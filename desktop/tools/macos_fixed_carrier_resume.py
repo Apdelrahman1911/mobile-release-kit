@@ -39,6 +39,13 @@ TERMINAL_LIMIT = 64 << 10
 TRANSPORT_LIMIT = LIMIT
 MEMBERS = {'MobileReleaseKit.dmg': LIMIT, 'PREVIEW.json': 16384, 'public-verification-evidence.json': 128 << 10}
 CANDIDATE_MEMBERS = {'MobileReleaseKit.dmg': LIMIT, 'PREVIEW.json': 16384, 'README.md': 32768}
+RETAINED_OBSERVER_MEMBERS = {
+    'android-helper-distribution-detach.status': 16,
+    'android-helper-distribution-detach.stderr': 65536,
+    'android-helper-distribution-detach.stdout': 0,
+    'distribution/MobileReleaseKit-Observation.dmg': LIMIT,
+    'distribution/MobileReleaseKit.dmg': LIMIT,
+}
 
 STATE = {'phase': 'admission', 'firstFailurePhase': None, 'lastRole': None, 'originalClosesKnown': False,
          'privateOutputsRetired': False, 'workloadsKnownSettled': False, 'resourceAdmission': None, 'installerObservation': None}
@@ -441,11 +448,14 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
-def member_stream_complete(stream, info, data_start, central_start, deadline=None, *, limits=MEMBERS):
+def member_stream_complete(stream, info, data_start, central_start, deadline=None, *, limits=MEMBERS, empty=False):
     """Same original span, real codec EOF and CRC; never ZipExtFile private state."""
+    need(type(empty) is bool and (not empty or limits is RETAINED_OBSERVER_MEMBERS
+         and info.filename == 'android-helper-distribution-detach.stdout' and info.file_size == 0),
+         'collector-public-empty-profile')
     need(type(data_start) is int and type(central_start) is int and data_start >= 0
-         and type(info.compress_size) is int and 0 < info.compress_size <= TRANSPORT_LIMIT
-         and type(info.file_size) is int and 0 < info.file_size <= limits[info.filename]
+         and type(info.compress_size) is int and (0 if empty else 1) <= info.compress_size <= TRANSPORT_LIMIT
+         and type(info.file_size) is int and (0 if empty else 1) <= info.file_size <= limits[info.filename]
          and data_start + info.compress_size <= central_start, 'collector-public-compressed-span')
     stored = info.compress_type == zipfile.ZIP_STORED
     need(stored or info.compress_type == zipfile.ZIP_DEFLATED, 'collector-public-compression')
@@ -514,10 +524,14 @@ def zip_data(body, selected, clock):
          and sha(body) == selected['sha256'], 'p0-zip-original')
     wanted = selected['members']; names = {v['name'] for v in wanted}
     candidate = selected['kind'] == 'candidate'
-    limits = CANDIDATE_MEMBERS if candidate else MEMBERS
-    need((len(wanted) == 3 and names == set(CANDIDATE_MEMBERS) if candidate else
+    retained = selected['kind'] == 'retained-observer'
+    limits = RETAINED_OBSERVER_MEMBERS if retained else CANDIDATE_MEMBERS if candidate else MEMBERS
+    need((len(wanted) == 5 and names == set(RETAINED_OBSERVER_MEMBERS) if retained else
+          len(wanted) == 3 and names == set(CANDIDATE_MEMBERS) if candidate else
           len(names) == len(wanted) in (1, 2) and names <= set(MEMBERS))
-         and all(type(v['bytes']) is int and 0 < v['bytes'] <= limits[v['name']] for v in wanted)
+         and all(type(v['bytes']) is int and (0 if retained and limits[v['name']] == 0 else 1)
+                 <= v['bytes'] <= limits[v['name']] for v in wanted)
+         and (not retained or all(set(v) == {'name', 'bytes'} for v in wanted))
          and sum(v['bytes'] for v in wanted) <= maximum, 'p0-zip-roster')
     stream = io.BytesIO(body)
     end = zip_directory_data(body, len(wanted))
@@ -546,7 +560,8 @@ def zip_data(body, selected, clock):
                 need(local[6] in (0, info.CRC) and local[7] in (0, info.compress_size)
                      and local[8] in (0, info.file_size), 'p0-zip-local-size')
             data_start = stream.tell()
-            member_stream_complete(stream, info, data_start, end[6], clock, limits=limits)
+            member_stream_complete(stream, info, data_start, end[6], clock, limits=limits,
+                                   empty=retained and limits[info.filename] == 0)
             span = data_start + info.compress_size
             if info.flag_bits & 8:
                 stream.seek(span); prefix = stream.read(4)
@@ -557,7 +572,9 @@ def zip_data(body, selected, clock):
             with archive.open(info) as member:
                 value = member.read(nominated['bytes'] + 1)
                 need(type(value) is bytes and len(value) == nominated['bytes'] and member.read(1) == b''
-                     and sha(value) == nominated['sha256'], 'p0-zip-member-original')
+                     and (retained or sha(value) == nominated['sha256']), 'p0-zip-member-original')
+                # Retained observer members are authenticated by the exact outer
+                # ZIP pin, not a nonexistent PREVIEW or invented inner hashes.
             result[info.filename] = value
         need(span == end[6], 'p0-zip-unaccounted-bytes')
     clock.check()
@@ -835,11 +852,16 @@ def acquisition_main(*, candidate=None):
     cfg = decode(os.environ['MRK_P0_REQUEST'].encode('ascii'))
     need(type(cfg) is dict and set(cfg) == {'row', 'role', 'target', 'work', 'workIdentity', 'caPath', 'caSha256', 'endpoint'}, 'p0-child-request')
     role, row = cfg['role'], cfg['row']
+    retained = role == 'retained-observer'
     need((role == 'candidate' and candidate is not None and cfg['target'] in ('aarch64-apple-darwin', 'x86_64-apple-darwin')
+          or retained and candidate is not None and cfg['target'] == TARGETS[0]
           or candidate is None and role in ('qualification', 'carrier') and cfg['target'] in TARGETS)
          and type(cfg['endpoint']) is int and time.monotonic_ns() < cfg['endpoint']
          and type(cfg['work']) is str and re.fullmatch(r'/Users/runner/work/_temp/mrk-macos-installed\.[A-Za-z0-9]{8}/resume-carrier', cfg['work']) is not None
          and str(Path(cfg['work'])) == os.path.normpath(cfg['work']), 'p0-child-admission')
+    if retained:
+        observer_selection = candidate.retained_observer_selection_data(row)
+        row = observer_selection['origin']
     endpoint = cfg['endpoint'] / 1e9
     token = os.environ['MRK_P0_READ_TOKEN']
     phase, response, ca_fd, root_fd, output_fd = 'trust', None, None, None, None
@@ -903,7 +925,8 @@ def acquisition_main(*, candidate=None):
         job = metadata('/actions/jobs/' + row['jobId'])
         selected = row['qualificationArtifact'] if role == 'qualification' else row
         artifact = metadata('/actions/artifacts/' + selected['artifactId'])
-        (candidate.candidate_metadata_data(run, job, artifact, row) if candidate is not None
+        (candidate.retained_observer_metadata_data(run, job, artifact, observer_selection) if retained else
+         candidate.candidate_metadata_data(run, job, artifact, row) if candidate is not None
          else metadata_data(run, job, artifact, row, role, cfg['target']))
         phase = 'artifact'
         response = request('https://api.github.com/repos/' + REPOSITORY + '/actions/artifacts/' + selected['artifactId'] + '/zip', True)

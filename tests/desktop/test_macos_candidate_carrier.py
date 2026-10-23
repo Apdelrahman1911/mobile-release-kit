@@ -201,5 +201,123 @@ class CandidateCarrierData(unittest.TestCase):
         parser.assert_not_called()
 
 
+def retained_fixture():
+    row, _, run, job, artifact = fixture()
+    entries = [('android-helper-distribution-detach.status', b'16\n'),
+               ('android-helper-distribution-detach.stderr', b'Resource busy\n'),
+               ('android-helper-distribution-detach.stdout', b''),
+               ('distribution/MobileReleaseKit-Observation.dmg', b'old-request-image'),
+               ('distribution/MobileReleaseKit.dmg', b'plain-package-image')]
+    body, row = archive(row, entries)
+    selection = dict(schemaVersion=1, kind='retained-observer-source-selection-v1',
+        packageRole='installed-shell-observation', nativeScope='tool-setup', origin=row,
+        members=[dict(name=name, bytes=len(content)) for name, content in entries])
+    job.update(labels=['macos-26'], steps=[dict(number=i + 10, name=name, status='completed',
+        conclusion='failure' if name == M.RETAINED_OBSERVER_STEPS[-2] else 'success')
+        for i, name in enumerate(M.RETAINED_OBSERVER_STEPS)])
+    artifact.update(size_in_bytes=len(body), digest='sha256:' + M.sha(body),
+        name='candidate-detach-nonshipping-unqualified-diagnostics-' + row['target'] + '-' + row['source'] + '-42-2')
+    return selection, entries, body, run, job, artifact
+
+
+def retained_receipt_fixture(selection, entries):
+    controls = {key: dict(name=name, bytes=len(body), sha256=M.sha(body)) for key, name, body in (
+        ('package', 'Install.pkg', b'package'), ('descriptor', 'producer.json', b'descriptor'),
+        ('signature', 'producer.sig', b'signature'), ('inventory', 'install-inventory.json', b'inventory'))}
+    release = dict(profile='fixed-macos26-arm64-maintenance-v2',
+        packageIdentifier='dev.mobile-release-kit.desktop.installed', bundleIdentifier='dev.mobile-release-kit.desktop',
+        packageVersion='0.1.3', release='macos26-arm64-desktop-03', sourceCommit=selection['origin']['source'],
+        protocolSha256='4'*64, runtimeManifestSha256='5'*64, signingPolicySha256='6'*64,
+        packageSha256=controls['package']['sha256'], inventorySha256=controls['inventory']['sha256'])
+    members = [dict(name=name, bytes=len(body), sha256=M.sha(body)) for name, body in entries]
+    return dict(schemaVersion=1, scope='retained-observer-fresh-install', packageRole='installed-shell-observation',
+        nativeScope='tool-setup', target=selection['origin']['target'], nomination=selection['origin'],
+        members=members, image=members[-1], **controls, release=release,
+        helperSource='a'*40, helperTree='b'*40, consumerRunId='51', consumerRunAttempt='1', consumerWorkDirectory=[2,3,501],
+        freshInstall=dict(requestId='1'*32, invocation='2'*32, instance='3'*32, stateSha256='7'*64, resultSha256='8'*64),
+        nativeProducerSignatureVerified=True, installedSignaturesVerified=True,
+        originalInstallerReturnedZero=True, sameRequestReadback=True, originalMountDetached=True,
+        originalClosesKnown=True, workloadsKnownSettled=True, privateOutputsRetired=True,
+        productReady=False, uiQualified=False, p0Qualified=False)
+
+
+class RetainedObserverCarrierData(unittest.TestCase):
+    def test_exact_nonshipping_selection_and_no_ordinary_substitution(self):
+        selected, _, _, *_ = retained_fixture()
+        self.assertEqual(M.retained_observer_selection_data(selected), selected)
+        for change in (lambda v:v.update(nativeScope='git-native'), lambda v:v.update(packageRole='ordinary-image'),
+                lambda v:v['origin'].update(target='x86_64-apple-darwin'), lambda v:v.update(schemaVersion=True),
+                lambda v:v['members'][2].update(bytes=1), lambda v:v['members'][0].update(bytes=True),
+                lambda v:v['members'].reverse(), lambda v:v['members'].append(v['members'][0]),
+                lambda v:v['members'][0].update(sha256='a'*64), lambda v:v.update(PREVIEW={})):
+            value=copy.deepcopy(selected); change(value)
+            with self.assertRaises(ValueError): M.retained_observer_selection_data(value)
+        with self.assertRaises(ValueError): M.candidate_selection_data(selected)
+
+    def test_actual_stage_results_not_global_job_success_admit_bytes(self):
+        selected, _, _, run, job, artifact = retained_fixture()
+        for outcome in ('success','failure','cancelled',None):
+            run['conclusion']=job['conclusion']=outcome
+            self.assertEqual(M.retained_observer_metadata_data(run,job,artifact,selected),selected)
+        for index in range(len(M.RETAINED_OBSERVER_STEPS)):
+            for fault in ('missing','duplicate','skipped','in_progress','reordered'):
+                changed=copy.deepcopy(job)
+                if fault=='missing': del changed['steps'][index]
+                elif fault=='duplicate': changed['steps'].append(dict(changed['steps'][index],number=40))
+                elif fault=='reordered': changed['steps'][index]['number']=50 if index < len(M.RETAINED_OBSERVER_STEPS)-1 else 1
+                elif fault=='in_progress': changed['steps'][index]['status']=fault
+                else: changed['steps'][index]['conclusion']=fault
+                with self.subTest(index=index,fault=fault), self.assertRaises(ValueError):
+                    M.retained_observer_metadata_data(run,changed,artifact,selected)
+        for index in range(len(M.RETAINED_OBSERVER_STEPS)-2):
+            changed=copy.deepcopy(job); changed['steps'][index]['conclusion']='failure'
+            with self.assertRaises(ValueError): M.retained_observer_metadata_data(run,changed,artifact,selected)
+        for index,key,value in ((0,'head_sha','f'*40),(0,'run_attempt',1),(0,'path','other'),
+                (0,'status','in_progress'),(1,'labels',['xcode-27']),(1,'id',True),
+                (1,'name','prepared-installed-aarch64-apple-darwin'),(2,'expired',True),
+                (2,'digest','sha256:'+'f'*64),(2,'name','ordinary-candidate')):
+            values=copy.deepcopy([run,job,artifact]); values[index][key]=value
+            with self.subTest(index=index,key=key),self.assertRaises(ValueError):
+                M.retained_observer_metadata_data(*values,selected)
+
+    def test_five_original_members_empty_stdout_and_no_preview(self):
+        selection, entries, _, *_ = retained_fixture()
+        for compression in (zipfile.ZIP_STORED,zipfile.ZIP_DEFLATED):
+            body,origin=archive(selection['origin'],entries,compression)
+            selected=dict(selection,origin=origin); admitted=[]
+            self.assertEqual(M.retained_observer_members(body,selected,CLOCK,before_image=admitted.append),dict(entries))
+            self.assertEqual(admitted,[sum(len(v) for _,v in entries)])
+            with self.assertRaises(ValueError): M.candidate_members(body,origin,CLOCK)
+            with self.assertRaises(ValueError): M.retained_observer_members(body+b'x',selected,CLOCK)
+        for entries2 in (entries[:-1],entries+[('PREVIEW.json',b'{}')],entries[:2]+[(entries[2][0],b'x')]+entries[3:],
+                         entries[:-1]+[('../MobileReleaseKit.dmg',entries[-1][1])]):
+            body,origin=archive(selection['origin'],entries2)
+            with self.assertRaises(ValueError): M.retained_observer_members(body,dict(selection,origin=origin),CLOCK)
+        body,origin=archive(selection['origin'],entries)
+        with mock.patch.object(M,'zip_data') as decoder, self.assertRaisesRegex(ValueError,'capacity'):
+            M.retained_observer_members(body,dict(selection,origin=origin),CLOCK,
+                before_image=lambda size:(_ for _ in ()).throw(ValueError('capacity')))
+        decoder.assert_not_called()
+
+    def test_receipt_separates_original_product_fresh_instance_and_current_consumer(self):
+        selection,entries,*_=retained_fixture()
+        value=retained_receipt_fixture(selection,entries)
+        args=(selection,'a'*40,'b'*40,'51','1',(2,3,501))
+        self.assertIs(M.retained_observer_install_receipt_data(value,*args),value)
+        self.assertNotEqual(value['nomination']['runId'],value['consumerRunId'])
+        for key in ('nativeProducerSignatureVerified','installedSignaturesVerified','originalInstallerReturnedZero',
+                    'sameRequestReadback','originalMountDetached','originalClosesKnown','workloadsKnownSettled','privateOutputsRetired'):
+            wrong=copy.deepcopy(value); wrong[key]=False
+            with self.subTest(key=key),self.assertRaises(ValueError): M.retained_observer_install_receipt_data(wrong,*args)
+        for change in (lambda v:v.update(productReady=True),lambda v:v.update(status=0),
+                lambda v:v.update(consumerRunId='42'),lambda v:v.update(consumerWorkDirectory=[2,4,501]),
+                lambda v:v['release'].update(sourceCommit='f'*40),lambda v:v['release'].update(packageSha256='f'*64),
+                lambda v:v['release'].update(inventorySha256='f'*64),lambda v:v['release'].update(packageVersion='1.02.3'),
+                lambda v:v['freshInstall'].update(instance='0'*32),lambda v:v['freshInstall'].update(requestId=True),
+                lambda v:v['members'][2].update(sha256='f'*64),lambda v:v.update(runtimeBindingSha256='f'*64)):
+            wrong=copy.deepcopy(value); change(wrong)
+            with self.assertRaises(ValueError): M.retained_observer_install_receipt_data(wrong,*args)
+
+
 if __name__ == '__main__':
     unittest.main()

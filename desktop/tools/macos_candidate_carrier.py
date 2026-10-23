@@ -8,8 +8,8 @@ import re
 import zipfile
 
 from desktop.tools.macos_fixed_carrier_resume import (
-    CANDIDATE_MEMBERS, LIMIT, REPOSITORY, WORKFLOW, WORKFLOW_ID,
-    decode, need, sha, zip_data, zip_directory_data,
+    CANDIDATE_MEMBERS, RETAINED_OBSERVER_MEMBERS, LIMIT, REPOSITORY, WORKFLOW, WORKFLOW_ID,
+    canonical, decode, need, sha, zip_data, zip_directory_data,
 )
 
 CANDIDATE_BRANCH = 'verify/desktop-macos-candidate'
@@ -141,4 +141,163 @@ def candidate_members(body, nomination, clock, *, before_image=None):
     return zip_data(body, {'kind': 'candidate', 'bytes': row['artifactBytes'],
                            'sha256': row['artifactSha256'], 'members': wanted}, clock)
 
+
+# A separate, explicitly nonshipping input. None of the ordinary candidate's
+# PREVIEW/final-image/installation gates above is relaxed for these bytes.
+RETAINED_OBSERVER_IMAGE = 'distribution/MobileReleaseKit.dmg'
+RETAINED_OBSERVER_STEPS = (
+    'Build the current nonshipping observer',
+    'Record the effective pinned compiler and preflight configured observer DATA',
+    'Assemble the current observer and sign code inside-out (never --deep)',
+    'Notarize and staple the signed payload, then bind Installer inputs',
+    'Compile the fixed ordinary root Installer before credential admission',
+    'Build the fixed one-shot root Installer and scripts-only package',
+    'Sign and notarize the same completed observer package before final P',
+    'Standard Installer only is privileged; never execute the app or Python as root',
+    'Retain only nonshipping candidate detach diagnostics and images',
+)
+
+
+def retained_observer_selection_data(value):
+    """Trusted helper SOURCE selects one artifact; the artifact never selects it."""
+    need(type(value) is dict and set(value) == {'schemaVersion', 'kind', 'packageRole', 'nativeScope', 'origin', 'members'}
+         and type(value['schemaVersion']) is int and value['schemaVersion'] == 1
+         and value['kind'] == 'retained-observer-source-selection-v1'
+         and value['packageRole'] == 'installed-shell-observation' and value['nativeScope'] == 'tool-setup',
+         'retained-observer-selection')
+    origin = candidate_selection_data(value['origin'])
+    need(origin['target'] == 'aarch64-apple-darwin', 'retained-observer-target')
+    members = value['members']
+    need(type(members) is list and len(members) == 5, 'retained-observer-members')
+    for item, name in zip(members, sorted(RETAINED_OBSERVER_MEMBERS)):
+        cap = RETAINED_OBSERVER_MEMBERS[name]
+        need(type(item) is dict and set(item) == {'name', 'bytes'} and item['name'] == name
+             and type(item['bytes']) is int and (0 if cap == 0 else 1) <= item['bytes'] <= cap,
+             'retained-observer-member')
+    need(sum(item['bytes'] for item in members) <= LIMIT, 'retained-observer-expanded-bound')
+    return dict(value, origin=origin, members=[dict(item) for item in members])
+
+
+def retained_observer_metadata_data(run, job, artifact, selection):
+    selected = retained_observer_selection_data(selection)
+    row = selected['origin']
+    need(type(run) is dict and type(job) is dict and type(artifact) is dict, 'retained-observer-metadata')
+    need(all(type(run.get(k)) is int and run[k] == int(row[v]) for k, v in
+             (('id', 'runId'), ('run_attempt', 'runAttempt')))
+         and run.get('head_sha') == row['source'] and run.get('head_branch') == CANDIDATE_BRANCH
+         and run.get('event') == 'push' and run.get('path') == WORKFLOW
+         and type(run.get('workflow_id')) is int and run['workflow_id'] == WORKFLOW_ID
+         and type(run.get('repository')) is dict and run['repository'].get('full_name') == REPOSITORY
+         and run.get('status') == 'completed', 'retained-observer-producer-run')
+    steps = job.get('steps')
+    need(all(type(job.get(k)) is int and job[k] == int(row[v]) for k, v in
+             (('id', 'jobId'), ('run_id', 'runId'), ('run_attempt', 'runAttempt')))
+         and job.get('head_sha') == row['source'] and job.get('name') == 'normal-installed-' + row['target']
+         and job.get('status') == 'completed' and job.get('labels') == ['macos-26']
+         and type(steps) is list and len(RETAINED_OBSERVER_STEPS) <= len(steps) <= 256
+         and all(type(s) is dict and type(s.get('number')) is int and 0 < s['number'] <= 256 for s in steps)
+         and len({s['number'] for s in steps}) == len(steps), 'retained-observer-producer-job')
+    previous = 0
+    for name in RETAINED_OBSERVER_STEPS:
+        matches = [s for s in steps if s.get('name') == name]
+        outcomes = ('success', 'failure') if name == RETAINED_OBSERVER_STEPS[-2] else ('success',)
+        need(len(matches) == 1 and matches[0].get('status') == 'completed'
+             and matches[0].get('conclusion') in outcomes and matches[0]['number'] > previous,
+             'retained-observer-producer-stage')
+        previous = matches[0]['number']
+    # A failed original package-install is NOT installation authority. Only the
+    # preceding completed signing stages and this exact upload admit raw bytes.
+    origin = artifact.get('workflow_run')
+    need(type(artifact.get('id')) is int and artifact['id'] == int(row['artifactId'])
+         and artifact.get('name') == 'candidate-detach-nonshipping-unqualified-diagnostics-' + row['target']
+             + '-' + row['source'] + '-' + row['runId'] + '-' + row['runAttempt']
+         and artifact.get('expired') is False and type(artifact.get('size_in_bytes')) is int
+         and artifact['size_in_bytes'] == row['artifactBytes']
+         and artifact.get('digest') == 'sha256:' + row['artifactSha256']
+         and type(origin) is dict and type(origin.get('id')) is int and origin['id'] == run['id']
+         and origin.get('head_sha') == row['source'] and origin.get('head_branch') == CANDIDATE_BRANCH,
+         'retained-observer-artifact-metadata')
+    return selected
+
+
+def retained_observer_members(body, selection, clock, *, before_image=None):
+    selected = retained_observer_selection_data(selection)
+    origin = selected['origin']
+    need(type(body) is bytes and len(body) == origin['artifactBytes'] and sha(body) == origin['artifactSha256'],
+         'retained-observer-zip-pin')
+    zip_directory_data(body, 5)
+    if before_image is not None:
+        clock.check()
+        # Fund BOTH retained images before decoding; only the plain user image
+        # will be installed. No mounted request from the observation image is used.
+        before_image(sum(item['bytes'] for item in selected['members']))
+        clock.check()
+    return zip_data(body, {'kind': 'retained-observer', 'bytes': origin['artifactBytes'],
+        'sha256': origin['artifactSha256'], 'members': selected['members']}, clock)
+
+
+def retained_observer_install_receipt_data(value, selection, helper_source, helper_tree, run, attempt, work_identity):
+    """Closed new consumer DATA. Caller must ALSO hold its actual post-return0.
+
+    This record never certifies its own future exit, old Installer finality,
+    unavailable old work bindings, native qualification or shipping readiness.
+    """
+    selected = retained_observer_selection_data(selection)
+    origin = selected['origin']
+    def digest(value, size=64):
+        return type(value) is str and re.fullmatch('[0-9a-f]{' + str(size) + '}', value) is not None and value != '0' * size
+    need(digest(helper_source, 40) and digest(helper_tree, 40)
+         and all(type(v) is str and re.fullmatch(r'[1-9][0-9]{0,19}', v) for v in (run, attempt))
+         and type(work_identity) in (list, tuple) and len(work_identity) == 3
+         and all(type(v) is int and v > 0 for v in work_identity), 'retained-observer-consumer-context')
+    expected = {'schemaVersion': 1, 'scope': 'retained-observer-fresh-install',
+        'packageRole': selected['packageRole'], 'nativeScope': selected['nativeScope'], 'target': origin['target'],
+        'nomination': origin, 'helperSource': helper_source, 'helperTree': helper_tree,
+        'consumerRunId': run, 'consumerRunAttempt': attempt, 'consumerWorkDirectory': list(work_identity),
+        'nativeProducerSignatureVerified': True, 'installedSignaturesVerified': True,
+        'originalInstallerReturnedZero': True, 'sameRequestReadback': True, 'originalMountDetached': True,
+        'originalClosesKnown': True, 'workloadsKnownSettled': True, 'privateOutputsRetired': True,
+        'productReady': False, 'uiQualified': False, 'p0Qualified': False}
+    fields = {'members', 'image', 'package', 'descriptor', 'signature', 'inventory', 'release', 'freshInstall'}
+    need(type(value) is dict and set(value) == set(expected) | fields
+         and all(type(value[k]) is type(v) and value[k] == v for k, v in expected.items()),
+         'retained-observer-install-handoff')
+    members = value['members']
+    need(type(members) is list and len(members) == 5, 'retained-observer-handoff-members')
+    for row, wanted in zip(members, selected['members']):
+        need(type(row) is dict and set(row) == {'name', 'bytes', 'sha256'}
+             and row['name'] == wanted['name'] and type(row['bytes']) is int and row['bytes'] == wanted['bytes']
+             and digest(row['sha256']) and (row['bytes'] != 0 or row['sha256'] == sha(b'')),
+             'retained-observer-handoff-member')
+    need(value['image'] == next(row for row in members if row['name'] == RETAINED_OBSERVER_IMAGE),
+         'retained-observer-handoff-image')
+    for key, name, cap in (('package', 'Install.pkg', LIMIT), ('descriptor', 'producer.json', 16384),
+                           ('signature', 'producer.sig', 512), ('inventory', 'install-inventory.json', 12 << 20)):
+        row = value[key]
+        need(type(row) is dict and set(row) == {'name', 'bytes', 'sha256'} and row['name'] == name
+             and type(row['bytes']) is int and 0 < row['bytes'] <= cap and digest(row['sha256']),
+             'retained-observer-handoff-control')
+    release = value['release']
+    need(type(release) is dict and set(release) == {'profile', 'packageIdentifier', 'bundleIdentifier',
+        'packageVersion', 'release', 'sourceCommit', 'protocolSha256', 'runtimeManifestSha256',
+        'inventorySha256', 'signingPolicySha256', 'packageSha256'}
+         and release['profile'] == 'fixed-macos26-arm64-maintenance-v2'
+         and release['packageIdentifier'] == 'dev.mobile-release-kit.desktop.installed'
+         and release['bundleIdentifier'] == 'dev.mobile-release-kit.desktop'
+         and release['sourceCommit'] == origin['source']
+         and type(release['packageVersion']) is str and len(release['packageVersion']) <= 32
+         and re.fullmatch(r'(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)', release['packageVersion'])
+         and all(int(part) <= 0xffffffff for part in release['packageVersion'].split('.'))
+         and type(release['release']) is str and len(release['release']) <= 128
+         and re.fullmatch(r'macos26-arm64-[a-z0-9_.-]*[a-z0-9]', release['release'])
+         and all(digest(release[k]) for k in ('protocolSha256', 'runtimeManifestSha256', 'inventorySha256',
+                                              'signingPolicySha256', 'packageSha256'))
+         and release['packageSha256'] == value['package']['sha256']
+         and release['inventorySha256'] == value['inventory']['sha256'], 'retained-observer-handoff-release')
+    fresh = value['freshInstall']
+    need(type(fresh) is dict and set(fresh) == {'requestId', 'invocation', 'instance', 'stateSha256', 'resultSha256'}
+         and all(digest(fresh[k], 32 if k in ('requestId', 'invocation', 'instance') else 64) for k in fresh),
+         'retained-observer-handoff-fresh-install')
+    need(len(canonical(value)) <= 16384, 'retained-observer-handoff-bound')
+    return value
 

@@ -31,6 +31,15 @@ def instance(target='aarch64-apple-darwin'):
                                  nomination=nomination(target))
 
 
+def retained_instance(selection):
+    with mock.patch.object(R.Resume, '__init__', return_value=None):
+        owner = C.CandidateResume(C.HELPER_ROOT, C.CANDIDATE_ROOT, Path('/inert'), None, None,
+                                  retained_observer=True)
+    owner.source = mock.Mock(return_value=R.canonical(selection))
+    owner.load_nomination('aarch64-apple-darwin')
+    return owner
+
+
 def mounted_fixture(target):
     """Parser seam supplies already-parsed inert structures, not fake XAR proof."""
     bodies = {'Install.pkg': b'package', 'producer.json': b'descriptor', 'producer.sig': b'signature'}
@@ -64,6 +73,95 @@ def mounted_fixture(target):
 
 
 class CandidateConsumerTests(unittest.TestCase):
+    def test_retained_observer_is_explicit_arm_install_and_held_helper_selection_only(self):
+        from tests.desktop.test_macos_candidate_carrier import retained_fixture
+        selection, *_ = retained_fixture()
+        owner = retained_instance(selection)
+        owner.source.assert_called_once_with(C.RETAINED_OBSERVER_SELECTION_PATH, 8192)
+        self.assertEqual(owner.nomination, selection['origin'])
+        self.assertEqual(owner.retained_selection(), selection)
+        exposed = owner.retained_selection(); exposed['members'][0]['bytes'] = 1
+        exposed['origin']['source'] = 'e'*40
+        self.assertEqual(owner.retained_selection(), selection)
+        with self.assertRaisesRegex(R.Refused, 'candidate-source-selection-once'):
+            owner.load_nomination('aarch64-apple-darwin')
+        self.assertEqual(owner.source.call_count, 1)
+        with self.assertRaisesRegex(R.Refused, 'retained-observer-source-not-loaded'):
+            instance().retained_selection()
+        for options in ({'purpose':'acquire'}, {'purpose':'restore-install'}, {'predecessor_install':True},
+                        {'nomination':selection['origin']}, {'retained_observer':1}):
+            with mock.patch.object(R.Resume, '__init__') as native, self.assertRaises(ValueError):
+                C.CandidateResume(C.HELPER_ROOT, C.CANDIDATE_ROOT, Path('/inert'), None, None,
+                                  **dict({'retained_observer':True}, **options))
+            native.assert_not_called()
+        env = PredecessorInstallTests().environment()
+        env.update(MRK_CANDIDATE_MODE='install-retained-observer',
+            GITHUB_REF='refs/heads/'+C.RETAINED_OBSERVER_BRANCH,
+            GITHUB_WORKFLOW_REF=R.REPOSITORY+'/'+C.WORKFLOW+'@refs/heads/'+C.RETAINED_OBSERVER_BRANCH)
+        self.assertEqual(C.context_data(env, C.HELPER_ROOT, 'arm64')['helperSource'], env['GITHUB_SHA'])
+        for changes in ({'GITHUB_EVENT_NAME':'push'}, {'MRK_CANDIDATE_MODE':'install-predecessor'},
+                {'GITHUB_REF':'refs/heads/'+C.BRANCH}, {'GITHUB_SHA':selection['origin']['source']},
+                {'MRK_MACOS_TARGET':'x86_64-apple-darwin','RUNNER_ARCH':'X64'}):
+            with self.subTest(changes=changes), self.assertRaises(ValueError):
+                C.context_data(dict(env, **changes), C.HELPER_ROOT,
+                    'x86_64' if changes.get('RUNNER_ARCH') == 'X64' else 'arm64')
+
+    def test_retained_acquisition_original_request_and_zip_keep_only_plain_image(self):
+        from tests.desktop.test_macos_candidate_carrier import retained_fixture
+        selection, entries, body, *_ = retained_fixture()
+        for fault in (None, 'child', 'post', 'capacity'):
+            owner = retained_instance(selection)
+            owner._CandidateResume__source_loaded = True
+            owner.work, owner.private, owner._resource_inputs = Path('/inert'), {}, (0,0)
+            owner.parent = {'identity':(1,2,stat.S_IFDIR|0o700,501,20)}
+            owner.ca_path, owner.ca_sha, owner.token = '/inert/ca.pem', 'a'*64, 'inert-not-a-token'
+            owner.python, owner.child_bootstrap, owner.environment = '/inert/python', 'inert-child-source', {}
+            owner.clock, owner.point = R.Deadline(now=lambda:1), mock.Mock()
+            original = {'identity':(1,2,3)}
+            owner.quota = SimpleNamespace(reserve=mock.Mock(), call=mock.Mock(return_value=(original,body)))
+            events = []
+            def acquired(role, argv, seconds, *, env):
+                events.append('child')
+                self.assertEqual((role, argv, seconds), ('acquire-carrier',
+                    ['/inert/python','-I','-S','-B','-c','inert-child-source'],120))
+                request = R.decode(env['MRK_P0_REQUEST'].encode())
+                self.assertEqual(request['row'], selection)
+                self.assertEqual(request['role'], 'retained-observer')
+                self.assertEqual(request['workIdentity'], list(owner.parent['identity']))
+                self.assertEqual(set(env), {'MRK_P0_REQUEST','MRK_P0_READ_TOKEN'})
+                return SimpleNamespace(returncode=1 if fault == 'child' else 0, stderr=b'', stdout=R.canonical({
+                    'schemaVersion':1, 'role':'retained-observer', 'target':owner.target,
+                    'bytes':len(body), 'sha256':R.sha(body), 'closedMetadataMatched':True, 'originalClosesKnown':True}))
+            owner.command = mock.Mock(side_effect=acquired)
+            def admit(*args, **kwargs):
+                events.append('capacity')
+                self.assertEqual(args, (0,0))
+                self.assertEqual(kwargs, {'image_bytes':sum(len(value) for _,value in entries), 'acquiring':True})
+                if fault == 'capacity': raise R.Refused('inert retained capacity')
+            owner.admit_resources = mock.Mock(side_effect=admit)
+            def post(entry):
+                events.append('post'); self.assertIs(entry, original)
+                return b'changed' if fault == 'post' else body
+            owner.outer = SimpleNamespace(read=post)
+            with self.subTest(fault=fault), mock.patch.object(C.candidate, 'candidate_preview_data') as preview:
+                if fault is None:
+                    self.assertEqual(owner.acquire_candidate(), {C.candidate.RETAINED_OBSERVER_IMAGE:dict(entries)[C.candidate.RETAINED_OBSERVER_IMAGE]})
+                    self.assertEqual(R.decode(owner._CandidateResume__members_document),
+                        [dict(name=name,bytes=len(value),sha256=R.sha(value)) for name,value in entries])
+                    self.assertFalse(hasattr(owner, '_CandidateResume__preview_document'))
+                    self.assertTrue(owner._CandidateResume__artifact_admitted)
+                else:
+                    with self.assertRaises(R.Refused): owner.acquire_candidate()
+                    self.assertFalse(owner._CandidateResume__artifact_admitted)
+                preview.assert_not_called()
+            self.assertEqual(events, ['child'] + ([] if fault == 'child' else ['capacity'])
+                             + ([] if fault in ('child','capacity') else ['post']))
+            owner.quota.reserve.assert_called_once_with(3)
+            if fault != 'child':
+                owner.quota.call.assert_called_once_with(owner.outer,'file',owner.work/'arm64-retained-observer.zip',len(body),modes=(0o600,))
+            with self.assertRaisesRegex(R.Refused, 'candidate-acquire-order'): owner.acquire_candidate()
+            self.assertEqual(owner.command.call_count,1)
+
     def test_immutable_selection_default_owner_and_arch_transport_separation(self):
         legacy = object.__new__(R.Resume)
         self.assertIs(legacy.origin, R.ORIGIN)
@@ -942,42 +1040,47 @@ class CandidateConsumerTests(unittest.TestCase):
                 value = {'path': path, 'kind': 'file'}
                 self.entries.append(value)
                 return value, b'inert'
-        quota = R.OriginalQuota(); quota.reserve(2)  # mkdir + consumed bootstrap
-        outer = quota.book(Book)
-        work = Path('/Users/runner/work/_temp/mrk-macos-installed.ABCDEFGH/resume-carrier')
-        quota.call(outer, 'directory', work)
-        helper_files = (*C.HELPER_SOURCE_INPUTS, C.SELECTION_PATH, C.CONSUMER_PATH, C.LEGACY_PATH, C.PARSER_PATH,
-                        R.SIGNING_CERTIFICATE[0], R.TLS_CA_PATH)
-        for path in helper_files: quota.call(outer, 'file', C.HELPER_ROOT / path, 1)
-        for path in (C.STAGER_PATH, *(path for path, _cap in C.CANDIDATE_SOURCE_INPUTS)):
-            quota.call(outer, 'file', C.CANDIDATE_ROOT / path, 1)
-        host = work.parent / 'host-python'
-        quota.call(outer, 'file', host / 'host-binding.json', 1)
-        for path in R.HOST_DIRS: quota.call(outer, 'directory', host / path)
-        for path in (*R.HOST_FILES, R.HOST_OPTIONAL): quota.call(outer, 'file', host / path, 1)
-        for path in ('/usr/bin/git', '/usr/bin/hdiutil', '/usr/bin/vm_stat', '/usr/bin/openssl', '/usr/bin/codesign', '/usr/sbin/installer'):
-            quota.call(outer, 'file', Path(path), 1)
-        quota.reserve(4)  # actual FixedSudoOriginals remains independent
-        self.assertEqual(quota.reserved, 76)
-        quota.reserve(3)  # acquisition child CA/root/output originals
-        quota.call(outer, 'file', work / 'arm64-candidate.zip', 1)
-        quota.reserve(1)  # actual image publisher original
-        quota.call(outer, 'file', work / 'arm64.dmg', 1)
-        quota.call(outer, 'directory', Path('/Volumes'))
-        mounted = quota.book(Book)
-        mounted.directories.update({path: entry for path, entry in outer.directories.items()
-                                    if path in (Path('/'), Path('/Volumes'))})
-        mount = Path('/Volumes/inert')
-        quota.call(mounted, 'directory', mount)
-        for path in ('Install.pkg', 'producer.json', 'producer.sig'): quota.call(mounted, 'file', mount / path, 1)
-        for path in ('producer-key.pem', 'producer-message.bin', 'producer-message.bin'):
-            quota.call(outer, 'file', work / path, 1)
-        quota.call(outer, 'directory', work / 'input')
-        quota.call(outer, 'file', work / 'input/install-inventory.json', 1)
-        quota.call(outer, 'file', work / 'installer-output.status', 1)
-        for _ in range(3): quota.reserve(1)  # original transport iterators
-        self.assertEqual(quota.reserved, R.MAX_ORIGINALS)
-        with self.assertRaises(ValueError): quota.reserve(1)
+        for selection, archive in ((C.SELECTION_PATH,'arm64-candidate.zip'),
+                                   (C.RETAINED_OBSERVER_SELECTION_PATH,'arm64-retained-observer.zip')):
+            with self.subTest(selection=selection):
+                quota = R.OriginalQuota(); quota.reserve(2)  # mkdir + consumed bootstrap
+                outer = quota.book(Book)
+                work = Path('/Users/runner/work/_temp/mrk-macos-installed.ABCDEFGH/resume-carrier')
+                quota.call(outer, 'directory', work)
+                helper_files = (*C.HELPER_SOURCE_INPUTS, selection, C.CONSUMER_PATH, C.LEGACY_PATH, C.PARSER_PATH,
+                                R.SIGNING_CERTIFICATE[0], R.TLS_CA_PATH)
+                for path in helper_files: quota.call(outer, 'file', C.HELPER_ROOT / path, 1)
+                for path in (C.STAGER_PATH, *(path for path, _cap in C.CANDIDATE_SOURCE_INPUTS)):
+                    quota.call(outer, 'file', C.CANDIDATE_ROOT / path, 1)
+                host = work.parent / 'host-python'
+                quota.call(outer, 'file', host / 'host-binding.json', 1)
+                for path in R.HOST_DIRS: quota.call(outer, 'directory', host / path)
+                for path in (*R.HOST_FILES, R.HOST_OPTIONAL): quota.call(outer, 'file', host / path, 1)
+                for path in ('/usr/bin/git', '/usr/bin/hdiutil', '/usr/bin/vm_stat', '/usr/bin/openssl', '/usr/bin/codesign', '/usr/sbin/installer'):
+                    quota.call(outer, 'file', Path(path), 1)
+                quota.reserve(4)  # actual FixedSudoOriginals remains independent
+                self.assertEqual(quota.reserved, 76)
+                quota.reserve(3)  # acquisition child CA/root/output originals
+                quota.call(outer, 'file', work / archive, 1)
+                quota.reserve(1)  # actual image publisher original
+                quota.call(outer, 'file', work / 'arm64.dmg', 1)
+                quota.call(outer, 'directory', Path('/Volumes'))
+                mounted = quota.book(Book)
+                mounted.directories.update({path: entry for path, entry in outer.directories.items()
+                                            if path in (Path('/'), Path('/Volumes'))})
+                mount = Path('/Volumes/inert')
+                quota.call(mounted, 'directory', mount)
+                for path in ('Install.pkg', 'producer.json', 'producer.sig'): quota.call(mounted, 'file', mount / path, 1)
+                for path in ('producer-key.pem', 'producer-message.bin', 'producer-message.bin'):
+                    quota.call(outer, 'file', work / path, 1)
+                quota.call(outer, 'directory', work / 'input')
+                quota.call(outer, 'file', work / 'input/install-inventory.json', 1)
+                quota.call(outer, 'file', work / 'installer-output.status', 1)
+                quota.reserve(2)  # Original pre-attach and post-attach transport iterators.
+                self.assertEqual(quota.reserved,95)  # Returned detach16 cannot enter the success-only third iterator.
+                quota.reserve(1)
+                self.assertEqual(quota.reserved, R.MAX_ORIGINALS)
+                with self.assertRaises(ValueError): quota.reserve(1)
         # New read-only purpose never acquires Installer(1)/sudo(4), nor
         # install-input directory/inventory/status(3); it publishes five donors.
         removal = R.OriginalQuota()
@@ -1203,6 +1306,7 @@ class PredecessorInstallTests(unittest.TestCase):
         """Actual install/command/signature methods; inert native and FS ports."""
         import subprocess
         C._PREDECESSOR_DETACH = None
+        retained = mode == 'retained-observer'
         events, native_calls, now = [], [], [1]
         original_error = RuntimeError('inert original unknown')
         image = b'inert-image'
@@ -1214,14 +1318,31 @@ class PredecessorInstallTests(unittest.TestCase):
             if mode == 'predecessor':
                 owner = self.owner()
                 owner._CandidateResume__nomination = nomination()
+            elif retained:
+                from tests.desktop.test_macos_candidate_carrier import retained_fixture
+                selection, entries, _, *_ = retained_fixture()
+                owner = retained_instance(selection)
+                image, preview = dict(entries)[C.candidate.RETAINED_OBSERVER_IMAGE], None
+                originals, selected, stage = mounted_fixture(owner.target)
+                owner.selection = stage.source_build_selection(owner.target)
+                stage.PRODUCER_DESCRIPTOR_BYTES, stage.PRODUCER_SIGNATURE_BYTES = 16384, 512
+                stage.maintenance_producer_data.return_value['signingPolicies'][0]['policy']['leafCertificateSha1'] = 'e'*40
+                owner._CandidateResume__members_document = R.canonical([
+                    dict(name=name,bytes=len(body),sha256=R.sha(body)) for name,body in entries])
+                owner._CandidateResume__image_document = R.canonical(
+                    dict(name=C.candidate.RETAINED_OBSERVER_IMAGE,bytes=len(image),sha256=R.sha(image)))
+                owner.admit_resources, owner.allocation_budget = mock.Mock(), mock.Mock()
+                owner._resource_inputs = (0,0)
             else:
                 with mock.patch.object(R.Resume, '__init__', return_value=None):
                     owner = C.CandidateResume(C.HELPER_ROOT, C.CANDIDATE_ROOT, Path('/inert'), None, None,
                                               nomination=nomination(), purpose=mode)
             row = dict(owner.nomination, package={'sha256':'c'*64}, inventorySha256='a'*64,
                        runtimeManifestSha256='b'*64)
+            if retained:
+                row.update({key:selected[key] for key in ('package','inventorySha256','runtimeManifestSha256')})
             owner._CandidateResume__artifact_admitted = owner._CandidateResume__source_loaded = True
-            owner._CandidateResume__preview_document = R.canonical(preview)
+            if not retained: owner._CandidateResume__preview_document = R.canonical(preview)
         owner.root, owner.work = C.HELPER_ROOT, Path('/inert')
         owner.run_id, owner.run_attempt, owner.private, owner.calls = '51', '2', {}, []
         owner.clock = R.Deadline(now=lambda: now[0])
@@ -1229,18 +1350,20 @@ class PredecessorInstallTests(unittest.TestCase):
         owner.signing_identity = {'teamIdentifier':'INERTTEAM0', 'leafCertificateSha1':'e'*40}
         mount = owner.mount_path()
         info = SimpleNamespace(st_dev=1, st_ino=2, st_mode=stat.S_IFDIR | 0o555,
-            st_uid=0, st_gid=0, st_nlink=1, st_size=0, st_mtime_ns=0, st_ctime_ns=0)
+            st_uid=501 if retained else 0, st_gid=20 if retained else 0, st_nlink=1, st_size=0, st_mtime_ns=0, st_ctime_ns=0)
         directory = {'fd':-1, 'identity':R.identity(info), 'path':owner.work}
         facts = (R.identity(info), 0, 'inert-filesystem')
-        message = R.producer_message_data(b'inert-descriptor')
+        bodies = ({name:value[0] for name,value in originals.items()} if retained else
+                  {'Install.pkg':b'P'*(65536+17), 'producer.json':b'inert-descriptor', 'producer.sig':b'inert-signature'})
+        message = R.producer_message_data(bodies['producer.json'])
         owner.outer = SimpleNamespace(directories={Path('/'):directory},
             read=lambda entry: image if entry['path'].suffix == '.dmg' else message)
         owner.parent = directory
         def quote(book, operation, path, *args, **kwargs):
             if operation == 'directory': return directory
-            return {'path':path, 'identity':(1,2)}, image if path.suffix == '.dmg' else message
+            return {'path':path, 'identity':(1,2)}, (bodies[path.name] if retained and book is mounted
+                                                     else image if path.suffix == '.dmg' else message)
         owner.quota = SimpleNamespace(call=quote, check=lambda: None)
-        bodies = {'Install.pkg':b'P'*(65536+17), 'producer.json':b'inert-descriptor', 'producer.sig':b'inert-signature'}
         held = tuple((name, {'kind':'file', 'path':mount/name, 'fd':100+index, 'closed':False,
             'identity':(1,index,stat.S_IFREG|0o444,0,0,1,len(body),0,0)}, body)
             for index,(name,body) in enumerate(bodies.items()))
@@ -1268,20 +1391,30 @@ class PredecessorInstallTests(unittest.TestCase):
             if mode != 'fixed': owner._CandidateResume__binding = R.canonical(row)
             if mode == 'predecessor': owner._CandidateResume__mounted_reread_inputs = (mounted,held)
             return {name:(body,0o444) for name,body in bodies.items()}, row, {}, b'inert-inventory'
-        owner.read_mounted = read_mounted
-        owner.prepare_readback = lambda *args: False if mode in ('acquire','acquire-restore','acquire-removal') else None
+        if not retained:
+            owner.read_mounted = read_mounted
+            owner.prepare_readback = lambda *args: False if mode in ('acquire','acquire-restore','acquire-removal') else None
         request = 'f'*32
-        owner.stager = SimpleNamespace(distribution_mount_data=lambda *args: '/dev/inert',
+        ports = dict(distribution_mount_data=lambda *args: '/dev/inert',
             INSTALLATION_INVENTORY_NAME='install-inventory.json', INSTALL_ROOT=Path('/Applications'),
             APP_NAME='MobileReleaseKit.app', ENTRY_BUNDLE_ID='dev.inert.entry', BUNDLE_ID='dev.inert.payload',
             same_package_result_census=mock.Mock(side_effect=[{}, {request:'original'}, {request:'original'}]))
-        def readback(args, original):
+        if retained:
+            vars(stage).update(ports); owner.stager = stage
+        else: owner.stager = SimpleNamespace(**ports)
+        def readback(args, original=None):
             events.append('readback')
             self.assertEqual(args.request_id, request)
-            return dict(requestId=request, originalInstallerReturnedZero=True, originalWriterJoined=fault != 'readback',
+            value = dict(requestId=request, originalInstallerReturnedZero=True, originalWriterJoined=fault != 'readback',
                 sourceCommit=row['source'], completedPackageSha256=row['package']['sha256'],
                 inventorySha256=row['inventorySha256'], runtimeManifestSha256=row['runtimeManifestSha256'])
-        owner.observe_installation = readback
+            if retained:
+                value.update(invocation='7'*32, installationMetadata=[{'instance':'8'*32}],
+                    originalInstallerResult={'action':'fresh-install', 'stateSha256':'9'*64},
+                    installerResultExport={'sha256':'a'*64})
+            return value
+        if retained: owner.stager.observation_command = mock.Mock(side_effect=readback)
+        else: owner.observe_installation = readback
         def run_owned(argv, **kwargs):
             role = owner.calls[-1]['role']
             events.append(role); native_calls.append((role, argv, kwargs))
@@ -1317,13 +1450,123 @@ class PredecessorInstallTests(unittest.TestCase):
         with ExitStack() as patches:
             patches.enter_context(mock.patch.dict(R.STATE, phase='admission', firstFailurePhase=None))
             patches.enter_context(mock.patch.object(R.os, 'fstat', return_value=info))
-            patches.enter_context(mock.patch.object(R.os, 'stat', return_value=info))
+            def observed_stat(name, **kwargs):
+                if retained and name in bodies:
+                    return SimpleNamespace(st_mode=stat.S_IFREG|0o444, st_size=len(bodies[name]), st_uid=0, st_gid=0)
+                return info
+            patches.enter_context(mock.patch.object(R.os, 'stat', side_effect=observed_stat))
             patches.enter_context(mock.patch.object(R.os, 'fstatvfs', return_value=SimpleNamespace(f_flag=0)))
             patches.enter_context(mock.patch.object(R.os, 'listdir', return_value=['Install.pkg','producer.json','producer.sig']))
             patches.enter_context(mock.patch.object(R, 'mount_data'))
             patches.enter_context(mock.patch.object(R.os, 'pread', side_effect=pread))
             patches.enter_context(mock.patch.object(R, 'retained_image_post', side_effect=byte_post))
             yield owner, image, preview, events, native_calls, original_error
+
+    def test_retained_actual_install_consume_and_receipt_require_original_finality(self):
+        faults = (None, 'pre-source', 'post-source', 'producer-key', 'producer-signature',
+            'producer-signature-stdout', 'producer-signature-stderr', 'request-before', 'request-after',
+            'installer', 'readback', 'not-fresh', 'entry-signature', 'payload-signature', 'mounted-close',
+            'detach16', 'detach-unknown', 'detach-post', 'call-capture', 'retire', 'close', 'final-close')
+        for fault in faults:
+            with self.subTest(fault=fault), self.scheduled_install('retained-observer', fault) as (owner,image,preview,events,calls,original):
+                self.assertIsNone(preview)
+                owner.helper_source, owner.helper_tree = 'd'*40, 'e'*40
+                owner.quota.reserved = 76
+                owner.quota.finish = mock.Mock(side_effect=[True,False] if fault == 'final-close' else None,
+                                               return_value=fault != 'close')
+                owner.acquire_candidate = mock.Mock(return_value={C.candidate.RETAINED_OBSERVER_IMAGE:image})
+                source_calls = []
+                def sources():
+                    source_calls.append(len(calls))
+                    events.append('source-post' if len(source_calls) == 2 else 'source-pre')
+                    if fault == ('post-source' if len(source_calls) == 2 else 'pre-source'): raise original
+                    if len(source_calls) == 2 and fault == 'call-capture': owner.calls[-1]['capturesSettled'] = False
+                owner.verify_sources = mock.Mock(side_effect=sources)
+                def retire():
+                    events.append('retire')
+                    if fault == 'retire': raise original
+                owner.retire = mock.Mock(side_effect=retire)
+                if fault == 'request-before': owner.stager.same_package_result_census.side_effect = [{'b'*32:'old'}]
+                if fault == 'request-after': owner.stager.same_package_result_census.side_effect = [{}, {}]
+                if fault == 'not-fresh':
+                    readback = owner.stager.observation_command.side_effect
+                    def old_action(args):
+                        value = readback(args); value['originalInstallerResult']['action'] = 'same-package'
+                        return value
+                    owner.stager.observation_command.side_effect = old_action
+                with mock.patch.object(owner, 'retained_observer_receipt', wraps=owner.retained_observer_receipt) as receipt, \
+                        mock.patch.object(C.candidate, 'candidate_preview_data') as old_preview:
+                    if fault is None:
+                        value = owner.consume(0,0)
+                        self.assertEqual(value['scope'],'retained-observer-fresh-install')
+                        self.assertEqual(value['nomination'],owner.nomination)
+                        self.assertEqual(value['nomination']['runId'],'42')
+                        self.assertEqual((value['consumerRunId'],value['consumerRunAttempt']),('51','2'))
+                        self.assertEqual(value['consumerWorkDirectory'],[1,2,501])
+                        self.assertEqual(value['freshInstall'],dict(requestId='f'*32,invocation='7'*32,instance='8'*32,
+                            stateSha256='9'*64,resultSha256='a'*64))
+                        self.assertEqual(value['image'],dict(name=C.candidate.RETAINED_OBSERVER_IMAGE,bytes=len(image),sha256=R.sha(image)))
+                        self.assertEqual(value['release']['sourceCommit'],owner.nomination['source'])
+                        self.assertFalse(value['productReady'] or value['p0Qualified'] or value['uiQualified'])
+                        self.assertNotIn('consumerReturnedZero',value)  # A record cannot prove its caller's future return.
+                        receipt.assert_called_once_with()
+                        self.assertEqual(owner.quota.finish.call_count,2)
+                    else:
+                        with self.assertRaises((R.Refused, RuntimeError)): owner.consume(0,0)
+                        self.assertEqual(receipt.call_count,int(fault == 'final-close'))
+                    old_preview.assert_not_called()
+                roles = [role for role,argv,kwargs in calls]
+                self.assertLessEqual(roles.count('installer'),1)
+                no_detach = ('pre-source','request-after','installer','readback','not-fresh','mounted-close')
+                self.assertEqual(roles.count('detach'),0 if fault in no_detach else 1)
+                if fault is None:
+                    self.assertEqual(roles,['attach','producer-key','producer-signature','installer',
+                                           'entry-signature','payload-signature','detach'])
+                    self.assertLess(events.index('producer-signature'),events.index('installer'))
+                    self.assertLess(events.index('installer'),events.index('readback'))
+                    self.assertLess(events.index('readback'),events.index('entry-signature'))
+                    self.assertLess(events.index('payload-signature'),events.index('mounted-finish'))
+                    self.assertLess(events.index('mounted-finish'),events.index('detach'))
+                    self.assertLess(events.index('detach-post'),events.index('source-post'))
+                    self.assertLess(events.index('source-post'),events.index('retire'))
+                for role,argv,kwargs in calls:
+                    if role == 'installer':
+                        self.assertEqual(argv,['/usr/bin/sudo','-n','--','/usr/sbin/installer','-pkg',
+                            str(owner.mount_path()/'Install.pkg'),'-target','/','-dumplog','-verboseR'])
+                        self.assertEqual(kwargs['timeout'],123)
+                        self.assertFalse(kwargs['cleanup'])
+                    if role == 'detach':
+                        self.assertEqual(argv,['/usr/bin/hdiutil','detach','/dev/inert'])
+                        self.assertEqual(kwargs['timeout'],30)
+                        self.assertTrue(kwargs['cleanup'])
+                self.assertIsNone(C._PREDECESSOR_DETACH)
+                if owner._CandidateResume__installation_entered:
+                    count = len(calls)
+                    with self.assertRaisesRegex(R.Refused,'candidate-install-order'): owner.install_image(image,None)
+                    self.assertEqual(len(calls),count)
+
+    def test_retained_plain_image_and_signed_current_source_guards_precede_installer(self):
+        for fault in ('preview','image','sourceCommit','packageVersion','packageSha256','inventory-codec','package-bound'):
+            with self.subTest(fault=fault), self.scheduled_install('retained-observer') as (owner,image,_,events,calls,original):
+                if fault in ('sourceCommit','packageVersion','packageSha256'):
+                    owner.stager.maintenance_producer_data.return_value['releaseSet']['current'][fault] = 'changed'
+                if fault == 'inventory-codec': owner.stager.observation_inventory_bytes.side_effect = original
+                with ExitStack() as patches:
+                    if fault == 'package-bound':
+                        stat_port = R.os.stat.side_effect
+                        def oversized(name, **kwargs):
+                            value = stat_port(name,**kwargs)
+                            if name == 'Install.pkg': value.st_size = R.LIMIT+1
+                            return value
+                        patches.enter_context(mock.patch.object(R.os,'stat',side_effect=oversized))
+                    with self.assertRaises((R.Refused,RuntimeError)):
+                        owner.install_image(b'other-image' if fault == 'image' else image, {} if fault == 'preview' else None)
+                roles = [role for role,argv,kwargs in calls]
+                self.assertEqual(roles, [] if fault in ('preview','image') else ['attach','detach'])
+                owner.stager.observation_command.assert_not_called()
+                self.assertIsNone(owner._CandidateResume__observer_product)
+                with self.assertRaisesRegex(R.Refused,'retained-observer-signed-product-missing'):
+                    owner.retained_observer_receipt()
 
     def test_only_predecessor_moves_the_exact_pair_after_first_detach(self):
         for mode in ('predecessor','fixed',*C.PURPOSES):

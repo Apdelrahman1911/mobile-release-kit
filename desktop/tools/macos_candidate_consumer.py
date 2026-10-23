@@ -23,9 +23,11 @@ WORKFLOW = '.github/workflows/desktop-macos-candidate-consume.yml'
 BRANCH = 'verify/desktop-macos-candidate-consume'
 REMOVAL_BRANCH = 'task/ci-simplification-20261015'
 PREDECESSOR_BRANCH = 'verify/desktop-macos-predecessor-install'
+RETAINED_OBSERVER_BRANCH = 'verify/desktop-macos-observer-reuse'
 SELECTION_PATH = 'desktop/macos-installed-inputs/candidate-carrier-selection.json'
 REMOVAL_SELECTION_PATH = 'desktop/macos-installed-inputs/candidate-removal-selection.json'
 PREDECESSOR_SELECTION_PATH = 'desktop/macos-installed-inputs/predecessor-install-selection.json'
+RETAINED_OBSERVER_SELECTION_PATH = 'desktop/macos-installed-inputs/retained-observer-selection.json'
 CHILD_SOURCE_LIMIT = 256 << 10
 PARSER_SOURCE_LIMIT = 64 << 10
 LEGACY_PATH = 'desktop/tools/macos_fixed_carrier_resume.py'
@@ -132,14 +134,15 @@ def context_data(environment, root, machine):
     source = environment.get('GITHUB_SHA', '')
     removal = environment.get('GITHUB_EVENT_NAME') == 'workflow_dispatch' and environment.get('MRK_CANDIDATE_MODE') == 'remove-delivery'
     predecessor = environment.get('MRK_CANDIDATE_MODE') == 'install-predecessor'
-    branch = PREDECESSOR_BRANCH if predecessor else REMOVAL_BRANCH if removal else BRANCH
+    retained = environment.get('MRK_CANDIDATE_MODE') == 'install-retained-observer'
+    branch = RETAINED_OBSERVER_BRANCH if retained else PREDECESSOR_BRANCH if predecessor else REMOVAL_BRANCH if removal else BRANCH
     resume.need(root == HELPER_ROOT and environment.get('GITHUB_WORKSPACE') == str(CANDIDATE_ROOT)
                 and environment.get('RUNNER_TEMP') == '/Users/runner/work/_temp'
                 and environment.get('GITHUB_REPOSITORY') == resume.REPOSITORY
-                and (environment.get('GITHUB_EVENT_NAME') == 'push' and not predecessor or
+                and (environment.get('GITHUB_EVENT_NAME') == 'push' and not (predecessor or retained) or
                      environment.get('GITHUB_EVENT_NAME') == 'workflow_dispatch'
-                     and (removal or predecessor))
-                and (not predecessor or arm)
+                     and (removal or predecessor or retained))
+                and (not (predecessor or retained) or arm)
                 and environment.get('GITHUB_REF') == 'refs/heads/' + branch
                 and environment.get('GITHUB_WORKFLOW_REF') == resume.REPOSITORY + '/' + WORKFLOW + '@refs/heads/' + branch
                 and re.fullmatch(r'[0-9a-f]{40}', source) and source != '0' * 40
@@ -264,15 +267,20 @@ class CandidateResume(resume.Resume):
     command_roles = (*resume.Resume.command_roles, 'helper-source', 'candidate-source')
 
     def __init__(self, helper_root, candidate_root, work, clock, factory, *, nomination=None, quota=None, purpose="install",
-                 predecessor_install=False):
+                 predecessor_install=False, retained_observer=False):
         resume.need(helper_root == HELPER_ROOT and candidate_root == CANDIDATE_ROOT,
                     'candidate-separate-source-roots')
         resume.need(type(purpose) is str and purpose in PURPOSES, "candidate-purpose")
         resume.need(type(predecessor_install) is bool
                     and (not predecessor_install or purpose == 'install' and nomination is None),
                     'candidate-predecessor-install-purpose')
+        resume.need(type(retained_observer) is bool and (not retained_observer
+                    or purpose == 'install' and nomination is None and not predecessor_install),
+                    'retained-observer-install-purpose')
         self.__purpose = purpose
         self.__predecessor_install = predecessor_install
+        self.__retained_observer = retained_observer
+        self.__retained_selection = self.__observer_product = self.__image_document = None
         self.__detach_observation = None
         self.__installed_signature_state = None
         self.__mounted_reread_inputs = self.__mounted_reread_state = None
@@ -340,10 +348,20 @@ class CandidateResume(resume.Resume):
     def load_nomination(self, target):
         resume.need(self.__nomination is None, 'candidate-source-selection-once')
         resume.need(not self.__predecessor_install or target == 'aarch64-apple-darwin', 'candidate-predecessor-target')
+        if self.__retained_observer:
+            resume.need(target == 'aarch64-apple-darwin', 'retained-observer-target')
+            selected = candidate.retained_observer_selection_data(resume.decode(self.source(RETAINED_OBSERVER_SELECTION_PATH, 8192)))
+            self.__retained_selection = resume.canonical(selected)
+            self.__nomination = MappingProxyType(selected['origin'])
+            return
         path = (PREDECESSOR_SELECTION_PATH if self.__predecessor_install else
                 REMOVAL_SELECTION_PATH if self.purpose == 'acquire-removal' else SELECTION_PATH)
         body = self.source(path, 8192)
         self.__nomination = MappingProxyType(selection_data(body, target))
+
+    def retained_selection(self):
+        resume.need(self.__retained_observer and self.__retained_selection is not None, 'retained-observer-source-not-loaded')
+        return candidate.retained_observer_selection_data(resume.decode(self.__retained_selection))
 
     def verify_sources(self):
         """Original owned Git queries; source bytes stay held across every call."""
@@ -452,31 +470,41 @@ class CandidateResume(resume.Resume):
         self.__acquisition_entered = True
         self.point(); self.quota.reserve(3)
         selected = self.nomination
-        request = {'row': selected, 'role': 'candidate', 'target': self.target, 'work': str(self.work),
+        role = 'retained-observer' if self.__retained_observer else 'candidate'
+        request = {'row': self.retained_selection() if self.__retained_observer else selected,
+                   'role': role, 'target': self.target, 'work': str(self.work),
                    'workIdentity': list(self.parent['identity']), 'caPath': self.ca_path, 'caSha256': self.ca_sha,
                    'endpoint': min(self.clock.work, self.clock.check() + 120_000_000_000)}
         env = dict(self.environment, MRK_P0_REQUEST=resume.canonical(request).decode('ascii'), MRK_P0_READ_TOKEN=self.token)
         bootstrap = self.child_bootstrap
         call = self.command('acquire-carrier', [self.python, '-I', '-S', '-B', '-c', bootstrap], 120, env=env)
         resume.need(call.returncode == 0 and call.stderr == b'' and resume.decode(call.stdout) == {
-            'schemaVersion': 1, 'role': 'candidate', 'target': self.target, 'bytes': selected['artifactBytes'],
+            'schemaVersion': 1, 'role': role, 'target': self.target, 'bytes': selected['artifactBytes'],
             'sha256': selected['artifactSha256'], 'closedMetadataMatched': True, 'originalClosesKnown': True},
             'candidate-original-acquisition')
         return self.read_candidate_zip()
 
     def read_candidate_zip(self):
         selected = self.nomination
-        name = target_names(self.target) + '-candidate.zip'
+        name = target_names(self.target) + ('-retained-observer.zip' if self.__retained_observer else '-candidate.zip')
         entry, body = self.quota.call(self.outer, 'file', self.work / name, selected['artifactBytes'], modes=(0o600,))
         self.private[name] = entry['identity']
         def before_image(size):
             self.admit_resources(*self._resource_inputs, image_bytes=size, acquiring=True)
-        values = candidate.candidate_members(body, selected, self.clock, before_image=before_image)
+        values = (candidate.retained_observer_members(body, self.retained_selection(), self.clock, before_image=before_image)
+                  if self.__retained_observer else candidate.candidate_members(body, selected, self.clock, before_image=before_image))
         resume.need(self.outer.read(entry) == body, 'candidate-acquisition-original-post')
-        self.preview_bytes, self.preview_sha = len(values['PREVIEW.json']), resume.sha(values['PREVIEW.json'])
-        self.__preview_document = resume.canonical(candidate.candidate_preview_data(values['PREVIEW.json'], selected))
         self.__members_document = resume.canonical([{'name': name, 'bytes': len(body), 'sha256': resume.sha(body)}
                                                    for name, body in sorted(values.items())])
+        if self.__retained_observer:
+            image = values[candidate.RETAINED_OBSERVER_IMAGE]
+            self.__image_document = resume.canonical({'name': candidate.RETAINED_OBSERVER_IMAGE,
+                'bytes': len(image), 'sha256': resume.sha(image)})
+            self.__artifact_admitted = True
+            # No old request-named package or detach transcript is kept for use.
+            return {candidate.RETAINED_OBSERVER_IMAGE: image}
+        self.preview_bytes, self.preview_sha = len(values['PREVIEW.json']), resume.sha(values['PREVIEW.json'])
+        self.__preview_document = resume.canonical(candidate.candidate_preview_data(values['PREVIEW.json'], selected))
         self.__artifact_admitted = True
         return values
 
@@ -537,25 +565,35 @@ class CandidateResume(resume.Resume):
         resume.need(self.__binding is None and self.__artifact_admitted, 'candidate-mounted-once')
         resume.need(self.stager.source_build_selection(self.target) == self.selection, 'candidate-source-selection-post')
         self.point()
+        if self.__retained_observer:
+            resume.need(preview is None, 'retained-observer-no-preview')
+            info = os.stat('Install.pkg', dir_fd=directory['fd'], follow_symlinks=False)
+            resume.need(stat.S_ISREG(info.st_mode) and 0 < info.st_size <= resume.LIMIT, 'retained-observer-package-bound')
+            package_size = info.st_size
+        else:
+            package_size = preview['packageSize']
         self.admit_resources(*self._resource_inputs, image_bytes=len(image),
-                             package_bytes=preview['packageSize'], reading=True)
+                             package_bytes=package_size, reading=True)
         originals, selected = {}, {}
         held = [] if self.__predecessor_install else None
-        for key, name, cap in (('package', 'Install.pkg', preview['packageSize']),
+        for key, name, cap in (('package', 'Install.pkg', package_size),
                               ('descriptor', 'producer.json', self.stager.PRODUCER_DESCRIPTOR_BYTES),
                               ('signature', 'producer.sig', self.stager.PRODUCER_SIGNATURE_BYTES)):
             info = os.stat(name, dir_fd=directory['fd'], follow_symlinks=False)
             resume.need(stat.S_ISREG(info.st_mode) and 0 < info.st_size <= cap
                         and info.st_uid in (0, os.getuid()) and info.st_gid in (0, os.getgid()), 'candidate-mounted-shape')
             entry, body = self.quota.call(mounted, 'file', mount / name, info.st_size, uid=info.st_uid, modes=(0o444,))
-            resume.need(len(body) == info.st_size and resume.sha(body) == preview[key + 'Sha256']
-                        and (key != 'package' or len(body) == preview['packageSize']), 'candidate-mounted-content-pin')
+            resume.need(len(body) == info.st_size and (self.__retained_observer or resume.sha(body) == preview[key + 'Sha256'])
+                        and (key != 'package' or len(body) == package_size), 'candidate-mounted-content-pin')
             originals[name] = (body, 0o444)
             selected[key] = {'name': name, 'bytes': len(body), 'sha256': resume.sha(body)}
             if held is not None: held.append((name, entry, body))
+        release = (self.stager.maintenance_producer_data(originals['producer.json'][0], target=self.target)['releaseSet']['current']
+                   if self.__retained_observer else None)
         row = dict(self.nomination, **selected, packageVersion=self.selection.package_version, release=self.selection.release,
             members=resume.decode(self.__members_document),
-            inventorySha256=preview['installerInventorySha256'], runtimeManifestSha256=preview['runtimeManifestSha256'],
+            inventorySha256=release['inventorySha256'] if self.__retained_observer else preview['installerInventorySha256'],
+            runtimeManifestSha256=release['runtimeManifestSha256'] if self.__retained_observer else preview['runtimeManifestSha256'],
             signingIdentity=dict(self.signing_identity))
         self.admit_resources(*self._resource_inputs, image_bytes=len(image),
                              package_bytes=len(originals['Install.pkg'][0]))
@@ -609,9 +647,14 @@ class CandidateResume(resume.Resume):
                     and not self.__installation_entered,
                     'candidate-install-order')
         self.__installation_entered = True
-        resume.need(resume.canonical(preview) == self.__preview_document
-                    and (len(image), resume.sha(image)) == (preview['distributionBytes'], preview['distributionSha256']),
-                    'candidate-install-image-binding')
+        if self.__retained_observer:
+            resume.need(preview is None and self.__image_document == resume.canonical({
+                'name': candidate.RETAINED_OBSERVER_IMAGE, 'bytes': len(image), 'sha256': resume.sha(image)}),
+                'retained-observer-install-image-binding')
+        else:
+            resume.need(resume.canonical(preview) == self.__preview_document
+                        and (len(image), resume.sha(image)) == (preview['distributionBytes'], preview['distributionSha256']),
+                        'candidate-install-image-binding')
         # Artifact pins never replace native signature verification.
         installed = super().install_image(image, preview)
         if self.__predecessor_install:
@@ -688,6 +731,11 @@ class CandidateResume(resume.Resume):
 
     def prepare_readback(self, result, inventory):
         # This hook runs only AFTER actual mounted producer signature POST.
+        if self.__retained_observer:
+            resume.need(self.__observer_product is None and self.__binding is not None, 'retained-observer-signed-product-once')
+            self.__observer_product = resume.canonical({key: result[key] for key in
+                ('package', 'descriptor', 'signature', 'inventory', 'release')})
+            return None
         if self.purpose in ('acquire', 'acquire-restore', 'acquire-removal'):
             self.acquisition_result = {key: result[key] for key in ('package','descriptor','signature','inventory')}
             self.acquisition_result.update(runtimeManifestSha256=result['release']['runtimeManifestSha256'])
@@ -767,10 +815,11 @@ class CandidateResume(resume.Resume):
             self._resource_inputs = (retained, host_bytes)
             self.admit_resources(retained, host_bytes)
             artifact = self.reuse_candidate() if self.purpose == 'restore-install' else self.acquire_candidate()
-            preview = candidate.candidate_preview_data(artifact['PREVIEW.json'], self.nomination)
-            self.admit_resources(retained, host_bytes, image_bytes=len(artifact['MobileReleaseKit.dmg']))
+            preview = None if self.__retained_observer else candidate.candidate_preview_data(artifact['PREVIEW.json'], self.nomination)
+            image = artifact[candidate.RETAINED_OBSERVER_IMAGE if self.__retained_observer else 'MobileReleaseKit.dmg']
+            self.admit_resources(retained, host_bytes, image_bytes=len(image))
             self.verify_sources()
-            self.install_image(artifact['MobileReleaseKit.dmg'], preview)
+            self.install_image(image, preview)
             self.verify_sources()
             if self.purpose == 'restore-install': self.baseline_post()
             self.point(); self.clock.finality = True
@@ -781,6 +830,8 @@ class CandidateResume(resume.Resume):
                         and self.mount_detached and ((not self.installer_entered and self.acquisition_result is not None)
                         if self.purpose in ('acquire','acquire-restore','acquire-removal') else (self.installer_zero and self.readback_known)),
                         'candidate-original-terminal-finality')
+            if self.__retained_observer:
+                return self.retained_observer_receipt()
             if self.purpose in ('acquire','acquire-restore','acquire-removal'):
                 return {'schemaVersion':1, 'scope':'candidate-closed-acquisition', 'nomination':self.nomination,
                     'helperSource':self.helper_source, 'helperTree':self.helper_tree,
@@ -835,6 +886,31 @@ class CandidateResume(resume.Resume):
             if not settled:
                 if primary is None: raise resume.Refused('candidate-original-final-closes')
                 BaseException.add_note(primary, 'candidate-original-final-closes')
+
+    def retained_observer_receipt(self):
+        # Only consume's successful actual finality reaches this projection.
+        # The shell must still write a separate status after THIS caller exits.
+        resume.need(self.__retained_observer and self.__observer_product is not None,
+                    'retained-observer-signed-product-missing')
+        observed = self.installation
+        q = self.outer.directories[self.work.parent]['identity']
+        work_identity = (q[0], q[1], q[3])
+        value = {'schemaVersion': 1, 'scope': 'retained-observer-fresh-install',
+            'packageRole': 'installed-shell-observation', 'nativeScope': 'tool-setup', 'target': self.target,
+            'nomination': self.nomination, 'members': resume.decode(self.__members_document),
+            'image': resume.decode(self.__image_document), **resume.decode(self.__observer_product),
+            'helperSource': self.helper_source, 'helperTree': self.helper_tree,
+            'consumerRunId': self.run_id, 'consumerRunAttempt': self.run_attempt, 'consumerWorkDirectory': list(work_identity),
+            'freshInstall': {'requestId': observed['requestId'], 'invocation': observed['invocation'],
+                'instance': observed['installationMetadata'][0]['instance'],
+                'stateSha256': observed['originalInstallerResult']['stateSha256'],
+                'resultSha256': observed['installerResultExport']['sha256']},
+            'nativeProducerSignatureVerified': True, 'installedSignaturesVerified': True,
+            'originalInstallerReturnedZero': True, 'sameRequestReadback': True,
+            'originalMountDetached': True, 'originalClosesKnown': True, 'workloadsKnownSettled': True,
+            'privateOutputsRetired': True, 'productReady': False, 'uiQualified': False, 'p0Qualified': False}
+        return candidate.retained_observer_install_receipt_data(value, self.retained_selection(), self.helper_source,
+            self.helper_tree, self.run_id, self.run_attempt, work_identity)
 
 
 def resume_identity(entry):
@@ -1070,8 +1146,10 @@ def main(purpose="install"):
     _PREDECESSOR_DETACH = None
     resume.need(type(purpose) is str and purpose in PURPOSES, 'candidate-purpose')
     predecessor = os.environ.get('MRK_CANDIDATE_MODE') == 'install-predecessor'
+    retained = os.environ.get('MRK_CANDIDATE_MODE') == 'install-retained-observer'
     resume.need(not predecessor or purpose == 'install', 'candidate-predecessor-install-purpose')
-    resume.need((purpose == 'acquire-removal' or predecessor) == (os.environ.get('GITHUB_EVENT_NAME') == 'workflow_dispatch'),
+    resume.need(not retained or purpose == 'install', 'retained-observer-install-purpose')
+    resume.need((purpose == 'acquire-removal' or predecessor or retained) == (os.environ.get('GITHUB_EVENT_NAME') == 'workflow_dispatch'),
                 'candidate-removal-purpose')
     context = entry_context(() if purpose == "install" else (purpose,))
     clock = resume.Deadline(started=STARTED_NS)
@@ -1085,7 +1163,7 @@ def main(purpose="install"):
         quota.reserve(1)  # Consuming bootstrap source FD, retained re-read below.
         session = CandidateResume(HELPER_ROOT, CANDIDATE_ROOT, context['work'], clock,
                                   resume.bootstrap_originals(HELPER_ROOT), quota=quota, purpose=purpose,
-                                  predecessor_install=predecessor)
+                                  predecessor_install=predecessor, retained_observer=retained)
         session.helper_source = context['helperSource']
         session.run_id, session.run_attempt = context['runId'], context['runAttempt']
         session.load_nomination(context['target'])
