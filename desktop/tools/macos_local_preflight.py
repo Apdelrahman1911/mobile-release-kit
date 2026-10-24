@@ -51,6 +51,7 @@ def main():
     if args.dialog:
         # The fixture's own watchdog bounds its entire UI lifetime to ten seconds.
         run('native-dialog', [str(executable), str(temporary)], timeout=15)
+        run('native-open-project', [str(executable), '--open-project', str(temporary)], timeout=15)
     print(json.dumps({'checks': results, 'installedAnything': False,
                       'dialogTested': args.dialog, 'passed': True}))
 

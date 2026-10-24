@@ -27,6 +27,14 @@ def reducers():
             if isinstance(target, ast.Name) and target.id in constants:
                 namespace[target.id] = ast.literal_eval(node.value)
     assert constants <= namespace.keys()
+    # The reducer also reads the newer saved-operation diagnostic roster.
+    # Execute only these fixed DATA assignments, in their original order.
+    roster_names = {"IOS_PENDING_RESULT", "ANDROID_CANDIDATE_RESULT", "PANEL_TOPOLOGY_SELECTIONS", "SAVED_DIAGNOSTIC_STAGES"}
+    rosters = [node for node in tree.body if isinstance(node, ast.Assign)
+               and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name)
+               and node.targets[0].id in roster_names]
+    assert {node.targets[0].id for node in rosters} == roster_names
+    exec(compile(ast.Module(body=rosters, type_ignores=[]), str(RUNNER), "exec"), namespace)
     exec(compile(ast.Module(body=nodes, type_ignores=[]), str(RUNNER), "exec"), namespace)
     return namespace
 
@@ -259,7 +267,7 @@ class NormalBuildFailureDataTests(unittest.TestCase):
     def test_admission_exact_owner_reasons_masks_and_unknowns_are_passive(self):
         data, owner = admission_reducers()
         encode, write = data["encoded"], data["normal_admission_failure"]
-        self.assertEqual(len(data["ADMISSION_OWNER_REASONS"]), 10)
+        self.assertEqual(len(data["ADMISSION_OWNER_REASONS"]), 11)
         for kind in (owner.ProcessError, owner.ProcessCleanupError, owner.ProcessOutcomeUnknown):
             for reason, label in data["ADMISSION_OWNER_REASONS"].items():
                 error = kind(reason, 63)
@@ -711,11 +719,15 @@ class NormalBuildFailureDataTests(unittest.TestCase):
         for methods, flags, allowance, result in (
             ((data["PACKAGED_METHOD"],), {}, 60, "/inert/test.xcresult"),
             ((data["ENGINEERING_METHOD"],), {"engineering": True}, 60, "/inert/test.xcresult"),
-            ((data["OUTPUT_DATA_METHOD"],), {"output_data": True}, 60, "/inert/test.xcresult"),
-            ((data["CLASS"] + data["ANDROID_METHOD"],), {"android_positive": True}, 900, "/inert/" + data["ANDROID_RESULT"])):
+            ((data["OUTPUT_DATA_METHOD"],), {"output_data": True}, 60, "/inert/test.xcresult")):
             with self.subTest(flags=flags), self.assertRaises(data["Refused"]):
                 data["xcode_test_arguments"]("/inert/fixed.xctestrun", result, methods, allowance,
                     target=data["INTEL_TARGET"], **flags)
+        # The Android positive route now has its own reviewed Intel profile.
+        android = data["xcode_test_arguments"]("/inert/fixed.xctestrun", "/inert/" + data["ANDROID_RESULT"],
+            (data["CLASS"] + data["ANDROID_METHOD"],), 900, target=data["INTEL_TARGET"], android_positive=True)
+        self.assertEqual(android[android.index("-destination") + 1], "platform=macOS")
+        self.assertIn("-only-testing:" + data["CLASS"] + data["ANDROID_METHOD"], android)
 
     def test_destination_error_terms_are_finite_lexical_observations(self):
         vocabulary = ["architecture", "platform", "macos", "xcode", "sdk", "deployment", "version", "support", "install"]

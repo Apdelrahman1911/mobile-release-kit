@@ -9755,7 +9755,7 @@ class ShippingGateControlWiringDataTests(unittest.TestCase):
                     lambda row: row['installationMetadata'][1].update(instance=row['installationMetadata'][0]['instance']),
                     lambda row: row['installationMetadata'][1].update(verifiedCurrentFiles=1),
                     lambda row: row['installationMetadata'][0].update(declaredPayloadFiles=3),
-                    lambda row: row['installationMetadata'][1].update(declaredPayloadFiles=2048),
+                    lambda row: row['installationMetadata'][1].update(declaredPayloadFiles=stage.MAX_FILES),
                     lambda row: row['installationMetadata'][1].update(declaredBytes=stage.MAX_BYTES),
                     lambda row: row['installationMetadata'][0].update(declaredBytes=1),
                     lambda row: row['installationMetadata'][0].update(producerDescriptorBytes=1),
