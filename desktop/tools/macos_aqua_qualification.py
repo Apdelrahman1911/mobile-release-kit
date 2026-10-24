@@ -4174,10 +4174,34 @@ def _git_read_failure_context(value, source, step, reason, case):
     return value
 
 
+def _tool_service_identity_failure(value):
+    """Closed failure-location DATA, not signature validity or native entry."""
+    need(type(value) is dict and type(value.get("stage")) is str, "failure-context")
+    stage = value["stage"]
+    if stage == "profile":
+        need(set(value) == {"stage"}, "failure-context")
+    elif stage in ("installation", "fixed-payload", "recheck"):
+        vocabulary = (
+            "none unavailable-profile busy document-unavailable wrong-location missing incomplete "
+            "record-mismatch payload-mismatch protection bounds native cancelled deadline cleanup-unknown"
+            if stage == "installation" else
+            "stopped deadline bounds native ownership inventory identity already-used unknown")
+        need(set(value) == {"stage", "reason"} and type(value["reason"]) is str
+             and value["reason"] in vocabulary.split(), "failure-context")
+    else:
+        need(stage == "native-signing" and set(value) == {"stage", "result", "phase", "nativeFailed"}
+             and type(value["result"]) is str and value["result"] in ("verified", "unavailable", "refused", "unknown")
+             and type(value["nativeFailed"]) is bool, "failure-context")
+        phase = value["phase"]
+        need(phase is None or type(phase) is str and phase in (
+            "allocate-cell", *(f"inspect-{n}" for n in range(1, 18))), "failure-context")
+    return value
+
+
 def _tool_service_failure_context(value, source, step, reason, case):
     """Finite facts from the already-returned status, never a successful result."""
     need(source == "record" and case == TOOLS.SERVICE_CASE and reason == "tool-setup-original-contract"
-         and type(value) is dict and set(value) == {
+         and type(value) is dict and set(value) - {"identityFailure"} == {
              "validation", "statusValid", "phase", "reason", "prerequisite", "observation"}, "failure-context")
     validation_steps = {
         "before-request": ("ToolService(Request)",),
@@ -4208,6 +4232,8 @@ def _tool_service_failure_context(value, source, step, reason, case):
              and type(observation["outcome"]) is str and observation["outcome"] in (
                  "not-entered", "observed", "registration-requested", "already-registered", "needs-approval",
                  "settings-requested", "denied-by-user", "stopped", "refused", "error", "unknown"), "failure-context")
+    if "identityFailure" in value:
+        _tool_service_identity_failure(value["identityFailure"])
     # This may be the very status whose validity check failed. Preserve its
     # finite values without deriving approval, admission, settlement or Ready.
     return value

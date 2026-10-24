@@ -550,6 +550,56 @@ class ToolServiceFailureDataTests(unittest.TestCase):
         output = io.StringIO(); M.emit_record(report, output)
         self.assertNotIn("PRIVATE", output.getvalue())
 
+    def test_identity_failure_preserves_only_the_returned_stage_data(self):
+        samples = [
+            {"stage": "profile"},
+            {"stage": "installation", "reason": "record-mismatch"},
+            {"stage": "fixed-payload", "reason": "ownership"},
+            {"stage": "recheck", "reason": "identity"},
+            {"stage": "native-signing", "result": "refused", "phase": "inspect-5", "nativeFailed": True},
+            {"stage": "native-signing", "result": "refused", "phase": "allocate-cell", "nativeFailed": False},
+            {"stage": "native-signing", "result": "unavailable", "phase": None, "nativeFailed": False},
+        ]
+        for sample in samples:
+            with self.subTest(sample=sample):
+                value = self.detail()
+                value["toolService"].update(phase="refused", reason="signing-unavailable",
+                                            prerequisite="signing-unavailable", identityFailure=sample)
+                row = self.row(value)
+                self.assertEqual(M.failure_context(b"", row, M.TOOLS.SERVICE_CASE), value)
+                with self.assertRaises(M.Refused):
+                    M.parse_result(b"", row, BINDING, M.TOOLS.SERVICE_CASE)
+
+    def test_identity_checkpoint_does_not_claim_native_entry_or_success(self):
+        for phase in (None, "allocate-cell", *(f"inspect-{n}" for n in range(1, 18))):
+            for result in ("verified", "unavailable", "refused", "unknown"):
+                value = self.detail()
+                value["toolService"]["identityFailure"] = {
+                    "stage": "native-signing", "result": result, "phase": phase, "nativeFailed": False}
+                row = self.row(value)
+                # Even contradictory finite diagnostic DATA remains a failure;
+                # a checkpoint or a result field is not an entry/finality receipt.
+                self.assertEqual(M.failure_context(b"", row, M.TOOLS.SERVICE_CASE), value)
+                with self.assertRaises(M.Refused):
+                    M.parse_result(b"", row, BINDING, M.TOOLS.SERVICE_CASE)
+
+    def test_identity_failure_rejects_private_unknown_or_cross_stage_fields(self):
+        native = {"stage": "native-signing", "result": "refused", "phase": "inspect-5", "nativeFailed": True}
+        bad_samples = [None, [], {}, {"stage": "PRIVATE"}, {"stage": "profile", "reason": "none"},
+                       {"stage": "installation", "reason": "/private/error"},
+                       {"stage": "fixed-payload", "reason": "record-mismatch"},
+                       {"stage": "recheck", "reason": "protection"},
+                       {"stage": "installation", "reason": "native", "path": "/private/file"},
+                       *(dict(native, **{key: bad}) for key, bad in (
+                           ("phase", "inspect-0"), ("phase", "inspect-18"), ("phase", "release-0"),
+                           ("phase", 5), ("result", "PRIVATE"), ("nativeFailed", 1),
+                           ("stderr", "PRIVATE"))),
+                       *({k: v for k, v in native.items() if k != missing} for missing in native)]
+        for sample in bad_samples:
+            with self.subTest(sample=sample):
+                value = self.detail(); value["toolService"]["identityFailure"] = sample
+                self.assertIsNone(M.failure_context(b"", self.row(value), M.TOOLS.SERVICE_CASE))
+
 
 class AquaDataTests(unittest.TestCase):
     def test_current_owner_pins_match_checkout_and_refuse_stale_before_import(self):
