@@ -24,9 +24,9 @@ from mobile_release.owned_process import ProcessError, run_owned
 
 BRANCH = 'verify/desktop-macos-notary-inspect'
 ARCHIVE = 'MobileReleaseKit-notary-payload.zip'
-# Actual failed step in run38914684702/1, ARM job117019014095.
-START = '2026-10-16T14:34:59Z'
-END = '2026-10-16T14:45:31Z'
+# Actual failed payload-submit step in run40071418028/1, ARM Git job120805474247.
+START = '2026-10-24T07:53:36Z'
+END = '2026-10-24T08:01:05Z'
 
 
 
@@ -196,7 +196,7 @@ def main():
         work = Path(tempfile.mkdtemp(prefix='mrk-notary-inspect-', dir=os.environ['RUNNER_TEMP']))
         result = inspect(work, key, profile, diagnostic=diagnostic)
         result.update(diagnosticOnly=True, sourceAuthenticated=False, productReady=False, cleanupComplete=True,
-                      producerRun=38914684702, producerAttempt=1, producerJob=117019014095)
+                      producerRun=40071418028, producerAttempt=1, producerJob=120805474247)
         print(json.dumps(result, separators=(',', ':')))
         return 0 if result['notary'] is not None else 1
     except BaseException:

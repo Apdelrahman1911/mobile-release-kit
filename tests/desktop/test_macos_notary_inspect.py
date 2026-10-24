@@ -20,12 +20,12 @@ PROFILE = {'keyId': 'SYNTHETIC0', 'issuerId': OLD_ID}
 
 def history():
     return {'history': [
-        {'id': ID, 'name': M.ARCHIVE, 'createdDate': '2026-10-16T14:40:00Z', 'status': 'Invalid'},
-        {'id': OLD_ID, 'name': 'unrelated-private-name', 'createdDate': '2026-10-15T14:40:00Z', 'status': 'Accepted'}]}
+        {'id': ID, 'name': M.ARCHIVE, 'createdDate': '2026-10-24T07:57:00Z', 'status': 'Invalid'},
+        {'id': OLD_ID, 'name': 'unrelated-private-name', 'createdDate': '2026-10-23T07:57:00Z', 'status': 'Accepted'}]}
 
 
 def log():
-    return {'jobId': ID, 'archiveFilename': M.ARCHIVE, 'uploadDate': '2026-10-16T14:40:00Z',
+    return {'jobId': ID, 'archiveFilename': M.ARCHIVE, 'uploadDate': '2026-10-24T07:57:00Z',
             'status': 'Invalid', 'statusCode': 4000,
             'issues': [{'severity': 'error', 'code': None,
                         'message': 'The binary is not signed.',
