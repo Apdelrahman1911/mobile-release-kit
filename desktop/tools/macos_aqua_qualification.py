@@ -1213,6 +1213,8 @@ FAILURE_STEPS |= frozenset(f"UploadKey(Backup({name}))" for name in (
 FAILURE_STEPS |= frozenset(f"ToolSetup({name})" for name in (
     "Context Service ServiceWait Catalog CatalogWait Inspect InspectWait Acquire AcquireWait RegisterInspect RegisterReview Register Registered Recover Recovered Select Reuse ReuseWait Finish"
 ).split()) | frozenset(f"ToolSetup({name}({i}))" for name in ("Choose", "Native", "Chosen") for i in range(4))
+FAILURE_STEPS |= frozenset(f"ToolService({name})" for name in (
+    "Request", "RequestWait", "Check", "CheckWait", "Finish"))
 FAILURE_STEPS |= frozenset(f"GitCli({name})" for name in (
     "Read ReadWait Allow Submitted Prepared Started Terminal Checked Revoke Denied Done Finish").split())
 FAILURE_STEPS |= frozenset(f"GitUpstream({name})" for name in (
@@ -4141,6 +4143,45 @@ def _vault_failure_context(value, source, step, reason, case):
     return value
 
 
+def _tool_service_failure_context(value, source, step, reason, case):
+    """Finite facts from the already-returned status, never a successful result."""
+    need(source == "record" and case == TOOLS.SERVICE_CASE and reason == "tool-setup-original-contract"
+         and type(value) is dict and set(value) == {
+             "validation", "statusValid", "phase", "reason", "prerequisite", "observation"}, "failure-context")
+    validation_steps = {
+        "before-request": ("ToolService(Request)",),
+        "admission-binding": ("ToolService(Request)", "ToolService(Check)"),
+        "wait-binding": ("ToolService(RequestWait)", "ToolService(CheckWait)"),
+        "terminal": ("ToolService(RequestWait)", "ToolService(CheckWait)"),
+        "before-check": ("ToolService(Check)",),
+    }
+    need(type(value["validation"]) is str and value["validation"] in validation_steps
+         and type(step) is str and step in validation_steps[value["validation"]]
+         and type(value["statusValid"]) is bool, "failure-context")
+    for key, vocabulary in (
+            ("phase", "idle checking requesting opening-settings settling stopping complete refused cancelled unknown"),
+            ("reason", "none not-inspected cancelled context-changed source-changed source-refused version-mismatch "
+                       "layout-refused supplier-unavailable signing-unavailable approval-required approval-denied "
+                       "service-unavailable fresh-service-unavailable review-expired stale-review timed-out document-lost "
+                       "shutdown busy input-limit result-limit protocol-error registration-refused cleanup-unknown"),
+            ("prerequisite", "ready supplier-unavailable signing-unavailable approval-required approval-denied "
+                             "service-unavailable fresh-service-unavailable")):
+        need(type(value[key]) is str and value[key] in vocabulary.split(), "failure-context")
+    observation = value["observation"]
+    if observation is not None:
+        flags = {"mutationEntered", "mutationReturned", "mutationUncertain", "nativeSettled"}
+        need(type(observation) is dict and set(observation) == flags | {"state", "outcome"}
+             and all(type(observation[k]) is bool for k in flags)
+             and type(observation["state"]) is str and observation["state"] in (
+                 "not-registered", "enabled", "requires-approval", "not-found", "unavailable", "error")
+             and type(observation["outcome"]) is str and observation["outcome"] in (
+                 "not-entered", "observed", "registration-requested", "already-registered", "needs-approval",
+                 "settings-requested", "denied-by-user", "stopped", "refused", "error", "unknown"), "failure-context")
+    # This may be the very status whose validity check failed. Preserve its
+    # finite values without deriving approval, admission, settlement or Ready.
+    return value
+
+
 def failure_context(stdout, stderr, case=None):
     row = _failure_row(stdout, stderr, b"MRK_MACOS_AQUA_FAILURE_CONTEXT", FAILURE_CONTEXT_LIMIT)
     if row is None:
@@ -4148,7 +4189,7 @@ def failure_context(stdout, stderr, case=None):
     try:
         value = json.loads(row.decode("ascii"), object_pairs_hook=_pairs,
                            parse_constant=lambda _: (_ for _ in ()).throw(Refused("failure-context")))
-        need(type(value) is dict and set(value) - {"accessibilityBinding", "snapshotSource", "originalWindow", "projectSelection", "completionSelection", "projectFieldPreparation", "dom", "bootstrap", "vault", "uploadKey", "inputBodyAdmission"} in (
+        need(type(value) is dict and set(value) - {"accessibilityBinding", "snapshotSource", "originalWindow", "projectSelection", "completionSelection", "projectFieldPreparation", "dom", "bootstrap", "vault", "uploadKey", "inputBodyAdmission", "toolService"} in (
             {"pending", "nativeHandler", "lastPanel"},
             {"pending", "nativeHandler", "lastPanel", "nativeAction"},
             {"pending", "nativeHandler", "lastPanel", "nativeAction", "accessibility"}), "failure-context")
@@ -4171,6 +4212,9 @@ def failure_context(stdout, stderr, case=None):
         if "vault" in value:
             value["vault"] = _vault_failure_context(value["vault"], value.get("snapshotSource"),
                                                     failure_step(stdout, stderr), failure_reason(stdout, stderr), case)
+        if "toolService" in value:
+            value["toolService"] = _tool_service_failure_context(value["toolService"], value.get("snapshotSource"),
+                failure_step(stdout, stderr), failure_reason(stdout, stderr), case)
         if "originalWindow" in value:
             value["originalWindow"] = _original_window_context(value["originalWindow"])
         if "projectSelection" in value:

@@ -384,6 +384,89 @@ def inert_created_directory(gid=GID):
                               mkdir=mkdir, opening=opening, chown=changing_group, chmod=changing_mode)
 
 
+class ToolServiceFailureDataTests(unittest.TestCase):
+    """Returned service DATA only; no native operation or UI automation."""
+
+    @staticmethod
+    def detail():
+        return {"snapshotSource": "record", "pending": None, "nativeHandler": None, "lastPanel": None,
+                "toolService": {"validation": "terminal", "statusValid": True,
+                                "phase": "unknown", "reason": "cleanup-unknown",
+                                "prerequisite": "service-unavailable", "observation": None}}
+
+    def row(self, value, step="ToolService(RequestWait)", reason="tool-setup-original-contract"):
+        return project_selection_row(value, reason, step)
+
+    def test_compact_steps_and_bound_returned_status_are_preserved(self):
+        for name in ("Request", "RequestWait", "Check", "CheckWait", "Finish"):
+            step = f"ToolService({name})"
+            self.assertLessEqual(len(step), 32)
+            self.assertEqual(M.failure_step(b"", self.row(self.detail(), step)), step)
+        for validation, steps in (
+                ("before-request", ("Request",)), ("admission-binding", ("Request", "Check")),
+                ("wait-binding", ("RequestWait", "CheckWait")),
+                ("terminal", ("RequestWait", "CheckWait")), ("before-check", ("Check",))):
+            for step in steps:
+                value = self.detail(); value["toolService"]["validation"] = validation
+                self.assertEqual(M.failure_context(b"", self.row(value, f"ToolService({step})"),
+                                                  M.TOOLS.SERVICE_CASE), value)
+
+    def test_partial_or_invalid_status_does_not_invent_settlement(self):
+        for valid in (False, True):
+            for observation in (None, {
+                    "state": "requires-approval", "outcome": "unknown", "mutationEntered": True,
+                    "mutationReturned": False, "mutationUncertain": True, "nativeSettled": False}):
+                value = self.detail()
+                value["toolService"].update(statusValid=valid, phase="stopping", reason="timed-out",
+                                            prerequisite="approval-required", observation=observation)
+                self.assertEqual(M.failure_context(b"", self.row(value), M.TOOLS.SERVICE_CASE), value)
+                with self.assertRaises(M.Refused):
+                    M.parse_result(b"", self.row(value), BINDING, M.TOOLS.SERVICE_CASE)
+
+    def test_unknown_private_or_wrongly_bound_fields_are_not_exported(self):
+        for key, bad in (("validation", "private"), ("phase", "private"), ("reason", "/private/error"),
+                         ("prerequisite", "private"), ("statusValid", 1), ("observation", []),
+                         ("operationId", "private"), ("context", {"project": "private"})):
+            value = self.detail(); value["toolService"][key] = bad
+            self.assertIsNone(M.failure_context(b"", self.row(value), M.TOOLS.SERVICE_CASE), key)
+        observed = {"state": "error", "outcome": "error", "mutationEntered": False,
+                    "mutationReturned": False, "mutationUncertain": False, "nativeSettled": True}
+        for key, bad in (("state", "private"), ("outcome", "private"), ("stderr", "private"),
+                         *((name, 0) for name in observed if name not in ("state", "outcome"))):
+            value = self.detail(); value["toolService"]["observation"] = {**observed, key: bad}
+            self.assertIsNone(M.failure_context(b"", self.row(value), M.TOOLS.SERVICE_CASE), key)
+        for key in self.detail()["toolService"]:
+            value = self.detail(); del value["toolService"][key]
+            self.assertIsNone(M.failure_context(b"", self.row(value), M.TOOLS.SERVICE_CASE), key)
+        for step in ("ToolSetup(ServiceWait)", "ToolService(Finish)", "ToolService(Request)"):
+            self.assertIsNone(M.failure_context(b"", self.row(self.detail(), step), M.TOOLS.SERVICE_CASE))
+        self.assertIsNone(M.failure_context(b"", self.row(self.detail(), reason="observer-deadline"), M.TOOLS.SERVICE_CASE))
+        for case in (None, "first-save", M.TOOLS.CASES[0]):
+            self.assertIsNone(M.failure_context(b"", self.row(self.detail()), case))
+        value = self.detail(); value["snapshotSource"] = "prearm-open-progress"
+        self.assertIsNone(M.failure_context(b"", self.row(value), M.TOOLS.SERVICE_CASE))
+        row = self.row(self.detail())
+        self.assertIsNone(M.failure_context(b"", row + context_row(self.detail()), M.TOOLS.SERVICE_CASE))
+
+    def test_completed_failure_preserves_original_exit_and_only_safe_diagnostic(self):
+        fixtures, emitted = InertFixtures(), []
+        fixtures.path = Path("/inert-service-fixture")
+        fixtures.recovery_runtime_paths = lambda: None
+        detail = self.detail()
+        def runner(argv, **_):
+            return CompletedProcess(args=argv, returncode=1, stdout=b"PRIVATE OUTPUT", stderr=self.row(detail))
+        with self.assertRaisesRegex(M.Refused, "^app-return$") as caught:
+            M.run_cases(BINDING, fixtures, runner, UID, "runner", emitted.append, M.TOOLS.SERVICE_SCOPE)
+        report = M.diagnostic(caught.exception, None, fixtures)
+        self.assertEqual(report["innerFailureContext"], detail)
+        self.assertEqual((report["status"], report["appReturncode"], report["innerFailureStep"]),
+                         ("failed", 1, "ToolService(RequestWait)"))
+        self.assertEqual((report["originalCallReturned"], report["invocationFinality"]), (True, "no-pending-invocation"))
+        self.assertEqual((fixtures.reads, emitted, report["typedLifetimeFacts"]), ([], [], []))
+        output = io.StringIO(); M.emit_record(report, output)
+        self.assertNotIn("PRIVATE", output.getvalue())
+
+
 class AquaDataTests(unittest.TestCase):
     def test_current_owner_pins_match_checkout_and_refuse_stale_before_import(self):
         # Keep this historical selected-method name, but exercise the actual
