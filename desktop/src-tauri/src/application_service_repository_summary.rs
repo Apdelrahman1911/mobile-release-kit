@@ -148,6 +148,7 @@ mod tests {
 
     fn finished() -> native::Projection {
         native::Projection {
+            failure_provenance: None,
             operation_id: "git-read-1".into(),
             context: native::Context {
                 project_id: "project-1".into(),

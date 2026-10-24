@@ -158,6 +158,7 @@ mod tests {
     #[test]
     fn a_saved_projection_cannot_rematch_another_document_or_registry_revision() {
         let value = native::Projection {
+            failure_provenance: None,
             operation_id: "git-read-1".into(),
             context: native::Context {
                 project_id: "project-1".into(),
