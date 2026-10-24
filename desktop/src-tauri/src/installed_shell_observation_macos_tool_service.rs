@@ -121,11 +121,14 @@ pub(crate) struct FailureSample {
     reason: wire::Reason,
     prerequisite: wire::Prerequisite,
     observation: Option<wire::ServiceObservation>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    identity_failure: Option<wire::ServiceIdentityFailure>,
 }
 impl FailureSample {
     fn capture(validation: Validation, status: &wire::ServiceStatus) -> Self {
         Self { validation, status_valid: status.valid(), phase: status.phase,
-            reason: status.reason, prerequisite: status.prerequisite, observation: status.observation }
+            reason: status.reason, prerequisite: status.prerequisite, observation: status.observation,
+            identity_failure: status.identity_failure }
     }
     pub(crate) fn matches(self, step: super::Step) -> bool {
         let super::Step::Prerequisite(step) = step else { return false; };
@@ -306,6 +309,45 @@ pub(super) async fn tick(q: &Arc<Observation>, document: &DocumentBinding, step:
 
 // Called by the existing harness=false observer's inert startup contracts.
 // No service, account, filesystem, Control, native owner or Ready is created.
+fn identity_failure_data_checks(before: &wire::ServiceStatus) -> bool {
+    use wire::{ServiceIdentityAdmissionFailure as A, ServiceIdentityFailure as F,
+        ServiceIdentitySigningPhase as P, ServiceIdentitySigningResult as R};
+    let at=std::time::Instant::now();
+    let later=at+std::time::Duration::from_nanos(1);
+    let first=F::Installation{reason:crate::installation::CheckReason::PayloadMismatch};
+    let mut diagnostic=wire::ServiceIdentityDiagnostic::default();
+    diagnostic.capture(first,wire::Reason::SigningUnavailable,at);
+    diagnostic.capture(F::Recheck{reason:A::Identity},wire::Reason::SigningUnavailable,later);
+    if diagnostic.for_first(Some((wire::Reason::SigningUnavailable,at)))!=Some(first)
+        || diagnostic.for_first(Some((wire::Reason::SigningUnavailable,later))).is_some()
+        || diagnostic.for_first(Some((wire::Reason::Cancelled,at))).is_some()
+        || diagnostic.for_first(None).is_some() {return false;}
+    let mut status=before.clone();status.phase=wire::ServicePhase::Refused;
+    status.reason=wire::Reason::SigningUnavailable;status.prerequisite=wire::Prerequisite::SigningUnavailable;
+    status.observation=None;
+    let Ok(baseline)=serde_json::to_value(&status)else{return false;};
+    for (failure,expected) in [
+        (F::Profile,json!({"stage":"profile"})),
+        (first,json!({"stage":"installation","reason":"payload-mismatch"})),
+        (F::FixedPayload{reason:A::Ownership},json!({"stage":"fixed-payload","reason":"ownership"})),
+        (F::Recheck{reason:A::Identity},json!({"stage":"recheck","reason":"identity"})),
+        (F::NativeSigning{result:R::Refused,phase:Some(P::Inspect5),native_failed:true},
+            json!({"stage":"native-signing","result":"refused","phase":"inspect-5","nativeFailed":true})),
+        (F::NativeSigning{result:R::Unknown,phase:None,native_failed:false},
+            json!({"stage":"native-signing","result":"unknown","phase":null,"nativeFailed":false})),
+    ] {
+        status.identity_failure=Some(failure);
+        let sample=FailureSample::capture(Validation::Terminal,&status);
+        if !status.valid() || status.clone().bounded().is_err()
+            || terminal(&status,wire::ServiceAction::RequestRegistration).is_some()
+            || serde_json::to_value(&status).ok()!=Some(baseline.clone())
+            || sample.value()["identityFailure"]!=expected
+            || !super::super::tool_service_failure_data_checks(sample,
+                [Step::Request,Step::RequestWait,Step::Check,Step::CheckWait,Step::Finish].map(super::Step::Prerequisite)) {return false;}
+    }
+    status.identity_failure=None;
+    FailureSample::capture(Validation::Terminal,&status).value().get("identityFailure").is_none()
+}
 pub(super) fn data_checks() -> bool {
     let Ok(context) = build::prepare(&json!({"projectId":"project-a","draftRevision":0,"baselineGeneration":1,
         "savedConfig":{"bytes":1,"sha256":"a".repeat(64)},
@@ -315,12 +357,14 @@ pub(super) fn data_checks() -> bool {
     let mut status = wire::ServiceStatus {schema_version:1,status_revision:1,setup_generation:1,
         availability:build::Availability::Available,prerequisite:wire::Prerequisite::Ready,
         phase:wire::ServicePhase::Complete,reason:wire::Reason::None,
+        identity_failure:None,
         operation:Some(wire::ServiceOperation {operation_id:"c".repeat(32),setup_generation:1,source_generation:0,
             action:request.action,context}),
         observation:Some(wire::ServiceObservation {state:wire::ServiceState::Enabled,outcome:wire::ServiceOutcome::AlreadyRegistered,
             mutation_entered:false,mutation_returned:false,mutation_uncertain:false,native_settled:true})};
     let Some(binding)=Binding::capture(&status,&request) else {return false;};
-    if !binding.matches(&status) || terminal(&status,request.action)!=Some(Finding::Ready) {return false;}
+    if !binding.matches(&status) || terminal(&status,request.action)!=Some(Finding::Ready)
+        || !identity_failure_data_checks(&status) {return false;}
     let mut record=Record::default();
     if !record.claim(request.action) || record.claim(request.action) || record.claim(wire::ServiceAction::Check)
         || record.complete() {return false;}

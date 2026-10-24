@@ -217,6 +217,7 @@ mod tests {
                     aliases:0,complete:true,compatibility:registration::Compatibility::Compatible}).to_vec()}),report:None};
         let service = registration::ServiceStatus {schema_version:1,status_revision:2,setup_generation:1,availability:build::Availability::Available,
             prerequisite:registration::Prerequisite::Ready,phase:registration::ServicePhase::Complete,reason:registration::Reason::None,
+            identity_failure:None,
             operation:Some(registration::ServiceOperation {operation_id:"d".repeat(32),setup_generation:1,source_generation:1,action:registration::ServiceAction::Check,context:saved.clone()}),
             observation:Some(registration::ServiceObservation {state:registration::ServiceState::Enabled,outcome:registration::ServiceOutcome::Observed,
                 mutation_entered:false,mutation_returned:false,mutation_uncertain:false,native_settled:true})};

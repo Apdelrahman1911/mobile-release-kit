@@ -168,6 +168,65 @@ pub(crate) struct ServiceObservation {
     pub(crate) mutation_entered: bool, pub(crate) mutation_returned: bool,
     pub(crate) mutation_uncertain: bool, pub(crate) native_settled: bool,
 }
+// Failure-only, finite DATA from the SAME original identity preparation. These
+// labels do not imply native entry, signature acceptance or Service readiness.
+#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum ServiceIdentityAdmissionFailure {
+    Stopped, Deadline, Bounds, Native, Ownership, Inventory, Identity, AlreadyUsed, Unknown,
+}
+#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum ServiceIdentitySigningResult { Verified, Unavailable, Refused, Unknown }
+#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
+pub(crate) enum ServiceIdentitySigningPhase {
+    #[serde(rename = "allocate-cell")] AllocateCell,
+    #[serde(rename = "inspect-1")] Inspect1,
+    #[serde(rename = "inspect-2")] Inspect2,
+    #[serde(rename = "inspect-3")] Inspect3,
+    #[serde(rename = "inspect-4")] Inspect4,
+    #[serde(rename = "inspect-5")] Inspect5,
+    #[serde(rename = "inspect-6")] Inspect6,
+    #[serde(rename = "inspect-7")] Inspect7,
+    #[serde(rename = "inspect-8")] Inspect8,
+    #[serde(rename = "inspect-9")] Inspect9,
+    #[serde(rename = "inspect-10")] Inspect10,
+    #[serde(rename = "inspect-11")] Inspect11,
+    #[serde(rename = "inspect-12")] Inspect12,
+    #[serde(rename = "inspect-13")] Inspect13,
+    #[serde(rename = "inspect-14")] Inspect14,
+    #[serde(rename = "inspect-15")] Inspect15,
+    #[serde(rename = "inspect-16")] Inspect16,
+    #[serde(rename = "inspect-17")] Inspect17,
+}
+#[derive(Clone, Copy, Debug, Serialize, PartialEq, Eq)]
+#[serde(tag = "stage", rename_all = "kebab-case")]
+pub(crate) enum ServiceIdentityFailure {
+    Profile,
+    Installation { reason: crate::installation::CheckReason },
+    FixedPayload { reason: ServiceIdentityAdmissionFailure },
+    Recheck { reason: ServiceIdentityAdmissionFailure },
+    NativeSigning {
+        result: ServiceIdentitySigningResult,
+        phase: Option<ServiceIdentitySigningPhase>,
+        #[serde(rename = "nativeFailed")] native_failed: bool,
+    },
+}
+#[derive(Clone, Copy, Default)]
+pub(crate) struct ServiceIdentityDiagnostic {
+    failure: Option<(ServiceIdentityFailure, Reason, std::time::Instant)>,
+}
+impl ServiceIdentityDiagnostic {
+    pub(crate) fn capture(&mut self, failure: ServiceIdentityFailure, reason: Reason, at: std::time::Instant) {
+        // Later work/cleanup cannot relabel the first captured refusal. The
+        // existing original first-F alone decides whether it may be exported.
+        self.failure.get_or_insert((failure, reason, at));
+    }
+    pub(crate) fn for_first(self, first: Option<(Reason, std::time::Instant)>) -> Option<ServiceIdentityFailure> {
+        let (failure, reason, at) = self.failure?;
+        (first == Some((reason, at))).then_some(failure)
+    }
+}
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct ServiceStatus {
@@ -176,6 +235,10 @@ pub(crate) struct ServiceStatus {
     pub(crate) prerequisite: Prerequisite, pub(crate) phase: ServicePhase,
     pub(crate) reason: Reason, pub(crate) operation: Option<ServiceOperation>,
     pub(crate) observation: Option<ServiceObservation>,
+    // In-process only: the renderer's strict status schema remains unchanged.
+    // Only the existing nonshipping observer failure projection serializes it.
+    #[serde(skip)]
+    pub(crate) identity_failure: Option<ServiceIdentityFailure>,
 }
 /// The route supplies action. No renderer-supplied method, service name, path,
 /// requirement, deadline, system URL or automatic-registration option exists.
@@ -582,6 +645,7 @@ mod tests {
         let mut status=ServiceStatus {schema_version:1,status_revision:1,setup_generation:1,
             availability:Availability::Available,prerequisite:Prerequisite::ApprovalRequired,
             phase:ServicePhase::Complete,reason:Reason::None,operation:Some(operation),
+            identity_failure:None,
             observation:Some(ServiceObservation {state:ServiceState::RequiresApproval,outcome:ServiceOutcome::Observed,
                 mutation_entered:false,mutation_returned:false,mutation_uncertain:false,native_settled:true})};
         // Setup can finish correctly while native approval is still required.

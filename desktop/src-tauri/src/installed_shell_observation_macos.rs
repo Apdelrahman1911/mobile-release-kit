@@ -1398,6 +1398,8 @@ fn bounded_failure_context(mut value: Value, timing: Option<mrk_macos_installed_
     // The optional finite read sample cannot consume the original frame's
     // room. Serialize the unchanged context first and retain it on overflow.
     let git_read_failure = value.as_object_mut().and_then(|fields| fields.remove("gitReadFailure"));
+    let identity_failure = value.get_mut("toolService").and_then(Value::as_object_mut)
+        .and_then(|fields| fields.remove("identityFailure"));
     let mut baseline = edit::bounded(&value, 8192).ok()?;
     if !baseline.is_ascii() || !fits(&baseline) { return None; }
     if let Some(sample) = git_read_failure {
@@ -1406,6 +1408,16 @@ fn bounded_failure_context(mut value: Value, timing: Option<mrk_macos_installed_
             baseline = bytes;
         } else if let Some(fields) = value.as_object_mut() {
             fields.remove("gitReadFailure");
+        }
+    }
+    // The optional identity substage must never hide the original returned
+    // Service status or failure frame when either unchanged bound is full.
+    if let Some(sample) = identity_failure {
+        value["toolService"]["identityFailure"] = sample;
+        if let Some(bytes) = edit::bounded(&value, 8192).ok().filter(|bytes| bytes.is_ascii() && fits(bytes)) {
+            baseline = bytes;
+        } else if let Some(fields) = value.get_mut("toolService").and_then(Value::as_object_mut) {
+            fields.remove("identityFailure");
         }
     }
     // Serialize baseline FIRST. Optional DATA can cost at most165 context
@@ -4728,8 +4740,20 @@ fn tool_service_failure_data_checks(sample: tool_setup::ServiceFailureSample, st
         || !frame_matches(wait, "ToolService(RequestWait)", "observer-deadline", None) { return false; }
     let expired = wait.at_expiry(OpenProgress { state: "unknown", requested: false, dispatched: false, entered: false,
         returned: false, joined: false, retired: false, expired: true });
-    expired.tool_service.is_none() && failure_context(&expired).get("toolService").is_none()
-        && frame_matches(expired, "ToolService(RequestWait)", reason, None)
+    if expired.tool_service.is_some() || failure_context(&expired).get("toolService").is_some()
+        || !frame_matches(expired, "ToolService(RequestWait)", reason, None) { return false; }
+    let mut service = sample.value();
+    let Some(identity) = service.as_object_mut().and_then(|fields| fields.remove("identityFailure")) else { return true; };
+    let mut near = json!({"padding":"","toolService":service});
+    let Ok(empty) = edit::bounded(&near, 8192) else { return false; };
+    near["padding"] = json!("x".repeat(8192 - empty.len()));
+    let Ok(baseline) = edit::bounded(&near, 8192) else { return false; };
+    near["toolService"]["identityFailure"] = identity.clone();
+    if bounded_failure_context(near, None, 256) != Some(baseline) { return false; }
+    let mut small = json!({"toolService":service});
+    let Ok(baseline) = edit::bounded(&small, 8192) else { return false; };
+    small["toolService"]["identityFailure"] = identity;
+    bounded_failure_context(small, None, 8448 - baseline.len()) == Some(baseline)
 }
 fn bootstrap_diagnostic_data_checks() -> bool {
     // Inert DATA only: no Record/native fixture, thread, endpoint or receipt.

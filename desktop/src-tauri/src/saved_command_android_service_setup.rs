@@ -16,6 +16,7 @@ pub(super) struct State {
 struct Completed {
     data:wire::ServiceOperation,phase:wire::ServicePhase,reason:wire::Reason,
     prerequisite:wire::Prerequisite,observation:Option<wire::ServiceObservation>,
+    identity_failure:Option<wire::ServiceIdentityFailure>,
 }
 pub(crate) struct Snapshot {
     owner:Weak<Inner>,document:Weak<()>,at:Instant,request:wire::ServiceRequest,
@@ -37,7 +38,8 @@ impl Checked {
     pub(crate) fn context(&self)->&android_wire::Prepare{&self.snapshot.request.context}
     pub(crate) fn picker_originals(&self)->&[Option<Arc<crate::asset_session::OriginalWork>>;3]{&self.snapshot.pickers}
 }
-struct WorkerReturn {known:bool,first:Option<(wire::Reason,Instant)>,observation:Option<wire::ServiceObservation>,retained:Option<usize>}
+struct WorkerReturn {known:bool,first:Option<(wire::Reason,Instant)>,observation:Option<wire::ServiceObservation>,
+    identity_diagnostic:wire::ServiceIdentityDiagnostic,retained:Option<usize>}
 struct SetupOriginal {
     owner:Weak<Inner>,document:Weak<()>,data:wire::ServiceOperation,
     registration:u32,project:RegisteredRoot,pickers:[Option<Arc<crate::asset_session::OriginalWork>>;3],
@@ -712,7 +714,8 @@ pub(super) struct Preparation {
 }
 #[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
 #[derive(Clone,Copy)]
-struct PreparationReturn {known:bool,checked:bool,observation:Option<wire::ServiceObservation>,retained:Option<usize>,maintenance:Option<MaintenanceRun>}
+struct PreparationReturn {known:bool,checked:bool,observation:Option<wire::ServiceObservation>,
+    identity_diagnostic:wire::ServiceIdentityDiagnostic,retained:Option<usize>,maintenance:Option<MaintenanceRun>}
 #[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
 #[derive(Clone,Copy,Default,PartialEq,Eq,Debug)]
 pub(super) enum MaintenanceBranch { #[default] Unselected,ObservedAbsent,Unregistered }
@@ -904,10 +907,12 @@ impl Preparation {
             std::thread::park_timeout(self.pause());
         };
         if checked && self.gate.control.failure().is_none() && main.0
-            && (self.retirement.removal.is_none() || self.gate.publishable())
-            && identity.recheck(self.gate.control.work,&stop).is_err(){
-                self.gate.control.propagated_refusal(wire::Reason::SigningUnavailable,Instant::now());
+            && (self.retirement.removal.is_none() || self.gate.publishable()){
+            if let Err(failure)=identity.recheck(self.gate.control.work,&stop){
+                let at=Instant::now();self.gate.control.propagated_refusal(wire::Reason::SigningUnavailable,at);
+                identity.capture_recheck_refusal(failure,at);
             }
+        }
         let files_known=files_known.unwrap_or_else(||identity.settle());
         let observation=main.1.and_then(Self::observation);
         // Complete project-owned retained preparation, not just identity FDs:
@@ -918,7 +923,7 @@ impl Preparation {
         if retained.is_some_and(|bytes|bytes>Self::SETTLED_BYTES){self.gate.control.stop_at(wire::Reason::ResultLimit,Instant::now());}
         let known=files_known && main.0 && retained.is_some() && !self.gate.control.unknown.load(Ordering::SeqCst)
             && Instant::now()<self.gate.control.endpoint();
-        let returned=PreparationReturn{known,checked,observation,retained,maintenance:None};
+        let returned=PreparationReturn{known,checked,observation,identity_diagnostic:identity.diagnostic(),retained,maintenance:None};
         drop(identity);
         let mut output=match self.returned.try_lock(){Ok(output)=>output,
             Err(_)=>{self.gate.control.poisoned();return false;}};
@@ -1101,7 +1106,7 @@ impl Preparation {
             callback_retired,peer_ended,retained};
         // A valid private native result is still not overall Prepared. Both
         // original worker/coordinator handles and the document cut remain owed.
-        let returned=PreparationReturn{known,checked,observation:None,retained,maintenance:Some(result)};
+        let returned=PreparationReturn{known,checked,observation:None,identity_diagnostic:Default::default(),retained,maintenance:Some(result)};
         match self.returned.try_lock(){Ok(mut output) if output.is_none()=>*output=Some(returned),
             _=>{self.gate.control.poisoned();return MaintenanceRun{known:false,..result};}}
         result
@@ -1121,7 +1126,8 @@ impl Preparation {
     }
     fn worker_return(&self)->Option<WorkerReturn>{
         let returned=(*self.returned.try_lock().ok()?)?;
-        Some(WorkerReturn{known:returned.known,first:self.gate.control.failure(),observation:returned.observation,retained:returned.retained})
+        Some(WorkerReturn{known:returned.known,first:self.gate.control.failure(),observation:returned.observation,
+            identity_diagnostic:returned.identity_diagnostic,retained:returned.retained})
     }
     fn finalization_ready(&self)->bool{
         if !self.known_return(){return false;}
@@ -1407,18 +1413,18 @@ impl State {
     }
     fn status(&self,revision:u32,availability:Availability)->Result<wire::ServiceStatus,BridgeError>{
         let prerequisite=self.prerequisite();
-        let (phase,reason,operation,observation)=if let Some(original)=&self.active{
+        let (phase,reason,operation,observation,identity_failure)=if let Some(original)=&self.active{
             let unknown=original.control.unknown.load(Ordering::SeqCst);let first=original.control.failure();
             let phase=if unknown{wire::ServicePhase::Unknown}else if first.is_some(){wire::ServicePhase::Stopping}
                 else if original.settling.load(Ordering::SeqCst){wire::ServicePhase::Settling}else{match original.data.action{
                     wire::ServiceAction::Check=>wire::ServicePhase::Checking,wire::ServiceAction::RequestRegistration=>wire::ServicePhase::Requesting,
                     wire::ServiceAction::OpenApprovalSettings=>wire::ServicePhase::OpeningSettings}};
-            (phase,if unknown{wire::Reason::CleanupUnknown}else{first.map_or(wire::Reason::None,|(reason,_)|reason)},Some(original.data.clone()),None)
-        }else if let Some(last)=&self.last{(last.phase,last.reason,Some(last.data.clone()),last.observation)}
-        else{(wire::ServicePhase::Idle,if prerequisite==wire::Prerequisite::SigningUnavailable{wire::Reason::SigningUnavailable}else{wire::Reason::ServiceUnavailable},None,None)};
+            (phase,if unknown{wire::Reason::CleanupUnknown}else{first.map_or(wire::Reason::None,|(reason,_)|reason)},Some(original.data.clone()),None,None)
+        }else if let Some(last)=&self.last{(last.phase,last.reason,Some(last.data.clone()),last.observation,last.identity_failure)}
+        else{(wire::ServicePhase::Idle,if prerequisite==wire::Prerequisite::SigningUnavailable{wire::Reason::SigningUnavailable}else{wire::Reason::ServiceUnavailable},None,None,None)};
         wire::ServiceStatus{schema_version:1,status_revision:revision,setup_generation:self.generation,
             availability:if phase==wire::ServicePhase::Unknown{android_wire::Availability::CleanupUnknown}else{availability.android()},
-            prerequisite,phase,reason,operation,observation}.bounded()
+            prerequisite,phase,reason,operation,observation,identity_failure}.bounded()
     }
     pub(super) fn reconcile(&mut self,inner:&Inner)->bool{
         let Some(original)=self.active.as_ref().cloned()else{return false;};
@@ -1487,7 +1493,8 @@ impl State {
         let reason=first.map_or(wire::Reason::None,|(reason,_)|reason);
         let phase=match reason{wire::Reason::None=>wire::ServicePhase::Complete,wire::Reason::Cancelled=>wire::ServicePhase::Cancelled,_=>wire::ServicePhase::Refused};
         self.last=Some(Completed{data:original.data.clone(),phase,reason,
-            prerequisite:setup_prerequisite(worker.observation,first.map(|(reason,_)|reason)),observation:worker.observation});
+            prerequisite:setup_prerequisite(worker.observation,first.map(|(reason,_)|reason)),observation:worker.observation,
+            identity_failure:worker.identity_diagnostic.for_first(first)});
         original.accepted.store(true,Ordering::SeqCst);book.original=None;book.cohort=None;self.active=None;
         drop(book);inner.android_registration_control.wake.notify_all();true
     }
@@ -1524,7 +1531,8 @@ fn setup_worker(original:Arc<SetupOriginal>,mut enter:oneshot::Receiver<()>)->Wo
             Err(oneshot::error::TryRecvError::Closed)=>{original.control.stop_at(wire::Reason::ServiceUnavailable,Instant::now());break;}}
     }
     original.preparation.run_once();original.settling.store(true,Ordering::SeqCst);original.control.changed();
-    original.preparation.worker_return().unwrap_or(WorkerReturn{known:false,first:original.control.failure(),observation:None,retained:None})
+    original.preparation.worker_return().unwrap_or(WorkerReturn{known:false,first:original.control.failure(),observation:None,
+        identity_diagnostic:Default::default(),retained:None})
 }
 #[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
 async fn coordinate(original:Arc<SetupOriginal>,mut release:oneshot::Receiver<()>,worker_enter:oneshot::Sender<()>)->bool{

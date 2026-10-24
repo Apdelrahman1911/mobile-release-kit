@@ -69,6 +69,7 @@ pub(crate) struct AndroidServiceIdentitySlots {
     installation: InstallationSlots, original: Book,
     signing: native::android_service_management::IdentityBook,
     gate: crate::saved_command_owner::AndroidRegistrationWorkGate,
+    diagnostic: crate::android_registration_app_protocol::ServiceIdentityDiagnostic,
     entered: bool, checked: bool, closed: bool,
 }
 #[cfg(not(feature = "macos-android-registration-helper"))]
@@ -76,7 +77,8 @@ impl AndroidServiceIdentitySlots {
     pub(crate) fn new(gate: crate::saved_command_owner::AndroidRegistrationWorkGate) -> Self {
         let mut original=Book::new();original.registration_gate=Some(gate.clone());
         Self { installation:InstallationSlots::new_registered(gate.clone()),original,
-            signing:native::android_service_management::IdentityBook::new(),gate,entered:false,checked:false,closed:false }
+            signing:native::android_service_management::IdentityBook::new(),gate,diagnostic:Default::default(),
+            entered:false,checked:false,closed:false }
     }
     pub(crate) fn working_reservation_bytes()->Option<usize> {
         // InstallationSlots' bounded128MiB complete inspector reservation is the
@@ -88,18 +90,65 @@ impl AndroidServiceIdentitySlots {
             .checked_add(native::android_service_management::IdentityBook::project_owned_upper_bound()?)
     }
     fn attempt<T>(&mut self,call:impl FnOnce(&mut Book)->Result<T>)->Result<T> {
+        self.attempt_admission(false,call)
+    }
+    fn attempt_admission<T>(&mut self,recheck:bool,call:impl FnOnce(&mut Book)->Result<T>)->Result<T> {
         let result=call(&mut self.original);let at=Instant::now();
-        if let Some((failure,first))=self.original.first_failure(){Self::note_failure(&self.gate,failure,first);}
+        if let Some((failure,first))=self.original.first_failure(){
+            let reason=Self::note_failure(&self.gate,failure,first);
+            // Book also imports containing-owner failures. Only these four
+            // categories cannot be a normalized external gate first-F.
+            if matches!(failure,AdmissionFailure::Native|AdmissionFailure::Ownership|AdmissionFailure::Inventory|AdmissionFailure::Identity){
+                self.capture_admission(recheck,failure,reason,first);
+            }
+        }
         if !self.original.removal_clock_vetoed(){
-            if let Err(failure)=&result{Self::note_failure(&self.gate,*failure,at);}
+            if let Err(failure)=&result{
+                let reason=Self::note_failure(&self.gate,*failure,at);
+                self.capture_admission(recheck,*failure,reason,at);
+            }
         }
         result
     }
-    fn note_failure(gate:&crate::saved_command_owner::AndroidRegistrationWorkGate,failure:AdmissionFailure,at:Instant){
+    fn note_failure(gate:&crate::saved_command_owner::AndroidRegistrationWorkGate,failure:AdmissionFailure,at:Instant)
+        ->crate::android_registration_app_protocol::Reason{
         use crate::android_registration_app_protocol::Reason;
-        gate.note(match failure{AdmissionFailure::Stopped=>Reason::Cancelled,AdmissionFailure::Deadline=>Reason::TimedOut,
+        let reason=match failure{AdmissionFailure::Stopped=>Reason::Cancelled,AdmissionFailure::Deadline=>Reason::TimedOut,
             AdmissionFailure::Bounds=>Reason::InputLimit,AdmissionFailure::Unknown|AdmissionFailure::AlreadyUsed=>Reason::CleanupUnknown,
-            _=>Reason::SigningUnavailable},at);
+            _=>Reason::SigningUnavailable};
+        gate.note(reason,at);reason
+    }
+    fn capture_admission(&mut self,recheck:bool,failure:AdmissionFailure,reason:crate::android_registration_app_protocol::Reason,at:Instant){
+        use crate::android_registration_app_protocol::{ServiceIdentityAdmissionFailure as A,ServiceIdentityFailure as F};
+        let admission=match failure{AdmissionFailure::Stopped=>A::Stopped,AdmissionFailure::Deadline=>A::Deadline,
+            AdmissionFailure::Bounds=>A::Bounds,AdmissionFailure::Native=>A::Native,AdmissionFailure::Ownership=>A::Ownership,
+            AdmissionFailure::Inventory=>A::Inventory,AdmissionFailure::Identity=>A::Identity,
+            AdmissionFailure::AlreadyUsed=>A::AlreadyUsed,AdmissionFailure::Unknown=>A::Unknown};
+        self.diagnostic.capture(if recheck{F::Recheck{reason:admission}}else{F::FixedPayload{reason:admission}},reason,at);
+    }
+    fn signing_failure(result:native::android_service_management::IdentityResult,
+        custody:native::android_service_management::IdentityCustody)->crate::android_registration_app_protocol::ServiceIdentityFailure{
+        use native::android_service_management::{IdentityResult as R,IdentityPhase as P};
+        use crate::android_registration_app_protocol::{ServiceIdentityFailure as F,
+            ServiceIdentitySigningResult as Result,ServiceIdentitySigningPhase as Phase};
+        let result=match result{R::Verified=>Result::Verified,R::Unavailable=>Result::Unavailable,
+            R::Refused=>Result::Refused,R::Unknown=>Result::Unknown};
+        let phase=match custody.phase{
+            Some(P::AllocateCell)=>Some(Phase::AllocateCell),
+            Some(P::Inspect(n))=>match n{
+                1=>Some(Phase::Inspect1),2=>Some(Phase::Inspect2),3=>Some(Phase::Inspect3),4=>Some(Phase::Inspect4),
+                5=>Some(Phase::Inspect5),6=>Some(Phase::Inspect6),7=>Some(Phase::Inspect7),8=>Some(Phase::Inspect8),
+                9=>Some(Phase::Inspect9),10=>Some(Phase::Inspect10),11=>Some(Phase::Inspect11),12=>Some(Phase::Inspect12),
+                13=>Some(Phase::Inspect13),14=>Some(Phase::Inspect14),15=>Some(Phase::Inspect15),16=>Some(Phase::Inspect16),
+                17=>Some(Phase::Inspect17),_=>None,
+            },
+            _=>None,
+        };
+        F::NativeSigning{result,phase,native_failed:custody.failed}
+    }
+    pub(crate) fn diagnostic(&self)->crate::android_registration_app_protocol::ServiceIdentityDiagnostic{self.diagnostic}
+    pub(crate) fn capture_recheck_refusal(&mut self,failure:AdmissionFailure,at:Instant){
+        self.capture_admission(true,failure,crate::android_registration_app_protocol::Reason::SigningUnavailable,at);
     }
     fn mode(book:&Book,index:usize,mode:u16,end:Instant,stop:&watch::Receiver<bool>)->Result<()> {
         book.point(end,stop)?;
@@ -171,17 +220,20 @@ impl AndroidServiceIdentitySlots {
                 return Err(AdmissionFailure::Inventory);
             }
         }
-        self.recheck(end,stop)
+        self.recheck_admission(false,end,stop)
     }
     pub(crate) fn check_once(&mut self,end:Instant,stop:&watch::Receiver<bool>)->Result<()> {
         use native::android_service_management as management;
         if self.entered || self.closed{return Err(AdmissionFailure::AlreadyUsed);}
         self.entered=true;
         if !management::signing_profile_configured(){
-            self.gate.note(crate::android_registration_app_protocol::Reason::SigningUnavailable,Instant::now());
+            let at=Instant::now();let reason=crate::android_registration_app_protocol::Reason::SigningUnavailable;
+            self.gate.note(reason,at);
+            self.diagnostic.capture(crate::android_registration_app_protocol::ServiceIdentityFailure::Profile,reason,at);
             return Err(AdmissionFailure::Inventory);
         }
         let gate=self.gate.clone();
+        let diagnostic=&mut self.diagnostic;
         let result=self.installation.run(end,stop,&mut |why,at|{
             use crate::installation::CheckReason as Problem;
             let reason=match why {Problem::CleanupUnknown=>crate::android_registration_app_protocol::Reason::CleanupUnknown,
@@ -189,6 +241,11 @@ impl AndroidServiceIdentitySlots {
                 Problem::Cancelled=>crate::android_registration_app_protocol::Reason::Cancelled,
                 _=>crate::android_registration_app_protocol::Reason::SigningUnavailable};
             gate.note(reason,at);
+            // Cancel/deadline/Unknown callbacks can be a normalized import
+            // of an unrelated containing-owner first-F, not this inspection.
+            if reason==crate::android_registration_app_protocol::Reason::SigningUnavailable{
+                diagnostic.capture(crate::android_registration_app_protocol::ServiceIdentityFailure::Installation{reason:why},reason,at);
+            }
         },&mut |first|if gate.source_has_removal_cutoff(){false}else{gate.source_cleanup_expired(first)},&mut |_,_|{});
         // The removal-bound Book already samples this SAME gate at each
         // cleanup boundary. A duplicate bool callback would erase its typed
@@ -196,18 +253,43 @@ impl AndroidServiceIdentitySlots {
         if result.is_err(){return Err(if self.installation.settled(){AdmissionFailure::Inventory}else{AdmissionFailure::Unknown});}
         let result=self.fixed_payload(end,stop);let at=Instant::now();
         if let Err(failure)=result{
-            if !self.original.removal_clock_vetoed(){Self::note_failure(&self.gate,failure,at);}
+            if !self.original.removal_clock_vetoed(){
+                let reason=Self::note_failure(&self.gate,failure,at);
+                self.capture_admission(false,failure,reason,at);
+            }
             return Err(failure);
         }
         let parent_veto=Cell::new(false);
-        let result=self.signing.check_once(&mut |point|Self::signing_gate(&gate,point,&parent_veto));
+        let mut native_failure_at=None;
+        let result=self.signing.check_once(&mut |point|{
+            // Only an already returned native refusal/allocation may supply
+            // native first-F. A Before/gate STOP is not a native-call witness.
+            if let management::IdentityCheckpoint::Returned{phase,custody,..}=point{
+                if custody.failed || phase==management::IdentityPhase::AllocateCell && custody.cell==management::CellCustody::Absent{
+                    if let Some(at)=custody.first_failure{native_failure_at.get_or_insert(at);}
+                }
+            }
+            Self::signing_gate(&gate,point,&parent_veto)
+        });
+        let signing_failure=Self::signing_failure(result,self.signing.custody());
+        if result!=management::IdentityResult::Verified{
+            if let Some(at)=native_failure_at{
+                self.diagnostic.capture(signing_failure,crate::android_registration_app_protocol::Reason::SigningUnavailable,at);
+            }
+        }
         match result {
             management::IdentityResult::Verified=>{self.recheck(end,stop)?;self.checked=true;Ok(())},
             management::IdentityResult::Unknown=>{
-                if !parent_veto.get(){gate.source_note(AdmissionFailure::Unknown,Instant::now());}
+                if !parent_veto.get(){
+                    let at=Instant::now();gate.source_note(AdmissionFailure::Unknown,at);
+                    self.diagnostic.capture(signing_failure,crate::android_registration_app_protocol::Reason::CleanupUnknown,at);
+                }
                 Err(AdmissionFailure::Unknown)
             },
-            _=>{gate.note(crate::android_registration_app_protocol::Reason::SigningUnavailable,Instant::now());Err(AdmissionFailure::Inventory)},
+            _=>{
+                let at=Instant::now();let reason=crate::android_registration_app_protocol::Reason::SigningUnavailable;
+                gate.note(reason,at);self.diagnostic.capture(signing_failure,reason,at);Err(AdmissionFailure::Inventory)
+            },
         }
     }
     fn signing_gate(gate:&crate::saved_command_owner::AndroidRegistrationWorkGate,
@@ -234,9 +316,12 @@ impl AndroidServiceIdentitySlots {
         Decision::Unknown
     }
     pub(crate) fn recheck(&mut self,end:Instant,stop:&watch::Receiver<bool>)->Result<()> {
+        self.recheck_admission(true,end,stop)
+    }
+    fn recheck_admission(&mut self,recheck:bool,end:Instant,stop:&watch::Receiver<bool>)->Result<()> {
         for index in 0..self.original.records.len() {
             if self.original.records[index].state==State::Owned {
-                self.attempt(|book|book.check_name(index,end,stop))?;
+                self.attempt_admission(recheck,|book|book.check_name(index,end,stop))?;
             }
         }
         if self.gate.source_has_removal_cutoff(){self.original.point(end,stop)}else{self.gate.source_work()}
