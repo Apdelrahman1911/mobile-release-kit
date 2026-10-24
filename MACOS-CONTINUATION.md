@@ -2,6 +2,16 @@
 
 ## Latest Mac continuation — 2026-10-24
 
+**Active request:** follow both candidate jobs until they succeed; investigate,
+fix, locally test and rerun failures. Current run:
+[40123897979](https://github.com/Apdelrahman1911/mobile-release-kit/actions/runs/40123897979),
+source `f7e2ca8885aa050ae6a22cfdd08300bd1e3aa956`. Consume that existing run;
+do not launch a duplicate or treat it as passed while pending. The six-step
+local preflight now includes successful actual Open completion and cleanup.
+The normal-build diagnostic fixture's 26 tests and the installation-metadata
+boundary fixture pass. See the report's active-verification section; later
+results there supersede the historical no-replacement-run statements below.
+
 Continue from `codex/macos-git-read-continuation` in the isolated local clone
 `/Users/abdelrahman/Projects/mobile-release-kit-macos-20261024`. The earlier
 image-status/GitRead cancellation fix is

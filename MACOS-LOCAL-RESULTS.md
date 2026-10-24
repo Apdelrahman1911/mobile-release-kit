@@ -1,5 +1,28 @@
 # Mac continuation results — 2026-10-24
 
+## Active verification — run 40123897979
+
+The owner explicitly requested continuing through workflow failures until both
+jobs succeed. [Run 40123897979](https://github.com/Apdelrahman1911/mobile-release-kit/actions/runs/40123897979)
+was started on `f7e2ca8885aa050ae6a22cfdd08300bd1e3aa956`, tree
+`986b46f7febbb0f76f84a886bec97ca346527d07`. Follow this existing run; do not start
+a duplicate. Its live/final metadata is in `run-40123897979-latest.json` and
+`run-40123897979-final.json` in the private sibling evidence directory.
+
+Before starting, the local fixture was extended to run the actual native Open
+path: real panel identity, both original rechecks, one AXPress, exact temporary
+folder returned by the real completion, and successful original cleanup. This
+passed with 216 AX calls, flags 15, completion flags 15, selection Match and no
+AX error. The six-step local preflight including transport and both UI checks
+passed (`preflight-complete-open`). It does not qualify the installed service.
+
+The diagnostic fixture module now passes all 26 tests after restoring its
+missing source DATA imports and current closed contracts. The previously
+unresolved installation-metadata mutation used an old 2,048-file threshold;
+the current bound is 16,384. Testing the current aggregate boundary now passes
+for both targets. Production gates were unchanged. The broader legacy Python
+suite has not been declared green; the historical counts below are retained.
+
 ## Source and scope
 
 - Checkpoint: `af9a4f76be5c4ced9186fb9e2e80e302e3078d7d`.
