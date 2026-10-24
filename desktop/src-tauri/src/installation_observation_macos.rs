@@ -46,6 +46,20 @@ fn producer_route_data(state: bool, descriptor: bool, signature: bool, supplied:
     }
 }
 
+// Only the indexed payload walk supplies its inventory-relative parent. Store
+// DATA permits internal spaces/percent under runtime/store/; validating a bare
+// leaf with the cross-platform grammar loses that existing inventory scope.
+// Fixed controls keep their original grammar and sole fixed app-name exception.
+fn roster_name_data(inventory_prefix: Option<&str>, name: &str) -> bool {
+    if !name.is_ascii() || name.contains('/') { return false; }
+    match inventory_prefix {
+        None => name == paths::APP_NAME || runtime::safe_payload_path(name),
+        Some(prefix) => prefix.len().checked_add(name.len()).and_then(|n| n.checked_add(1))
+            .is_some_and(|n| n <= 512)
+            && runtime::safe_macos_install_path(&format!("{prefix}/{name}")),
+    }
+}
+
 // This cell belongs to the SAME original blocking inspector as Book. Public
 // signed controls are retained outside hashed payload; no installation record
 // selects its own expectations and no new thread/clock/root helper is created.
@@ -657,7 +671,7 @@ impl InstallationSlots {
             Ok(Some(selected))
         }
     }
-    fn roster(&mut self, parent: usize, limit: usize, end: Instant, stop: &watch::Receiver<bool>,
+    fn roster(&mut self, parent: usize, limit: usize, inventory_prefix: Option<&str>, end: Instant, stop: &watch::Receiver<bool>,
         publish: &mut dyn FnMut(Problem, Instant)) -> InspectResult<BTreeMap<String, (u64, u8)>> {
         let mut local = BTreeMap::new(); let mut buffer = [0u8; 65536];
         loop {
@@ -682,8 +696,7 @@ impl InstallationSlots {
                 offset = next;
                 if name == "." || name == ".." { continue; }
                 if !matches!(kind, nix::libc::DT_DIR | nix::libc::DT_REG) || inode == 0
-                    || !name.is_ascii() || name.contains('/')
-                    || !(name == paths::APP_NAME || runtime::safe_payload_path(name)) {
+                    || !roster_name_data(inventory_prefix, name) {
                     return self.reject(Problem::PayloadMismatch, Instant::now(), publish);
                 }
                 if local.len() >= limit || local.insert(name.to_owned(), (inode, kind)).is_some() {
@@ -696,7 +709,7 @@ impl InstallationSlots {
     }
     fn match_fixed_roster(&mut self, parent: usize, names: &[&str], optional_stage: Option<&str>, end: Instant,
         stop: &watch::Receiver<bool>, publish: &mut dyn FnMut(Problem, Instant)) -> InspectResult<()> {
-        let roster = self.roster(parent, names.len() + usize::from(optional_stage.is_some()), end, stop, publish)?;
+        let roster = self.roster(parent, names.len() + usize::from(optional_stage.is_some()), None, end, stop, publish)?;
         let expected = names.iter().all(|name| roster.contains_key(*name))
             && roster.keys().all(|name| names.contains(&name.as_str()) || optional_stage == Some(name.as_str()));
         if !expected { return self.reject(Problem::PayloadMismatch, Instant::now(), publish); }
@@ -900,7 +913,7 @@ impl InstallationSlots {
         let limit=names.len().checked_add(if removal_archives { REMOVAL_VISIBLE_ARCHIVES } else { 0 })
             .ok_or(Problem::Bounds)?;
         if removal_archives && limit>350 { return self.reject(Problem::Bounds,Instant::now(),publish); }
-        let actual = self.roster(install,limit,end,stop,publish)?;
+        let actual = self.roster(install,limit,None,end,stop,publish)?;
         if !names.iter().all(|name|actual.contains_key(name)) { return self.reject(Problem::PayloadMismatch,Instant::now(),publish); }
         let mut extra=0usize;
         for (name,(inode,kind)) in &actual {
@@ -918,7 +931,7 @@ impl InstallationSlots {
             if kind != nix::libc::DT_DIR { return self.reject(Problem::Protection,Instant::now(),publish); }
             self.private_stage(install,&stage,inode,end,stop,publish)?;
         }
-        let version_roster = self.roster(versions,version_names.len(),end,stop,publish)?;
+        let version_roster = self.roster(versions,version_names.len(),None,end,stop,publish)?;
         if version_roster.keys().cloned().collect::<BTreeSet<_>>() != version_names
             || version_roster.values().any(|(_,kind)| *kind != nix::libc::DT_DIR) {
             return self.reject(Problem::PayloadMismatch,Instant::now(),publish);
@@ -936,7 +949,7 @@ impl InstallationSlots {
         if expected > data::FILE_LIMIT * 2 { return self.reject(Problem::Bounds, Instant::now(), publish); }
         // Bounds follow the inventory's immediate roster, not a per-depth4096
         // allocation. Extra names cannot accumulate at every retained ancestor.
-        let roster = self.roster(parent, expected, end, stop, publish)?;
+        let roster = self.roster(parent, expected, Some(prefix), end, stop, publish)?;
         if roster.len() != expected { return self.reject(Problem::PayloadMismatch, Instant::now(), publish); }
         for (name, (inode, kind)) in roster {
             self.check(end, stop, publish)?;
@@ -1243,8 +1256,56 @@ fn control_bound(descriptor: &Vec<u8>, raw: &Vec<u8>, inventory: &Inventory, ind
 }
 
 #[cfg(test)]
+fn assert_installation_roster_path_contract() {
+    // Pure path-policy DATA. Acceptance here is not file membership, protected
+    // originals, hashes, native identity, installation or Service readiness.
+    assert!(roster_name_data(None, paths::APP_NAME));
+    assert!(roster_name_data(None, paths::PAYLOAD_NAME));
+    assert!(!roster_name_data(Some("app/Contents"), paths::APP_NAME));
+    let plugin = "runtime/store/bundle/ruby/3.3.0/gems/fastlane-2.235.0/fastlane/lib/fastlane/plugins/template/lib/fastlane/plugin/%plugin_name%/helper/%plugin_name%_helper.rb.erb";
+    let gem = "runtime/store/bundle/ruby/3.3.0/gems/fastlane-2.235.0/fastlane/lib/fastlane/plugins/template/%gem_name%.gemspec.erb";
+    let notice = "runtime/store/bundle/ruby/3.3.0/gems/terminal-notifier-2.0.0/vendor/terminal-notifier/Terminal Notifier/en.lproj/Credits.rtf";
+    assert_eq!(plugin.split('/').count(), 18);
+    for path in [plugin, gem, notice, paths::PAYLOAD_INVENTORY_PATH, "runtime/python/bin/python3"] {
+        assert!(runtime::safe_macos_install_path(path));
+        let mut parts = path.split('/');
+        let mut prefix = parts.next().unwrap().to_owned();
+        for name in parts {
+            assert!(roster_name_data(Some(&prefix), name), "{prefix}/{name}");
+            prefix.push('/'); prefix.push_str(name);
+        }
+        assert_eq!(prefix, path);
+    }
+    for name in ["Terminal Notifier", "%gem_name%.gemspec.erb", "%plugin_name%", "%plugin_name%_helper.rb.erb"] {
+        assert!(!runtime::safe_payload_path(name)); // The previous bare-name rejection.
+        assert!(!roster_name_data(None, name));
+        for prefix in ["runtime/store", "runtime/store/bundle/gems"] {
+            assert!(roster_name_data(Some(prefix), name));
+        }
+        for prefix in ["app/Contents", "runtime", "runtime/python", "runtime/storeish",
+            "Runtime/store", "runtime/Store", "app/Contents/runtime/store"] {
+            assert!(!roster_name_data(Some(prefix), name));
+        }
+    }
+    for name in ["", ".", "..", "a/b", " leading", "trailing ", "dot.", "a\\b", "a:b",
+        "a\tb", "a\0b", "NUL.txt", "COM1", "LPT9.log", "é"] {
+        for prefix in [None, Some("app/Contents"), Some("runtime/store")] {
+            assert!(!roster_name_data(prefix, name));
+        }
+    }
+    let (parent, leaf) = plugin.rsplit_once('/').unwrap();
+    assert!(!roster_name_data(Some(&format!("{parent}/extra")), leaf));
+    let long_parent = format!("runtime/store/{}", "a".repeat(255));
+    assert_eq!(long_parent.len() + 1 + 242, 512);
+    assert!(roster_name_data(Some(&long_parent), &"a".repeat(242)));
+    assert!(!roster_name_data(Some(&long_parent), &"a".repeat(243)));
+    assert!(!roster_name_data(Some(&"a".repeat(513)), "b"));
+}
+
+#[cfg(test)]
 #[test]
 fn installation_roster_uses_fixed_app_name_and_global_inventory_bound() {
+    assert_installation_roster_path_contract();
     // The extra names are admitted only in the private removal source branch,
     // never an ordinary/legacy wildcard or an attempt to read root-only files.
     let archive=format!(".remove-{}","1".repeat(32));
