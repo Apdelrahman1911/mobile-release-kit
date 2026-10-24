@@ -284,7 +284,7 @@ jobs:
           ulimit -c 0
           driver="$GITHUB_WORKSPACE/.candidate-consumer-helper/desktop/tools/macos_identity_current_runtime.py"
           # Original Index1 -> Branch1 -> Fetch4 -> Push3 -> create-only Push5 -> Upstream1.
-          # Same signed5212 Git image, fresh Installer/readback/unforced detach first.
+          # Same nominated signed Git image, fresh Installer/readback/unforced detach first.
           # Existing600s suite/120s case,135s app and45/55s Git clocks unchanged;
           # the unchanged25min outer cap does not promise worst-case completion.
           # First nonzero/unknown/78 stops; no retry, live remote write or nomination.

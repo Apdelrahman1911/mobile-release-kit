@@ -29,6 +29,11 @@ from test_macos_candidate_carrier import fixture, archive
 
 class CandidateBootstrapTests(unittest.TestCase):
     def test_retained_workflow_adds_only_closed_git_operation_and_preserves_original_handoff_and_clocks(self):
+        from desktop.tools import macos_identity_current_runtime as runtime
+        self.assertEqual(runtime.RETAINED_GIT_TUPLE, C.candidate.RETAINED_GIT_TUPLE)
+        selected = json.loads((ROOT / C.candidate.RETAINED_GIT_SELECTION_PATH).read_bytes())
+        self.assertEqual(tuple(selected['origin'][key] for key in ('source', 'runId', 'runAttempt')),
+                         runtime.RETAINED_GIT_TUPLE)
         workflow = (ROOT / C.WORKFLOW).read_text()
         self.assertIn('install-retained-observer, install-retained-git-observer]', workflow)
         self.assertNotIn('\n  install-retained-git-observer:', workflow)

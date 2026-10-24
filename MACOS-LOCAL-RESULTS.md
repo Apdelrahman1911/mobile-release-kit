@@ -2,6 +2,36 @@
 
 ## Latest continuation — 2026-10-25
 
+Retained-Git run [40140647775](https://github.com/Apdelrahman1911/mobile-release-kit/actions/runs/40140647775)
+on helper `14c9c90a76d006f8f06460a138b5179bb63629c6` passed fresh installation,
+readback, code signatures and unforced ejection after the 60-second grace. Step17
+then stopped at `entry-refused`, before any Git case: the native test driver still
+pinned the old5212 source tuple. That independent pin now matches the validated
+ed91 nomination. The local preflight now checks agreement between both source
+pins, the nominated origin and workflow, plus finite source sizes. The full
+current-runtime DATA module passes; no native Git success is implied yet.
+
+Tool26 correction prepared: the existing explicit RequestRegistration now admits
+its single register selector after a pre-status of NotFound as well as
+NotRegistered, following the same independent installed-file/signature and
+consent checks. Observe remains read-only; maintenance absence, denied approval,
+unknown native return and actual readiness checks remain unchanged. A read-only
+ad-hoc local fixture observed NotFound with and without the expected plist; that
+does not establish the signed hosted cause or authorize installation. It shows
+that this status alone is not a file-existence proof. The app previously stopped
+before asking registration. Only a real register result plus fresh Enabled state
+can now pass; native errors/approval are not overridden. No local service was
+registered or removed.
+
+Validation: the new first-request state-machine test failed before correction;
+all 96 native bridge tests passed after correction (1 ignored), including
+error/denial/approval/unknown-return cases. All eight existing app service callback
+lifecycle tests passed. The first callback-test filter selected zero tests and is
+not counted; the corrected qualified filter ran all eight. Four-step local
+preflight passed without touching the locked Mac's UI. Logs use
+`service-first-request-*`, `service-callback-tests-2.log`, `reuse-runtime-data.log`
+and `preflight-reuse-runtime` in the private evidence directory.
+
 Retained-Git run [40140364346](https://github.com/Apdelrahman1911/mobile-release-kit/actions/runs/40140364346)
 on helper `ac14c5cadeb4949ddf8884326ff01919534079ba` failed before acquisition/native
 installation: the added helper exceeded its old 96 KiB source-input cap (99,042

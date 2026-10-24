@@ -114,7 +114,8 @@ static int phase_admitted(mrk_android_management *original,uint32_t phase) {
         case MRK_SERVICE_MUTATE:
             return report->called && report->phase==MRK_SERVICE_STATUS
                 && report->service_state==2 && original->service && report->outcome==0
-                && (report->action==2 || (report->action==1 && report->status==0) || (report->action==3 && report->status==1));
+                && (report->action==2 || (report->action==1 && (report->status==0 || report->status==3))
+                    || (report->action==3 && report->status==1));
         case MRK_SERVICE_RESULT:
             return report->called && report->phase==MRK_SERVICE_MUTATE
                 && (report->action==1 || (report->action==3 && report->outcome==10 && report->reserved==3)) && report->entered && report->returned
@@ -187,7 +188,11 @@ int mrk_android_management_step(void *raw,uint32_t phase,mrk_android_management_
                 else if (original->report.action==1) {
                     if (original->report.status==1) original->report.outcome=3;
                     else if (original->report.status==2) original->report.outcome=4;
-                    else if (original->report.status==3) original->report.outcome=6;
+                    /* A pre-registration NotFound is not proof that the
+                     * independently authenticated fixed bundle lacks its
+                     * service. Let this explicit request make its ONE register
+                     * call; only its returned result and fresh status can make
+                     * the service ready. Observe remains read-only. */
                 }
                 break;
             }

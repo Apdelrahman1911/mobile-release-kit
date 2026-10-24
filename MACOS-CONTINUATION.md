@@ -9,6 +9,11 @@ fix, locally test and rerun failures. Work remains on
 Read [MACOS-LOCAL-RESULTS.md](MACOS-LOCAL-RESULTS.md) first for current run status,
 original failures, candidate changes and exact verification limits.
 
+The retained Git install/cleanup passed in run40140647775; its next step exposed
+a stale driver source pin, now corrected. The explicit Tool26 service request
+correction is locally tested but still needs signed hosted execution. Continue
+the next exact run below; neither job has passed its full native scope yet.
+
 **Run 40132594293 is finished with failure.** Git27 installed/read back successfully,
 then diskutil eject1 identified `installd` as the dissenter. Tool26 installed and
 completed actual Open Project, then returned service-not-found / exit78 with

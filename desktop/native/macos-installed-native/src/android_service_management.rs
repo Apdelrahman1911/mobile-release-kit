@@ -110,7 +110,7 @@ fn decode(raw:Report,action:Action,phase:Phase)->Option<Observation> {
     let reservation_action=matches!(action,Action::RequestRegistration|Action::OpenApprovalSettings);
     let reservation_refused=reservation_action && phase==Phase::Mutate && raw.outcome==6
         && raw.service_state==2 && raw.entered==0 && raw.returned==0
-        && match action {Action::RequestRegistration=>raw.status==0,
+        && match action {Action::RequestRegistration=>matches!(raw.status,0|3),
             Action::OpenApprovalSettings=>raw.status<=3,_=>false};
     if raw.unknown==0 {
         if phase==Phase::ReleaseService {
@@ -131,12 +131,12 @@ fn decode(raw:Report,action:Action,phase:Phase)->Option<Observation> {
         if phase==Phase::ObserveStatus {
             let expected=if raw.status==5 { 7 } else { match action {
                 Action::Observe=>1,Action::OpenApprovalSettings=>0,Action::UnregisterAfterQuiescence=>return None,
-                Action::RequestRegistration=>match raw.status { 0=>0,1=>3,2=>4,3=>6,_=>return None },
+                Action::RequestRegistration=>match raw.status { 0|3=>0,1=>3,2=>4,_=>return None },
             } };
             if raw.outcome!=expected { return None; }
         }
         if phase==Phase::Mutate && !reservation_refused && match action {
-            Action::RequestRegistration=>raw.status!=0 || !matches!(raw.outcome,2|3|4|7|9),
+            Action::RequestRegistration=>!matches!(raw.status,0|3) || !matches!(raw.outcome,2|3|4|7|9),
             Action::OpenApprovalSettings=>raw.status>3 || raw.outcome!=5,
             Action::Observe|Action::UnregisterAfterQuiescence=>true,
         } { return None; }
@@ -797,7 +797,8 @@ mod tests {
     #[derive(Default)]
     struct NativeData {
         report:Report,entries:Vec<Phase>,bad_mutation_return:bool,error_status:bool,
-        refused_status:bool,nil_acquire:bool,unentered_retired:bool,
+        missing_status:bool,nil_acquire:bool,unentered_retired:bool,
+        mutation_outcome:Option<u32>,result_status:Option<u32>,
         reservation_refused_at:Option<Phase>,bad_retire:bool,
     }
     impl Native for NativeData {
@@ -818,13 +819,14 @@ mod tests {
                 Phase::ObserveStatus=>{
                     self.report.status=0;self.report.outcome=if self.report.action==0 { 1 } else { 0 };
                     if self.error_status { self.report.status=5;self.report.outcome=7; }
-                    if self.refused_status { self.report.status=3;self.report.outcome=6; }
+                    if self.missing_status { self.report.status=3; }
                 },
                 Phase::Mutate=>{
                     self.report.entered=1;self.report.returned=1;
                     self.report.outcome=if self.report.action==2 { 5 } else { 2 };
+                    if let Some(outcome)=self.mutation_outcome {self.report.outcome=outcome;}
                 },
-                Phase::ObserveResult=>self.report.status=1,
+                Phase::ObserveResult=>self.report.status=self.result_status.unwrap_or(1),
                 Phase::ReleaseService=>{ self.report.service_state=4;self.report.cleanup_known=1; },
                 _=>unreachable!(),
             }
@@ -841,6 +843,40 @@ mod tests {
             if unentered { assert_eq!(self.report.called,0);assert_eq!(self.report.service_state,0); }
             else { assert_eq!(self.report.phase,6);assert_eq!(self.report.service_state,4); }
             i32::from(!self.bad_retire)
+        }
+    }
+    #[test]
+    fn explicit_registration_after_not_found_still_requires_the_original_native_return_and_status() {
+        let mut manager=ServiceManager::new();
+        let mut native=NativeData {missing_status:true,..NativeData::default()};
+        let result=manager.perform_with(Action::RequestRegistration,&mut |_|Decision::Proceed,&mut native);
+        assert!(matches!(result,Progress::Finished(Observation {
+            status:Status::Enabled,outcome:Outcome::RegistrationRequested,
+            mutation_entered:true,mutation_returned:true,native_settled:true,.. })));
+        assert_eq!(native.entries.iter().filter(|phase|**phase==Phase::Mutate).count(),1);
+        assert!(native.entries.contains(&Phase::ObserveResult));
+        let mut observer=ServiceManager::new();
+        let mut check=NativeData {missing_status:true,..NativeData::default()};
+        assert!(matches!(observer.perform_with(Action::Observe,&mut |_|Decision::Proceed,&mut check),
+            Progress::Finished(Observation {status:Status::NotFound,outcome:Outcome::Observed,..})));
+        assert!(!check.entries.contains(&Phase::Mutate));
+        // Neither the earlier NotFound nor registration entry grants Ready.
+        // Preserve the original refusal, denial, unknown return and approval.
+        for (outcome,status,unknown) in [(7,3,false),(9,3,false),(2,2,false),(2,1,true)] {
+            let mut manager=ServiceManager::new();
+            let mut native=NativeData {missing_status:true,mutation_outcome:Some(outcome),
+                result_status:Some(status),bad_mutation_return:unknown,..NativeData::default()};
+            let result=manager.perform_with(Action::RequestRegistration,&mut |_|Decision::Proceed,&mut native);
+            if unknown {assert!(matches!(result,Progress::Unknown(_)));}
+            else {assert!(matches!(result,Progress::Finished(Observation {native_settled:true,..})));}
+            let observed=manager.custody().observation.unwrap();
+            assert!(!(observed.status==Status::Enabled && observed.native_settled));
+            assert_eq!(native.entries.iter().filter(|phase|**phase==Phase::Mutate).count(),1);
+            if unknown {
+                let entries=native.entries.clone();
+                assert!(matches!(manager.perform_with(Action::RequestRegistration,&mut |_|Decision::Proceed,&mut native),Progress::Unknown(_)));
+                assert_eq!(native.entries,entries);
+            }
         }
     }
     #[test]
@@ -941,13 +977,15 @@ mod tests {
         for expected in [Outcome::Error,Outcome::Refused] {
             let mut manager=ServiceManager::new();
             let mut native=NativeData {
-                error_status:expected==Outcome::Error,refused_status:expected==Outcome::Refused,
+                error_status:expected==Outcome::Error,
+                reservation_refused_at:(expected==Outcome::Refused).then_some(Phase::AcquireService),
                 ..NativeData::default()
             };
             let mut first=None;
             let result=manager.perform_with(Action::RequestRegistration,&mut |point| {
                 match point {
-                    Checkpoint::Returned { phase:Phase::ObserveStatus,at,custody }=>{
+                    Checkpoint::Returned { phase,at,custody } if phase==
+                        (if expected==Outcome::Error {Phase::ObserveStatus}else{Phase::AcquireService})=>{
                         assert_eq!(custody.first_failure,Some(at));first=Some(at);
                     },
                     Checkpoint::Before { phase,custody } if phase.is_cleanup()=>{
