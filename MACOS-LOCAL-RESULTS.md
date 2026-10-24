@@ -2,6 +2,13 @@
 
 ## Latest continuation — 2026-10-25
 
+**Active run:** [40132594293](https://github.com/Apdelrahman1911/mobile-release-kit/actions/runs/40132594293),
+attempt 1, exact candidate `ed91b0dd582ca35a6dc57556aa73d60f1fc852a2`, tree
+`27e03272ab0f31bf4769a7236322427707cbddae`. Tool26 job `120987297562` and
+Git27 job `120987297813` are running. Follow this run to completion; do not
+launch a duplicate. Private monitor files use prefix
+`run-40132594293-attempt-1-`. No native success is claimed while pending.
+
 The owner explicitly requested continuing through failures until both candidate
 jobs succeed. Run [40123897979](https://github.com/Apdelrahman1911/mobile-release-kit/actions/runs/40123897979)
 finished with failure on `f7e2ca8885aa050ae6a22cfdd08300bd1e3aa956`, tree
@@ -61,9 +68,10 @@ reuses that earlier scoped result. Logs: `preflight-supported-ejection`,
 
 A premature request to rerun only Tool26 while Git27 was active was rejected by
 GitHub's run-state rule (HTTP 403, containing workflow still running); no rerun
-started. Because Git27 subsequently exposed the source-path regression, select
-the corrected exact candidate after local checks instead of rerunning that
-failed source. Do not launch duplicate monitors or claim either job passed.
+started. Because Git27 subsequently exposed the source-path regression, the
+corrected exact candidate above was selected after local checks instead of
+rerunning that failed source. Do not launch duplicate monitors or claim either
+job passed while pending.
 
 ## Previous local preflight on f7e2ca88
 
