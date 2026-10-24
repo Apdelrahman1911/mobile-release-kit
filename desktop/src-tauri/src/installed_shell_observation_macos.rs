@@ -1774,7 +1774,9 @@ impl Observation {
     }
     pub(super) fn snapshot(&self, project: &str, result: &Result<Value, BridgeError>) {
         let Some(mut r) = self.record() else { return; };
-        let saved = matches!(self.case, Case::NoopStale | Case::ProjectFields | Case::LocalEdits(_) | Case::Checks(_) | Case::Vault(vault::Case::UploadKey(_))) || r.snapshot_requests == 2;
+        let saved = matches!(self.case, Case::NoopStale | Case::ProjectFields | Case::LocalEdits(_) | Case::Checks(_)
+            | Case::Vault(vault::Case::UploadKey(_)) | Case::ToolSetup(_) | Case::Cli | Case::GitCli(_)
+            | Case::GitFetch(_) | Case::GitPush(_) | Case::GitUpstream) || r.snapshot_requests == 2;
         let failure = match result {
             Ok(value) => if let Case::Identity(case)=self.case {
                     identity::snapshot_failure(value,&self.project_path,case,&self.base)

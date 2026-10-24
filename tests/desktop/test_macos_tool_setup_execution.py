@@ -96,6 +96,46 @@ class ServiceReports(PassiveOnly):
         self.assertIsNone(fixtures.tool_namespace)
         self.assertEqual(fixtures.tool_entered, set())
 
+    def test_functional_first_snapshots_match_unchanged_saved_fixture_config(self):
+        from mobile_release.api._snapshot import project_snapshot
+
+        observer = (ROOT / "desktop/src-tauri/src/installed_shell_observation_macos.rs").read_text()
+        snapshot = observer.split("pub(super) fn snapshot(&self", 1)[1].split("pub(super) fn suggest_request(", 1)[0]
+        saved = snapshot.split("let saved = ", 1)[1].split(";", 1)[0]
+        for variant in ("Case::ToolSetup(_)", "Case::Cli", "Case::GitCli(_)",
+                        "Case::GitFetch(_)", "Case::GitPush(_)", "Case::GitUpstream"):
+            self.assertIn(variant, saved)
+        self.assertIn("r.snapshot_requests == 2", saved)  # Existing first-save refresh stays saved.
+        self.assertIn("snapshot_value_failure(value, &self.project_path, saved, &self.base)", snapshot)
+
+        # These service/tool, CLI and Git journeys already carry this saved,
+        # credential-free config. No Store tree, SDK, Git process or native owner
+        # is needed for their original passive project snapshot to be format-valid.
+        cases = (*T.SERVICE_CASES, *T.CASES, *T.PUBLIC.CASES, *OBS.CLI.CASES,
+                 *OBS.GIT_CLI.CASES, *OBS.FETCH.CASES, *OBS.PUSH.ALL_CASES, *OBS.UPSTREAM.CASES)
+        with tempfile.TemporaryDirectory(prefix=".tool-snapshot-data-") as temporary:
+            for case in cases:
+                with self.subTest(case=case):
+                    root = Path(temporary) / case
+                    root.mkdir(mode=0o700)
+                    files, _ = OBS.fixture_data(case, False)
+                    for name, body in files.items():
+                        path = root / name
+                        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+                        path.write_bytes(body)
+                    before = {name: ((root / name).stat().st_ino, (root / name).read_bytes()) for name in files}
+                    value = project_snapshot(str(root))
+                    self.assertEqual(before, {name: ((root / name).stat().st_ino, (root / name).read_bytes()) for name in files})
+                    self.assertEqual(files["release/mobile-release.json"], OBS.CONFIG)
+                    self.assertEqual(value["config"]["state"], "format-valid")
+                    self.assertEqual(value["config"]["data"], json.loads(OBS.CONFIG))
+                    self.assertEqual(value["config"]["content"], {
+                        "bytes": len(OBS.CONFIG), "sha256": hashlib.sha256(OBS.CONFIG).hexdigest()})
+                    self.assertEqual(value["config"]["issues"], [])
+                    self.assertEqual(value["issues"], [])
+                    self.assertFalse(value["discovery"]["partial"])
+                    self.assertFalse((root / "release/store").exists())
+
     def test_service_and_tool_project_roots_share_native_home_abi_not_tmp_or_home_env(self):
         binding = OBS.Binding("a" * 40, "2", "1")
         with patch.dict(os.environ, {"HOME": "/foreign", "TMPDIR": "/foreign"}):
