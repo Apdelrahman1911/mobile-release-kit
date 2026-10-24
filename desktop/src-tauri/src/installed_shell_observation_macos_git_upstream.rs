@@ -1,7 +1,7 @@
 //! One fixed local SetUpstream journey in the existing installed observer.
 //! This comparison control grants no runtime/profile, Connection, source,
 //! Candidate/ACK or finality authority. All five Git calls use ordinary owners.
-use super::{Case as OuterCase, DocumentBinding, Observation, Step as OuterStep};
+use super::{Case as OuterCase, DocumentBinding, GitReadCheck as ReadCheck, GitReadFailureSample, Observation, Step as OuterStep};
 use crate::{
     error::BridgeError, git_local_protocol as local, git_read_protocol as read,
     git_upstream_protocol as upstream,
@@ -432,48 +432,50 @@ impl Observation {
                     Some(Step::ReadWait)
                 }
                 Step::ReadWait => {
-                    let p = document.git_read_status().operation.ok_or_else(invalid)?;
-                    let mut r = self.record().ok_or_else(invalid)?;
-                    let target = r
-                        .fixture
-                        .git_upstream
-                        .as_ref()
-                        .ok_or_else(invalid)?
-                        .target()
-                        .to_owned();
-                    let v = r.git_upstream.as_mut().ok_or_else(invalid)?;
-                    if v.reads.last().is_none_or(|o| !o.matches(&p)) {
+                    let status = document.git_read_status();
+                    if status.operation.is_none() {
+                        self.fail_git_read_missing(OuterStep::GitUpstream(step), "git-upstream-original-contract");
                         return Err(invalid());
                     }
-                    if matches!(p.phase, read::Phase::Starting | read::Phase::Running) {
-                        None
-                    } else {
-                        if p.phase != read::Phase::Settled
-                            || p.outcome != Some(read::Outcome::Ok)
-                            || p.reason.is_some()
-                            || p.result["basis"] != "local-refs-no-fetch"
+                    let mut r = self.record().ok_or_else(invalid)?;
+                    let checked = (|| {
+                        let p = status.operation.as_ref().ok_or(ReadCheck::MissingOperation)?;
+                        let target = r.fixture.git_upstream.as_ref().ok_or(ReadCheck::MissingFixture)?.target().to_owned();
+                        let v = r.git_upstream.as_mut().ok_or(ReadCheck::MissingOriginal)?;
+                        let original = v.reads.last().ok_or(ReadCheck::MissingOriginal)?;
+                        if !original.matches(p) { return Err(ReadCheck::OriginalMismatch); }
+                        if !super::git_read_wait_terminal(p)? { return Ok(None); }
+                        if p.result["basis"] != "local-refs-no-fetch"
                             || p.result["observation"]["head"] != target
                             || p.result["observation"]["branch"] != "refs/heads/main"
                             || !tracking(&p.result["tracking"], v.applied)
                         {
-                            return Err(invalid());
+                            return Err(ReadCheck::FixtureComparison);
                         }
                         v.revision = Some(
                             p.result["observation"]["revision"]
                                 .as_str()
                                 .filter(|s| read::digest(s))
-                                .ok_or_else(invalid)?
+                                .ok_or(ReadCheck::ResultSchema)?
                                 .into(),
                         );
                         v.reference_revision = Some(
                             p.result["referenceRevision"]
                                 .as_str()
                                 .filter(|s| read::digest(s))
-                                .ok_or_else(invalid)?
+                                .ok_or(ReadCheck::ReferenceRevision)?
                                 .into(),
                         );
                         v.read_count += 1;
-                        Some(Step::Prepare)
+                        Ok(Some(Step::Prepare))
+                    })();
+                    match checked {
+                        Ok(next) => next,
+                        Err(check) => {
+                            let sample = GitReadFailureSample::capture(OuterStep::GitUpstream(step), status.operation.as_ref(), check, None);
+                            self.fail_git_read_wait(&mut r, "git-upstream-original-contract", sample);
+                            return Err(invalid());
+                        }
                     }
                 }
                 Step::Prepare => {

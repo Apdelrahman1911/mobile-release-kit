@@ -2,7 +2,7 @@
 //! This comparison control grants no runtime/profile, Connection, source,
 //! Candidate/ACK or finality authority. Both Reads, Prepare and Apply use the
 //! ordinary Git owners; CLI caller and history returns are checked separately.
-use super::{Case as OuterCase, DocumentBinding, Observation, Step as OuterStep};
+use super::{Case as OuterCase, DocumentBinding, GitReadCheck as ReadCheck, GitReadFailureSample, Observation, Step as OuterStep};
 use crate::{
     error::BridgeError, git_local_protocol as local, git_read_protocol as read,
     service_git_protocol as wire,
@@ -543,12 +543,14 @@ fn fixed_action(case: Case, revision: &str, references: &str) -> local::PublicAc
         }),
     }
 }
-fn read_result(p: &read::Projection, head: &str, case: Case, after: bool) -> bool {
-    p.phase == read::Phase::Settled
-        && p.outcome == Some(read::Outcome::Ok)
-        && p.reason.is_none()
-        && read::validate_result(&p.action, &p.result).is_ok()
-        && p.result["basis"] == "local-refs-no-fetch"
+fn read_result(p: &read::Projection, head: &str, case: Case, after: bool, result_valid: &mut Option<bool>) -> Result<(), ReadCheck> {
+    if !super::git_read_wait_terminal(p)? { return Err(ReadCheck::TerminalPhase); }
+    // The same existing schema validation runs once, only after real terminal
+    // checks. Pending/refused states never acquire a diagnostic validation.
+    let valid = read::validate_result(&p.action, &p.result).is_ok();
+    *result_valid = Some(valid);
+    if !valid { return Err(ReadCheck::ResultSchema); }
+    if p.result["basis"] == "local-refs-no-fetch"
         && p.result["observation"]["head"] == head
         && p.result["observation"]["branch"] == "refs/heads/main"
         && p.result["observation"]["restrictions"] == json!([])
@@ -558,6 +560,7 @@ fn read_result(p: &read::Projection, head: &str, case: Case, after: bool) -> boo
         && p.result["observation"]["changes"]
             == json!([{"path":"untracked.txt","index":if after&&case==Case::Index{"A"}else{"?"},
             "worktree":if after&&case==Case::Index{" "}else{"?"},"kind":"file","conflict":false}])
+    { Ok(()) } else { Err(ReadCheck::FixtureComparison) }
 }
 impl Observation {
     fn git_cli_access(&self, d: &DocumentBinding, case: Case) -> Result<Value, BridgeError> {
@@ -615,19 +618,35 @@ impl Observation {
                     v.reads.push(ReadOriginal::capture(&p));Some(Step::ReadWait)
                 },
                 Step::ReadWait=>{
-                    let p=document.git_read_status().operation.ok_or_else(bad)?;
+                    let status=document.git_read_status();
+                    if status.operation.is_none(){
+                        self.fail_git_read_missing(OuterStep::GitCli(step),"git-cli-original-contract");
+                        return Err(bad());
+                    }
                     let mut r=self.record().ok_or_else(bad)?;
-                    let head=r.fixture.git_cli.as_ref().ok_or_else(bad)?.target().to_owned();
-                    let v=r.git_cli.as_mut().ok_or_else(bad)?;
-                    if v.reads.last().is_none_or(|o|!o.matches(&p)){return Err(bad());}
-                    if matches!(p.phase,read::Phase::Starting|read::Phase::Running){None}else{
-                        if !read_result(&p,&head,c.case,v.read_count==1){return Err(bad());}
+                    let mut result_valid=None;
+                    let checked=(||{
+                        let p=status.operation.as_ref().ok_or(ReadCheck::MissingOperation)?;
+                        let head=r.fixture.git_cli.as_ref().ok_or(ReadCheck::MissingFixture)?.target().to_owned();
+                        let v=r.git_cli.as_mut().ok_or(ReadCheck::MissingOriginal)?;
+                        let original=v.reads.last().ok_or(ReadCheck::MissingOriginal)?;
+                        if !original.matches(p){return Err(ReadCheck::OriginalMismatch);}
+                        if !super::git_read_wait_terminal(p)?{return Ok(None);}
+                        read_result(p,&head,c.case,v.read_count==1,&mut result_valid)?;
                         if v.read_count==0 {
-                            v.revision=Some(p.result["observation"]["revision"].as_str().ok_or_else(bad)?.into());
-                            v.references=Some(p.result["referenceRevision"].as_str().ok_or_else(bad)?.into());
+                            v.revision=Some(p.result["observation"]["revision"].as_str().ok_or(ReadCheck::ResultSchema)?.into());
+                            v.references=Some(p.result["referenceRevision"].as_str().ok_or(ReadCheck::ReferenceRevision)?.into());
                         }else if (c.case==Case::Branch&&p.result["referenceRevision"].as_str()==v.references.as_deref())
-                            ||(c.case==Case::Index&&p.result["referenceRevision"].as_str()!=v.references.as_deref()){return Err(bad());}
-                        v.read_count+=1;Some(if v.read_count==1{Step::Allow}else{Step::Revoke})
+                            ||(c.case==Case::Index&&p.result["referenceRevision"].as_str()!=v.references.as_deref()){return Err(ReadCheck::ReferenceRevision);}
+                        v.read_count+=1;Ok(Some(if v.read_count==1{Step::Allow}else{Step::Revoke}))
+                    })();
+                    match checked {
+                        Ok(next)=>next,
+                        Err(check)=>{
+                            let sample=GitReadFailureSample::capture(OuterStep::GitCli(step),status.operation.as_ref(),check,result_valid);
+                            self.fail_git_read_wait(&mut r,"git-cli-original-contract",sample);
+                            return Err(bad());
+                        }
                     }
                 },
                 Step::Allow=>{
@@ -955,11 +974,12 @@ mod tests {
     }
     #[test]
     fn git_cli_readback_compares_original_context_and_exact_delta_not_ready_data() {
+        let accepts = |p: &read::Projection, head: &str, case, after| read_result(p, head, case, after, &mut None).is_ok();
         for case in [Case::Index, Case::Branch] {
             for after in [false, true] {
                 let p = observed(case, after);
                 let original = ReadOriginal::capture(&p);
-                assert!(read_result(&p, &"c".repeat(40), case, after) && original.matches(&p));
+                assert!(accepts(&p, &"c".repeat(40), case, after) && original.matches(&p));
                 let mut other = p.clone();
                 other.operation_id = "git-read-2".into();
                 assert!(!original.matches(&other));
@@ -971,30 +991,64 @@ mod tests {
                 assert!(!original.matches(&other));
                 other = p.clone();
                 other.phase = read::Phase::Running;
-                assert!(!read_result(&other, &"c".repeat(40), case, after));
+                assert!(!accepts(&other, &"c".repeat(40), case, after));
                 other = p.clone();
                 other.reason = Some("cancelled".into());
-                assert!(!read_result(&other, &"c".repeat(40), case, after));
+                assert!(!accepts(&other, &"c".repeat(40), case, after));
                 other = p.clone();
                 other.result["observation"]["head"] = json!("d".repeat(40));
-                assert!(!read_result(&other, &"c".repeat(40), case, after));
+                assert!(!accepts(&other, &"c".repeat(40), case, after));
                 other = p.clone();
                 other.result["observation"]["changes"] = json!([]);
-                assert!(!read_result(&other, &"c".repeat(40), case, after));
+                assert!(!accepts(&other, &"c".repeat(40), case, after));
                 other = p.clone();
                 other.result["observation"]["remotes"] = json!(["origin"]);
-                assert!(!read_result(&other, &"c".repeat(40), case, after));
+                assert!(!accepts(&other, &"c".repeat(40), case, after));
                 other = p.clone();
                 other.result["tracking"]["state"] = json!("gone");
-                assert!(!read_result(&other, &"c".repeat(40), case, after));
+                assert!(!accepts(&other, &"c".repeat(40), case, after));
             }
         }
-        assert!(!read_result(
+        assert!(!accepts(
             &observed(Case::Index, true),
             &"c".repeat(40),
             Case::Branch,
             true
         ));
+    }
+
+    #[test]
+    fn git_cli_failed_read_retains_only_the_validation_actually_reached() {
+        let head = "c".repeat(40);
+        let mut p = observed(Case::Index, false);
+        for phase in [read::Phase::Starting, read::Phase::Running, read::Phase::Stopping, read::Phase::CleanupUnknown] {
+            p.phase = phase;
+            let mut valid = None;
+            assert_eq!(read_result(&p, &head, Case::Index, false, &mut valid), Err(ReadCheck::TerminalPhase));
+            assert_eq!(valid, None);
+        }
+        p.phase = read::Phase::Settled;
+        for outcome in [None, Some(read::Outcome::Refused), Some(read::Outcome::Cancelled), Some(read::Outcome::TimedOut), Some(read::Outcome::CleanupUnknown)] {
+            p.outcome = outcome;
+            let mut valid = None;
+            assert_eq!(read_result(&p, &head, Case::Index, false, &mut valid), Err(ReadCheck::TerminalOutcome));
+            assert_eq!(valid, None);
+        }
+        p.outcome = Some(read::Outcome::Ok);
+        p.reason = Some("command-failed".into());
+        let mut valid = None;
+        assert_eq!(read_result(&p, &head, Case::Index, false, &mut valid), Err(ReadCheck::TerminalReason));
+        assert_eq!(valid, None);
+        p.reason = None;
+        p.result["observation"]["head"] = json!("invalid-oid");
+        assert_eq!(read_result(&p, &head, Case::Index, false, &mut valid), Err(ReadCheck::ResultSchema));
+        assert_eq!(valid, Some(false));
+        p.result["observation"]["head"] = json!("d".repeat(40));
+        assert_eq!(read_result(&p, &head, Case::Index, false, &mut valid), Err(ReadCheck::FixtureComparison));
+        assert_eq!(valid, Some(true));
+        p.result["observation"]["head"] = json!(head);
+        assert_eq!(read_result(&p, &head, Case::Index, false, &mut valid), Ok(()));
+        assert_eq!(valid, Some(true));
     }
 
     #[test]

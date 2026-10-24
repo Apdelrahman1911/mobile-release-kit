@@ -1,7 +1,7 @@
 //! Three fixed, nonshipping Push journeys on the existing installed observer.
 //! Only provider BYTES are synthetic. This control cannot construct a SourceBook,
 //! Connected session, GO, native receipt, replacement clock or final-CAS witness.
-use super::{Case as OuterCase, DocumentBinding, Observation, Step as OuterStep};
+use super::{Case as OuterCase, DocumentBinding, GitReadCheck as ReadCheck, GitReadFailureSample, Observation, Step as OuterStep};
 use crate::{
     error::BridgeError, git_local_protocol as local, git_push_protocol as push,
     git_read_protocol as read, github_connection_protocol as github,
@@ -770,50 +770,54 @@ impl Observation {
                     Some(Step::ReadWait)
                 }
                 Step::ReadWait => {
-                    let s = document.git_read_status();
-                    let p = s.operation.ok_or_else(invalid)?;
-                    let mut r = self.record().ok_or_else(invalid)?;
-                    let f = r.fixture.git_push.as_ref().ok_or_else(invalid)?;
-                    let read_matches = p.result["basis"] == "local-refs-no-fetch"
-                        && p.result["observation"]["head"] == f.target()
-                        && p.result["observation"]["branch"] == "refs/heads/main"
-                        && if control.case.create().is_some(){create::tracking(&p.result["tracking"])}else{p.result["tracking"]["state"] == "complete"
-                        && p.result["tracking"]["remote"] == "origin"
-                        && p.result["tracking"]["localRef"] == "refs/remotes/origin/main"
-                        && p.result["tracking"]["mergeRef"] == "refs/heads/main"
-                        && p.result["tracking"]["head"] == f.base()
-                        && p.result["tracking"]["ahead"] == 1
-                        && p.result["tracking"]["behind"] == 0};
-                    let v = r.git_push.as_mut().ok_or_else(invalid)?;
-                    if v.read_operation.as_deref() != Some(&p.operation_id) {
+                    let status = document.git_read_status();
+                    if status.operation.is_none() {
+                        self.fail_git_read_missing(OuterStep::GitPush(step), "git-push-original-contract");
                         return Err(invalid());
                     }
-                    if matches!(p.phase, read::Phase::Starting | read::Phase::Running) {
-                        None
-                    } else {
-                        if p.phase != read::Phase::Settled
-                            || p.outcome != Some(read::Outcome::Ok)
-                            || p.reason.is_some()
-                            || !read_matches
-                        {
-                            return Err(invalid());
-                        }
+                    let mut r = self.record().ok_or_else(invalid)?;
+                    let checked = (|| {
+                        let p = status.operation.as_ref().ok_or(ReadCheck::MissingOperation)?;
+                        let f = r.fixture.git_push.as_ref().ok_or(ReadCheck::MissingFixture)?;
+                        let read_matches = p.result["basis"] == "local-refs-no-fetch"
+                            && p.result["observation"]["head"] == f.target()
+                            && p.result["observation"]["branch"] == "refs/heads/main"
+                            && if control.case.create().is_some(){create::tracking(&p.result["tracking"])}else{p.result["tracking"]["state"] == "complete"
+                            && p.result["tracking"]["remote"] == "origin"
+                            && p.result["tracking"]["localRef"] == "refs/remotes/origin/main"
+                            && p.result["tracking"]["mergeRef"] == "refs/heads/main"
+                            && p.result["tracking"]["head"] == f.base()
+                            && p.result["tracking"]["ahead"] == 1
+                            && p.result["tracking"]["behind"] == 0};
+                        let v = r.git_push.as_mut().ok_or(ReadCheck::MissingOriginal)?;
+                        let original = v.read_operation.as_deref().ok_or(ReadCheck::MissingOriginal)?;
+                        if original != p.operation_id { return Err(ReadCheck::OriginalMismatch); }
+                        if !super::git_read_wait_terminal(p)? { return Ok(None); }
+                        if !read_matches { return Err(ReadCheck::FixtureComparison); }
                         v.revision = Some(
                             p.result["observation"]["revision"]
                                 .as_str()
                                 .filter(|s| read::digest(s))
-                                .ok_or_else(invalid)?
+                                .ok_or(ReadCheck::ResultSchema)?
                                 .into(),
                         );
                         v.reference_revision = Some(
                             p.result["referenceRevision"]
                                 .as_str()
                                 .filter(|s| read::digest(s))
-                                .ok_or_else(invalid)?
+                                .ok_or(ReadCheck::ReferenceRevision)?
                                 .into(),
                         );
                         v.read = true;
-                        Some(Step::Prepare)
+                        Ok(Some(Step::Prepare))
+                    })();
+                    match checked {
+                        Ok(next) => next,
+                        Err(check) => {
+                            let sample = GitReadFailureSample::capture(OuterStep::GitPush(step), status.operation.as_ref(), check, None);
+                            self.fail_git_read_wait(&mut r, "git-push-original-contract", sample);
+                            return Err(invalid());
+                        }
                     }
                 }
                 Step::Prepare => {

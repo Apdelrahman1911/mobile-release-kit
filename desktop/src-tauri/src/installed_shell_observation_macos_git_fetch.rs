@@ -1,7 +1,7 @@
 //! Four fixed, nonshipping Fetch journeys on the existing installed observer.
 //! Only provider BYTES are synthetic. This control cannot construct a SourceBook,
 //! Connected session, GO, native receipt, replacement clock or final-CAS witness.
-use super::{Case as OuterCase, DocumentBinding, Observation, Step as OuterStep};
+use super::{Case as OuterCase, DocumentBinding, GitReadCheck as ReadCheck, GitReadFailureSample, Observation, Step as OuterStep};
 use crate::{
     error::BridgeError, git_fetch_protocol as fetch, git_local_protocol as local,
     git_read_protocol as read, github_connection_protocol as github,
@@ -757,38 +757,42 @@ impl Observation {
                     Some(Step::ReadWait)
                 }
                 Step::ReadWait => {
-                    let s = document.git_read_status();
-                    let p = s.operation.ok_or_else(invalid)?;
-                    let mut r = self.record().ok_or_else(invalid)?;
-                    let v = r.git_fetch.as_mut().ok_or_else(invalid)?;
-                    if v.read_operation.as_deref() != Some(&p.operation_id) {
+                    let status = document.git_read_status();
+                    if status.operation.is_none() {
+                        self.fail_git_read_missing(OuterStep::GitFetch(step), "git-fetch-original-contract");
                         return Err(invalid());
                     }
-                    if matches!(p.phase, read::Phase::Starting | read::Phase::Running) {
-                        None
-                    } else {
-                        if p.phase != read::Phase::Settled
-                            || p.outcome != Some(read::Outcome::Ok)
-                            || p.reason.is_some()
-                        {
-                            return Err(invalid());
-                        }
+                    let mut r = self.record().ok_or_else(invalid)?;
+                    let checked = (|| {
+                        let p = status.operation.as_ref().ok_or(ReadCheck::MissingOperation)?;
+                        let v = r.git_fetch.as_mut().ok_or(ReadCheck::MissingOriginal)?;
+                        let original = v.read_operation.as_deref().ok_or(ReadCheck::MissingOriginal)?;
+                        if original != p.operation_id { return Err(ReadCheck::OriginalMismatch); }
+                        if !super::git_read_wait_terminal(p)? { return Ok(None); }
                         v.revision = Some(
                             p.result["observation"]["revision"]
                                 .as_str()
                                 .filter(|s| read::digest(s))
-                                .ok_or_else(invalid)?
+                                .ok_or(ReadCheck::ResultSchema)?
                                 .into(),
                         );
                         v.reference_revision = Some(
                             p.result["referenceRevision"]
                                 .as_str()
                                 .filter(|s| read::digest(s))
-                                .ok_or_else(invalid)?
+                                .ok_or(ReadCheck::ReferenceRevision)?
                                 .into(),
                         );
                         v.read = true;
-                        Some(Step::Prepare)
+                        Ok(Some(Step::Prepare))
+                    })();
+                    match checked {
+                        Ok(next) => next,
+                        Err(check) => {
+                            let sample = GitReadFailureSample::capture(OuterStep::GitFetch(step), status.operation.as_ref(), check, None);
+                            self.fail_git_read_wait(&mut r, "git-fetch-original-contract", sample);
+                            return Err(invalid());
+                        }
                     }
                 }
                 Step::Prepare => {
