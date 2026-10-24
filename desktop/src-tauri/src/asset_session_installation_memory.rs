@@ -65,7 +65,7 @@ impl MacosMaintenanceCensus<'_>{
 pub(super) fn macos_maintenance_census<'a>(document:&'a DocumentBinding,state:&'a DocumentState,
     pickers:&'a [Option<Arc<OriginalWork>>;3])->Result<MacosMaintenanceCensus<'a>,Reason>{
     if !state.maintenance.data_only() || !android_fixture_histories_empty(document){return Err(Reason::Capacity);}
-    let bytes=known::android_service_setup_bytes(state,pickers,Some(&document.inner.bridge.artifact_inspection))?;
+    let bytes=known::android_service_setup_bytes(state,pickers,Some(&document.inner.bridge.artifact_inspection),document)?;
     Ok(MacosMaintenanceCensus{bytes,document:&document.inner.session_identity,pickers,_state:state})
 }
 #[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"),not(feature="macos-android-registration-helper")))]
@@ -89,15 +89,13 @@ fn android_fixture_histories_empty(document:&DocumentBinding)->bool {
 #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"),
     all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
 pub(super) fn additional_document_bytes(document: &DocumentBinding, state: &DocumentState) -> Result<usize, Reason> {
-    if !android_fixture_histories_empty(document) { return Err(Reason::Capacity); }
-    known::additional_document_bytes(state)
+    known::additional_document_bytes(state,document)
 }
 pub(super) fn android_service_setup_census<'a>(document:&'a DocumentBinding,state:&'a DocumentState,
     pickers:&'a [Option<Arc<OriginalWork>>;3])->Result<AndroidServiceSetupCensus<'a>,Reason>{
-    if !android_fixture_histories_empty(document){return Err(Reason::Capacity);}
     #[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
     {
-        let bytes=known::android_service_setup_bytes(state,pickers,Some(&document.inner.bridge.artifact_inspection))?;
+        let bytes=known::android_service_setup_bytes(state,pickers,Some(&document.inner.bridge.artifact_inspection),document)?;
         Ok(AndroidServiceSetupCensus{bytes,document:&document.inner.session_identity,pickers,_state:state})
     }
     #[cfg(not(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper"))))]
@@ -111,12 +109,12 @@ impl AndroidRegistrationCensus<'_> {
 }
 pub(super) fn android_registration_census<'a>(document: &'a DocumentBinding, state: &'a DocumentState,
     pickers: &'a [Arc<OriginalWork>; 3]) -> Result<AndroidRegistrationCensus<'a>, Reason> {
-    // All four existing fixture-Inner histories remain exclusions. This path
-    // neither changes nor reuses installation::Admission or its empty-source gate.
-    if !android_fixture_histories_empty(document){return Err(Reason::Capacity);}
+    // Only the existing bound Tool history can be visited by the concrete
+    // census below. Other fixture histories remain exclusions; installation's
+    // Admission and its empty-source gate are unchanged.
     #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"), not(feature = "macos-android-registration-helper")))]
     {
-        let bytes = known::android_registration_bytes(state, pickers,Some(&document.inner.bridge.artifact_inspection))?;
+        let bytes = known::android_registration_bytes(state, pickers,Some(&document.inner.bridge.artifact_inspection),document)?;
         Ok(AndroidRegistrationCensus { bytes, document: &document.inner.session_identity, pickers, _state: state })
     }
     #[cfg(not(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"), not(feature = "macos-android-registration-helper"))))]
@@ -134,7 +132,7 @@ pub(super) fn android_registration_agent_census<'a>(document: &'a DocumentBindin
     {
         let bytes = lookup_memory::tool_setup_registration_document_bytes(&document.inner, state, pickers)
             .map_err(|_| Reason::Capacity)?;
-        let bytes = bytes.checked_add(known::additional_document_bytes(state)?).ok_or(Reason::Capacity)?;
+        let bytes = bytes.checked_add(known::additional_document_bytes(state,document)?).ok_or(Reason::Capacity)?;
         if bytes > SESSION_BYTES { return Err(Reason::Capacity); }
         Ok(AndroidRegistrationCensus { bytes, document: &document.inner.session_identity, pickers, _state: state })
     }
@@ -189,9 +187,13 @@ mod known {
     struct Census { bytes: usize, seen: Seen }
     // Reuse the original lane/evidence/maintenance accounting for the new tool
     // path; do not silently omit fields absent from the older lookup census.
-    pub(super) fn additional_document_bytes(state: &DocumentState) -> Count<usize> {
+    pub(super) fn additional_document_bytes(state: &DocumentState, document:&DocumentBinding) -> Count<usize> {
         if !state.maintenance.data_only() { return Err(Reason::Capacity); }
         let mut census = Census::new();
+        // This additive path conservatively recounts shared Tool originals and
+        // Control backing already visited by the lookup/public-owner census.
+        // No cross-census identity credit or increased partition is inferred.
+        census.tool_fixture_history(document)?;
         census.document_state_gate(state)?;
         census.document_cells()?;
         if let Some(lane) = &state.saved_observation { census.saved_observation(lane)?; }
@@ -207,6 +209,25 @@ mod known {
     }
     impl Census {
         fn new() -> Self { Self { bytes: 0, seen: Seen::new() } }
+        fn tool_fixture_history(&mut self, document:&DocumentBinding) -> Count<()> {
+            #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+            {
+                let Some(history)=document.installed_tool_setup_history()? else {return Ok(());};
+                // SessionBook's inline cells are already in Inner. Its Vec
+                // backing, existing bound Control/fixture charge and ALL actual
+                // original owners are not empty merely because work returned.
+                return self.tool_history_rows(history.capacity,history.control.retained_bytes(),&history.originals);
+            }
+            #[cfg(not(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64"))))]
+            if android_fixture_histories_empty(document){Ok(())}else{Err(Reason::Capacity)}
+        }
+        #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+        fn tool_history_rows(&mut self, slots:usize, control:Option<usize>, originals:&[Option<Arc<OriginalWork>>;6])->Count<()> {
+            self.cells::<(Arc<OriginalWork>,Option<Operation>)>(slots)?;
+            self.add(capacity(control)?)?;
+            for original in originals.iter().flatten(){self.owner(original)?;}
+            Ok(())
+        }
         fn add(&mut self, bytes: usize) -> Count<()> {
             let total = capacity(self.bytes.checked_add(bytes))?;
             if total > SESSION_BYTES { return Err(Reason::Capacity); }
@@ -651,16 +672,17 @@ mod known {
         CatalogueCensusData{bytes:census.bytes,rows,pickers,_state:state,_saved:saved_aliases}
     }
 
-    pub(super) fn android_registration_bytes(state: &DocumentState, pickers: &[Arc<OriginalWork>; 3],artifact:Option<&crate::saved_command_owner::SavedCommandOwner>) -> Count<usize> {
+    pub(super) fn android_registration_bytes(state: &DocumentState, pickers: &[Arc<OriginalWork>; 3],artifact:Option<&crate::saved_command_owner::SavedCommandOwner>,document:&DocumentBinding) -> Count<usize> {
         let mut census = Census::new(); if let Some(artifact)=artifact{census.artifact_inputs(artifact)?;}
+        census.tool_fixture_history(document)?;
         census.document(state)?;
         // SAME Seen table: original picker state shared with Document.slot or
         // another retained root counts once; equal distinct Arcs count again.
         for picker in pickers { census.owner(picker)?; }
         Ok(census.bytes)
     }
-    pub(super) fn android_service_setup_bytes(state:&DocumentState,pickers:&[Option<Arc<OriginalWork>>;3],artifact:Option<&crate::saved_command_owner::SavedCommandOwner>)->Count<usize>{
-        let mut census=Census::new(); if let Some(artifact)=artifact{census.artifact_inputs(artifact)?;}census.document(state)?;
+    pub(super) fn android_service_setup_bytes(state:&DocumentState,pickers:&[Option<Arc<OriginalWork>>;3],artifact:Option<&crate::saved_command_owner::SavedCommandOwner>,document:&DocumentBinding)->Count<usize>{
+        let mut census=Census::new(); if let Some(artifact)=artifact{census.artifact_inputs(artifact)?;}census.tool_fixture_history(document)?;census.document(state)?;
         for picker in pickers.iter().flatten(){census.owner(picker)?;}
         Ok(census.bytes)
     }
@@ -691,6 +713,56 @@ mod known {
     #[cfg(all(test, debug_assertions))]
     pub(super) fn tally_data(state: &DocumentState) -> Count<usize> {
         let mut census = Census::new(); census.document(state)?; Ok(census.bytes)
+    }
+
+    #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+    impl DocumentBinding {
+        // Existing observer data-contracts entry only. These private, inert
+        // OriginalWork arrangements never enter native work or acquire a
+        // Document, Control, Registration, Ready or real joined-work witness.
+        pub(crate) fn installed_tool_setup_census_data_checks()->bool {
+            let check=||->Count<()> {
+                let first=OriginalWork::new(1,false,Weak::new());
+                let mut book=Vec::with_capacity(4);
+                book.push((Arc::clone(&first),Some(Operation::ChooseProject)));
+                let originals=std::array::from_fn(|i|book.get(i).map(|(owner,_)|Arc::clone(owner)));
+                if Census::new().tool_history_rows(book.capacity(),Some(17),&originals).is_ok(){return Err(Reason::Capacity);}
+                first.coordinator.try_lock().map_err(|_|Reason::Capacity)?.receipt=JoinReceipt::Returned;
+                let mut owner=Census::new();owner.owner(&first)?;
+                let mut rows=Census::new();rows.tool_history_rows(book.capacity(),Some(17),&originals)?;
+                let expected=book.capacity()*size_of::<(Arc<OriginalWork>,Option<Operation>)>()+17+owner.bytes;
+                if book.capacity()<=book.len() || owner.bytes==0 || rows.bytes!=expected{return Err(Reason::Capacity);}
+                rows.owner(&first)?;
+                if rows.bytes!=expected{return Err(Reason::Capacity);}
+                let distinct=OriginalWork::new(1,false,Weak::new());
+                distinct.coordinator.try_lock().map_err(|_|Reason::Capacity)?.receipt=JoinReceipt::Returned;
+                let mut other=Census::new();other.owner(&distinct)?;rows.owner(&distinct)?;
+                if rows.bytes!=expected+other.bytes || first.ended.load(Ordering::SeqCst)
+                    || distinct.ended.load(Ordering::SeqCst){return Err(Reason::Capacity);}
+                let empty=std::array::from_fn(|_|None);
+                let mut exact=Census::new();exact.tool_history_rows(0,Some(SESSION_BYTES),&empty)?;
+                if exact.bytes!=SESSION_BYTES || exact.add(1).is_ok()
+                    || Census::new().tool_history_rows(book.capacity(),None,&originals).is_ok()
+                    || Census::new().tool_history_rows(usize::MAX,Some(0),&empty).is_ok()
+                    || Census::new().tool_history_rows(book.capacity(),Some(usize::MAX),&originals).is_ok()
+                    || Census::new().tool_history_rows(book.capacity(),Some(SESSION_BYTES),&originals).is_ok(){return Err(Reason::Capacity);}
+                first.coordinator.try_lock().map_err(|_|Reason::Capacity)?.receipt=JoinReceipt::Failed;
+                if Census::new().tool_history_rows(book.capacity(),Some(17),&originals).is_ok(){return Err(Reason::Capacity);}
+                first.coordinator.try_lock().map_err(|_|Reason::Capacity)?.receipt=JoinReceipt::Returned;
+                first.retired.store(false,Ordering::SeqCst);
+                if Census::new().tool_history_rows(book.capacity(),Some(17),&originals).is_ok(){return Err(Reason::Capacity);}
+                first.retired.store(true,Ordering::SeqCst);
+                first.gui.facts.try_lock().map_err(|_|Reason::Capacity)?.refusal=Some(Reason::CleanupUnknown);
+                if Census::new().tool_history_rows(book.capacity(),Some(17),&originals).is_ok(){return Err(Reason::Capacity);}
+                first.gui.facts.try_lock().map_err(|_|Reason::Capacity)?.refusal=None;
+                let held=first.source.try_lock().map_err(|_|Reason::Capacity)?;
+                if Census::new().tool_history_rows(book.capacity(),Some(17),&originals).is_ok(){return Err(Reason::Capacity);}
+                drop(held);
+                let mut restored=Census::new();restored.tool_history_rows(book.capacity(),Some(17),&originals)?;
+                if restored.bytes!=expected{return Err(Reason::Capacity);}Ok(())
+            };
+            check().is_ok()
+        }
     }
 
     #[cfg(all(test, not(feature = "desktop-shell")))]

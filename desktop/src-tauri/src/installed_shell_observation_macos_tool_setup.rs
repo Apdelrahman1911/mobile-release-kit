@@ -1033,4 +1033,6 @@ impl Observation {
     }
 }
 
-pub(super) fn service_data_checks() -> bool { service::data_checks() }
+pub(super) fn service_data_checks() -> bool {
+    service::data_checks() && DocumentBinding::installed_tool_setup_census_data_checks()
+}

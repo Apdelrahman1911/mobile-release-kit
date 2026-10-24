@@ -5,7 +5,38 @@ use crate::{
     shell::installed_observation::tool_setup::{Control, Registration},
 };
 
+// A bounded snapshot of existing references, not a native/registration permit.
+// Release SessionBook before the caller visits the original owners' locks.
+pub(super) struct ToolSetupHistory {
+    pub(super) control: Arc<Control>,
+    pub(super) originals: [Option<Arc<OriginalWork>>; 6],
+    pub(super) capacity: usize,
+}
+
 impl DocumentBinding {
+    pub(super) fn installed_tool_setup_history(&self) -> Result<Option<ToolSetupHistory>, Reason> {
+        let book = self.inner.installed_macos_session.try_lock().map_err(|_| Reason::Capacity)?;
+        let Some(book) = book.as_ref() else { return Ok(None); };
+        let control = book.tool_setup.as_ref().ok_or(Reason::Capacity)?;
+        let limit = control.case().maximum_original();
+        if book.original_limit() != Some(limit) || limit > 6 || book.originals.len() > limit as usize
+            || !control.bound(&self.inner.session_identity)
+            || !book.originals.iter().enumerate().all(|(index, (owner, operation))| {
+                owner.id as usize == index + 1 && original_call(&self.inner, owner)
+                    && match (owner.id, operation) {
+                        (1, Some(Operation::ChooseProject)) => true,
+                        (id, Some(Operation::ChooseAndroidSource)) => control.case().picker(id).is_some(),
+                        (id, None) => (2..=limit).contains(&id),
+                        _ => false,
+                    }
+            }) { return Err(Reason::Capacity); }
+        Ok(Some(ToolSetupHistory {
+            control: Arc::clone(control),
+            originals: std::array::from_fn(|index| book.originals.get(index).map(|(owner, _)| Arc::clone(owner))),
+            capacity: book.originals.capacity(),
+        }))
+    }
+
     pub(crate) fn register_installed_macos_tool_setup(
         &self,
         token: Registration,
