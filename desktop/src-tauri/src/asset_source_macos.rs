@@ -21,10 +21,15 @@ pub(crate) use history_sources::HistorySources;
 mod github_auth_sources;
 #[path = "git_read_sources_macos.rs"]
 mod git_read_sources;
+#[path = "git_source_flags_macos.rs"]
+mod git_source_flags;
 pub(crate) use git_read_sources::GitReadSources;
 #[path = "git_local_sources_macos.rs"]
 mod git_local_sources;
 pub(crate) use git_local_sources::GitLocalSources;
+#[cfg(test)]
+#[path = "git_sources_native_tests.rs"]
+mod git_sources_native_tests;
 pub(crate) use github_auth_sources::GhAuthSources;
 #[path = "local_history_sources_macos.rs"]
 mod local_history_sources;

@@ -2,6 +2,44 @@
 
 ## Latest continuation — 2026-10-25
 
+Retained-Git run [40141597634](https://github.com/Apdelrahman1911/mobile-release-kit/actions/runs/40141597634)
+on helper `2cb018014c3843e88a4d3dd72ee0f10490c19b35` finished with failure in job
+`121014311545`, step17. Fresh install, readback, signatures and unforced ejection
+passed again. The first `git-index-cli` case completed Open Project, then its
+GitRead settled refused with `unsupported-repository`; app returncode1, original
+call returned, no pending invocation. Later cases stopped and fixtures were
+preserved with zero close errors. This is a real Git-source failure, not the old
+entry pin or image-refresh cancellation. No workflow is active from this run.
+
+Local reproduction: both real native GitRead and GitLocal source inspections
+failed `SourceRefused` on this Mac before correction, with originals settled.
+The fixed CLT Git executable is root-owned, mode0755, one link, and carries
+`UF_COMPRESSED` (32). `/` and `/Library` carry `SF_NOUNLINK` (1048576); `/private`
+also carries Finder's `UF_HIDDEN` (32768). The initial correction still refused
+that hidden bit (`git-sources-native-after.log`), so the final policy includes it.
+The old source code required zero flags for all of these. The correction admits
+compression only for the fixed root-owned Git executable, and the three system
+protection flags plus UF_HIDDEN only for root-owned directories. Repository files retain zero
+flags, and all ownership/mode/link/ACL/hash checks remain. A bounded per-original
+flag roster now requires held/named flags and every later recheck to match.
+Old-file replacement/unlink checks are unchanged. These are new application
+bytes and require a new signed candidate; the ed91 retained app cannot prove them.
+All 21 existing real core Git tests passed in 381.443s using the actual CLT Git:
+read/diff/history, stage/unstage, commit, branches, switch, rename and fast-forward.
+Their fixed platform executable is now shared consistently by setup and the
+operation. No provider/network or user repository was accessed. The deliberate
+expected-old refusal test retained its private fixture as designed; it is not
+reported as a successful mutation/finality result. See `git-core-native-clt.log`.
+Final native verification passed: 323 Git-related Rust tests, including the two
+explicit real Account/SourceBook/ACL source inspections and rechecks, with all
+originals closed. Three flag-policy tests cover root/user ownership, all other
+flag bits, named/held disagreement, later changes and bounded roster capacity.
+The six-step local preflight also passed, including those real native checks;
+it now accepts `--git-test-bin` for a freshly compiled local test binary and
+requires the expected test counts, preventing an empty filter from passing.
+Logs: `git-rust-local-final.log` and `preflight-git-flags/`. Actual UI was not
+rerun on the locked Mac. A fresh signed candidate is the next verification step.
+
 Retained-Git run [40140647775](https://github.com/Apdelrahman1911/mobile-release-kit/actions/runs/40140647775)
 on helper `14c9c90a76d006f8f06460a138b5179bb63629c6` passed fresh installation,
 readback, code signatures and unforced ejection after the 60-second grace. Step17

@@ -24,6 +24,7 @@ pub(crate) struct GitReadSources {
     native: Option<wire::Native>,
     git: Option<usize>,
     indices: [Option<usize>; 4],
+    flags: git_source_flags::Snapshots<SOURCE_LIMIT>,
 }
 impl Drop for GitReadSources {
     fn drop(&mut self) {
@@ -48,6 +49,7 @@ impl GitReadSources {
             native: None,
             git: None,
             indices: [None; 4],
+            flags: git_source_flags::Snapshots::new(),
         }
     }
     pub(crate) fn not_started(&self) -> bool {
@@ -92,7 +94,8 @@ impl GitReadSources {
             || expected.common.mode & 0o7022 != 0
             || expected.size > maximum
             || executable && (expected.size == 0 || expected.common.mode & 0o111 == 0)
-            || before.st_flags != 0
+            || !git_source_flags::permits(before.st_flags, uid,
+                if executable { git_source_flags::Kind::SystemGit } else { git_source_flags::Kind::RepositoryFile })
         {
             return Err(Reason::SourceRefused);
         }
@@ -111,9 +114,12 @@ impl GitReadSources {
         let named = stat::fstatat(self.book.fd(parent)?, OsStr::from_bytes(name), AtFlags::AT_SYMLINK_NOFOLLOW)
             .map_err(|_| Reason::SourceChanged)?;
         checkpoint(stop)?;
-        if file_identity(&held)? != expected || file_identity(&named)? != expected {
+        if file_identity(&held)? != expected || file_identity(&named)? != expected
+            || held.st_flags != before.st_flags || named.st_flags != before.st_flags {
             return Err(Reason::SourceChanged);
         }
+        self.flags.observe(index, held.st_flags, named.st_flags, uid,
+            if executable { git_source_flags::Kind::SystemGit } else { git_source_flags::Kind::RepositoryFile })?;
         self.book.slots[index].identity = Some(Identity::File(expected));
         Ok(index)
     }
@@ -284,12 +290,14 @@ impl GitReadSources {
             checkpoint(stop)?;
             if identity(&held, file)? != expected
                 || identity(&named, file)? != expected
-                || held.st_flags != 0
-                || named.st_flags != 0
                 || held.st_uid != 0 && held.st_uid != uid
             {
                 return Err(Reason::SourceChanged);
             }
+            self.flags.observe(index, held.st_flags, named.st_flags, held.st_uid,
+                if Some(index) == self.indices[0] { git_source_flags::Kind::SystemGit }
+                else if file { git_source_flags::Kind::RepositoryFile }
+                else { git_source_flags::Kind::Directory })?;
             // Existing protected temporary ancestors may be sticky; no other
             // group/other writable directory can nominate a Git executable.
             if held.st_mode & 0o7022 != 0 && !(slot.role == PhysicalRole::Tmp && held.st_mode & 0o1000 != 0) {

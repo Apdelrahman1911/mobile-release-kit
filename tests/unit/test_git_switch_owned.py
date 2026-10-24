@@ -1,7 +1,7 @@
 """PROPOSED exact four owned Git fixtures; DO NOT RUN before Root approval.
 
 Reuse the reviewed nonroot public-source projection, original run_owned C/A/W,
-0700 fixture/HOME/TMPDIR, fixed /usr/bin/git, no remotes/hooks/credentials. The
+0700 fixture/HOME/TMPDIR, fixed platform Git, no remotes/hooks/credentials. The
 invocation selects umask022; production never changes the inherited mask.
 Every fixture keeps the unchanged120s/160calls/5s ceilings, every action45s,
 and the enclosing fail-fast run600s. Failed/unknown fixtures remain intact.
@@ -63,7 +63,7 @@ class OwnedSwitchTests(unittest.TestCase):
         self.remember_fixture()
 
     def repo(self):
-        repository = switch.GitSwitchRepository(self.root, git_executable=Path("/usr/bin/git"),
+        repository = switch.GitSwitchRepository(self.root, git_executable=approved.GIT,
             work_end=min(self.end, time.monotonic() + 45), _run=self.owned)
         self.repositories.append(repository)
         return repository

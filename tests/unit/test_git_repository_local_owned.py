@@ -1,6 +1,6 @@
 """PROPOSED real local Git fixtures. Execute only after Root source approval.
 
-Reuses the already inspected disposable GitRead fixture's fixed /usr/bin/git,
+Reuses the already inspected disposable GitRead fixture's fixed platform Git,
 private repo/HOME/config, original run_owned C/A/W, <=160 calls/120s per fixture,
 <=5s each call, and exact finite cleanup. No user repo, remotes, credentials,
 hooks, network, install, native source admission or installed Mac qualification.
@@ -56,7 +56,7 @@ class OwnedLocalTests(unittest.TestCase):
 
     def local_apply(self, action, paths=()):
         started, initial_calls = time.monotonic(), self.calls
-        observer = local.GitLocalRepository(self.root, git_executable=Path("/usr/bin/git"),
+        observer = local.GitLocalRepository(self.root, git_executable=approved_fixture.GIT,
             work_end=min(self.end, time.monotonic() + 45), _run=self.owned)
         self.repositories.append(observer)
         observed = observer.observe()
@@ -66,7 +66,7 @@ class OwnedLocalTests(unittest.TestCase):
         # Observe is a distinct, now-completed read action. The actual native
         # Apply packet uses one fresh prepare+apply under its SAME 45s bound;
         # never renew a running repository or the enclosing 120s fixture.
-        repository = local.GitLocalRepository(self.root, git_executable=Path("/usr/bin/git"),
+        repository = local.GitLocalRepository(self.root, git_executable=approved_fixture.GIT,
             work_end=min(self.end, time.monotonic() + 45), _run=self.owned)
         self.repositories.append(repository)
         kwargs = {"paths": paths}

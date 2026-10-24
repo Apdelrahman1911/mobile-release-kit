@@ -1,7 +1,7 @@
 """Three Root-approved real-Git fixtures; source review precedes execution.
 
 Reuse the existing nonroot public-source projection and OwnedReadTests helpers,
-not its test collection. Actual run_owned C/A/W, fixed /usr/bin/git, private
+not its test collection. Actual run_owned C/A/W, fixed platform Git, private
 0700 HOME/TMPDIR, umask022, 120s/160calls/5s ceilings, one45s Prepare+Apply and
 the existing600s fail-fast outer bound. No user repository, network, credential,
 hook or native/Store authority. Failed/unknown fixtures remain intact.
@@ -88,7 +88,7 @@ class OwnedRenameTests(unittest.TestCase):
         return approved.OwnedReadTests.owned(self, argv, **options)
 
     def repo(self):
-        repository = rename.GitRenameRepository(self.root, git_executable=Path("/usr/bin/git"),
+        repository = rename.GitRenameRepository(self.root, git_executable=approved.GIT,
             work_end=min(self.end, time.monotonic() + 45), _run=self.owned)
         self.repositories.append(repository)
         return repository

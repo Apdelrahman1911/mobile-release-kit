@@ -1,6 +1,6 @@
 """Explicit, Root-approved disposable real-Git core fixtures.
 
-Only new private temporary repos/home/config. Fixed /usr/bin/git, no remote,
+Only new private temporary repos/home/config. Fixed platform Git (CLT on macOS), no remote,
 provider, host home, global config, repository hook, download or credentials.
 Every setup/read call uses the unchanged run_owned C/A/W lifecycle. This is
 portable core semantics verification, NOT installed Mac/provider qualification.
@@ -11,6 +11,7 @@ import math
 import os
 from pathlib import Path
 import stat
+import sys
 import tempfile
 import time
 import unittest
@@ -18,6 +19,9 @@ import unittest
 from mobile_release import git_repository_read as read
 from mobile_release import git_service as core
 from mobile_release.owned_process import ProcessError, run_owned
+
+
+GIT = Path("/Library/Developer/CommandLineTools/usr/bin/git" if sys.platform == "darwin" else "/usr/bin/git")
 
 
 class OwnedReadTests(unittest.TestCase):
@@ -43,7 +47,7 @@ class OwnedReadTests(unittest.TestCase):
     def reader(self):
         # A fresh owner/deadline for each genuinely distinct action, as in the
         # private worker. Never renew a running action or the enclosing budget.
-        repository = read.GitReadRepository(self.root, git_executable=Path("/usr/bin/git"),
+        repository = read.GitReadRepository(self.root, git_executable=GIT,
             work_end=min(self.end, time.monotonic() + 45), _run=self.owned)
         self.repositories.append(repository)
         return repository
@@ -124,7 +128,7 @@ class OwnedReadTests(unittest.TestCase):
             raise
 
     def git(self, *args):
-        result = self.owned(["/usr/bin/git", "--no-pager", "-c", "core.hooksPath=" + os.devnull,
+        result = self.owned([str(GIT), "--no-pager", "-c", "core.hooksPath=" + os.devnull,
             "-c", "commit.gpgsign=false", "-c", "tag.gpgsign=false", "-c", "gc.auto=0",
             "-c", "maintenance.auto=false", "-c", "protocol.allow=never",
             "-c", "user.name=GitReadFixture", "-c", "user.email=fixture@example.invalid", *args],

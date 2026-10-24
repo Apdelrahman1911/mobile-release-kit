@@ -3,6 +3,8 @@
 
 Run with Python >=3.11. --transport also mounts two tiny read-only fixtures.
 The real accessibility smoke is opt-in because it needs a local OS permission.
+--git-test-bin runs real Git source custody against a locally compiled Rust test
+binary, using Apple's CLT Git and a disposable repository.
 """
 import argparse
 import json
@@ -16,6 +18,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--transport', action='store_true')
     parser.add_argument('--dialog', action='store_true')
+    parser.add_argument('--git-test-bin', type=Path)
     parser.add_argument('--output', type=Path, required=True)
     args = parser.parse_args()
     if sys.platform != 'darwin' or sys.version_info < (3, 11) or os.getuid() == 0:
@@ -27,15 +30,16 @@ def main():
     env = dict(os.environ, TMPDIR=str(temporary))
     results = []
 
-    def run(name, command, *, timeout=60):
+    def run(name, command, *, timeout=60, expected_output=None):
         with (output / (name + '.log')).open('xb') as log:
             result = subprocess.run(command, cwd=root, env=env, stdout=log, stderr=subprocess.STDOUT,
                                     timeout=timeout, check=False)
-        results.append({'check': name, 'returncode': result.returncode})
+        matched = expected_output is None or expected_output in (output / (name + '.log')).read_bytes()
+        results.append({'check': name, 'returncode': result.returncode, 'expectedOutputMatched': matched})
         (output / 'results.json').write_text(json.dumps({'checks': results}, indent=2) + '\n')
-        if result.returncode:
+        if result.returncode or not matched:
             print(f'{name} failed; see {output / (name + ".log")}', file=sys.stderr)
-            raise SystemExit(result.returncode)
+            raise SystemExit(result.returncode or 1)
 
     run('installer-data', [sys.executable, '-m', 'unittest', 'discover', '-s', 'tests/desktop',
                           '-p', 'test_macos_distribution_detach.py'])
@@ -47,6 +51,13 @@ def main():
         '-framework', 'AppKit', '-framework', 'ApplicationServices',
         'tests/desktop/macos_dialog_smoke.m', '-o', str(executable)])
     run('native-dialog-allowances', [str(executable), '--allowance-contract'])
+    if args.git_test_bin:
+        test_bin = args.git_test_bin.resolve(strict=True)
+        env['RUST_MIN_STACK'] = '16777216'
+        run('native-git-sources', [str(test_bin), 'git_sources_native_tests', '--ignored', '--test-threads=1'],
+            expected_output=b'2 passed; 0 failed')
+        run('git-source-flags', [str(test_bin), 'git_source_flags::tests', '--test-threads=1'],
+            expected_output=b'3 passed; 0 failed')
     if args.transport:
         env['MRK_RUN_LOCAL_MAC_SMOKE'] = '1'
         run('native-transport', [sys.executable, '-m', 'unittest', 'discover', '-s', 'tests/desktop',

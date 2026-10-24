@@ -9,10 +9,16 @@ fix, locally test and rerun failures. Work remains on
 Read [MACOS-LOCAL-RESULTS.md](MACOS-LOCAL-RESULTS.md) first for current run status,
 original failures, candidate changes and exact verification limits.
 
-The retained Git install/cleanup passed in run40140647775; its next step exposed
-a stale driver source pin, now corrected. The explicit Tool26 service request
-correction is locally tested but still needs signed hosted execution. Continue
-the next exact run below; neither job has passed its full native scope yet.
+The latest retained-Git run40141597634 finished: install/cleanup and Open Project
+passed, then the first real GitRead refused `unsupported-repository` with settled
+originals. Both native source inspections reproduced a refusal locally. Their
+zero-flags policy rejected Apple's compressed CLT Git and protected system
+ancestors. The narrow flag-policy correction passes 323 Git Rust tests, both real
+native source inspections, 21 real core Git tests and the six-step local preflight. It changes
+application bytes and requires a fresh signed candidate, not another ed91 reuse.
+The explicit Tool26 service request correction is locally tested but still needs
+signed hosted execution. See the latest local results for the next run; neither
+job has passed its full native scope yet.
 
 **Run 40132594293 is finished with failure.** Git27 installed/read back successfully,
 then diskutil eject1 identified `installd` as the dissenter. Tool26 installed and

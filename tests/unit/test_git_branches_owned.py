@@ -63,7 +63,7 @@ class OwnedBranchTests(unittest.TestCase):
         return approved.OwnedReadTests.owned(self, argv, **options)
 
     def repo(self):
-        repository = branches.GitBranchesRepository(self.root, git_executable=Path("/usr/bin/git"),
+        repository = branches.GitBranchesRepository(self.root, git_executable=approved.GIT,
             work_end=min(self.end, time.monotonic() + 45), _run=self.owned)
         self.repositories.append(repository)
         return repository

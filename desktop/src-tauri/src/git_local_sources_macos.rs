@@ -85,6 +85,7 @@ pub(crate) struct GitLocalSources {
     native: Option<wire::Native>,
     git: Option<usize>,
     indices: [Option<usize>; 4],
+    flags: git_source_flags::Snapshots<SOURCE_LIMIT>,
     operation_id: Option<String>,
     review: Option<wire::Review>,
     reference: Option<RefEdge>,
@@ -129,6 +130,7 @@ impl GitLocalSources {
             native: None,
             git: None,
             indices: [None; 4],
+            flags: git_source_flags::Snapshots::new(),
             operation_id: None, review: None, reference: None, replacement: None,
             post_claimed: false, switch:None, rename:None, fast_forward:None,initialization:None,fetch:None,push:None,upstream:None,
             #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
@@ -201,7 +203,8 @@ impl GitLocalSources {
             || expected.common.mode & 0o7022 != 0
             || expected.size > maximum
             || executable && (expected.size == 0 || expected.common.mode & 0o111 == 0)
-            || before.st_flags != 0
+            || !git_source_flags::permits(before.st_flags, uid,
+                if executable { git_source_flags::Kind::SystemGit } else { git_source_flags::Kind::RepositoryFile })
         {
             return Err(Reason::SourceRefused);
         }
@@ -220,9 +223,12 @@ impl GitLocalSources {
         let named = stat::fstatat(self.book.fd(parent)?, OsStr::from_bytes(name), AtFlags::AT_SYMLINK_NOFOLLOW)
             .map_err(|_| Reason::SourceChanged)?;
         checkpoint(stop)?;
-        if file_identity(&held)? != expected || file_identity(&named)? != expected {
+        if file_identity(&held)? != expected || file_identity(&named)? != expected
+            || held.st_flags != before.st_flags || named.st_flags != before.st_flags {
             return Err(Reason::SourceChanged);
         }
+        self.flags.observe(index, held.st_flags, named.st_flags, uid,
+            if executable { git_source_flags::Kind::SystemGit } else { git_source_flags::Kind::RepositoryFile })?;
         self.book.slots[index].identity = Some(Identity::File(expected));
         Ok(index)
     }
@@ -568,8 +574,11 @@ impl GitLocalSources {
                     stat::fstatat(self.book.fd(parent)?, OsStr::from_bytes(&slot.name), AtFlags::AT_SYMLINK_NOFOLLOW)
                 } else { stat::lstat(Path::new("/")) }.map_err(|_|Reason::SourceChanged)?;
                 checkpoint(stop)?;
-                if identity(&held,file)? != expected || identity(&named,file)? != expected
-                    || held.st_flags != 0 || named.st_flags != 0 { return Err(Reason::SourceChanged); }
+                if identity(&held,file)? != expected || identity(&named,file)? != expected { return Err(Reason::SourceChanged); }
+                self.flags.observe(index, held.st_flags, named.st_flags, held.st_uid,
+                    if Some(index) == self.indices[0] { git_source_flags::Kind::SystemGit }
+                    else if file { git_source_flags::Kind::RepositoryFile }
+                    else { git_source_flags::Kind::Directory })?;
             }
             if held.st_uid != 0 && held.st_uid != uid {
                 return Err(Reason::SourceChanged);

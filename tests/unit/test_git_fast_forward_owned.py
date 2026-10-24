@@ -1,7 +1,7 @@
 """Three scoped real-Git fixtures; source approval precedes execution.
 
 Reuse OwnedReadTests/run_owned, not its test collection: nonroot, private
-HOME/TMPDIR, fixed /usr/bin/git, no network/hooks/credentials, umask022,
+HOME/TMPDIR, fixed platform Git, no network/hooks/credentials, umask022,
 120s/160calls/5s per fixture, ONE45s Prepare+Apply, existing600s outer bound.
 MutationOwner alone is inert; no native/Store/SourceBook authority is asserted.
 
@@ -148,7 +148,7 @@ class OwnedFastForwardTests(unittest.TestCase):
         self.remember_fixture()
 
     def prepared(self):
-        observer = read.GitReadRepository(self.root, git_executable=Path("/usr/bin/git"),
+        observer = read.GitReadRepository(self.root, git_executable=approved.GIT,
             work_end=min(self.end, time.monotonic() + 45), _run=self.owned)
         self.repositories.append(observer)
         observed = observer.observe()
@@ -156,7 +156,7 @@ class OwnedFastForwardTests(unittest.TestCase):
         self.assertEqual((observed.tracking.state, observed.tracking.local_ref, observed.tracking.head,
                           observed.tracking.ahead, observed.tracking.behind),
                          ("complete", TRACKING, self.target, 0, 1))
-        repository = ff.GitFastForwardRepository(self.root, git_executable=Path("/usr/bin/git"),
+        repository = ff.GitFastForwardRepository(self.root, git_executable=approved.GIT,
             work_end=min(self.end, time.monotonic() + 45), _run=self.owned)
         self.repositories.append(repository)
         started, calls = time.monotonic(), self.calls
