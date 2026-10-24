@@ -19,6 +19,25 @@ SAMPLE = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(SAMPLE)
 PRIVATE = "PRIVATE STACK PATH STDERR MUST NOT BE EXPORTED"
 WALK = "installed_shell_observation::installed_runtime::Book::walk"
+# Generated, not executed, using existing rustc1.98.0 (88d9e12ae), default v0:
+# --edition=2021 --crate-type=lib --emit=llvm-ir -C opt-level=0 -o - -
+# Exact1.98.1 tagged compiler source also declares v0 default. These fixtures
+# establish encodings, NOT symbols observed in the signed Mac application.
+V0_CASES = (
+    ("inventory-walk", "_RNvMNtCs9EckvoX1OKL_27installed_shell_observation17installed_runtimeNtB2_4Book4walk"),
+    ("inventory-inspect", "_RNvMNtCs9EckvoX1OKL_27installed_shell_observation17installed_runtimeNtB2_4Book7inspect"),
+    ("inventory-read", "_RNvMs_NtCs9EckvoX1OKL_27installed_shell_observation17installed_runtimeNtB4_4Book4read"),
+    ("inventory-reserve", "_RNvMs_NtCs9EckvoX1OKL_27installed_shell_observation17installed_runtimeNtB4_4Book7reserve"),
+    ("runtime-resolve", "_RNvMNtCs9EckvoX1OKL_27installed_shell_observation7runtimeNtB2_13RuntimeConfig25resolve_passive_installed"),
+    ("supervisor-prepare", "_RNvMNtCs9EckvoX1OKL_27installed_shell_observation10supervisorNtB2_20PreparedPassiveSpawn7prepare"),
+    ("supervisor-admission", "_RNvNtCs9EckvoX1OKL_27installed_shell_observation10supervisor24acquire_passive_original"),
+    ("supervisor-spawn", "_RNvNtCs9EckvoX1OKL_27installed_shell_observation10supervisor22spawn_passive_original"),
+    ("supervisor-wait", "_RNCNvNtCs9EckvoX1OKL_27installed_shell_observation10supervisor13wait_original0B5_"),
+    ("supervisor-write", "_RNCNvNtCs9EckvoX1OKL_27installed_shell_observation10supervisor13write_request0B5_"),
+    ("supervisor-read", "_RINvNtCs9EckvoX1OKL_27installed_shell_observation10supervisor12read_boundedhEB4_"),
+    ("supervisor-read", "_RNCINvNtCs9EckvoX1OKL_27installed_shell_observation10supervisor12read_boundedhE0B6_"),
+    ("filesystem-observe", "_RNvMNtCskC5sipNRyls_26mrk_macos_installed_native16vault_filesystemNtB2_12SnapshotBook14observe_phased"),
+)
 
 
 def frame(symbol, count=123):
@@ -123,7 +142,7 @@ class NativeStartupSampleTests(unittest.TestCase):
         raw = report(frame(WALK, 999), frame(WALK + "::h0123456789abcdef", 1),
             frame("mobile_release_desktop::installed_runtime::Book::inspect", 12),
             frame("installed_shell_observation::supervisor::read_bounded::{{closure}}", 14))
-        shape, matched, counts = SAMPLE.report_shape(raw)
+        shape, matched, counts, _, _, _ = SAMPLE.report_shape(raw)
         self.assertEqual((shape, matched), ("known-symbols", True))
         self.assertEqual((counts["inventory-walk"], counts["inventory-inspect"], counts["supervisor-read"]), (2, 1, 1))
         self.assertEqual(sum(counts.values()), 4)
@@ -132,7 +151,7 @@ class NativeStartupSampleTests(unittest.TestCase):
         legacy = "_ZN" + "".join(f"{len(part)}{part}" for part in WALK.split("::")) + "17h0123456789abcdefE"
         raw = report(frame(legacy), frame("mrk_macos_installed_native::vault_filesystem::SnapshotBook::observe_phased"),
                      frame("mrk_vault_acl_step"))
-        shape, _, counts = SAMPLE.report_shape(raw)
+        shape, _, counts, _, _, _ = SAMPLE.report_shape(raw)
         self.assertEqual(shape, "known-symbols")
         self.assertEqual((counts["inventory-walk"], counts["filesystem-observe"], counts["filesystem-acl"]), (1, 1, 1))
 
@@ -140,9 +159,52 @@ class NativeStartupSampleTests(unittest.TestCase):
         raw = report(frame("???") + " " + WALK, frame(WALK + "_unrelated"), frame("different_" + WALK),
                      summary=frame(WALK))
         raw = raw.replace(("/" + PRIVATE).encode(), ("/" + WALK).encode())
-        shape, matched, counts = SAMPLE.report_shape(raw)
+        shape, matched, counts, _, _, _ = SAMPLE.report_shape(raw)
         self.assertEqual((shape, matched), ("no-known-symbols", True))
         self.assertTrue(all(value == 0 for value in counts.values()))
+
+    def test_default_v0_generated_fixed_paths_impl_disambiguators_and_async_generics(self):
+        for label, symbol in (*V0_CASES, ("inventory-walk", "_" + V0_CASES[0][1] + ".llvm.123")):
+            with self.subTest(label=label, symbol=symbol):
+                shape, matched, counts, weights, seen, unmatched = SAMPLE.report_shape(report(frame(symbol, 37)))
+                self.assertEqual((shape, matched, seen, unmatched), ("known-symbols", True, 1, 0))
+                self.assertEqual((counts[label], weights[label], sum(counts.values()), sum(weights.values())), (1, 37, 1, 37))
+        # Exact outputs of existing c++filt -s rust on the generated fixtures.
+        for label, symbol in (
+            ("inventory-walk", "<installed_shell_observation[706169e86843f385]::installed_runtime::Book>::walk"),
+            ("supervisor-read", "installed_shell_observation[706169e86843f385]::supervisor::read_bounded::<u8>::{closure#0}")):
+            shape, matched, counts, weights, seen, unmatched = SAMPLE.report_shape(report(frame(symbol, 37)))
+            self.assertEqual((shape, matched, seen, unmatched), ("known-symbols", True, 0, 0))
+            self.assertEqual((counts[label], weights[label], sum(counts.values())), (1, 37, 1))
+
+    def test_v0_wrong_identifiers_backrefs_embedded_paths_or_unsupported_forms_do_not_match(self):
+        walk = V0_CASES[0][1]
+        # The last actual compiler-generated symbol mentions the right function
+        # ONLY in drop_glue's generic argument. It must not become that function.
+        invalid = (walk.replace("27installed_shell_observation", "32fake_installed_shell_observation"),
+            walk.replace("17installed_runtime", "23installed_runtime_extra"), walk.replace("4Book", "8BookCopy"),
+            walk.replace("4walk", "10walk_extra"), walk.replace("NtB2_", "NtB3_"), walk + "extra",
+            "_RINvNtCsc36rpYXAlPq_4core3ptr9drop_glueNCINvNtCs9EckvoX1OKL_27installed_shell_observation10supervisor12read_boundedhE0EBI_")
+        for symbol in invalid:
+            with self.subTest(symbol=symbol):
+                shape, matched, counts, weights, seen, unmatched = SAMPLE.report_shape(report(frame(symbol)))
+                self.assertEqual((shape, matched, seen, unmatched), ("no-known-symbols", True, 1, 1))
+                self.assertEqual((sum(counts.values()), sum(weights.values())), (0, 0))
+        for symbol in ("<installed_shell_observation[not-hex]::installed_runtime::Book>::walk",
+                       "<installed_shell_observation[706169e86843f385]::installed_runtime::BookCopy>::walk",
+                       "<installed_shell_observation[706169e86843f385]::installed_runtime::Book>::walk_extra"):
+            shape, _, counts, weights, _, _ = SAMPLE.report_shape(report(frame(symbol)))
+            self.assertEqual((shape, sum(counts.values()), sum(weights.values())), ("no-known-symbols", 0, 0))
+
+    def test_weights_include_ancestor_overlap_and_recursion_not_exclusive_time_or_operations(self):
+        raw = report(frame(WALK, 100), frame(V0_CASES[0][1], 25),
+                     frame("installed_shell_observation::installed_runtime::Book::read", 100))
+        result = self.run_sample(raw=raw)
+        self.assertEqual(result["knownSymbolLineCounts"]["inventory-walk"], 2)
+        self.assertEqual(result["knownSymbolInclusiveStackWeights"]["inventory-walk"], 125)
+        self.assertEqual(result["knownSymbolInclusiveStackWeights"]["inventory-read"], 100)
+        self.assertEqual((result["rustV0FrameLines"], result["unmatchedRustV0FrameLines"]), (1, 0))
+        self.assertEqual(result["weightMeaning"], "inclusive-stack-lines-not-exclusive-cpu-time-or-operations")
 
     def test_matched_report_without_known_symbols_is_explicit_not_absence_proof(self):
         result = self.run_sample(raw=report(frame("???")))
@@ -157,7 +219,7 @@ class NativeStartupSampleTests(unittest.TestCase):
                     b"Process: " + SAMPLE.PROCESS.encode() + b" [456]\n" + valid,
                     valid.replace(b"Path:", b"Elsewhere:")):
             with self.subTest(raw=raw[:40]):
-                self.assertEqual(SAMPLE.report_shape(raw), ("header-mismatch", False, None))
+                self.assertEqual(SAMPLE.report_shape(raw), ("header-mismatch", False, None, None, None, None))
         result = self.run_sample(raw=report(path=PRIVATE))
         self.assertEqual((result["outcome"], result["knownSymbolLineCounts"]), ("unavailable", None))
 
@@ -168,8 +230,9 @@ class NativeStartupSampleTests(unittest.TestCase):
                     valid.replace(b"Call graph:\n", b""), valid + b"Binary Images:\n",
                     report("Not a call-tree frame"), valid.replace(b"Path:", b"Call graph:\nPath:")):
             with self.subTest(raw=raw[:40]):
-                shape, _, counts = SAMPLE.report_shape(raw)
+                shape, _, counts, weights, seen, unmatched = SAMPLE.report_shape(raw)
                 self.assertEqual((shape, counts), ("invalid", None))
+                self.assertEqual((weights, seen, unmatched), (None, None, None))
 
     def test_nonzero_sampler_return_is_unavailable_without_exporting_refusal_prose(self):
         result = self.run_sample(code=1, raw=b"", stdout=PRIVATE.encode(), stderr=PRIVATE.encode())

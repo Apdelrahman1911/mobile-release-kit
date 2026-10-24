@@ -50,23 +50,86 @@ def _need(value):
         raise ValueError("native-sample-refused")
 
 
+def _symbol_names(symbol):
+    return ([f"{crate}::{symbol}" for crate in ("installed_shell_observation", "mobile_release_desktop")]
+            if symbol.startswith(("installed_runtime::", "runtime::", "supervisor::")) else [symbol])
+
+
 def _symbol_pattern(symbol):
-    names = ([f"{crate}::{symbol}" for crate in ("installed_shell_observation", "mobile_release_desktop")]
-             if symbol.startswith(("installed_runtime::", "runtime::", "supervisor::")) else [symbol])
-    # Apple may present demangled names or legacy length-encoded Rust symbols.
-    # Other/stripped spellings can legitimately produce no-known-symbols.
-    demangled = "|".join(re.escape(name) for name in names)
+    names = _symbol_names(symbol)
+    # Also accept the exact v0 display forms observed with c++filt -s rust:
+    # crate[hex]::module::fn and <crate[hex]::module::Type>::method.
+    demangled = []
+    for name in names:
+        parts = [re.escape(part) for part in name.split("::")]
+        if len(parts) > 1:
+            parts[0] += r"(?:\[[0-9a-f]{1,16}\])?"
+            parent = "::".join(parts[:-1])
+            if len(parts) == 4:
+                parent = "(?:<" + parent + ">|" + parent + ")"
+            demangled.append(parent + "::" + parts[-1])
+        else:
+            demangled.append(parts[0])
+    demangled = "|".join(demangled)
     legacy = "|".join(re.escape("".join(f"{len(part)}{part}" for part in name.split("::"))) for name in names)
     return re.compile(r"(?<![A-Za-z0-9_:])(?:(?:" + demangled + r")(?=::|[^A-Za-z0-9_]|$)|__?ZN(?:"
                       + legacy + r")(?=[0-9E]))")
 
 
 PATTERNS = {label: _symbol_pattern(symbol) for label, symbol in SYMBOLS.items()}
-FRAME = re.compile(r"^[ \t+|:!]*[1-9][0-9]*[ \t]+(.+?)[ \t]+\(in ")
+DISAMBIGUATOR = r"(?:s[A-Za-z0-9]{0,16}_)?"
+BACKREF = r"[A-Za-z0-9]{0,8}_"
+V0_FRAME = re.compile(r"__?R([A-Za-z0-9_]+)(?:\.llvm\.[0-9]+)?\Z")
+
+
+def _v0_pattern(symbol):
+    """Only fixed complete paths: free functions or inherent methods, optionally
+    instantiated and/or inside one closure. NOT a general Rust-v0 demangler.
+    Rust1.98 defaults to v0; legacy-only matching loses undemangled Rust frames.
+    """
+    names = [[f"{len(part)}{part}" for part in name.split("::")] for name in _symbol_names(symbol)]
+    if len(names[0]) not in (3, 4):
+        return None
+    module = r"(?P<module>NtC" + DISAMBIGUATOR + "(?:" + "|".join("".join(name[:2]) for name in names) + "))"
+    path = (module + names[0][2] if len(names[0]) == 3 else
+            "M" + DISAMBIGUATOR + module + r"NtB(?P<parent>" + BACKREF + ")" + "".join(names[0][2:]))
+    return re.compile(r"(?P<closure>NC)?(?P<generic>I?)Nv" + path + r"(?P<tail>[A-Za-z0-9_]*)\Z")
+
+
+V0_PATTERNS = {label: _v0_pattern(symbol) for label, symbol in SYMBOLS.items()}
+
+
+def _backref(value):
+    number = 0
+    for char in value[:-1]:
+        number = number * 62 + "0123456789abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ".index(char)
+    return number + 1 if value != "_" else 0
+
+
+def _v0_matches(pattern, body):
+    match = pattern.fullmatch(body) if pattern is not None and body is not None else None
+    if match is None:
+        return False
+    if "parent" in match.groupdict() and _backref(match["parent"]) != match.start("module"):
+        return False  # Book/type must refer to THIS fully encoded crate/module.
+    if not match["generic"] and not match["closure"]:
+        return not match["tail"]
+    # Generic arguments remain opaque, never searched for known names. Accept
+    # only the observed same-crate suffix; other backrefs/trait paths stay unknown.
+    suffix = (r"[A-Za-z0-9_]+E" if match["generic"] else "")
+    suffix += (DISAMBIGUATOR + "0" if match["closure"] else "")
+    tail = re.fullmatch(suffix + r"B(" + BACKREF + ")", match["tail"])
+    return tail is not None and _backref(tail[1]) == match.start("module") + 2
+
+
+FRAME = re.compile(r"^[ \t+|:!]*([1-9][0-9]{0,9})[ \t]+(.+?)[ \t]+\(in ")
 
 
 def report_shape(raw):
-    """Count matching CALL-TREE LINES, not samples, CPU time or exclusive stages.
+    """Count matching CALL-TREE LINES and their inclusive integer line weights.
+
+    Weights can overlap between ancestors/recursion; they are NOT exclusive CPU
+    time, duration, percentages or a count of operations. Zero is not absence.
 
     Only the graph is searched, not repeated summaries, source paths or binary
     images. A returned0 sampler, sub-limit capture, trailing newline and image
@@ -82,7 +145,7 @@ def report_shape(raw):
                    and re.fullmatch(r"Path:[ \t]+" + re.escape(EXECUTABLE), paths[0]) is not None
                    and re.fullmatch(r"Process:[ \t]+" + PROCESS + r" \[[1-9][0-9]{0,9}\]", processes[0]) is not None)
         if not matched:
-            return "header-mismatch", False, None
+            return "header-mismatch", False, None, None, None, None
         _need(lines.count("Call graph:") == lines.count("Binary Images:") == 1)
         start, footer = lines.index("Call graph:"), lines.index("Binary Images:")
         _need(lines.index(paths[0]) < start and lines.index(processes[0]) < start < footer)
@@ -90,13 +153,25 @@ def report_shape(raw):
                   for line in lines[footer + 1:]))
         end = next((index for index in range(start + 1, footer) if lines[index].startswith((
             "Total number in stack ", "Sort by top of stack,"))), footer)
-        frames = [match.group(1) for line in lines[start + 1:end] if (match := FRAME.match(line))]
+        frames = [(int(match[1]), match[2]) for line in lines[start + 1:end] if (match := FRAME.match(line))]
         _need(frames)
-        counts = {label: sum(pattern.search(frame) is not None for frame in frames)
-                  for label, pattern in PATTERNS.items()}
-        return "known-symbols" if any(counts.values()) else "no-known-symbols", True, counts
+        counts, weights = dict.fromkeys(SYMBOLS, 0), dict.fromkeys(SYMBOLS, 0)
+        v0_lines = unmatched_v0 = 0
+        for weight, frame in frames:
+            v0 = V0_FRAME.fullmatch(frame)
+            body = v0[1] if v0 else None
+            known = False
+            for label, pattern in PATTERNS.items():
+                if pattern.search(frame) is not None or _v0_matches(V0_PATTERNS[label], body):
+                    counts[label] += 1
+                    weights[label] += weight
+                    known = True
+            if v0:  # Format-looking lines, not a claim to validate all v0 syntax.
+                v0_lines += 1
+                unmatched_v0 += not known
+        return "known-symbols" if any(counts.values()) else "no-known-symbols", True, counts, weights, v0_lines, unmatched_v0
     except (ValueError, TypeError, UnicodeError):
-        return "invalid", matched, None
+        return "invalid", matched, None, None, None, None
 
 
 def _child_limits():
@@ -110,6 +185,9 @@ def _result():
     return {"schemaVersion": 1, "scope": SCOPE, "outcome": "refused",
             "elapsedSeconds": None, "exitCode": None, "reportShape": "not-read",
             "installedHeaderMatches": None, "knownSymbolLineCounts": None,
+            "knownSymbolInclusiveStackWeights": None,
+            "weightMeaning": "inclusive-stack-lines-not-exclusive-cpu-time-or-operations",
+            "rustV0FrameLines": None, "unmatchedRustV0FrameLines": None,
             "stdoutBytes": None, "stderrBytes": None, "captures": "not-created"}
 
 
@@ -120,7 +198,7 @@ def _read_report(path):
         _need(stat.S_ISREG(info.st_mode) and stat.S_IMODE(info.st_mode) == 0o600
               and info.st_uid == os.getuid() and info.st_nlink == 1)
         if info.st_size >= CAPTURE_LIMIT:
-            return "capture-limit", None, None
+            return "capture-limit", None, None, None, None, None
         return report_shape(original.read(CAPTURE_LIMIT))
 
 
@@ -174,8 +252,10 @@ def sample(uid):
                     result["reportShape"] = "capture-limit"
                 elif result["outcome"] == "returned" and child.returncode == 0:
                     try:
-                        shape, matched, counts = _read_report(path)
-                        result.update(reportShape=shape, installedHeaderMatches=matched, knownSymbolLineCounts=counts)
+                        shape, matched, counts, weights, v0_lines, unmatched_v0 = _read_report(path)
+                        result.update(reportShape=shape, installedHeaderMatches=matched,
+                                      knownSymbolLineCounts=counts, knownSymbolInclusiveStackWeights=weights,
+                                      rustV0FrameLines=v0_lines, unmatchedRustV0FrameLines=unmatched_v0)
                     except (OSError, ValueError):
                         result["reportShape"] = "invalid"
                 if result["outcome"] == "returned":
