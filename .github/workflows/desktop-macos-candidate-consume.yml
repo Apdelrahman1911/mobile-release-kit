@@ -19,6 +19,10 @@ on:
         description: Diagnose only bundled Python startup on the retained Git ARM build; do not launch or qualify the app
         type: boolean
         default: false
+      native_startup_sample:
+        description: Observe only the first retained Git startup with Apple sample; not a qualification run
+        type: boolean
+        default: false
       tool_resume_from:
         description: Start independent Tool checks at service; skipped identity edits remain unverified
         type: choice
@@ -36,7 +40,7 @@ concurrency:
 jobs:
   install-retained-observer:
     if: github.repository == 'Apdelrahman1911/mobile-release-kit' && github.event_name == 'workflow_dispatch' && (inputs.operation == 'install-retained-observer' || inputs.operation == 'install-retained-git-observer') && inputs.architecture == 'arm64' && github.ref == 'refs/heads/verify/desktop-macos-observer-reuse'
-    name: ${{ inputs.bundled_core_diagnostic && 'Diagnose bundled Mac core startup (no rebuild)' || 'Reuse signed Mac build and complete core functional checks' }}
+    name: ${{ inputs.bundled_core_diagnostic && 'Diagnose bundled Mac core startup (no rebuild)' || inputs.native_startup_sample && 'Observe native Mac startup (no rebuild)' || 'Reuse signed Mac build and complete core functional checks' }}
     runs-on: ${{ inputs.operation == 'install-retained-git-observer' && 'xcode-27' || 'macos-26' }}
     timeout-minutes: 260
     env:
@@ -58,6 +62,7 @@ jobs:
         env:
           RUNNER_ENVIRONMENT: ${{ runner.environment }}
           MRK_CORE_DIAGNOSTIC_REQUESTED: ${{ inputs.bundled_core_diagnostic }}
+          MRK_NATIVE_SAMPLE_REQUESTED: ${{ inputs.native_startup_sample }}
           MRK_TOOL_RESUME_FROM: ${{ inputs.tool_resume_from }}
         run: |
           set +x
@@ -69,6 +74,9 @@ jobs:
           [[ "$RUNNER_TEMP" == /Users/runner/work/_temp && "$(/usr/bin/id -u)" != 0 && "$(/usr/bin/uname -m)" == arm64 ]]
           if [[ "$MRK_CORE_DIAGNOSTIC_REQUESTED" == true ]]; then
             [[ "$MRK_CANDIDATE_MODE" == install-retained-git-observer ]]
+          fi
+          if [[ "$MRK_NATIVE_SAMPLE_REQUESTED" == true ]]; then
+            [[ "$MRK_CANDIDATE_MODE" == install-retained-git-observer && "$MRK_CORE_DIAGNOSTIC_REQUESTED" != true ]]
           fi
           [[ "$MRK_TOOL_RESUME_FROM" == identity || "$MRK_TOOL_RESUME_FROM" == service ]]
           if [[ "$MRK_TOOL_RESUME_FROM" == service ]]; then
@@ -237,8 +245,35 @@ jobs:
           "$MRK_PYTHON" -I -S -B "$driver" --retained-observer --target "$MRK_MACOS_TARGET" --scope upload-key-backup-roundtrip
           exec "$MRK_PYTHON" -I -S -B "$driver" --retained-observer --target "$MRK_MACOS_TARGET" --scope upload-key-backup-cli
 
+      - name: Observe native startup beside the unchanged first Git case
+        if: env.MRK_CANDIDATE_MODE == 'install-retained-git-observer' && inputs.native_startup_sample && !inputs.bundled_core_diagnostic
+        timeout-minutes: 5
+        shell: bash
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: |
+          set +x
+          set -euo pipefail
+          umask 077
+          ulimit -c 0
+          helper="$GITHUB_WORKSPACE/.candidate-consumer-helper/desktop/tools"
+          # Name-selected stack observation only. No app control, prewarming,
+          # raw report upload, later cases, or feature-qualification claim.
+          MRK_MACOS_NATIVE_STARTUP_SAMPLE=true "$MRK_PYTHON" -I -S -B "$helper/macos_native_startup_sample.py" &
+          sampler=$!
+          set +e
+          "$MRK_PYTHON" -I -S -B "$helper/macos_identity_current_runtime.py" \
+            --retained-observer --target "$MRK_MACOS_TARGET" --scope git-index-cli-native
+          case_status=$?
+          wait "$sampler"
+          sampler_status=$?
+          set -e
+          printf 'Original case exit: %s; diagnostic sampler exit: %s\n' "$case_status" "$sampler_status"
+          if [[ "$case_status" != 0 ]]; then exit "$case_status"; fi
+          exit "$sampler_status"
+
       - name: Verify fifteen existing Git cases on the freshly installed signed Git observer
-        if: env.MRK_CANDIDATE_MODE == 'install-retained-git-observer' && !inputs.bundled_core_diagnostic
+        if: env.MRK_CANDIDATE_MODE == 'install-retained-git-observer' && !inputs.bundled_core_diagnostic && !inputs.native_startup_sample
         timeout-minutes: 25
         shell: bash
         env:
