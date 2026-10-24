@@ -2184,9 +2184,16 @@ mod lookup_memory {
             }
         }
         fn slot(&mut self, slot: &Slot) -> Result<(), Problem> {
-            if slot.project.is_some() || slot.evidence.is_some()
+            if slot.evidence.is_some()
                 || slot.project_path.is_some() || slot.path_result.is_some() { return Err(Problem::Unavailable); }
             self.add(std::mem::size_of::<Slot>())?;
+            // The ordinary chooser keeps its published Project after result
+            // return and Snapshot. Charge its three owned String buffers; the
+            // inline cells are above and the SAME original owner is below.
+            // This DATA is neither a registered source nor a join receipt.
+            if let Some(project) = &slot.project {
+                self.add(project.id.capacity())?; self.add(project.name.capacity())?; self.add(project.path.capacity())?;
+            }
             if let Some(assessment) = &slot.assessment { self.assessment(assessment)?; }
             if let Some(payload) = &slot.vault.loaded { self.payload(payload)?; }
             if let Some(loan) = &slot.vault.previous_bound {
@@ -2702,6 +2709,115 @@ mod lookup_memory {
         // These are the ACTUAL child/source/retirement dispatch locks; none is
         // released between the census and publishing the one nonduplicable charge.
         drop((book, retirement, source, child, coordinator)); result
+    }
+
+    #[cfg(test)]
+    mod project_result_census_tests {
+        // Direct census logic with inert DATA only. No DocumentBinding, native
+        // picker, native registration, task or Git operation is constructed here.
+        use super::*;
+
+        fn census() -> Census<'static> {
+            Census { current: None, bytes: 0, payloads: Seen::new(), materials: Seen::new(), contexts: Seen::new(),
+                sources: Seen::new(), owners: Seen::new(), assessments: Seen::new(), secret_loans: Seen::new(),
+                vault_stores: Seen::new(), vault_keys: Seen::new() }
+        }
+        fn slot_data() -> Slot {
+            let owner = OriginalWork::new(1, false, Weak::new());
+            // Model the retained receipt; this does not assert a native join.
+            owner.coordinator.lock().unwrap().receipt = JoinReceipt::Returned;
+            let mut slot = Slot::new(owner, Operation::ChooseProject, None, None, None);
+            slot.phase = Phase::Idle; slot.settlement = Settlement::Known;
+            slot
+        }
+        fn project_data() -> Project {
+            let mut project = Project { id: String::with_capacity(91), name: String::with_capacity(513), path: String::with_capacity(4097) };
+            project.id.push_str("project-1"); project.name.push_str("Retained project DATA"); project.path.push_str("/inert/project");
+            project
+        }
+        fn slot_bytes(slot: &Slot) -> Result<usize, Problem> {
+            let mut census = census(); census.slot(slot)?; Ok(census.bytes)
+        }
+        fn document_bytes(state: &DocumentState) -> Result<usize, Problem> {
+            let mut census = census(); census.document(state)?; Ok(census.bytes)
+        }
+
+        #[test]
+        fn retained_project_charges_all_capacities_without_disposing_or_replacing_original() {
+            let mut state = crate::asset_session::tests::empty_state();
+            state.session = false; state.next_operation = 1; state.slot = Some(slot_data());
+            let owner = state.slot.as_ref().unwrap().owner.clone();
+            let before = document_bytes(&state).unwrap();
+            let project = project_data();
+            let extra = project.id.capacity() + project.name.capacity() + project.path.capacity();
+            assert!(extra > project.id.len() + project.name.len() + project.path.len());
+            state.slot.as_mut().unwrap().project = Some(project);
+            assert_eq!(document_bytes(&state), Ok(before + extra));
+            let slot = state.slot.as_ref().unwrap();
+            assert!(Arc::ptr_eq(&slot.owner, &owner));
+            assert_eq!(slot.project.as_ref().unwrap().id, "project-1");
+            assert!(slot.operation == Operation::ChooseProject && slot.phase == Phase::Idle
+                && slot.settlement == Settlement::Known && slot.reason == Reason::None && !slot.discard);
+            assert!(!owner.stopped() && owner.retired.load(Ordering::SeqCst));
+            assert!(matches!(owner.coordinator.lock().unwrap().receipt, JoinReceipt::Returned));
+            assert_eq!(state.next_operation, 1);
+            // The observer may retain the SAME picker Arc before the slot is
+            // visited. Charge that owner once, not zero or once per alias.
+            let mut aliased = census(); aliased.owner(&owner).unwrap(); aliased.slot(slot).unwrap();
+            assert_eq!(aliased.bytes, slot_bytes(slot).unwrap());
+        }
+
+        #[test]
+        fn retained_project_does_not_replace_positive_original_receipts_or_unlock_books() {
+            let mut slot = slot_data(); slot.project = Some(project_data());
+            let owner = slot.owner.clone();
+            assert!(slot_bytes(&slot).is_ok());
+            for receipt in [JoinReceipt::New, JoinReceipt::Pending, JoinReceipt::Failed] {
+                owner.coordinator.lock().unwrap().receipt = receipt;
+                assert_eq!(slot_bytes(&slot), Err(Problem::CleanupUnknown));
+                assert!(owner.coordinator.lock().unwrap().receipt == receipt);
+            }
+            owner.coordinator.lock().unwrap().receipt = JoinReceipt::Returned;
+            for receipt in [JoinReceipt::Pending, JoinReceipt::Failed] {
+                owner.child.try_lock().unwrap().receipt = receipt;
+                assert_eq!(slot_bytes(&slot), Err(Problem::CleanupUnknown));
+            }
+            owner.child.try_lock().unwrap().receipt = JoinReceipt::New;
+            let source = owner.source.lock().unwrap();
+            assert_eq!(slot_bytes(&slot), Err(Problem::CleanupUnknown)); drop(source);
+            let retirement = owner.retirement.lock().unwrap();
+            assert_eq!(slot_bytes(&slot), Err(Problem::CleanupUnknown)); drop(retirement);
+            owner.retired.store(false, Ordering::SeqCst);
+            assert_eq!(slot_bytes(&slot), Err(Problem::CleanupUnknown));
+            assert!(!owner.retired.load(Ordering::SeqCst));
+            owner.retired.store(true, Ordering::SeqCst);
+            owner.gui.facts.lock().unwrap().not_created = false;
+            assert_eq!(slot_bytes(&slot), Err(Problem::CleanupUnknown));
+            assert!(!owner.gui.facts.lock().unwrap().destroyed);
+            owner.gui.facts.lock().unwrap().not_created = true;
+            assert!(slot_bytes(&slot).is_ok());
+            assert!(slot.project.is_some() && Arc::ptr_eq(&slot.owner, &owner) && !owner.stopped());
+        }
+
+        #[test]
+        fn retained_project_does_not_admit_unrelated_dtos_or_overflow() {
+            let mut slot = slot_data(); slot.project = Some(project_data());
+            slot.evidence = Some(EvidenceBinding { operation_id: 1, kind: evidence_wire::OperationKind::Observe,
+                selection_id: None, epoch: 1, purpose: EvidencePurpose::Candidate });
+            assert_eq!(slot_bytes(&slot), Err(Problem::Unavailable)); slot.evidence = None;
+            slot.project_path = Some(Arc::new(ProjectPathBinding { project_id: "project-1".into(),
+                field: commands::ProjectPathField::VersionSource, generation: 1,
+                root: asset_source::RegisteredRoot { path: "/inert/project".into(),
+                    identity: asset_source::ProjectIdentity::Posix(asset_source::DirectoryIdentity::synthetic_evidence_identity()) } }));
+            assert_eq!(slot_bytes(&slot), Err(Problem::Unavailable)); slot.project_path = None;
+            slot.path_result = Some(commands::project_path_result("project-1", commands::ProjectPathField::VersionSource, "package.json".into()).ok().unwrap());
+            assert_eq!(slot_bytes(&slot), Err(Problem::Unavailable)); slot.path_result = None;
+            let mut overflow = census();
+            overflow.bytes = usize::MAX - std::mem::size_of::<Slot>() - slot.project.as_ref().unwrap().id.capacity();
+            assert_eq!(overflow.slot(&slot), Err(Problem::Capacity));
+            assert!(slot_bytes(&slot).is_ok());
+            assert_eq!(SESSION_BYTES, 64 * 1024 * 1024);
+        }
     }
 
     #[cfg(all(test, all(target_os = "linux", target_arch = "x86_64", target_env = "gnu")))]
