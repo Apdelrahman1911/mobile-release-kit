@@ -2,18 +2,34 @@
 
 ## Latest Mac continuation — 2026-10-24
 
-Continue from `codex/macos-git-read-continuation`. The image-status/GitRead
-cancellation fix is committed as `148e7c6234a51a548e07bbc87095527e7beaa584`.
-The Mac reproduced the Document-stop failure with actual in-memory Document,
-Supervisor and ticket state, then passed 28 focused Rust tests, 117 frontend
-tests, the frontend build and an ARM64 Desktop compilation after the fix.
-This is not an installed-runtime qualification or a signed installer.
+Continue from `codex/macos-git-read-continuation` in the isolated local clone
+`/Users/abdelrahman/Projects/mobile-release-kit-macos-20261024`. The earlier
+image-status/GitRead cancellation fix is
+`148e7c6234a51a548e07bbc87095527e7beaa584` and remains locally reproduced/tested.
+The new installer/dialog/preflight correction is
+`4c354265e9a26c7b48b4ce6d0d743de7383888e3`, tree
+`b4b6f3a69044ca5969ff994e441df0196665b691`.
 
-The existing signed verification workflow is running the fixed source in
-[run 40110783814](https://github.com/Apdelrahman1911/mobile-release-kit/actions/runs/40110783814).
-Consume that run before starting a replacement. The original Tool26 job finished
-with a native Open Project automation failure, not a service result; its original
-invocation finality remains unknown. No production feature gate was enabled.
+Both jobs in [run 40110783814](https://github.com/Apdelrahman1911/mobile-release-kit/actions/runs/40110783814)
+have FAILED and their actual logs were consumed. Git27 installed successfully,
+then failed to eject its distribution (Resource busy, 16); Git tests were not
+reached. Tool26's first Open Project child Role query failed (-25204) before any
+press; its outer invocation finality remains unknown. Do not repeat diagnosis
+of the already-corrected GitRead state bug as either current failure's cause.
+
+New local corrections supply Installer the verified identical host package
+copy, allow AX reads up to 500 ms within the original two-second deadline, and
+retain the 100 ms action allowance. A short preflight now runs before expensive
+workflow preparation. Its real local DMG and NSOpenPanel checks pass. The
+owner's latest Accessibility change worked; that is no longer a local blocker.
+Tool-setup retained-memory accounting and stale test fixtures were also fixed.
+
+Current limits: the protected Xcode test refuses this Mac's group-writable
+`/Applications`; its permissions were left unchanged. Broad legacy Python
+packaging tests still fail, so do not claim everything passed. No replacement
+hosted run, production feature gate, signed installer or installed-runtime
+qualification was delivered by these local tests. Keep the verification branch
+on the prior source until the next exact candidate is intentionally selected.
 
 Read [MACOS-LOCAL-RESULTS.md](MACOS-LOCAL-RESULTS.md) for the current evidence,
 limits and next steps. The original checkpoint record below is historical where
