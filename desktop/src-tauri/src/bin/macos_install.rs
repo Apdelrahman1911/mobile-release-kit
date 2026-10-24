@@ -12551,6 +12551,38 @@ mod installer {
                 let (_,parts)=source_name(path)?;parts.len().checked_add(4).filter(|n|*n<=35).ok_or("archived-input-original-bound")
             }
         }
+        #[test]
+        #[ignore = "requires the ordinary-user disposable DMG fixture"]
+        fn local_readonly_source_policy() {
+            // Exercise the actual completed-input reader and policy without
+            // invoking Installer, verifying a producer or writing any payload.
+            assert!(!unistd::getuid().is_root() && !unistd::geteuid().is_root());
+            let mounted = std::env::var("MRK_LOCAL_MOUNTED_PACKAGE").expect("fixture mount");
+            let local = std::env::var("MRK_LOCAL_HOST_PACKAGE").expect("fixture host copy");
+            assert!(mounted.starts_with("/Volumes/MRK-LocalSmoke-") && mounted.ends_with("/Install.pkg"));
+            let temporary = std::env::temp_dir().canonicalize().expect("owned temporary parent");
+            assert!(Path::new(&local).starts_with(&temporary) && local.ends_with("/Install.pkg"));
+            for (path, accepted) in [(&local, false), (&mounted, true)] {
+                let mut book = Install::new();
+                let tested = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                    match Input::open(&mut book, path) {
+                        Ok(input) => {
+                            assert!(accepted, "a user-owned host copy must not gain admission");
+                            input.content_post(&book).expect("original mounted bytes and metadata");
+                            assert!(!book.payload_verified && book.creations.is_empty());
+                        }
+                        Err(reason) => {
+                            assert!(!accepted, "read-only mounted input refused: {reason}");
+                            assert_eq!(reason, "protection-other-owner");
+                        }
+                    }
+                }));
+                for index in (0..book.originals.len()).rev() {
+                    assert!(book.close(index), "original fixture reader close");
+                }
+                if let Err(panic) = tested { std::panic::resume_unwind(panic); }
+            }
+        }
         #[cfg(test)]
         pub(super) fn fixed_source_data_checks() {
             let local=MntFlags::MNT_LOCAL;let readonly=MntFlags::MNT_RDONLY;

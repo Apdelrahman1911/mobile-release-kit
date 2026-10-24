@@ -1,50 +1,43 @@
 # Continue Mobile Release Kit on the owner's Mac
 
-## Latest Mac continuation — 2026-10-24
+## Latest Mac continuation — 2026-10-25
 
 **Active request:** follow both candidate jobs until they succeed; investigate,
-fix, locally test and rerun failures. Current run:
-[40123897979](https://github.com/Apdelrahman1911/mobile-release-kit/actions/runs/40123897979),
-source `f7e2ca8885aa050ae6a22cfdd08300bd1e3aa956`. Consume that existing run;
-do not launch a duplicate or treat it as passed while pending. The six-step
-local preflight now includes successful actual Open completion and cleanup.
-The normal-build diagnostic fixture's 26 tests and the installation-metadata
-boundary fixture pass. See the report's active-verification section; later
-results there supersede the historical no-replacement-run statements below.
+fix, locally test and rerun failures. Work remains on
+`codex/macos-git-read-continuation` in the isolated clone
+`/Users/abdelrahman/Projects/mobile-release-kit-macos-20261024`.
+Read [MACOS-LOCAL-RESULTS.md](MACOS-LOCAL-RESULTS.md) first for current run status,
+original failures, candidate changes and exact verification limits.
 
-Continue from `codex/macos-git-read-continuation` in the isolated local clone
-`/Users/abdelrahman/Projects/mobile-release-kit-macos-20261024`. The earlier
-image-status/GitRead cancellation fix is
-`148e7c6234a51a548e07bbc87095527e7beaa584` and remains locally reproduced/tested.
-The new installer/dialog/preflight correction is
-`4c354265e9a26c7b48b4ce6d0d743de7383888e3`, tree
-`b4b6f3a69044ca5969ff994e441df0196665b691`.
+Run [40123897979](https://github.com/Apdelrahman1911/mobile-release-kit/actions/runs/40123897979)
+on `f7e2ca8885aa050ae6a22cfdd08300bd1e3aa956` failed; its monitor has exited.
+Tool26's Apple notarization tool crashed (SIGBUS, no Accepted/Invalid response).
+Git27's root Installer rejected the user-owned host package with
+`protection-other-owner`. The host-copy change is now removed. Installer again
+receives the protected read-only mounted package. macOS27 ejection uses Apple's
+recommended non-force `diskutil eject` once; other routes stay unchanged.
+No root ownership check, signature check or original failure is suppressed.
 
-Both jobs in [run 40110783814](https://github.com/Apdelrahman1911/mobile-release-kit/actions/runs/40110783814)
-have FAILED and their actual logs were consumed. Git27 installed successfully,
-then failed to eject its distribution (Resource busy, 16); Git tests were not
-reached. Tool26's first Open Project child Role query failed (-25204) before any
-press; its outer invocation finality remains unknown. Do not repeat diagnosis
-of the already-corrected GitRead state bug as either current failure's cause.
+The actual compiled Installer reader locally rejected the host copy and accepted
+the mounted fixture with all readers closed. Both real ejection commands refused
+an open mounted file and succeeded after close. The four-step noninteractive
+preflight, 12 ejection DATA tests and 26 diagnostic tests pass. The UI source is
+unchanged and previously passed actual Open completion; new attempts occurred
+with the Mac locked and are not passes. No macOS settings were altered.
 
-New local corrections supply Installer the verified identical host package
-copy, allow AX reads up to 500 ms within the original two-second deadline, and
-retain the 100 ms action allowance. A short preflight now runs before expensive
-workflow preparation. Its real local DMG and NSOpenPanel checks pass. The
-owner's latest Accessibility change worked; that is no longer a local blocker.
-Tool-setup retained-memory accounting and stale test fixtures were also fixed.
+Earlier changes retained: the reproduced image-status/GitRead cancellation fix
+`148e7c62`, AX reads up to 500 ms within the original two-second endpoint with
+100 ms Press allowance, tool-setup memory accounting, and fast preflight before
+expensive hosted work. Original Tool26 unknown invocation finality from
+run 40110783814 remains unknown. Neither local tests nor later runs rewrite it.
 
-Current limits: the protected Xcode test refuses this Mac's group-writable
-`/Applications`; its permissions were left unchanged. Broad legacy Python
-packaging tests still fail, so do not claim everything passed. No replacement
-hosted run, production feature gate, signed installer or installed-runtime
-qualification was delivered by these local tests. Keep the verification branch
-on the prior source until the next exact candidate is intentionally selected.
-
-Read [MACOS-LOCAL-RESULTS.md](MACOS-LOCAL-RESULTS.md) for the current evidence,
-limits and next steps. The original checkpoint record below is historical where
-it differs from that continuation. The owner's installation, credentials and
-original dirty checkout have not been modified.
+The protected Xcode test still refuses this Mac's group-writable `/Applications`;
+its permissions remain unchanged. Broad legacy Python packaging tests are not
+all green. No production feature gate, signed user installer, production release
+or complete installed-runtime qualification is implied by these local results.
+The owner's installation, credentials and original dirty checkout are untouched.
+Do not modify main or publish production. The checkpoint below is historical
+where it differs from the latest continuation.
 
 Checkpoint: **2026-10-24, 15:27 UTC**.
 

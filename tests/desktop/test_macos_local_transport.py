@@ -16,22 +16,24 @@ import uuid
 @unittest.skipUnless(sys.platform == 'darwin' and os.environ.get('MRK_RUN_LOCAL_MAC_SMOKE') == '1',
                      'explicit macOS smoke selection required')
 class LocalTransport(unittest.TestCase):
-    def test_verified_host_copy_does_not_pin_distribution(self):
+    def test_readonly_input_and_nonforce_ejection_lifetime(self):
         work = Path(tempfile.mkdtemp(prefix='mrk-local-transport-')).resolve()
         mount = Path('/Volumes') / ('MRK-LocalSmoke-' + uuid.uuid4().hex)
-        original = b'Harmless installer-source lifetime fixture.\n'
+        original = b'xar!Harmless source-reader fixture, not an installable package.\n'
         device = None
         known = True
         reader = None
         observations = []
         deadline = time.monotonic() + 90
 
-        def run(*args):
+        def run(*args, eject_tool='hdiutil'):
             nonlocal known
             try:
                 remaining = deadline - time.monotonic()
                 self.assertGreater(remaining, 0)
-                result = subprocess.run(['/usr/bin/hdiutil', *args], cwd=work,
+                command = (['/usr/sbin/diskutil', 'eject', *args[1:]]
+                           if args[0] == 'detach' and eject_tool == 'diskutil' else ['/usr/bin/hdiutil', *args])
+                result = subprocess.run(command, cwd=work,
                     stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=min(45, remaining), check=False)
             except BaseException:
                 known = False
@@ -41,11 +43,14 @@ class LocalTransport(unittest.TestCase):
 
         try:
             source = work / 'source'; source.mkdir(mode=0o700)
-            package = source / 'fixture.pkg'; package.write_bytes(original)
+            package = source / 'Install.pkg'; package.write_bytes(original)
+            (source / 'producer.json').write_bytes(b'{}\n')
+            (source / 'producer.sig').write_bytes(b'inert signature\n')
             image = work / 'fixture.dmg'
             self.assertEqual(run('create', '-size', '8m', '-fs', 'HFS+', '-volname', 'MRKLocalSmoke',
                 '-srcfolder', str(source), '-format', 'UDZO', str(image)).returncode, 0)
-            for use_host_copy in (False, True):
+            native_reader = os.environ.get('MRK_LOCAL_INSTALLER_TEST_BIN')
+            for eject_tool in ('hdiutil', 'diskutil'):
                 self.assertFalse(mount.exists())
                 attached = run('attach', str(image), '-readonly', '-nobrowse', '-noautoopen',
                                '-mountpoint', str(mount), '-plist')
@@ -56,21 +61,26 @@ class LocalTransport(unittest.TestCase):
                 devices = [row['dev-entry'] for row in entities if row.get('mount-point') == str(mount)]
                 self.assertEqual(len(devices), 1)
                 device = devices[0]; known = True
-                mounted = mount / 'fixture.pkg'
+                mounted = mount / 'Install.pkg'
                 self.assertEqual(hashlib.sha256(mounted.read_bytes()).digest(), hashlib.sha256(original).digest())
-                reader = os.open(package if use_host_copy else mounted, os.O_RDONLY | os.O_NOFOLLOW)
-                result = run('detach', device)
-                observations.append({'source': 'host-copy' if use_host_copy else 'mounted-copy',
-                                     'detachReturncode': result.returncode})
-                self.assertEqual(result.returncode, 0 if use_host_copy else 16)
+                if native_reader:
+                    env = dict(os.environ, MRK_LOCAL_MOUNTED_PACKAGE=str(mounted), MRK_LOCAL_HOST_PACKAGE=str(package))
+                    checked = subprocess.run([native_reader, '--exact',
+                        'installer::completed_package::local_readonly_source_policy', '--ignored', '--nocapture'],
+                        env=env, cwd=work, capture_output=True, timeout=15, check=False)
+                    self.assertEqual(checked.returncode, 0, checked.stdout.decode(errors='replace') + checked.stderr.decode(errors='replace'))
+                    self.assertIn(b'1 passed', checked.stdout)
+                reader = os.open(mounted, os.O_RDONLY | os.O_NOFOLLOW)
+                result = run('detach', device, eject_tool=eject_tool)
+                observations.append({'tool': eject_tool, 'openFileEjectionReturncode': result.returncode})
+                self.assertNotEqual(result.returncode, 0)
                 self.assertEqual(os.pread(reader, len(original), 0), original)
                 os.close(reader); reader = None
-                if not use_host_copy:
-                    self.assertEqual(run('detach', device).returncode, 0)
+                self.assertEqual(run('detach', device, eject_tool=eject_tool).returncode, 0)
                 device = None
                 self.assertFalse(mount.exists())
             print(json.dumps({'scope': 'local-dmg-source-lifetime', 'observations': observations,
-                              'installedAnything': False, 'passed': True}))
+                              'installedAnything': False, 'nativeInputPolicyTested': bool(native_reader), 'passed': True}))
         finally:
             if reader is not None:
                 os.close(reader)

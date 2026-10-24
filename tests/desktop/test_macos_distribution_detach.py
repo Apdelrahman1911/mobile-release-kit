@@ -171,46 +171,16 @@ class DistributionDetachData(unittest.TestCase):
 
 
 class DistributionDetachCustody(unittest.TestCase):
-    def test_installer_uses_identical_retained_host_copy_not_the_mounted_package(self):
-        with operation() as op:
-            source = op.package_directory('producer-observation-root')
-            copied = op.package_file(source, op.package_name, b'inert package')
-            path = op.installer_package_path(source)
-            self.assertEqual(path, op.work / 'producer-observation-root' / op.package_name)
-            self.assertNotEqual(path.parent, op.transport_mount)
-            self.assertEqual(path.read_bytes(), (op.transport_mount / op.package_name).read_bytes())
-            self.assertFalse(copied['closed'])
-            self.assertFalse(op.mount_detached)
-            self.assertEqual(len(op.calls), len(H._PACKAGE_DIAGNOSTIC_ROLES) - 1)
-
-    def test_installer_host_copy_rejects_changes_substitution_and_missing_original(self):
-        for fault in ('bytes', 'symlink', 'missing', 'foreign-root', 'digest'):
-            with self.subTest(fault=fault), operation() as op:
-                source = op.package_directory('producer-observation-root')
-                copied = op.package_file(source, op.package_name, b'inert package')
-                path = op.work / source['name'] / op.package_name
-                if fault == 'bytes':
-                    os.pwrite(copied['fd'], b'changed', 0)
-                elif fault == 'symlink':
-                    path.unlink(); path.symlink_to(op.transport_mount / op.package_name)
-                elif fault == 'missing':
-                    op.package_outputs.clear()
-                elif fault == 'foreign-root':
-                    source = dict(source)
-                else:
-                    op.package_outputs[0] = (copied, '0' * 64)
-                with self.assertRaises(H.Refused):
-                    op.installer_package_path(source)
-                self.assertFalse(op.mount_detached)
-
-    def test_installer_log_correlation_accepts_only_the_exact_host_copy_name(self):
+    def test_installer_log_correlation_rejects_unprotected_host_copy(self):
         args = SimpleNamespace(fixture=False, expected_source='a' * 40, expected_inventory='b' * 64,
             expected_manifest='c' * 64, run_id='123', run_attempt='1', target=H.ARM_TARGET,
-            request_id='1' * 32, package=Path('/private/test/producer-observation-root') /
-                S.distribution_request_name('1' * 32))
+            request_id='1' * 32)
+        name = S.distribution_request_name(args.request_id)
+        args.package = H.transport_mount_path_data(
+            {'GITHUB_RUN_ID': args.run_id, 'GITHUB_RUN_ATTEMPT': args.run_attempt}, H.ARM_TARGET, 'package-install') / name
         self.assertEqual(S.installer_log_binding(args)['packagePath'], str(args.package))
         for package in (args.package.with_name(S.distribution_request_name('2' * 32)),
-                        args.package.parent.parent / 'other' / args.package.name):
+                        Path('/private/test/producer-observation-root') / name):
             with self.subTest(package=package), self.assertRaises(S.Refused):
                 S.installer_log_binding(SimpleNamespace(**{**vars(args), 'package': package}))
 
@@ -220,18 +190,23 @@ class DistributionDetachCustody(unittest.TestCase):
                 os.fstat(fd)
             self.assertEqual(raised.exception.errno, errno.EBADF)
 
-    def test_only_package_install_adds_verbose_without_changing_other_detach_routes(self):
+    def test_ejection_uses_supported_original_command_without_force_or_fallback(self):
         # Isolate argv construction/consuming closes, not full native phases.
-        for phase in ('package-install', H.SAME_PACKAGE_PHASE, H.UPDATE_PHASE, *H.FINAL_IMAGE_PHASES):
-            with self.subTest(phase=phase), operation() as op:
+        for phase, runner in [(phase, runner) for phase in ('package-install', H.SAME_PACKAGE_PHASE, H.UPDATE_PHASE, *H.FINAL_IMAGE_PHASES)
+                              for runner in ('macos-26', 'xcode-27')]:
+            with self.subTest(phase=phase, runner=runner), operation() as op:
                 op.phase = phase
+                op.environment['MRK_MACOS_RUNNER'] = runner
                 op.installation_readback = True
                 mounted_fds = [row['fd'] for row in op.entries if row['kind'] in ('mount', 'mounted-file')]
                 def original(role, argv, **options):
                     self.assert_closed(mounted_fds)
                     self.assertEqual(role, H.UPDATE_ROLES[2] if phase == H.UPDATE_PHASE else 'distribution-detach')
-                    self.assertEqual(argv, ['/usr/bin/hdiutil', 'detach', '/dev/disk99s1']
-                                     + (['-verbose'] if phase == 'package-install' else []))
+                    expected = (['/usr/sbin/diskutil', 'eject', '/dev/disk99s1']
+                                if phase == 'package-install' and runner == 'xcode-27' else
+                                ['/usr/bin/hdiutil', 'detach', '/dev/disk99s1']
+                                + (['-verbose'] if phase == 'package-install' else []))
+                    self.assertEqual(argv, expected)
                     self.assertEqual(options, {'timeout': 60 if phase == H.UPDATE_PHASE else 30})
                     return subprocess.CompletedProcess(argv, 0, b'', b'')
                 with (mock.patch.object(op, 'package_call', side_effect=original) as call,
@@ -243,8 +218,15 @@ class DistributionDetachCustody(unittest.TestCase):
                 self.assertTrue(op.mount_detached)
                 self.assertIsNone(op.distribution_detach_diagnostic)
 
-    def test_real_readback_and_mounted_fds_close_before_original16_and_single_probe(self):
+    def test_real_readback_and_mounted_fds_close_before_original_refusal_and_single_probe(self):
+        for runner in ('macos-26', 'xcode-27'):
+            with self.subTest(runner=runner):
+                self.assert_original_ejection_refusal(runner)
+
+    def assert_original_ejection_refusal(self, runner):
+        code = 1 if runner == 'xcode-27' else 16
         with operation() as op:
+            op.environment['MRK_MACOS_RUNNER'] = runner
             selected = S.BuildSelection(op.target, '0.2.0', 'macos26-detach-data')
             args = SimpleNamespace(producer_descriptor=op.transport_mount / 'producer.json',
                 producer_signature=op.transport_mount / 'producer.sig', expected_source='a'*40,
@@ -284,12 +266,13 @@ class DistributionDetachCustody(unittest.TestCase):
                 self.assert_closed(readback_fds)
                 self.assertEqual(options['cwd'], op.work)
                 self.assertEqual(options['environ'], op.native_environment())
-                if argv[0] == '/usr/bin/hdiutil':
+                if argv[0] in ('/usr/bin/hdiutil', '/usr/sbin/diskutil'):
                     events.append(('detach', None))
-                    self.assertEqual(argv, ['/usr/bin/hdiutil', 'detach', '/dev/disk99s1', '-verbose'])
+                    self.assertEqual(argv, ['/usr/sbin/diskutil', 'eject', '/dev/disk99s1'] if runner == 'xcode-27'
+                                     else ['/usr/bin/hdiutil', 'detach', '/dev/disk99s1', '-verbose'])
                     self.assertEqual((options['timeout'], options['output_limit'], options['text'], options['capture']),
                                      (30, 65536, False, True))
-                    return subprocess.CompletedProcess(argv, 16, b'UNMOUNT EJECT ' + PRIVATE,
+                    return subprocess.CompletedProcess(argv, code, b'UNMOUNT EJECT ' + PRIVATE,
                         b'hdiutil: detach failed - Resource busy\nDISSENT ' + PRIVATE)
                 events.append(('lsof', None))
                 self.assertEqual(argv, ['/usr/sbin/lsof', '-n', '-P', '-b', '-F0pcuftD', '+f', '--', str(op.transport_mount)])
@@ -308,7 +291,7 @@ class DistributionDetachCustody(unittest.TestCase):
             self.assertEqual([event[0] for event in events[:len(mounted_fds)+1]], ['close']*len(mounted_fds) + ['detach'])
             self.assertEqual(op.owner.run_owned.call_count, 2)
             self.assertEqual(tuple(row['role'] for row in op.calls), H._PACKAGE_DIAGNOSTIC_ROLES)
-            self.assertEqual(op.calls[-1]['returncode'], 16)
+            self.assertEqual(op.calls[-1]['returncode'], code)
             self.assertTrue(op.calls[-1]['capturesSettled'])
             self.assertTrue(op.distribution_detach_diagnostic_known())
             self.assertFalse(op.mount_detached)
@@ -334,7 +317,7 @@ class DistributionDetachCustody(unittest.TestCase):
             for forbidden in (PRIVATE.decode(), str(op.work), str(op.transport_mount), '/dev/disk99s1', '765', 'installd'):
                 self.assertNotIn(forbidden, public)
             self.assertFalse(observation['holderAuthentication'] or observation['systemServiceExitClaimed'])
-            # Only existing hdiutil captures were published. No lsof stdout,
+            # Only existing ejection captures were published. No lsof stdout,
             # stderr, command-name/PID roster, extra role or cache file exists.
             self.assertEqual(set(path.name for path in op.work.iterdir()), {op.target_name,
                 'android-helper-distribution-detach.stdout', 'android-helper-distribution-detach.stderr',

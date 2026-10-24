@@ -2837,7 +2837,7 @@ def failure_diagnostic(error, *, phase=None, target=None, main_stage=None, opera
     if (state.get("phase") == "package-install" and native.get("role") == "distribution-detach"
             and native.get("entered") is True and native.get("returned") is True
             and native.get("capturesSettled") is True and type(native.get("returncode")) is int
-            and native["returncode"] == 16):
+            and native["returncode"] in (1, 16)):
         detach = {"stderr": token(native.get("detachStderr"), _DETACH_STDERR_REASONS),
                   "textHints": distribution_detach_text_hints_data(native.get("detachTextHints")),
                   "holderObservation": distribution_detach_diagnostic_data(state.get("distribution_detach_diagnostic"))}
@@ -3832,12 +3832,14 @@ class Operation:
         diagnostic = (self.phase == "package-install" and role in ("installer-log-cursor", "installer-log-capture")
                       or self.setup_verify and role in ("setup-log-cursor", XCODE_SETUP_LOG_CAPTURE)
                       or self.phase == "candidate-baseline" and role in ("app-absence-log-cursor", "app-absence-log-capture"))
-        if self.phase == "package-install" and role == "distribution-detach" and result.returncode == 16:
+        if (self.phase == "package-install" and role == "distribution-detach"
+                and (result.returncode == 16 or result.returncode == 1
+                     and self.environment.get("MRK_MACOS_RUNNER") == "xcode-27")):
             try:
                 record["detachStderr"] = distribution_detach_stderr(result.stderr)
                 record["detachTextHints"] = distribution_detach_text_hints(result.stdout, result.stderr)
             except BaseException:
-                pass  # Passive diagnosis never replaces the identical original16.
+                pass  # Passive diagnosis never replaces the identical nonzero.
             original = Refused("original-nonzero-distribution-detach")
             self.distribution_detach_refusal = (original, record)
             raise original
@@ -9018,28 +9020,6 @@ class Operation:
              "remove-producer.sig" if self.removal else "producer.sig"}, "package-mounted-post-roster")
         self.recheck_mount()
 
-    def installer_package_path(self, source):
-        """Use the verified host copy so PackageKit never owns a mounted file.
-
-        The distribution image is still mounted and independently read back.
-        Both originals remain checked before/after Installer; this changes only
-        which identical signed package is supplied to the system service.
-        """
-        need(source.get("parent_entry") is self.work_entry
-             and source.get("name") == "producer-observation-root",
-             "package-installer-source")
-        self.recheck_directory(source)
-        local = [(entry, sha) for entry, sha in self.package_outputs
-                 if entry.get("parent_entry") is source and entry["name"] == self.package_name]
-        mounted = [entry for entry in self.entries
-                   if entry["kind"] == "mounted-file" and entry["name"] == self.package_name]
-        need(len(local) == len(mounted) == 1, "package-installer-source")
-        entry, expected = local[0]
-        need(expected == mounted[0]["sha256"] and digest(self.read(entry)) == expected,
-             "package-installer-source")
-        self.mounted_post()
-        return self.work / source["name"] / self.package_name
-
     def observe_distribution_detach_failure(self, original):
         """One bounded nonroot observation of this SAME failed detach only."""
         admitted = self.distribution_detach_refusal
@@ -9047,7 +9027,9 @@ class Operation:
                 or self.phase != "package-install" or self.app_absence is not None or self.update is not None
                 or self.removal_baseline_mount is not None or self.distribution_detach_diagnostic is not None
                 or tuple(row.get("role") for row in self.calls) != _PACKAGE_DIAGNOSTIC_ROLES
-                or self.calls[-1] is not admitted[1] or self.calls[-1].get("returncode") != 16
+                or self.calls[-1] is not admitted[1]
+                or self.calls[-1].get("returncode") not in (
+                    (1, 16) if self.environment.get("MRK_MACOS_RUNNER") == "xcode-27" else (16,))
                 or not self.package_settled() or not self.installer_zero or not self.installation_readback):
             return
         record = {"state": "unavailable", "entered": False, "returned": False, "settled": False,
@@ -9121,8 +9103,14 @@ class Operation:
                 need(entry["closed"], "package-mount-close-unknown")
         # The original reported device is used once, without force/fallback or
         # adopting unrelated OS services. Closing our FDs precedes detach.
-        argv = ["/usr/bin/hdiutil", "detach", self.mount_device]
-        if self.phase == "package-install":
+        # macOS27 deprecates hdiutil detach and directs callers to diskutil.
+        # Use its ordinary (non-force) eject as the single original operation;
+        # a refusal remains failure, with no second command or renewed deadline.
+        if self.phase == "package-install" and self.environment.get("MRK_MACOS_RUNNER") == "xcode-27":
+            argv = ["/usr/sbin/diskutil", "eject", self.mount_device]
+        else:
+            argv = ["/usr/bin/hdiutil", "detach", self.mount_device]
+        if self.phase == "package-install" and argv[0] == "/usr/bin/hdiutil":
             argv.append("-verbose")  # Same first operation and deadline; diagnostic text only.
         try:
             self.package_call(UPDATE_ROLES[2] if self.phase == UPDATE_PHASE else "distribution-detach",
@@ -9653,10 +9641,13 @@ class Operation:
                 "-noautoopen", "-mountpoint", str(mount_path), "-plist"], timeout=60)
             self.mount_custody(attached, "package-readonly-mount")
         self.mount_inputs(expected, self.package_name)
+        # The root completed-input reader requires protected ancestors or this
+        # verified read-only distribution. A user-owned host copy is refused,
+        # even when its bytes equal the package on the mounted image.
         args = argparse.Namespace(target=self.target, fixture=False, input=self.work / "input", expected_source=self.image_source,
             expected_inventory=inventory_hash, expected_manifest=manifest_hash, request_id=request_id, expected_package=digest(body),
             producer_descriptor=mount_path / "producer.json", producer_signature=mount_path / "producer.sig",
-            installer_status=self.work / "installer-output.status", package=self.installer_package_path(observed_root),
+            installer_status=self.work / "installer-output.status", package=mount_path / self.package_name,
             run_id=self.environment["GITHUB_RUN_ID"], run_attempt=self.environment["GITHUB_RUN_ATTEMPT"])
         self.package_stager_io("result-absence", args)
         if self.update is not None:

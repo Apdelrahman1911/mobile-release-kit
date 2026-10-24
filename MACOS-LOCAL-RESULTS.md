@@ -1,13 +1,71 @@
 # Mac continuation results — 2026-10-24
 
-## Active verification — run 40123897979
+## Latest continuation — 2026-10-25
 
-The owner explicitly requested continuing through workflow failures until both
-jobs succeed. [Run 40123897979](https://github.com/Apdelrahman1911/mobile-release-kit/actions/runs/40123897979)
-was started on `f7e2ca8885aa050ae6a22cfdd08300bd1e3aa956`, tree
-`986b46f7febbb0f76f84a886bec97ca346527d07`. Follow this existing run; do not start
-a duplicate. Its live/final metadata is in `run-40123897979-latest.json` and
-`run-40123897979-final.json` in the private sibling evidence directory.
+The owner explicitly requested continuing through failures until both candidate
+jobs succeed. Run [40123897979](https://github.com/Apdelrahman1911/mobile-release-kit/actions/runs/40123897979)
+finished with failure on `f7e2ca8885aa050ae6a22cfdd08300bd1e3aa956`, tree
+`986b46f7febbb0f76f84a886bec97ca346527d07`. Its original monitor has exited.
+Both job logs, parsed failures and final metadata are retained privately.
+
+- Tool26 `120961099217`: step 47, `notarize-payload` / `payload-submit`.
+  Apple's original `notarytool` returned `-10` (Darwin SIGBUS), with empty
+  stderr. No Accepted/Invalid result was returned. Original closes and
+  credential cleanup were known; target retired. This is a native tool crash,
+  not a recorded app rejection. No source fix or internal retry has been
+  invented for it; the next candidate reruns normal notarization.
+- Git27 `120961099371`: step 64, original Installer returned 1,
+  `PKInstallErrorDomain` 112. The root parent's static reason hash
+  `0c7fbe1fde5f90f476fa8980a7e022aa5084354810b59d2fbf70570c7b1682e5`
+  resolves in this exact source to `protection-other-owner`. Native admission
+  was false; originals were known, timely, and not unknown. Readback and
+  ejection were not reached. Supplying the user-owned host package conflicted
+  with the completed-input reader's protected-ancestor policy.
+
+The earlier host-copy change has been removed; Installer again receives the
+verified read-only mounted package. Its ownership and signature policy is
+unchanged. The original Git27 ejection stderr was retrieved from artifact
+`12570035234`; it explicitly deprecates `hdiutil detach` and directs callers to
+`diskutil eject`, then reports Resource busy. Only the macOS27 candidate route
+now uses the supported non-force eject command, once, after the same reader
+closes and before the same namespace checks. A nonzero remains failure;
+no forced detach, command fallback, retry or deadline extension was added.
+The exact historical disk holder remains unidentified. Hosted verification of
+the new ejection command is still required; local success is not that result.
+
+New local evidence (`preflight-ejection-final`):
+
+- All four noninteractive preflight steps passed, including 12 descriptor,
+  diagnostic and ejection DATA tests.
+- Both real ejection commands refused a disposable volume while a mounted file
+  was open, then succeeded after the reader closed. No software was installed.
+- The actual compiled Installer `completed_package::Input` reader rejected the
+  user-owned copy with the same `protection-other-owner` reason and accepted
+  the read-only mounted fixture, including original byte/metadata rechecks and
+  consuming closes. It did not enter Installer main, authenticate a producer,
+  copy an app, or gain installation authority.
+- All 26 bounded build-diagnostic tests passed; workflow syntax and diff checks
+  passed. All 21 standard native Installer tests passed; the one opt-in input
+  test is ignored in that standard run and separately passed in the real DMG
+  fixture (`installer-all-final.log`).
+
+A combined preflight passed the new native transport checks, then its UI fixture
+reported AX NoValue (-25212); the separate full-Open fixture could not start its
+panel. `CGSessionCopyCurrentDictionary` confirmed `screenLocked=true`. These
+attempts remain failures, not hidden successes. The unchanged UI source already
+passed actual Open completion earlier while the Mac was unlocked. No lock or
+permission setting was changed. Final noninteractive validation excludes UI and
+reuses that earlier scoped result. Logs: `preflight-supported-ejection`,
+`preflight-ejection-final`, `installer-input-test-build-2.*`,
+`installer-input-data-final.log`, and `ejection-build-diagnostics-final.log`.
+
+A premature request to rerun only Tool26 while Git27 was active was rejected by
+GitHub's run-state rule (HTTP 403, containing workflow still running); no rerun
+started. Because Git27 subsequently exposed the source-path regression, select
+the corrected exact candidate after local checks instead of rerunning that
+failed source. Do not launch duplicate monitors or claim either job passed.
+
+## Previous local preflight on f7e2ca88
 
 Before starting, the local fixture was extended to run the actual native Open
 path: real panel identity, both original rechecks, one AXPress, exact temporary
@@ -52,11 +110,11 @@ busy: `original-nonzero-distribution-detach`, stage
 could not identify a holder; do not claim Finder, Spotlight or PackageKit was
 conclusively identified as the original cause.
 
-Installer now receives the retained host copy in `producer-observation-root`,
+The earlier attempted correction supplied the retained host copy in `producer-observation-root`,
 whose bytes and SHA-256 match the signed package on the mounted distribution.
-The mount, original files, signed descriptors, request-correlated log binding,
-post-checks and installed readback remain checked. No forced detach, retry,
-status suppression or new package is introduced.
+That change was later invalidated by the root Installer ownership refusal in
+run 40123897979 and has been removed, as recorded above. The candidate now
+retains the original mounted package admission and changes macOS27 ejection.
 
 A real, harmless local DMG experiment reproduced the relevant lifetime problem:
 an open descriptor on the mounted fixture yielded detach 16; after closing it,
@@ -276,8 +334,8 @@ made. These original unknown-finality facts must remain unchanged.
 ## Remaining installed delivery
 
 Both original job results have now been consumed, as recorded above.
-`verify/desktop-macos-candidate` remains on the earlier tested GitRead fix;
-the new correction has not started another workflow. Distribution signing
+Use the exact candidate and run recorded in the latest continuation above;
+older branch/run statements are historical. Distribution signing
 remains in the existing `macos-developer-id` environment. Resolve or explicitly
 scope remaining local fixture failures before spending another long hosted run.
 The next hosted result must bind the new exact source and preserve each original
