@@ -1,6 +1,7 @@
 //! One explicitly selected, nonshipping prerequisite. The three tool journeys
 //! remain Check-only. All work uses the existing Document/Saved service owner.
 use super::{build, registration as wire, BridgeError, Control, DocumentBinding, Observation};
+use serde::Serialize;
 use serde_json::{json, Value};
 use std::sync::Arc;
 
@@ -69,7 +70,10 @@ impl Finding {
     }
 }
 fn pending(phase: wire::ServicePhase) -> bool {
-    matches!(phase, wire::ServicePhase::Checking | wire::ServicePhase::Requesting | wire::ServicePhase::Settling)
+    // STOP is still the SAME live original, not a terminal observation. Its
+    // existing coordinator/deadline must establish final settlement first.
+    matches!(phase, wire::ServicePhase::Checking | wire::ServicePhase::Requesting
+        | wire::ServicePhase::Settling | wire::ServicePhase::Stopping)
 }
 // Only a status returned by the actual Document can reach this comparison.
 // Native retirement/finalization already gates its Complete/Refused publication.
@@ -77,7 +81,7 @@ fn pending(phase: wire::ServicePhase) -> bool {
 fn terminal(status: &wire::ServiceStatus, action: wire::ServiceAction) -> Option<Finding> {
     if !status.valid()
         || !matches!(status.phase, wire::ServicePhase::Complete | wire::ServicePhase::Refused)
-        || !matches!(status.reason, wire::Reason::None | wire::Reason::ApprovalDenied
+        || !matches!(status.reason, wire::Reason::None | wire::Reason::ApprovalRequired | wire::Reason::ApprovalDenied
             | wire::Reason::ServiceUnavailable | wire::Reason::SigningUnavailable)
     { return None; }
     let observed = status.observation?;
@@ -102,6 +106,39 @@ fn terminal(status: &wire::ServiceStatus, action: wire::ServiceAction) -> Option
     } else { None }
 }
 
+#[derive(Clone, Copy, Serialize)]
+#[serde(rename_all = "kebab-case")]
+enum Validation { BeforeRequest, AdmissionBinding, WaitBinding, Terminal, BeforeCheck }
+
+// Failure-only projection of an ALREADY returned status. No context, project,
+// operation IDs, native query, authority or replacement settlement is retained.
+#[derive(Clone, Copy, Serialize)]
+#[serde(rename_all = "camelCase")]
+pub(crate) struct FailureSample {
+    validation: Validation,
+    status_valid: bool,
+    phase: wire::ServicePhase,
+    reason: wire::Reason,
+    prerequisite: wire::Prerequisite,
+    observation: Option<wire::ServiceObservation>,
+}
+impl FailureSample {
+    fn capture(validation: Validation, status: &wire::ServiceStatus) -> Self {
+        Self { validation, status_valid: status.valid(), phase: status.phase,
+            reason: status.reason, prerequisite: status.prerequisite, observation: status.observation }
+    }
+    pub(crate) fn matches(self, step: super::Step) -> bool {
+        let super::Step::Prerequisite(step) = step else { return false; };
+        match self.validation {
+            Validation::BeforeRequest => step == Step::Request,
+            Validation::AdmissionBinding => matches!(step, Step::Request | Step::Check),
+            Validation::WaitBinding | Validation::Terminal => matches!(step, Step::RequestWait | Step::CheckWait),
+            Validation::BeforeCheck => step == Step::Check,
+        }
+    }
+    pub(crate) fn value(self) -> Value { json!(self) }
+}
+
 #[derive(Default)]
 pub(super) struct Record {
     request_called: bool,
@@ -112,6 +149,7 @@ pub(super) struct Record {
     check_settled: bool,
     finding: Option<Finding>,
     nonentry: bool,
+    pub(super) failure: Option<FailureSample>,
 }
 impl Record {
     pub(super) fn retained_bytes(&self) -> Option<usize> {
@@ -169,6 +207,16 @@ fn record<T>(q: &Observation, f: impl FnOnce(&mut Record) -> Result<T, BridgeErr
 }
 fn known_nonentry(error: &BridgeError) -> bool { error.code == "android_service_unavailable" }
 
+fn status_failure(q: &Observation, validation: Validation, status: &wire::ServiceStatus) -> BridgeError {
+    // The validation already failed. Optional DATA capture cannot replace its
+    // error, query native state, wait, or create another diagnostic writer.
+    let sample = FailureSample::capture(validation, status);
+    if let Ok(mut record) = q.record.try_lock() {
+        if let Some(tool) = record.tool_setup.as_mut() { tool.service.failure.get_or_insert(sample); }
+    }
+    BridgeError::invalid()
+}
+
 fn bind_return(q: &Observation, result: Result<wire::ServiceStatus, BridgeError>, request: wire::ServiceRequest) -> Result<super::Step, BridgeError> {
     let check = request.action == wire::ServiceAction::Check;
     match result {
@@ -180,7 +228,8 @@ fn bind_return(q: &Observation, result: Result<wire::ServiceStatus, BridgeError>
         },
         Err(error) => Err(error),
         Ok(status) => {
-            let binding = Binding::capture(&status, &request).ok_or_else(BridgeError::invalid)?;
+            let binding = Binding::capture(&status, &request)
+                .ok_or_else(|| status_failure(q, Validation::AdmissionBinding, &status))?;
             record(q, |r| {
                 if check {
                     if r.check.is_some() || r.request.as_ref().is_none_or(|prior| prior.id == binding.id) { return Err(BridgeError::invalid()); }
@@ -203,7 +252,9 @@ pub(super) async fn tick(q: &Arc<Observation>, document: &DocumentBinding, step:
     Ok(match step {
         Step::Request => {
             let before = document.android_tool_service_status()?;
-            if !before.valid() || before.setup_generation != 0 || before.operation.is_some() { return Err(invalid()); }
+            if !before.valid() || before.setup_generation != 0 || before.operation.is_some() {
+                return Err(status_failure(q, Validation::BeforeRequest, &before));
+            }
             let request = wire::ServiceRequest::request_registration(&serde_json::to_vec(&json!({
                 "schemaVersion":1,"setupGeneration":before.setup_generation,"context":context()?,
                 "consentVersion":wire::SERVICE_CONSENT,"registrationAcknowledged":true})).map_err(|_|invalid())?)?;
@@ -214,9 +265,10 @@ pub(super) async fn tick(q: &Arc<Observation>, document: &DocumentBinding, step:
             let check = step == Step::CheckWait;
             let status = document.android_tool_service_status()?;
             let binding = record(q, |r| (if check {&r.check}else{&r.request}).clone().ok_or_else(invalid))?;
-            if !binding.matches(&status) { return Err(invalid()); }
+            if !binding.matches(&status) { return Err(status_failure(q, Validation::WaitBinding, &status)); }
             if pending(status.phase) { None } else {
-                let finding = terminal(&status,binding.action).ok_or_else(invalid)?;
+                let finding = terminal(&status,binding.action)
+                    .ok_or_else(|| status_failure(q, Validation::Terminal, &status))?;
                 record(q, |r| {
                     if check {if r.check_settled{return Err(invalid());} r.check_settled=true;}
                     else {if r.request_settled{return Err(invalid());} r.request_settled=true;}
@@ -233,7 +285,9 @@ pub(super) async fn tick(q: &Arc<Observation>, document: &DocumentBinding, step:
             let fresh = document.installed_tool_setup_saved(&prior.context.project_id).await?;
             if !q.timely() {return Err(invalid());}
             let before = document.android_tool_service_status()?;
-            if !prior.matches(&before) || pending(before.phase) {return Err(invalid());}
+            if !prior.matches(&before) || pending(before.phase) {
+                return Err(status_failure(q, Validation::BeforeCheck, &before));
+            }
             let request = wire::ServiceRequest::check(&serde_json::to_vec(&json!({
                 "schemaVersion":1,"setupGeneration":before.setup_generation,"context":fresh})).map_err(|_|invalid())?)?;
             record(q, |r| r.claim(wire::ServiceAction::Check).then_some(()).ok_or_else(invalid))?;
@@ -284,7 +338,49 @@ pub(super) fn data_checks() -> bool {
     status.operation.as_mut().unwrap().context=request.context.clone();
     status.phase=wire::ServicePhase::Unknown;status.reason=wire::Reason::CleanupUnknown;
     status.availability=build::Availability::CleanupUnknown;status.observation=None;
-    if terminal(&status,request.action).is_some() {return false;}
+    if !status.valid() || pending(status.phase) || terminal(&status,request.action).is_some() {return false;}
+    let unknown = FailureSample::capture(Validation::Terminal, &status);
+    if unknown.value() != json!({"validation":"terminal","statusValid":true,"phase":"unknown",
+        "reason":"cleanup-unknown","prerequisite":"ready","observation":null})
+        || !super::super::tool_service_failure_data_checks(unknown,
+            [Step::Request,Step::RequestWait,Step::Check,Step::CheckWait,Step::Finish].map(super::Step::Prerequisite)) {return false;}
+    for (validation, allowed) in [(Validation::BeforeRequest,[true,false,false,false,false]),
+        (Validation::AdmissionBinding,[true,false,true,false,false]),
+        (Validation::WaitBinding,[false,true,false,true,false]),
+        (Validation::Terminal,[false,true,false,true,false]),
+        (Validation::BeforeCheck,[false,false,true,false,false])] {
+        let sample=FailureSample::capture(validation,&status);
+        for (step,expected) in [Step::Request,Step::RequestWait,Step::Check,Step::CheckWait,Step::Finish].into_iter().zip(allowed) {
+            if sample.matches(super::Step::Prerequisite(step))!=expected {return false;}
+        }
+        if sample.matches(super::Step::Context) {return false;}
+    }
+    // Actual valid active-original STOP, then a separately valid settled
+    // refusal. Neither STOP nor RequiresApproval is an enabled/Ready witness.
+    status.phase=wire::ServicePhase::Stopping;status.reason=wire::Reason::ApprovalRequired;
+    status.availability=build::Availability::Available;status.prerequisite=wire::Prerequisite::ApprovalRequired;
+    if !status.valid() || !binding.matches(&status) || !pending(status.phase)
+        || terminal(&status,request.action).is_some() {return false;}
+    status.phase=wire::ServicePhase::Refused;
+    status.observation=Some(wire::ServiceObservation {state:wire::ServiceState::RequiresApproval,outcome:wire::ServiceOutcome::NeedsApproval,
+        mutation_entered:false,mutation_returned:false,mutation_uncertain:false,native_settled:true});
+    if !status.valid() || pending(status.phase) || terminal(&status,request.action)!=Some(Finding::Approval) {return false;}
+    let mut approval=Record {request_called:true,request:Some(binding.clone()),request_settled:true,
+        finding:Some(Finding::Approval),..Record::default()};
+    if !approval.complete() || approval.ready() || approval.claim(wire::ServiceAction::Check) {return false;}
+    let returned = FailureSample::capture(Validation::WaitBinding, &status);
+    if returned.value() != json!({"validation":"wait-binding","statusValid":true,"phase":"refused","reason":"approval-required",
+        "prerequisite":"approval-required",
+        "observation":{"state":"requires-approval","outcome":"needs-approval","mutationEntered":false,"mutationReturned":false,
+            "mutationUncertain":false,"nativeSettled":true}}) {return false;}
+    status.observation.as_mut().unwrap().native_settled=false;
+    let invalid=FailureSample::capture(Validation::Terminal,&status).value();
+    if status.valid() || terminal(&status,request.action).is_some()
+        || invalid["statusValid"]!=false || invalid["observation"]["nativeSettled"]!=false
+        || invalid["prerequisite"]!="approval-required" {return false;}
+    status.observation.as_mut().unwrap().native_settled=true;
+    status.phase=wire::ServicePhase::Complete;status.reason=wire::Reason::None;
+    if !status.valid() || terminal(&status,request.action)!=Some(Finding::Approval) {return false;}
     status.phase=wire::ServicePhase::Refused;status.reason=wire::Reason::ApprovalDenied;
     status.availability=build::Availability::Available;status.prerequisite=wire::Prerequisite::ApprovalDenied;
     status.observation=Some(wire::ServiceObservation {state:wire::ServiceState::RequiresApproval,outcome:wire::ServiceOutcome::DeniedByUser,

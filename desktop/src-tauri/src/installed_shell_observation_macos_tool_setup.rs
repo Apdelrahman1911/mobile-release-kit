@@ -20,6 +20,7 @@ mod fixture;
 pub(super) use fixture::Fixture;
 #[path = "installed_shell_observation_macos_tool_service.rs"]
 mod service;
+pub(super) use service::FailureSample as ServiceFailureSample;
 #[path = "installed_shell_observation_macos_tool_acquire.rs"]
 mod acquire;
 pub(crate) use acquire::{PUBLIC_SCOPE, PUBLIC_NAMES};
@@ -618,6 +619,16 @@ pub(super) enum Step {
     ReuseWait,
     Finish,
 }
+pub(super) fn service_failure_label(step: Step) -> Option<&'static str> {
+    Some(match step {
+        Step::Prerequisite(service::Step::Request) => "ToolService(Request)",
+        Step::Prerequisite(service::Step::RequestWait) => "ToolService(RequestWait)",
+        Step::Prerequisite(service::Step::Check) => "ToolService(Check)",
+        Step::Prerequisite(service::Step::CheckWait) => "ToolService(CheckWait)",
+        Step::Prerequisite(service::Step::Finish) => "ToolService(Finish)",
+        _ => return None,
+    })
+}
 #[derive(Default)]
 pub(super) struct Record {
     service: service::Record,
@@ -638,6 +649,7 @@ pub(super) struct Record {
     pub(super) actions: [bool; 4],
 }
 impl Record {
+    pub(super) fn service_failure(&self) -> Option<ServiceFailureSample> { self.service.failure }
     pub(super) fn new(case: Case, project: &Path, uid: u32) -> Result<Self, ()> {
         Ok(Self { public: if case.public_acquisition() { Some(Box::new(acquire::Record::new(case,project,uid)?)) } else {None}, ..Self::default() })
     }

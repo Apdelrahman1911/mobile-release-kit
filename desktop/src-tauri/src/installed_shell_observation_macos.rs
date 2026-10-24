@@ -1212,6 +1212,7 @@ struct FailureSnapshot {
     bootstrap: Option<BootstrapSample>,
     vault: Option<vault::FailureSample>,
     upload: Option<vault::upload_key::FailureSample>,
+    tool_service: Option<tool_setup::ServiceFailureSample>,
     dom: Option<(u16, Option<ProjectChooserSample>)>,
     original_window: Option<OriginalWindowSample>,
     last_panel: Option<PanelSample>, native_action: Option<NativeActionSample>,
@@ -1223,6 +1224,7 @@ impl FailureSnapshot {
     fn from_record(r: &Record) -> Self {
         Self { source: "record", step: r.step, pending: r.pending, native_dispatch: r.native_dispatch, input_body_admission: None,
             bootstrap: r.bootstrap_failure, vault: r.vault_failure, upload: r.upload_failure,
+            tool_service: r.tool_setup.as_ref().and_then(tool_setup::Record::service_failure),
             dom: Some((r.evaluations, r.last_project_chooser)), original_window: r.original_window,
             last_panel: r.last_panel, native_action: r.native_action, accessibility: r.open_sample(), identity_binding: r.identity_binding,
             project_selection: r.project_selection, completion_selection: r.completion_selection,
@@ -1242,6 +1244,7 @@ impl FailureSnapshot {
         self.bootstrap = None; // A pre-arm cache is not the first failure's Record sample.
         self.upload = None;
         self.vault = None; // Never attach a later original vault sample to an earlier cache.
+        self.tool_service = None; // A cached panel expiry did not sample Service status.
         self.project_selection = None; // Never attach fresh return DATA to a pre-arm snapshot.
         self.completion_selection = None;
         self.accessibility = self.accessibility.map(|sample| sample.reconciled(progress));
@@ -1275,8 +1278,14 @@ impl FailureSnapshot {
             || sample.step != step || sample.selection != (panel.kind == "version-source") { return None; }
         sample.failed_press_timing()
     }
-    fn frame(self, reason: &'static str) -> Option<Vec<u8>> {
-        let step = format!("{:?}", self.step);
+    fn frame(mut self, reason: &'static str) -> Option<Vec<u8>> {
+        // Only this nested service spelling changes. Preserve the existing
+        // global step/context/frame bounds, including both original wait steps.
+        let step = match self.step {
+            Step::ToolSetup(tool) => tool_setup::service_failure_label(tool).map(str::to_owned)
+                .unwrap_or_else(|| format!("{:?}", self.step)),
+            step => format!("{step:?}"),
+        };
         if step.len() > 32 || !step.is_ascii() || !FAILURE_REASONS.contains(&reason) { return None; }
         if self.input_body_admission.is_some() != (self.source == "prearm-open-return")
             || self.input_body_admission.is_some() && reason != "native-default-input" { return None; }
@@ -1286,6 +1295,10 @@ impl FailureSnapshot {
         if self.vault.is_some_and(|sample| self.source != "record" || reason != "vault-finality-contract"
             || self.step != Step::Vault(sample.step)) { return None; }
         if self.upload.is_some() && (self.source != "record" || reason != "upload-key-expected-retention" || !matches!(self.step,Step::UploadKey(_))) {return None;}
+        // Best-effort returned-status DATA cannot suppress or relabel another
+        // winning first failure. A mismatched sample is omitted, not accepted.
+        self.tool_service = self.tool_service.filter(|sample| self.source == "record" && reason == "tool-setup-original-contract"
+            && matches!(self.step, Step::ToolSetup(step) if sample.matches(step)));
         let mut frame = format!("MRK_MACOS_AQUA_FAILURE_STEP={step}\nMRK_MACOS_AQUA_FAILURE_REASON={reason}\nMRK_MACOS_AQUA_FAILURE_CONTEXT=").into_bytes();
         let tail = b"\nMRK_MACOS_AQUA=failed\n";
         let context = bounded_failure_context(failure_context(&self), self.press_timing(), frame.len().checked_add(tail.len())?)?;
@@ -1349,6 +1362,7 @@ fn failure_context(r: &FailureSnapshot) -> Value {
     if let Some(sample) = r.bootstrap { value["bootstrap"] = sample.value(); }
     if let Some(sample) = r.vault { value["vault"] = sample.value(); }
     if let Some(sample) = r.upload { value["uploadKey"] = sample.value(); }
+    if let Some(sample) = r.tool_service { value["toolService"] = sample.value(); }
     if let Some(completion) = r.completion_selection { value["completionSelection"] = completion.value(); }
     if let Some(selection) = r.project_selection { value["projectSelection"] = selection.value(); }
     if let Some(admitted) = r.input_body_admission { value["inputBodyAdmission"] = json!(admitted); }
@@ -4293,7 +4307,7 @@ fn press_diagnostic_data_check(full: OpenInputSample) -> bool {
         parent_references_panel: Some(true), panel_references_parent: Some(true), panel_visible: Some(true),
         directory_bound: true, directory_returned: true, directory_ready: true, directory_readiness: "ready", wait_location: None };
     let snapshot = FailureSnapshot { source: "record", step: Step::OpenProject, pending: None, native_dispatch: Some(native),
-        input_body_admission: None, bootstrap: None, vault: None, upload:None, dom: None, original_window: None, last_panel: Some(panel),
+        input_body_admission: None, bootstrap: None, vault: None, upload:None, tool_service:None, dom: None, original_window: None, last_panel: Some(panel),
         native_action: None, accessibility: Some(failed), identity_binding: Some(identity),
         completion_selection: None, project_selection: None, field_preparation: None };
     if snapshot.press_timing() != Some(timing) || snapshot.frame("native-default-input").is_none() { return false; }
@@ -4460,6 +4474,44 @@ fn native_recheck_data_check() -> bool {
     if receiver.try_recv() != Ok(None) || receiver.try_recv().is_ok() || sink.claim.load(Ordering::SeqCst) != 2 { return false; }
     true
 }
+fn tool_service_failure_data_checks(sample: tool_setup::ServiceFailureSample, steps: [tool_setup::Step; 5]) -> bool {
+    // Real frame/serializer over inert returned-status DATA. No Control, native
+    // owner, fixture, service query, writer thread or permission is constructed.
+    fn frame_matches(snapshot: FailureSnapshot, step: &str, reason: &'static str, sample: Option<Value>) -> bool {
+        let Some(frame) = snapshot.frame(reason) else { return false; };
+        let mut context = json!({"snapshotSource":snapshot.source,"pending":null,"nativeHandler":null,"lastPanel":null,
+            "nativeAction":null,"originalWindow":null,"accessibility":null,"accessibilityBinding":null});
+        if let Some(sample) = sample { context["toolService"] = sample; }
+        let Ok(bytes) = serde_json::to_vec(&context) else { return false; };
+        let mut expected = format!("MRK_MACOS_AQUA_FAILURE_STEP={step}\nMRK_MACOS_AQUA_FAILURE_REASON={reason}\nMRK_MACOS_AQUA_FAILURE_CONTEXT=").into_bytes();
+        expected.extend_from_slice(&bytes); expected.extend_from_slice(b"\nMRK_MACOS_AQUA=failed\n");
+        step.len() <= 32 && bytes.len() <= 8192 && frame.len() <= 8448 && frame.is_ascii() && frame == expected
+    }
+    let reason = "tool-setup-original-contract";
+    let snapshot = FailureSnapshot { source: "record", step: Step::ToolSetup(steps[0]), pending: None, native_dispatch: None,
+        input_body_admission: None, bootstrap: None, vault: None, upload: None, tool_service: None, dom: None,
+        original_window: None, last_panel: None, native_action: None, accessibility: None, identity_binding: None,
+        completion_selection: None, project_selection: None, field_preparation: None };
+    for (i, (step, label)) in steps.into_iter().zip(["ToolService(Request)","ToolService(RequestWait)","ToolService(Check)",
+        "ToolService(CheckWait)","ToolService(Finish)"]).enumerate() {
+        let current = FailureSnapshot { step: Step::ToolSetup(step), ..snapshot };
+        if !frame_matches(current, label, reason, None)
+            || !frame_matches(FailureSnapshot { tool_service: Some(sample), ..current }, label, reason,
+                matches!(i, 1 | 3).then(|| sample.value())) { return false; }
+    }
+    let wait = FailureSnapshot { step: Step::ToolSetup(steps[1]), tool_service: Some(sample), ..snapshot };
+    if !frame_matches(FailureSnapshot { source: "prearm-open-progress", ..wait }, "ToolService(RequestWait)", reason, None)
+        || !frame_matches(FailureSnapshot { step: Step::ToolSetup(tool_setup::Step::Context), ..wait }, "ToolSetup(Context)", reason, None) { return false; }
+    let first = AtomicU8::new(0); let failed = AtomicBool::new(false);
+    latch_failure(&first, &failed, "observer-deadline");
+    latch_failure(&first, &failed, reason);
+    if first_failure_reason(&first) != Some("observer-deadline") || !failed.load(Ordering::SeqCst)
+        || !frame_matches(wait, "ToolService(RequestWait)", "observer-deadline", None) { return false; }
+    let expired = wait.at_expiry(OpenProgress { state: "unknown", requested: false, dispatched: false, entered: false,
+        returned: false, joined: false, retired: false, expired: true });
+    expired.tool_service.is_none() && failure_context(&expired).get("toolService").is_none()
+        && frame_matches(expired, "ToolService(RequestWait)", reason, None)
+}
 fn bootstrap_diagnostic_data_checks() -> bool {
     // Inert DATA only: no Record/native fixture, thread, endpoint or receipt.
     let sample = BootstrapSample { step: Step::Bootstrap, attached: true, initial_navigation: true,
@@ -4485,7 +4537,7 @@ fn bootstrap_diagnostic_data_checks() -> bool {
     latch_bootstrap(&first, &failed, &mut detail, "bootstrap-info-duplicate", later);
     if detail.is_some() || first_failure_reason(&first) != Some("bootstrap-info-methods-shape") { return false; }
     let snapshot = FailureSnapshot { source: "record", step: Step::Bootstrap, pending: None, native_dispatch: None, input_body_admission: None,
-        bootstrap: Some(sample), vault: None, upload:None, dom: Some((0, None)), original_window: None, last_panel: None, native_action: None,
+        bootstrap: Some(sample), vault: None, upload:None, tool_service:None, dom: Some((0, None)), original_window: None, last_panel: None, native_action: None,
         accessibility: None, identity_binding: None, completion_selection: None, project_selection: None, field_preparation: None };
     if snapshot.frame("bootstrap-info-available-count").is_none() || snapshot.frame("observer-invariant").is_some()
         || (FailureSnapshot { source: "prearm-open-progress", ..snapshot }).frame("bootstrap-info-available-count").is_some() { return false; }
