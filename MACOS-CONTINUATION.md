@@ -9,11 +9,13 @@ fix, locally test and rerun failures. Work remains on
 Read [MACOS-LOCAL-RESULTS.md](MACOS-LOCAL-RESULTS.md) first for current run status,
 original failures, candidate changes and exact verification limits.
 
-**Follow active run [40132594293](https://github.com/Apdelrahman1911/mobile-release-kit/actions/runs/40132594293),
-attempt 1, source `ed91b0dd582ca35a6dc57556aa73d60f1fc852a2`.** Tool26 job
-`120987297562` and Git27 job `120987297813` are pending. Do not launch a
-duplicate. Its live/final metadata is in the private sibling evidence directory
-with prefix `run-40132594293-attempt-1-`.
+**Run 40132594293 is finished with failure.** Git27 installed/read back successfully,
+then diskutil eject1 identified `installd` as the dissenter. Tool26 installed and
+completed actual Open Project, then returned service-not-found / exit78 with
+originals settled. Read the latest results above. A tested 60-second cleanup grace
+and exact ed91 artifact nomination are being prepared on the existing retained
+Git reuse route; no new workflow or production publication. Track the next run
+recorded in MACOS-LOCAL-RESULTS.md. Service packaging still needs investigation.
 
 Run [40123897979](https://github.com/Apdelrahman1911/mobile-release-kit/actions/runs/40123897979)
 on `f7e2ca8885aa050ae6a22cfdd08300bd1e3aa956` failed; its monitor has exited.

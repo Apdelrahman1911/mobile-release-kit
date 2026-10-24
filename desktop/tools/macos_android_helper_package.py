@@ -3370,6 +3370,7 @@ class Operation:
         self.transport_mount = self.transport_slash = self.transport_volumes = self.transport_roster = None
         self.mount_entered = self.mount_known = self.mount_detached = False
         self.installer_entered = self.installer_zero = self.installation_readback = False
+        self.installer_cleanup_grace_entered = False
         self.distribution_detach_refusal = None  # SAME exception/call, not a matching error token.
         self.distribution_detach_diagnostic = None  # Separate native custody; never joins self.calls.
         self.removal_package_complete = False
@@ -9097,6 +9098,20 @@ class Operation:
              and (not self.installer_entered or self.installer_zero and self.installation_readback), "package-mount-retention-required")
         need(self.package_settled(), "package-mount-finality-unknown")
         self.recheck_mount()
+        if (self.phase == "package-install" and self.environment.get("MRK_MACOS_RUNNER") == "xcode-27"
+                and self.installer_entered):
+            # Installer0 does not mean PackageKit has released its source image.
+            # Give its asynchronous cleanup one bounded grace BEFORE the first
+            # eject. This is not evidence of service exit; eject0 and the fresh
+            # namespace check below remain mandatory. Never renew the endpoint.
+            need(not self.installer_cleanup_grace_entered
+                 and package_timeout_data(self.package_clock(), self.package_endpoint, 90) == 90,
+                 "installer-cleanup-grace-admission")
+            self.installer_cleanup_grace_entered = True
+            time.sleep(60)
+            need(package_timeout_data(self.package_clock(), self.package_endpoint, 30) == 30,
+                 "installer-cleanup-grace-settlement")
+            self.recheck_mount()
         for entry in self.entries:
             if entry["kind"] in ("mounted-file", "mount"):
                 self.close(entry)

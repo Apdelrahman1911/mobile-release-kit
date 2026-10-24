@@ -88,6 +88,33 @@ def mounted_fixture(target):
 
 
 class CandidateConsumerTests(unittest.TestCase):
+    def test_retained_git_cleanup_grace_is_inside_work_budget_once_after_readback(self):
+        from tests.desktop.test_macos_candidate_carrier import retained_fixture
+        for fault in (None, 'budget', 'interrupted', 'overrun', 'changed-mount', 'readback'):
+            with self.subTest(fault=fault):
+                owner = retained_instance(retained_fixture(git=True)[0], environment=retained_git_environment())
+                now = [1_000_000_000]
+                owner.clock = R.Deadline(lambda: now[0])
+                owner.installer_zero = True
+                owner.readback_known = fault != 'readback'
+                post = mock.Mock(return_value='same')
+                if fault == 'budget': now[0] += 451_000_000_000
+                def grace(seconds):
+                    self.assertEqual(seconds, 60)
+                    if fault == 'interrupted': raise KeyboardInterrupt()
+                    now[0] += (600 if fault == 'overrun' else 60) * 1_000_000_000
+                    if fault == 'changed-mount': post.return_value = 'changed'
+                with mock.patch.object(C.time, 'sleep', side_effect=grace) as sleep:
+                    if fault:
+                        with self.assertRaises((ValueError, KeyboardInterrupt)):
+                            owner.pre_detach_originals(post, 'same')
+                    else:
+                        owner.pre_detach_originals(post, 'same')
+                        self.assertEqual(post.call_count, 2)
+                        with self.assertRaises(ValueError): owner.pre_detach_originals(post, 'same')
+                    self.assertEqual(sleep.call_count, 0 if fault in ('budget', 'readback') else 1)
+                    self.assertFalse(owner.clock.finality)
+
     def test_git_retained_context_selection_and_actual_host_caller_are_closed_and_defaults_stay26(self):
         import ctypes
         from desktop.tools import macos_xcode_host_preparation as H
@@ -1544,6 +1571,13 @@ class PredecessorInstallTests(unittest.TestCase):
             return body[offset:offset+count]
         with ExitStack() as patches:
             patches.enter_context(mock.patch.dict(R.STATE, phase='admission', firstFailurePhase=None))
+            def cleanup_grace(seconds):
+                self.assertEqual(mode, 'retained-git-observer')
+                self.assertEqual(seconds, 60)
+                self.assertIn('readback', events)
+                self.assertNotIn('detach', events)
+                now[0] += 60_000_000_000
+            patches.enter_context(mock.patch.object(C.time, 'sleep', side_effect=cleanup_grace))
             patches.enter_context(mock.patch.object(R.os, 'fstat', return_value=info))
             def observed_stat(name, **kwargs):
                 if retained and name in bodies:

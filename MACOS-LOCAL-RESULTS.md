@@ -2,12 +2,45 @@
 
 ## Latest continuation — 2026-10-25
 
-**Active run:** [40132594293](https://github.com/Apdelrahman1911/mobile-release-kit/actions/runs/40132594293),
-attempt 1, exact candidate `ed91b0dd582ca35a6dc57556aa73d60f1fc852a2`, tree
-`27e03272ab0f31bf4769a7236322427707cbddae`. Tool26 job `120987297562` and
-Git27 job `120987297813` are running. Follow this run to completion; do not
-launch a duplicate. Private monitor files use prefix
-`run-40132594293-attempt-1-`. No native success is claimed while pending.
+**Run 40132594293 completed with failure** on candidate
+`ed91b0dd582ca35a6dc57556aa73d60f1fc852a2`, tree
+`27e03272ab0f31bf4769a7236322427707cbddae`.
+
+- Git27 job `120987297813`: original Installer0 and readback passed; the first
+  ordinary diskutil eject returned 1. Its actual stderr identified PackageKit's
+  `installd` (PID 544, parent launchd) as the unmount dissenter. All owned calls,
+  captures and closes were known. Git cases were not reached.
+- Tool26 job `120987297562`: signing, notarization, installation and ejection
+  passed. The actual Open Project path passed, including 232 AX calls, one
+  Press and the matching original completion. The service prerequisite then
+  returned `service-not-found`, exit78: request settled, Check not entered,
+  all originals settled. Tool/CLI cases remain unexecuted.
+
+The next helper correction gives PackageKit one 60-second cleanup grace before
+Git27's FIRST eject, within the unchanged endpoint and with the existing finality
+reserve. It neither retries nor forces eject and does not assert service exit.
+Eject0 and fresh namespace absence still decide success. Insufficient budget,
+interruption or changed mount prevents admission. Tool26 behavior is unchanged.
+
+To avoid another full build, the existing retained-Git workflow now nominates
+artifact `12578123633` from the exact run/job above (294264707 bytes,
+SHA256 `25b26bcf2ccde9432864d7f3717d937f6c31349458beea243afeefd8fe03c239`).
+API metadata passed the actual strict producer validator. This is a raw,
+nonshipping unqualified carrier; its old failed install is NOT authority for a
+new success. The consumer must verify bytes/signatures, freshly install/readback,
+and eject successfully before all 15 native Git cases can run.
+
+Local checks: 33 focused DATA tests passed, including deadline/interruption and
+source metadata binding; two existing retained-install tests exercised all
+success/failure seams for both native scopes and passed. The initial broader
+98-test invocation had 1 failure and 36 errors (including a new selection-bytes
+access bug now fixed, and legacy fixture/provenance failures); it is not a green
+suite. The real tiny-DMG test passed both refusal/close cycles and a separate
+asynchronous reader with 60-second grace followed by first-eject0. No Installer,
+service registration or privileged operation ran on the owner's Mac. This models
+reader lifetime, not PackageKit's actual lifetime. Evidence uses prefix
+`cleanup-grace-` in the private sibling evidence directory. Workflow syntax and
+diff checks passed. Hosted verification remains required.
 
 The owner explicitly requested continuing through failures until both candidate
 jobs succeed. Run [40123897979](https://github.com/Apdelrahman1911/mobile-release-kit/actions/runs/40123897979)

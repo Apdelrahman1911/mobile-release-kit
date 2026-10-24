@@ -341,6 +341,7 @@ class CandidateResume(resume.Resume):
         self.__retained_observer = retained_observer
         self.__retained_selection = self.__observer_product = self.__image_document = None
         self.__detach_observation = None
+        self.__installer_cleanup_grace_entered = False
         self.__installed_signature_state = None
         self.__mounted_reread_inputs = self.__mounted_reread_state = None
         self.baseline = self.baseline_entry = self.baseline_receipt = self.fixture_api = None
@@ -738,6 +739,17 @@ class CandidateResume(resume.Resume):
 
     def pre_detach_originals(self, post, facts):
         super().pre_detach_originals(post, facts)
+        if self.__retained_observer and self.retained_selection()['nativeScope'] == 'git-native':
+            # Same bounded PackageKit cleanup grace as the normal Git27 route.
+            # Stay in the original work region, leaving its cleanup reserve.
+            resume.need(not self.__installer_cleanup_grace_entered and self.__detach_observation is None
+                        and self.installer_zero is True and self.readback_known is True
+                        and self.clock.finality is False and self.clock.seconds(60) == 60,
+                        'retained-installer-cleanup-grace-admission')
+            self.__installer_cleanup_grace_entered = True
+            time.sleep(60)
+            self.clock.check()
+            super().pre_detach_originals(post, facts)
         if not self.__predecessor_install: return
         # Production's final mounted-read workload, after full readback and
         # immediately before the unchanged consuming mounted.finish/detach.

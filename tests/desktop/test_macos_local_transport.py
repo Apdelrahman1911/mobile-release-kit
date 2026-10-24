@@ -8,6 +8,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import unittest
 import uuid
@@ -23,8 +24,9 @@ class LocalTransport(unittest.TestCase):
         device = None
         known = True
         reader = None
+        delayed_reader = None
         observations = []
-        deadline = time.monotonic() + 90
+        deadline = time.monotonic() + 180
 
         def run(*args, eject_tool='hdiutil'):
             nonlocal known
@@ -50,7 +52,9 @@ class LocalTransport(unittest.TestCase):
             self.assertEqual(run('create', '-size', '8m', '-fs', 'HFS+', '-volname', 'MRKLocalSmoke',
                 '-srcfolder', str(source), '-format', 'UDZO', str(image)).returncode, 0)
             native_reader = os.environ.get('MRK_LOCAL_INSTALLER_TEST_BIN')
-            for eject_tool in ('hdiutil', 'diskutil'):
+            for eject_tool in ('hdiutil', 'diskutil', 'diskutil-grace'):
+                delayed = eject_tool == 'diskutil-grace'
+                if delayed: eject_tool = 'diskutil'
                 self.assertFalse(mount.exists())
                 attached = run('attach', str(image), '-readonly', '-nobrowse', '-noautoopen',
                                '-mountpoint', str(mount), '-plist')
@@ -71,6 +75,30 @@ class LocalTransport(unittest.TestCase):
                     self.assertEqual(checked.returncode, 0, checked.stdout.decode(errors='replace') + checked.stderr.decode(errors='replace'))
                     self.assertIn(b'1 passed', checked.stdout)
                 reader = os.open(mounted, os.O_RDONLY | os.O_NOFOLLOW)
+                if delayed:
+                    # Model a separate asynchronous source reader. This is not
+                    # an Installer service or evidence of its actual lifetime.
+                    fd, reader = reader, None
+                    released = threading.Event()
+                    def release_source():
+                        time.sleep(2)
+                        os.close(fd)
+                        released.set()
+                    delayed_reader = threading.Thread(target=release_source)
+                    delayed_reader.start()
+                    self.assertEqual(os.pread(fd, len(original), 0), original)
+                    time.sleep(60)
+                    delayed_reader.join(timeout=1)
+                    self.assertTrue(released.is_set())
+                    self.assertFalse(delayed_reader.is_alive())
+                    delayed_reader = None
+                    result = run('detach', device, eject_tool=eject_tool)
+                    observations.append({'tool': eject_tool, 'cleanupGraceSeconds': 60,
+                                         'firstEjectionReturncode': result.returncode})
+                    self.assertEqual(result.returncode, 0)
+                    device = None
+                    self.assertFalse(mount.exists())
+                    continue
                 result = run('detach', device, eject_tool=eject_tool)
                 observations.append({'tool': eject_tool, 'openFileEjectionReturncode': result.returncode})
                 self.assertNotEqual(result.returncode, 0)
@@ -82,6 +110,9 @@ class LocalTransport(unittest.TestCase):
             print(json.dumps({'scope': 'local-dmg-source-lifetime', 'observations': observations,
                               'installedAnything': False, 'nativeInputPolicyTested': bool(native_reader), 'passed': True}))
         finally:
+            if delayed_reader is not None:
+                delayed_reader.join(timeout=3)
+                if delayed_reader.is_alive(): known = False
             if reader is not None:
                 os.close(reader)
             # Never force-detach or delete through a mount/uncertain operation.

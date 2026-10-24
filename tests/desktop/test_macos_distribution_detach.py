@@ -77,6 +77,7 @@ def operation():
             assert H.directory_identity(volumes.stat()) == parent['identity']
         try:
             with (mock.patch.object(H.time, 'monotonic_ns', return_value=NOW),
+                  mock.patch.object(H.time, 'sleep'),
                   mock.patch.object(H, 'transport_mount_path_data', return_value=op.transport_mount),
                   mock.patch.object(op, 'recheck_mount', side_effect=mount_post),
                   mock.patch.object(op, 'removal_directory_post', side_effect=parent_post)):
@@ -171,6 +172,29 @@ class DistributionDetachData(unittest.TestCase):
 
 
 class DistributionDetachCustody(unittest.TestCase):
+    def test_cleanup_grace_requires_full_budget_and_never_reenters_or_ejects_after_interruption(self):
+        for fault in ('budget', 'interrupted', 'overrun', 'changed-mount'):
+            with self.subTest(fault=fault), operation() as op:
+                op.environment['MRK_MACOS_RUNNER'] = 'xcode-27'
+                op.installation_readback = True
+                if fault == 'budget': op.package_endpoint = NOW + 92_000_000_000
+                def grace(seconds):
+                    self.assertEqual(seconds, 60)
+                    if fault == 'interrupted': raise KeyboardInterrupt()
+                    if fault == 'overrun': op.package_endpoint = NOW + 32_000_000_000
+                    if fault == 'changed-mount': op.recheck_mount.side_effect = H.Refused('changed-mount')
+                with (mock.patch.object(H.time, 'sleep', side_effect=grace) as sleep,
+                      mock.patch.object(op, 'package_call') as call):
+                    with self.assertRaises((H.Refused, KeyboardInterrupt)):
+                        op.detach_package_mount()
+                    call.assert_not_called()
+                    self.assertEqual(sleep.call_count, 0 if fault == 'budget' else 1)
+                    if fault in ('interrupted', 'overrun'):
+                        op.package_endpoint = NOW + 990_000_000_000
+                        with self.assertRaises(H.Refused): op.detach_package_mount()
+                        self.assertEqual(sleep.call_count, 1)
+                        call.assert_not_called()
+
     def test_installer_log_correlation_rejects_unprotected_host_copy(self):
         args = SimpleNamespace(fixture=False, expected_source='a' * 40, expected_inventory='b' * 64,
             expected_manifest='c' * 64, run_id='123', run_attempt='1', target=H.ARM_TARGET,

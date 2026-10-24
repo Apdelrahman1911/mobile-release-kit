@@ -46,7 +46,7 @@ RETAINED_OBSERVER_MEMBERS = {
     'distribution/MobileReleaseKit-Observation.dmg': LIMIT,
     'distribution/MobileReleaseKit.dmg': LIMIT,
 }
-# The selected5212 Git job returned Installer0/readback, then detach16. Its
+# The selected ed91 Git job returned Installer0/readback, then eject1. Its
 # exact archive also has all three detach originals; none are optional.
 RETAINED_GIT_MEMBERS = dict(RETAINED_OBSERVER_MEMBERS)
 

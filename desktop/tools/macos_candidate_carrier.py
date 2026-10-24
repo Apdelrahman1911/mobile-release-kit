@@ -147,7 +147,7 @@ def candidate_members(body, nomination, clock, *, before_image=None):
 RETAINED_OBSERVER_IMAGE = 'distribution/MobileReleaseKit.dmg'
 RETAINED_OBSERVER_OPERATIONS = ('install-retained-observer', 'install-retained-git-observer')
 RETAINED_GIT_SELECTION_PATH = 'desktop/macos-installed-inputs/retained-git-observer-selection.json'
-RETAINED_GIT_TUPLE = ('5212f4be8ae091bb186bd63936c045684702719d', '40086813826', '1')
+RETAINED_GIT_TUPLE = ('ed91b0dd582ca35a6dc57556aa73d60f1fc852a2', '40132594293', '1')
 RETAINED_OBSERVER_STEPS = (
     'Build the current nonshipping observer',
     'Record the effective pinned compiler and preflight configured observer DATA',
