@@ -60,7 +60,7 @@ pub(crate) use history::{GitHubHistoryAdmission,GitHubHistoryReceipt,GitHubHisto
 use crate::github_history_protocol as history_protocol;
 #[path = "supervisor_git_read.rs"]
 mod git_read;
-pub(crate) use git_read::{GitReadAdmission, GitReadTicket, GitReadReceipt};
+pub(crate) use git_read::{GitReadAdmission, GitReadTicket, GitReadReceipt, GitReadStop};
 #[path = "supervisor_git_local.rs"]
 mod git_local;
 pub(crate) use git_local::{GitLocalAdmission, GitLocalTicket, GitLocalReceipt, GitLocalPublication, GitLocalFetchHold, GitLocalPushHold};
@@ -669,7 +669,13 @@ impl OwnerState {
         // shutdown latch. This small decision also admits fixed-value tests of
         // simultaneous-ready joins/deadlines without replacing the product clock.
         if self.terminal || !self.management_ready() { return None; }
-        if stopping { self.fail_at(BridgeError::shutdown(), now); }
+        if stopping {
+            let error = BridgeError::shutdown().with_git_read_failure_provenance(self.git_read_endpoints.map(|_| {
+                crate::error::GitReadFailureProvenance { origin: crate::error::GitReadFailureOrigin::Shutdown,
+                    go_claimed_at_boundary: None }
+            }));
+            self.fail_at(error, now);
+        }
         if now >= self.endpoint { self.fail_at(BridgeError::timeout(), now); }
         if self.cleanup_endpoint.is_some_and(|endpoint| now >= endpoint) {
             #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", target_os = "linux", target_arch = "x86_64", target_env = "gnu",
@@ -1813,7 +1819,9 @@ impl Supervisor {
         };
         let mut observer_end=Instant::now()+CLEANUP_TIME;
         for owner in owners {
-            owner.fail(BridgeError::shutdown());
+            owner.fail(BridgeError::shutdown().with_git_read_failure_provenance(owner.git_read.as_ref().map(|_| {
+                git_read::boundary_provenance(&owner, crate::error::GitReadFailureOrigin::Shutdown)
+            })));
             if matches!(owner.profile,Profile::GitHubHistory | Profile::GitHubAuth | Profile::GitHubDevice | Profile::GitRead | Profile::GitLocal | Profile::VersionAllocationSource){
                 if let Some(end)=lock(&owner.state).cleanup_endpoint{observer_end=observer_end.max(end);}
             }
@@ -4278,7 +4286,12 @@ async fn drive(inner: Arc<Inner>, owner: Arc<Owner>, bytes: Vec<u8>) -> DriverEn
             }
             Event::Fault(Some(error)) => owner.fail(error),
             Event::Fault(None) => faults_open = false,
-            Event::Stop => { stopped = true; if !owner.failed() { owner.fail(BridgeError::shutdown()); } }
+            Event::Stop => { stopped = true; if !owner.failed() {
+                // This fallback observed the stop channel, not its sender.
+                owner.fail(BridgeError::shutdown().with_git_read_failure_provenance(owner.git_read.as_ref().map(|_| {
+                    git_read::boundary_provenance(&owner, crate::error::GitReadFailureOrigin::DriverStop)
+                })));
+            } }
         }
     }
     if resources.failed_writer.is_some() || resources.failed_stdout.is_some() || resources.failed_stderr.is_some() {

@@ -9,6 +9,27 @@ pub struct BridgeError {
     #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
     #[serde(skip)]
     linux_passive_cause: Option<LinuxPassiveCause>,
+    #[serde(skip)]
+    git_read_failure_provenance: Option<GitReadFailureProvenance>,
+}
+
+// Closed facts at the producer of the winning original GitRead error. These
+// are not public protocol, timing, child-entry or finality authority.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct GitReadFailureProvenance {
+    pub(crate) origin: GitReadFailureOrigin,
+    // A later decode boundary can observe GO after the child's first failure.
+    // Even true does not prove stdin delivery or child/Git entry. None means
+    // this producer did not already have the original owner's GO flag.
+    pub(crate) go_claimed_at_boundary: Option<bool>,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum GitReadFailureOrigin {
+    ExplicitCancel, DocumentStop, Shutdown, DriverStop,
+    SourceInspectOwnerFailed, SourceInspectStopFlag, SourceInspectExpired,
+    SourcePostOwnerFailed, SourcePostStopFlag, SourcePostExpired,
+    ChildTerminal,
 }
 
 // Original returned facts only. These are neither public protocol fields nor
@@ -45,7 +66,16 @@ impl BridgeError {
         Self { code: code.into(), message: message.into(), retryable: false,
             #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
             linux_passive_cause: None,
+            git_read_failure_provenance: None,
         }
+    }
+
+    pub(crate) fn with_git_read_failure_provenance(mut self, provenance: Option<GitReadFailureProvenance>) -> Self {
+        self.git_read_failure_provenance = provenance;
+        self
+    }
+    pub(crate) fn git_read_failure_provenance(&self) -> Option<GitReadFailureProvenance> {
+        self.git_read_failure_provenance
     }
 
     #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
@@ -72,6 +102,30 @@ impl std::fmt::Display for BridgeError {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result { write!(f, "{}: {}", self.code, self.message) }
 }
 impl std::error::Error for BridgeError {}
+
+#[cfg(test)]
+mod git_read_tests {
+    use super::*;
+    #[test]
+    fn git_read_provenance_is_cloned_but_not_public_or_equality_authority() {
+        let plain = BridgeError::new("cancelled", "The original Git read was stopped.");
+        let provenance = Some(GitReadFailureProvenance {
+            origin: GitReadFailureOrigin::DocumentStop, go_claimed_at_boundary: Some(false),
+        });
+        let tagged = plain.clone().with_git_read_failure_provenance(provenance);
+        assert_eq!(tagged.clone().git_read_failure_provenance(), provenance);
+        assert_eq!(plain.git_read_failure_provenance(), None);
+        assert_eq!(plain, tagged);
+        assert_eq!(tagged, plain.clone().with_git_read_failure_provenance(Some(GitReadFailureProvenance {
+            origin: GitReadFailureOrigin::ChildTerminal, go_claimed_at_boundary: Some(true),
+        })));
+        assert_eq!(serde_json::to_value(&tagged).unwrap(), serde_json::json!({
+            "code":"cancelled", "message":"The original Git read was stopped.", "retryable":false,
+        }));
+        assert_eq!(serde_json::to_value(&plain).unwrap(), serde_json::to_value(&tagged).unwrap());
+        assert_eq!(plain.to_string(), tagged.to_string());
+    }
+}
 
 #[cfg(all(test, target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
 mod tests {

@@ -468,6 +468,84 @@ class GitReadFailureDataTests(unittest.TestCase):
         self.assertNotIn("PRIVATE", output.getvalue())
 
 
+class GitReadFailureProvenanceDataTests(unittest.TestCase):
+    """Closed original-error DATA only, not a child cause or finality receipt."""
+
+    ORIGINS = ("explicit-cancel", "document-stop", "shutdown", "driver-stop",
+               "source-inspect-owner-failed", "source-inspect-stop-flag", "source-inspect-expired",
+               "source-post-owner-failed", "source-post-stop-flag", "source-post-expired", "child-terminal")
+
+    @staticmethod
+    def detail(origin="document-stop", go=False):
+        value = GitReadFailureDataTests.detail()
+        provenance = {"origin": origin, "goClaimedAtBoundary": go}
+        if origin == "child-terminal":
+            provenance["childSubcause"] = "unavailable"
+        value["gitReadFailure"].update(check="terminal-outcome", phase="settled", outcome="cancelled",
+                                       reason="authorization", provenance=provenance)
+        return value
+
+    @staticmethod
+    def row(value, step="GitCli(ReadWait)", reason="git-cli-original-contract"):
+        return project_selection_row(value, reason, step)
+
+    def test_optional_closed_provenance_and_legacy_frames_for_each_read_family(self):
+        for family, reason, cases in (
+                ("GitCli", "git-cli-original-contract", M.GIT_CLI.CASES),
+                ("GitUpstream", "git-upstream-original-contract", M.UPSTREAM.CASES),
+                ("GitFetch", "git-fetch-original-contract", M.FETCH.CASES),
+                ("GitPush", "git-push-original-contract", M.PUSH.ALL_CASES)):
+            for case in cases:
+                for origin in self.ORIGINS:
+                    for go in (None, False, True):
+                        value = self.detail(origin, go)
+                        self.assertEqual(M.failure_context(b"", self.row(value, f"{family}(ReadWait)", reason), case), value)
+                legacy = self.detail()
+                del legacy["gitReadFailure"]["provenance"]
+                self.assertEqual(M.failure_context(b"", self.row(legacy, f"{family}(ReadWait)", reason), case), legacy)
+
+    def test_unmatched_original_cannot_carry_provenance(self):
+        for check in ("missing-operation", "missing-fixture", "missing-original", "original-mismatch"):
+            value = self.detail(); value["gitReadFailure"]["check"] = check
+            self.assertIsNone(M.failure_context(b"", self.row(value), M.GIT_CLI.INDEX))
+        for key, replacement in (("snapshotSource", "prearm-open-progress"),):
+            value = self.detail(); value[key] = replacement
+            self.assertIsNone(M.failure_context(b"", self.row(value), M.GIT_CLI.INDEX))
+        for step in ("GitCli(Read)", "GitFetch(ReadWait)"):
+            self.assertIsNone(M.failure_context(b"", self.row(self.detail(), step), M.GIT_CLI.INDEX))
+        self.assertIsNone(M.failure_context(b"", self.row(self.detail(), reason="observer-deadline"), M.GIT_CLI.INDEX))
+
+    def test_private_unknown_and_wrongly_typed_provenance_is_rejected(self):
+        for replacement in (None, True, [], "private error", {}, {"origin": "document-stop"}):
+            value = self.detail(); value["gitReadFailure"]["provenance"] = replacement
+            self.assertIsNone(M.failure_context(b"", self.row(value), M.GIT_CLI.INDEX))
+        for key, replacement in (("origin", "private/path"), ("origin", None), ("origin", {}),
+                                 *(("goClaimedAtBoundary", v) for v in (0, 1, "true", [], {})),
+                                 ("childStarted", True), ("error", "private"), ("path", "private"),
+                                 ("childSubcause", "unavailable")):
+            value = self.detail(); value["gitReadFailure"]["provenance"][key] = replacement
+            self.assertIsNone(M.failure_context(b"", self.row(value), M.GIT_CLI.INDEX), key)
+        value = self.detail("child-terminal")
+        del value["gitReadFailure"]["provenance"]["childSubcause"]
+        self.assertIsNone(M.failure_context(b"", self.row(value), M.GIT_CLI.INDEX))
+        for replacement in (None, True, {}, [], "authorization", "stdin-eof", "signal", "deadline"):
+            value = self.detail("child-terminal"); value["gitReadFailure"]["provenance"]["childSubcause"] = replacement
+            self.assertIsNone(M.failure_context(b"", self.row(value), M.GIT_CLI.INDEX))
+
+    def test_claimed_go_and_child_terminal_cannot_establish_subcause_or_finality(self):
+        value = self.detail("child-terminal", True)
+        self.assertEqual(M.failure_context(b"", self.row(value), M.GIT_CLI.INDEX), value)
+        with self.assertRaises(M.Refused):
+            M.parse_result(b"", self.row(value), BINDING, M.GIT_CLI.INDEX)
+        fixtures = InertFixtures()
+        fixtures.case, fixtures.stage, fixtures.inflight = M.GIT_CLI.INDEX, "invocation", True
+        fixtures.inner_failure_context = M.failure_context(b"", self.row(value), fixtures.case)
+        report = M.diagnostic(M.Refused("original-deadline"), None, fixtures)
+        self.assertEqual(report["innerFailureContext"], value)
+        self.assertEqual((report["status"], report["appReturncode"], report["invocationFinality"],
+                          report["originalCallReturned"]), ("failed", None, "unknown", False))
+
+
 class ToolServiceFailureDataTests(unittest.TestCase):
     """Returned service DATA only; no native operation or UI automation."""
 

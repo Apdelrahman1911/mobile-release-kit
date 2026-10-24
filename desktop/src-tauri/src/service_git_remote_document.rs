@@ -331,6 +331,7 @@ mod tests {
     use super::*;
     fn observed() -> read::Projection {
         read::Projection {
+            failure_provenance: None,
             operation_id: "git-read-1".into(),
             context: read::Context {
                 project_id: "project-1".into(),

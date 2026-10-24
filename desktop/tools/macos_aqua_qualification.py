@@ -4154,7 +4154,7 @@ def _git_read_failure_context(value, source, step, reason, case):
     need(source == "record" and type(case) is str
          and any(case in cases and step == selected_step and reason == selected_reason
                  for cases, selected_step, selected_reason in bindings)
-         and type(value) is dict and set(value) == {"check", "phase", "outcome", "reason", "resultValid"},
+         and type(value) is dict and set(value) - {"provenance"} == {"check", "phase", "outcome", "reason", "resultValid"},
          "failure-context")
     need(type(value["check"]) is str and value["check"] in (
         "missing-operation", "missing-fixture", "missing-original", "original-mismatch",
@@ -4169,6 +4169,22 @@ def _git_read_failure_context(value, source, step, reason, case):
                        "already-used operation-in-progress unrecognized")):
         need(value[key] is None or type(value[key]) is str and value[key] in vocabulary.split(), "failure-context")
     need(value["resultValid"] is None or type(value["resultValid"]) is bool, "failure-context")
+    if "provenance" in value:
+        provenance = value["provenance"]
+        need(value["check"] not in ("missing-operation", "missing-fixture", "missing-original", "original-mismatch")
+             and type(provenance) is dict and type(provenance.get("origin")) is str
+             and provenance["origin"] in (
+                 "explicit-cancel", "document-stop", "shutdown", "driver-stop",
+                 "source-inspect-owner-failed", "source-inspect-stop-flag", "source-inspect-expired",
+                 "source-post-owner-failed", "source-post-stop-flag", "source-post-expired", "child-terminal"),
+             "failure-context")
+        child = provenance["origin"] == "child-terminal"
+        need(set(provenance) == {"origin", "goClaimedAtBoundary"} | ({"childSubcause"} if child else set())
+             and (provenance["goClaimedAtBoundary"] is None or type(provenance["goClaimedAtBoundary"]) is bool)
+             and (not child or type(provenance["childSubcause"]) is str and provenance["childSubcause"] == "unavailable"), "failure-context")
+        # This is a winning-error boundary, not the child's first-failure time.
+        # GO is only the already-held native claim flag, never sent-byte, child
+        # entry or successful settlement evidence. Child subcause stays unknown.
     # Invalid/partial status is precisely what is being diagnosed. Do not
     # normalize it, infer successful settlement, or export raw Git results.
     return value

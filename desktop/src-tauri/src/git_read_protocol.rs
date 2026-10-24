@@ -402,6 +402,10 @@ pub(crate) struct Projection {
     pub(crate) outcome: Option<Outcome>,
     pub(crate) reason: Option<String>,
     pub(crate) result: Value,
+    // Original-error diagnostic DATA only. Reconcile/Clone retains it without
+    // another owner query; neither public read status nor policy consumes it.
+    #[serde(skip)]
+    pub(crate) failure_provenance: Option<crate::error::GitReadFailureProvenance>,
 }
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]

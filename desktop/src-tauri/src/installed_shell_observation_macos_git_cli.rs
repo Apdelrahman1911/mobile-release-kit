@@ -988,6 +988,7 @@ mod tests {
 
     fn observed(case: Case, after: bool) -> read::Projection {
         read::Projection {
+            failure_provenance: None,
             operation_id: "git-read-1".into(),
             context: read::Context {
                 project_id: "fixture".into(),

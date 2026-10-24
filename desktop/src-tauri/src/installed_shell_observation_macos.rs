@@ -184,6 +184,7 @@ enum GitReadReason { Absent, Known(u8), Unrecognized }
 struct GitReadFailureSample {
     step: Step, check: GitReadCheck, phase: Option<git_read::Phase>, outcome: Option<git_read::Outcome>,
     reason: GitReadReason, result_valid: Option<bool>,
+    provenance: Option<crate::error::GitReadFailureProvenance>,
 }
 impl GitReadFailureSample {
     fn capture(step: Step, p: Option<&git_read::Projection>, check: GitReadCheck, result_valid: Option<bool>) -> Self {
@@ -193,7 +194,13 @@ impl GitReadFailureSample {
             Some(reason) => git_read::REASONS.iter().position(|label| *label == reason)
                 .map_or(GitReadReason::Unrecognized, |index| GitReadReason::Known(index as u8)),
         };
-        Self { step, check, phase: p.map(|p| p.phase), outcome: p.and_then(|p| p.outcome), reason, result_valid }
+        // A missing/mismatched original must not attribute another read's
+        // provenance to this failure. All remaining checks follow matching.
+        let provenance = match check {
+            GitReadCheck::MissingOperation | GitReadCheck::MissingFixture | GitReadCheck::MissingOriginal | GitReadCheck::OriginalMismatch => None,
+            _ => p.and_then(|p| p.failure_provenance),
+        };
+        Self { step, check, phase: p.map(|p| p.phase), outcome: p.and_then(|p| p.outcome), reason, result_valid, provenance }
     }
     fn value(self) -> Value {
         let reason = match self.reason {
@@ -201,7 +208,16 @@ impl GitReadFailureSample {
             GitReadReason::Known(index) => Some(git_read::REASONS.get(usize::from(index)).copied().unwrap_or("unrecognized")),
             GitReadReason::Unrecognized => Some("unrecognized"),
         };
-        json!({"check":self.check.label(),"phase":self.phase,"outcome":self.outcome,"reason":reason,"resultValid":self.result_valid})
+        let mut value = json!({"check":self.check.label(),"phase":self.phase,"outcome":self.outcome,"reason":reason,"resultValid":self.result_valid});
+        if let Some(provenance) = self.provenance {
+            value["provenance"] = json!({"origin":provenance.origin,"goClaimedAtBoundary":provenance.go_claimed_at_boundary});
+            if provenance.origin == crate::error::GitReadFailureOrigin::ChildTerminal {
+                // The closed child terminal has no cancellation subcause.
+                // Neither its generic authorization reason nor GO proves one.
+                value["provenance"]["childSubcause"] = json!("unavailable");
+            }
+        }
+        value
     }
 }
 fn latch_git_read_failure(first: &AtomicU8, failed: &AtomicBool, detail: &mut Option<GitReadFailureSample>,
@@ -4593,7 +4609,7 @@ fn git_read_wait_data_checks() -> bool {
     let mut p = git_read::Projection { operation_id: "not-exported".into(),
         context: git_read::Context { project_id: "not-exported".into(), generation: 1, revision: "not-exported".into() },
         action: git_read::Action { kind: git_read::Kind::Observe, expected_revision: None, paths: Vec::new(), staged: false },
-        phase: git_read::Phase::Starting, outcome: None, reason: None, result: Value::Null };
+        phase: git_read::Phase::Starting, outcome: None, reason: None, result: Value::Null, failure_provenance: None };
     for phase in [git_read::Phase::Starting, git_read::Phase::Running, git_read::Phase::Stopping,
         git_read::Phase::Settled, git_read::Phase::CleanupUnknown] {
         for outcome in [None, Some(git_read::Outcome::Ok), Some(git_read::Outcome::Refused),
@@ -4635,7 +4651,7 @@ fn git_read_failure_data_checks() -> bool {
         context: git_read::Context { project_id: "private-project-never-exported".into(), generation: 1, revision: "private-revision-never-exported".into() },
         action: git_read::Action { kind: git_read::Kind::Observe, expected_revision: None, paths: Vec::new(), staged: false },
         phase: git_read::Phase::Settled, outcome: Some(git_read::Outcome::Refused), reason: Some("command-failed".into()),
-        result: json!({"private":"never-exported"}) };
+        result: json!({"private":"never-exported"}), failure_provenance: None };
     for step in [Step::GitCli(git_cli::Step::ReadWait), Step::GitUpstream(git_upstream::Step::ReadWait),
         Step::GitFetch(git_fetch::Step::ReadWait), Step::GitPush(git_push::Step::ReadWait)] {
         let Some(reason) = git_read_failure_reason(step) else { return false; };
@@ -4687,16 +4703,46 @@ fn git_read_failure_data_checks() -> bool {
     }
     p.reason = None;
     if !GitReadFailureSample::capture(snapshot.step, Some(&p), GitReadCheck::TerminalOutcome, None).value()["reason"].is_null() { return false; }
+    use crate::error::{GitReadFailureOrigin as Origin, GitReadFailureProvenance};
+    let Ok(public) = serde_json::to_value(&p) else { return false; };
+    for origin in [Origin::ExplicitCancel, Origin::DocumentStop, Origin::Shutdown, Origin::DriverStop,
+        Origin::SourceInspectOwnerFailed, Origin::SourceInspectStopFlag, Origin::SourceInspectExpired,
+        Origin::SourcePostOwnerFailed, Origin::SourcePostStopFlag, Origin::SourcePostExpired, Origin::ChildTerminal] {
+        for go in [None, Some(false), Some(true)] {
+            p.failure_provenance = Some(GitReadFailureProvenance { origin, go_claimed_at_boundary: go });
+            if p.clone().failure_provenance != p.failure_provenance || serde_json::to_value(&p).ok().as_ref() != Some(&public) { return false; }
+            let mut expected = json!({"origin":origin,"goClaimedAtBoundary":go});
+            if origin == Origin::ChildTerminal { expected["childSubcause"] = json!("unavailable"); }
+            for step in [Step::GitCli(git_cli::Step::ReadWait), Step::GitUpstream(git_upstream::Step::ReadWait),
+                Step::GitFetch(git_fetch::Step::ReadWait), Step::GitPush(git_push::Step::ReadWait)] {
+                let reason = git_read_failure_reason(step).unwrap();
+                let sample = GitReadFailureSample::capture(step, Some(&p), GitReadCheck::TerminalOutcome, None);
+                if sample.value()["provenance"] != expected
+                    || !frame_matches(FailureSnapshot { step, git_read_failure: Some(sample), ..snapshot }, reason, Some(sample.value())) { return false; }
+                // A later provenance-bearing sample cannot decorate an older
+                // untagged observer failure, even with the same coarse reason.
+                let first = AtomicU8::new(0); let failed = AtomicBool::new(false); let mut detail = None;
+                let untagged = GitReadFailureSample { provenance: None, ..sample };
+                latch_git_read_failure(&first, &failed, &mut detail, step, reason, untagged);
+                latch_git_read_failure(&first, &failed, &mut detail, step, reason, sample);
+                if detail != Some(untagged) { return false; }
+            }
+            for check in [GitReadCheck::MissingOperation, GitReadCheck::MissingFixture, GitReadCheck::MissingOriginal, GitReadCheck::OriginalMismatch] {
+                if GitReadFailureSample::capture(snapshot.step, Some(&p), check, None).value().get("provenance").is_some() { return false; }
+            }
+        }
+    }
     // Optional diagnostic overflow must return the unchanged failure context.
+    let tagged = GitReadFailureSample::capture(snapshot.step, Some(&p), GitReadCheck::TerminalOutcome, None).value();
     let mut near = json!({"padding":""});
     let Ok(empty) = edit::bounded(&near, 8192) else { return false; };
     near["padding"] = json!("x".repeat(8192 - empty.len()));
     let Ok(baseline) = edit::bounded(&near, 8192) else { return false; };
-    near["gitReadFailure"] = missing.value();
+    near["gitReadFailure"] = tagged.clone();
     if bounded_failure_context(near, None, 256) != Some(baseline) { return false; }
     let mut small = json!({"padding":""});
     let Ok(baseline) = edit::bounded(&small, 8192) else { return false; };
-    small["gitReadFailure"] = missing.value();
+    small["gitReadFailure"] = tagged;
     bounded_failure_context(small, None, 8448 - baseline.len()) == Some(baseline)
 }
 #[cfg(test)]

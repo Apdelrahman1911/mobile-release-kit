@@ -4,7 +4,7 @@
 use super::*;
 use crate::{
     git_read_protocol as wire,
-    supervisor::{GitReadAdmission, GitReadReceipt, GitReadTicket},
+    supervisor::{GitReadAdmission, GitReadReceipt, GitReadTicket, GitReadStop},
 };
 
 pub(super) enum Entry {
@@ -73,7 +73,7 @@ pub(super) fn pending(state: &DocumentState) -> bool {
 pub(super) fn stop(state: &DocumentState) {
     if let Some(Entry::Original { ticket, .. }) = &state.git_read {
         if !ticket.settled() {
-            ticket.stop();
+            ticket.stop(GitReadStop::DocumentStop);
         }
     }
 }
@@ -102,6 +102,7 @@ fn projection(entry: &Entry) -> wire::Projection {
         outcome: None,
         reason: None,
         result: serde_json::Value::Null,
+        failure_provenance: None,
     };
     match ticket.receipt() {
         GitReadReceipt::Pending => {}
@@ -113,8 +114,10 @@ fn projection(entry: &Entry) -> wire::Projection {
         GitReadReceipt::Settled {
             outcome,
             was_unknown: false,
+            failure_provenance,
         } => {
             result.phase = wire::Phase::Settled;
+            result.failure_provenance = failure_provenance;
             match outcome {
                 Ok(value) => {
                     result.outcome = Some(value.status);
@@ -193,7 +196,7 @@ impl DocumentBinding {
     pub(crate) fn git_read_cancel(&self, operation_id: &str) -> Result<wire::Status, BridgeError> {
         let mut state = self.lock();
         match &state.git_read {
-            Some(Entry::Original { ticket, .. }) if ticket.operation_id() == operation_id => ticket.stop(),
+            Some(Entry::Original { ticket, .. }) if ticket.operation_id() == operation_id => ticket.stop(GitReadStop::ExplicitCancel),
             Some(Entry::Finished(value)) if value.operation_id == operation_id => {}
             _ => return Err(BridgeError::invalid()),
         }

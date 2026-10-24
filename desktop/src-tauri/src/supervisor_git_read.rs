@@ -1,6 +1,7 @@
 //! Closed GitRead arm of the original Supervisor. No separate driver,
 //! watchdog, process group, joiner, deadline renewal or source executor.
 use super::*;
+use crate::error::{GitReadFailureOrigin, GitReadFailureProvenance};
 use crate::git_read_protocol as wire;
 
 #[derive(Clone, Copy)]
@@ -121,8 +122,10 @@ pub(crate) enum GitReadReceipt {
     Settled {
         outcome: Result<wire::Terminal, BridgeError>,
         was_unknown: bool,
+        failure_provenance: Option<GitReadFailureProvenance>,
     },
 }
+pub(crate) enum GitReadStop { ExplicitCancel, DocumentStop }
 pub(crate) struct GitReadTicket {
     owner: Arc<Owner>,
     receipt: Arc<Mutex<GitReadReceipt>>,
@@ -131,9 +134,13 @@ impl GitReadTicket {
     pub(crate) fn operation_id(&self) -> &str {
         &self.owner.id
     }
-    pub(crate) fn stop(&self) {
-        self.owner
-            .fail(BridgeError::new("cancelled", "The original local Git read was stopped."));
+    pub(crate) fn stop(&self, cause: GitReadStop) {
+        let origin = match cause {
+            GitReadStop::ExplicitCancel => GitReadFailureOrigin::ExplicitCancel,
+            GitReadStop::DocumentStop => GitReadFailureOrigin::DocumentStop,
+        };
+        self.owner.fail(BridgeError::new("cancelled", "The original local Git read was stopped.")
+            .with_git_read_failure_provenance(Some(boundary_provenance(&self.owner, origin))));
     }
     pub(crate) fn receipt(&self) -> GitReadReceipt {
         lock(&self.receipt).clone()
@@ -183,11 +190,37 @@ pub(super) fn selected(profile: Profile) -> bool {
         not(feature = "ubuntu-runtime-publisher")
     )) && matches!(profile, Profile::GitRead)
 }
-fn source_error(reason: crate::asset_commands::Reason) -> BridgeError {
+pub(super) fn boundary_provenance(owner: &Owner, origin: GitReadFailureOrigin) -> GitReadFailureProvenance {
+    GitReadFailureProvenance { origin, go_claimed_at_boundary: Some(owner.preflight_go_claimed.load(Ordering::SeqCst)) }
+}
+#[derive(Clone, Copy)]
+enum SourcePhase { Inspect, Post }
+fn source_checkpoint(owner: &Owner, stop: &watch::Receiver<bool>, phase: SourcePhase,
+    first: &mut Option<GitReadFailureProvenance>) -> bool {
+    use GitReadFailureOrigin as Origin;
+    // Preserve the existing short-circuit order and its one expiry check.
+    // Freeze the first true checkpoint BEFORE native failure forwarding can
+    // change owner.failed(). Never infer this cause later from a stopped owner.
+    let origin = if owner.failed() {
+        Some(match phase { SourcePhase::Inspect => Origin::SourceInspectOwnerFailed, SourcePhase::Post => Origin::SourcePostOwnerFailed })
+    } else if *stop.borrow() {
+        Some(match phase { SourcePhase::Inspect => Origin::SourceInspectStopFlag, SourcePhase::Post => Origin::SourcePostStopFlag })
+    } else if Instant::now() >= owner.endpoint() {
+        Some(match phase { SourcePhase::Inspect => Origin::SourceInspectExpired, SourcePhase::Post => Origin::SourcePostExpired })
+    } else {
+        None
+    };
+    if let Some(origin) = origin {
+        if first.is_none() { *first = Some(boundary_provenance(owner, origin)); }
+        true
+    } else { false }
+}
+fn source_error(reason: crate::asset_commands::Reason, checkpoint: Option<GitReadFailureProvenance>) -> BridgeError {
     use crate::asset_commands::Reason;
     match reason {
         Reason::CleanupUnknown => BridgeError::cleanup_unknown(),
-        Reason::UserCancelled => BridgeError::new("cancelled", "The original Git read was stopped."),
+        Reason::UserCancelled => BridgeError::new("cancelled", "The original Git read was stopped.")
+            .with_git_read_failure_provenance(checkpoint),
         Reason::SourceChanged => BridgeError::new("git_stale_observation", "The original Git source changed."),
         _ => BridgeError::unavailable("The original Git source is not supported by this read-only profile."),
     }
@@ -211,6 +244,10 @@ impl Invocation {
         {
             *receipt = GitReadReceipt::RetainedUnknown;
         } else {
+            // Copy ONLY the winning original error, before a known child
+            // refusal becomes Ok(Terminal). A later tagged failure must not
+            // decorate an earlier untagged error or a successful child reply.
+            let failure_provenance = outcome.as_ref().err().and_then(BridgeError::git_read_failure_provenance);
             // A known child refusal starts the original min-first-F cleanup.
             // Once that SAME owner genuinely retires, keep its closed reason,
             // not a generic error. Never resurrect a vetoed child success.
@@ -225,6 +262,7 @@ impl Invocation {
             *receipt = GitReadReceipt::Settled {
                 outcome,
                 was_unknown: false,
+                failure_provenance,
             };
         }
     }
@@ -252,14 +290,15 @@ impl Invocation {
         };
         let snapshot = {
             let mut sources = self.sources.lock().map_err(|_| BridgeError::cleanup_unknown())?;
+            let mut checkpoint = None;
             let result = sources.inspect(
                 &root,
                 crate::installed_runtime::GitReadRuntimeSlots::source_runtime_fd_bound(),
-                &mut || owner.failed() || *stop.borrow() || Instant::now() >= owner.endpoint(),
+                &mut || source_checkpoint(owner, &stop, SourcePhase::Inspect, &mut checkpoint),
             );
             observe_source_failure(owner, sources.first_failure());
-            result.map_err(source_error)?;
-            sources.native_snapshot().map_err(source_error)?.clone()
+            result.map_err(|reason| source_error(reason, checkpoint))?;
+            sources.native_snapshot().map_err(|reason| source_error(reason, None))?.clone()
         };
         let endpoints = owner.git_read_endpoints.ok_or_else(BridgeError::cleanup_unknown)?;
         let mut clock = mrk_macos_installed_native::vault_helper_wire::ClockBridge::capture().ok_or_else(BridgeError::cleanup_unknown)?;
@@ -309,9 +348,10 @@ impl Invocation {
             result.map_err(|_| BridgeError::cleanup_unknown())?;
         }
         let mut sources = self.sources.lock().map_err(|_| BridgeError::cleanup_unknown())?;
-        let result = sources.post(&mut || owner.failed() || *stop.borrow() || Instant::now() >= owner.endpoint());
+        let mut checkpoint = None;
+        let result = sources.post(&mut || source_checkpoint(owner, &stop, SourcePhase::Post, &mut checkpoint));
         observe_source_failure(owner, sources.first_failure());
-        result.map_err(source_error)
+        result.map_err(|reason| source_error(reason, checkpoint))
     }
     pub(super) fn decode_before_close(
         &self,
@@ -342,7 +382,8 @@ impl Invocation {
                 .ok_or_else(BridgeError::cleanup_unknown)?
                 .failure_bound(first)
                 .ok_or_else(BridgeError::cleanup_unknown)?;
-            let error = BridgeError::new("git_read_refused", "The original bounded Git read did not complete.");
+            let error = BridgeError::new("git_read_refused", "The original bounded Git read did not complete.")
+                .with_git_read_failure_provenance(Some(boundary_provenance(owner, GitReadFailureOrigin::ChildTerminal)));
             lock(&owner.state).fail_at(error, at);
             owner.stop.send_replace(true);
             owner.changed.notify_waiters();
@@ -419,10 +460,11 @@ pub(super) fn settle(owner: &Owner, slots: &Arc<Mutex<crate::installed_runtime::
         // DATA. A stale source is a failure, not permission to adopt its edits.
         if !owner.failed() {
             let stop = owner.stop.subscribe();
-            let result = sources.post(&mut || owner.failed() || *stop.borrow() || Instant::now() >= owner.endpoint());
+            let mut checkpoint = None;
+            let result = sources.post(&mut || source_checkpoint(owner, &stop, SourcePhase::Post, &mut checkpoint));
             observe_source_failure(owner, sources.first_failure());
             if let Err(reason) = result {
-                owner.fail(source_error(reason));
+                owner.fail(source_error(reason, checkpoint));
             }
         }
     }
@@ -641,6 +683,118 @@ pub(super) async fn read<T: AsyncRead + Unpin>(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn git_read_ticket_stop_provenance_does_not_decorate_an_earlier_error() {
+        // Bookkeeping only: the existing inert owner has no child or tasks.
+        for (cause, origin) in [(GitReadStop::ExplicitCancel, GitReadFailureOrigin::ExplicitCancel),
+            (GitReadStop::DocumentStop, GitReadFailureOrigin::DocumentStop)] {
+            let owner = Arc::new(super::super::tests::inert_owner());
+            let ticket = GitReadTicket { owner: owner.clone(), receipt: Arc::new(Mutex::new(GitReadReceipt::Pending)) };
+            ticket.stop(cause);
+            let first = lock(&owner.state).error.clone().unwrap();
+            assert_eq!(first, BridgeError::new("cancelled", "The original local Git read was stopped."));
+            assert_eq!(first.git_read_failure_provenance(), Some(GitReadFailureProvenance { origin, go_claimed_at_boundary: Some(false) }));
+            owner.preflight_go_claimed.store(true, Ordering::SeqCst);
+            ticket.stop(GitReadStop::DocumentStop);
+            assert_eq!(lock(&owner.state).error.as_ref().unwrap().git_read_failure_provenance(), first.git_read_failure_provenance());
+        }
+        let owner = Arc::new(super::super::tests::inert_owner());
+        owner.fail(BridgeError::timeout());
+        let endpoint = lock(&owner.state).cleanup_endpoint;
+        GitReadTicket { owner: owner.clone(), receipt: Arc::new(Mutex::new(GitReadReceipt::Pending)) }.stop(GitReadStop::ExplicitCancel);
+        let state = lock(&owner.state);
+        assert_eq!(state.error, Some(BridgeError::timeout()));
+        assert_eq!(state.error.as_ref().unwrap().git_read_failure_provenance(), None);
+        assert_eq!(state.cleanup_endpoint, endpoint);
+    }
+    #[test]
+    fn git_read_source_provenance_freezes_the_actual_first_true_checkpoint() {
+        use crate::asset_commands::Reason;
+        use GitReadFailureOrigin as Origin;
+        for (phase, origins) in [(SourcePhase::Inspect, [Origin::SourceInspectOwnerFailed, Origin::SourceInspectStopFlag, Origin::SourceInspectExpired]),
+            (SourcePhase::Post, [Origin::SourcePostOwnerFailed, Origin::SourcePostStopFlag, Origin::SourcePostExpired])] {
+            for (cause, origin) in origins.into_iter().enumerate() {
+                let owner = super::super::tests::inert_owner();
+                let stop = owner.stop.subscribe();
+                let mut first = None;
+                assert!(!source_checkpoint(&owner, &stop, phase, &mut first));
+                assert_eq!(first, None);
+                // Simultaneously expired/flagged data checks the original
+                // owner-error -> stop-flag -> expiry short-circuit priority.
+                lock(&owner.state).endpoint = Instant::now();
+                if cause <= 1 { owner.stop.send_replace(true); }
+                if cause == 0 { lock(&owner.state).error = Some(BridgeError::timeout()); }
+                assert!(source_checkpoint(&owner, &stop, phase, &mut first));
+                let expected = Some(GitReadFailureProvenance { origin, go_claimed_at_boundary: Some(false) });
+                assert_eq!(first, expected);
+                owner.preflight_go_claimed.store(true, Ordering::SeqCst);
+                owner.fail(BridgeError::unavailable("inert later native forwarding"));
+                assert!(source_checkpoint(&owner, &stop, phase, &mut first));
+                assert_eq!(first, expected);
+                assert_eq!(source_error(Reason::UserCancelled, first).git_read_failure_provenance(), expected);
+                for other in [Reason::CleanupUnknown, Reason::SourceChanged, Reason::Deadline] {
+                    assert_eq!(source_error(other, first).git_read_failure_provenance(), None);
+                }
+            }
+        }
+        assert_eq!(source_error(Reason::UserCancelled, None).git_read_failure_provenance(), None);
+    }
+    #[test]
+    fn git_read_provenance_follows_the_original_min_first_failure_winner() {
+        let start = Instant::now();
+        let endpoints = Endpoints::at(start).unwrap();
+        let mut state = OwnerState::new(endpoints.work, None);
+        state.git_read_endpoints = Some(endpoints);
+        let early = start + Duration::from_secs(2);
+        let late = start + Duration::from_secs(5);
+        let plain = BridgeError::new("cancelled", "inert original error");
+        let child = BridgeError::new("git_read_refused", "inert child refusal")
+            .with_git_read_failure_provenance(Some(GitReadFailureProvenance {
+                origin: GitReadFailureOrigin::ChildTerminal, go_claimed_at_boundary: Some(true),
+            }));
+        state.fail_at(plain.clone(), early);
+        for at in [late, early] {
+            state.fail_at(child.clone(), at);
+            assert_eq!(state.error, Some(plain.clone()));
+            assert_eq!(state.error.as_ref().unwrap().git_read_failure_provenance(), None);
+            assert_eq!(state.cleanup_endpoint, Some(endpoints.first_failure(early)));
+        }
+        // A genuinely earlier child F may replace the observed winner. Its
+        // metadata moves WITH that error, never onto the old or next error.
+        state.fail_at(child.clone(), start);
+        assert_eq!(state.error.as_ref().unwrap().git_read_failure_provenance(), child.git_read_failure_provenance());
+        assert_eq!(state.cleanup_endpoint, Some(endpoints.first_failure(start)));
+        state.fail_at(plain.clone(), late);
+        assert_eq!(state.error.as_ref().unwrap().git_read_failure_provenance(), child.git_read_failure_provenance());
+        state.fail_at(plain.clone(), start - Duration::from_secs(1));
+        assert_eq!(state.error.as_ref().unwrap().git_read_failure_provenance(), None);
+        state.terminal = true;
+        state.fail_at(child, start - Duration::from_secs(2));
+        assert_eq!(state.error, Some(plain));
+        assert_eq!(state.error.as_ref().unwrap().git_read_failure_provenance(), None);
+        assert_eq!(state.endpoint, endpoints.work);
+    }
+    #[test]
+    fn git_read_retirement_shutdown_has_no_capture_time_go_claim() {
+        let start = Instant::now();
+        let endpoints = Endpoints::at(start).unwrap();
+        for read in [false, true] {
+            for earlier in [false, true] {
+                let mut state = OwnerState::new(endpoints.work, None);
+                state.git_read_endpoints = read.then_some(endpoints);
+                state.driver_join = ManagementJoin::Returned;
+                state.watchdog_join = ManagementJoin::Returned;
+                state.driver_end = Some(DriverEnd::Ready(Err(BridgeError::protocol())));
+                state.watchdog_end = Some(WatchdogEnd::DriverObserved(ManagementJoin::Returned));
+                if earlier { state.fail_at(BridgeError::timeout(), start); }
+                let error = state.retirement_result(start + Duration::from_secs(1), true).unwrap().unwrap_err();
+                assert_eq!(error, if earlier { BridgeError::timeout() } else { BridgeError::shutdown() });
+                assert_eq!(error.git_read_failure_provenance(), (read && !earlier).then_some(GitReadFailureProvenance {
+                    origin: GitReadFailureOrigin::Shutdown, go_claimed_at_boundary: None,
+                }));
+            }
+        }
+    }
     #[test]
     fn git_read_uses_one_original_45_55_clock_and_first_failure_minimum() {
         let at = Instant::now();
