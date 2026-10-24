@@ -55,8 +55,21 @@ pub(super) fn snapshot_failure(value:&Value,root:&Path,case:Case,base:&Value)->O
         expected["android"]=json!({"module":":app","buildFile":ANDROID_PATH,"applicationId":if case.recovery(){NEW}else{OLD},
             "namespace":"com.example.source","debugApplicationIdSuffix":".debug"});
     }
-    if hints!=&expected{return Some("identity-original-contract");}
+    if !required_snapshot_hints_match(hints,&expected){return Some("identity-original-contract");}
     None
+}
+fn required_snapshot_hints_match(hints:&Value,required:&Value)->bool{
+    // Passive discovery may add guidance such as ios.appTargets. This observer
+    // checks required identity facts, not a closed schema for all hints. Keep
+    // their values/arrays exact; original edit admission and fixture readbacks
+    // remain authoritative and are not changed by this comparison.
+    let (Some(actual),Some(required))=(hints.as_object(),required.as_object()) else{return false;};
+    required.iter().all(|(name,wanted)|{
+        let Some(found)=actual.get(name) else{return false;};
+        if let Some(fields)=wanted.as_object(){
+            found.as_object().is_some_and(|values|fields.iter().all(|(field,value)|values.get(field)==Some(value)))
+        }else{found==wanted}
+    })
 }
 fn replace(raw:&[u8])->Vec<u8>{String::from_utf8_lossy(raw).replace(OLD,NEW).into_bytes()}
 fn files(case:Case,finalized:bool)->BTreeMap<String,Vec<u8>>{
@@ -331,8 +344,41 @@ impl Observation {
     }
 }
 
+fn snapshot_hints_data_checks()->bool{
+    // Inert comparison policy, not a second full-snapshot golden or native
+    // result. Extra guidance is harmless; required identity/source facts are not.
+    let required=json!({"versionSource":"version.properties","ios":{"bundleId":OLD,"bundleIds":[OLD],
+        "project":"iosApp/Reader.xcodeproj","projects":["iosApp/Reader.xcodeproj"]}});
+    let mut hints=required.clone();
+    hints["ios"]["appTargets"]=json!([{"project":"iosApp/Reader.xcodeproj","source":PBX_PATH,
+        "targets":[{"name":"Reader","line":8}]}]);
+    hints["additionalPassiveGuidance"]=json!({"state":"unverified"});
+    if !required_snapshot_hints_match(&required,&required)||!required_snapshot_hints_match(&hints,&required){return false;}
+    for (path,replacement) in [
+        (&["versionSource"][..],json!("other.properties")),
+        (&["ios","bundleId"][..],json!(NEW)),
+        (&["ios","bundleIds"][..],json!([OLD,NEW])),
+        (&["ios","project"][..],json!("iosApp/Other.xcodeproj")),
+        (&["ios","projects"][..],json!(["iosApp/Reader.xcodeproj","iosApp/Other.xcodeproj"])),
+        (&["ios"][..],json!([])),
+    ]{
+        let mut changed=hints.clone();let mut field=&mut changed;
+        for name in path{field=&mut field[*name];}*field=replacement;
+        if required_snapshot_hints_match(&changed,&required){return false;}
+    }
+    for name in ["versionSource","ios"]{
+        let mut changed=hints.clone();changed.as_object_mut().unwrap().remove(name);
+        if required_snapshot_hints_match(&changed,&required){return false;}
+    }
+    for name in ["bundleId","bundleIds","project","projects"]{
+        let mut changed=hints.clone();changed["ios"].as_object_mut().unwrap().remove(name);
+        if required_snapshot_hints_match(&changed,&required){return false;}
+    }
+    true
+}
+
 pub(super) fn data_checks()->bool{
-    NAMES.iter().all(|name|Case::parse(name).is_some())&&Case::parse("identity-android-apply-extra").is_none()
+    snapshot_hints_data_checks()&&NAMES.iter().all(|name|Case::parse(name).is_some())&&Case::parse("identity-android-apply-extra").is_none()
         &&Case::Android.sessions()==2&&Case::Rollback.recovery()&&Case::Committed.recovery()&&!Case::Ios.recovery()
         &&files(Case::Committed,false).get(ANDROID_PATH)==files(Case::Committed,true).get(ANDROID_PATH)
         &&files(Case::Rollback,true).get(ANDROID_PATH)==Some(&SOURCE.to_vec())

@@ -231,7 +231,10 @@ class IdentityInstalledFixtureTests(unittest.TestCase):
                 root = self.root(case)
                 if case in fixture.RECOVERY_CASES:
                     produce(root, case)
-                value = project_snapshot(str(root))
+                before = snapshot(root)
+                with patch("subprocess.Popen", side_effect=AssertionError("Passive identity snapshot executed a project")):
+                    value = project_snapshot(str(root))
+                self.assertEqual(snapshot(root), before)
                 raw = fixture.config(case)
                 if case in fixture.RECOVERY_CASES:
                     raw = raw.replace(fixture.OLD.encode(), fixture.NEW.encode())
@@ -241,11 +244,22 @@ class IdentityInstalledFixtureTests(unittest.TestCase):
                 self.assertFalse(value["discovery"]["partial"])
                 hints = value["discovery"]["hints"]
                 self.assertEqual(hints["versionSource"], "version.properties")
+                self.assertEqual(hints["versionNameKey"], "VERSION_NAME")
+                self.assertEqual(hints["versionBuildKey"], "BUILD_NUMBER")
                 if case == fixture.CASES[1]:
                     self.assertNotIn("android", hints)
-                    self.assertEqual(hints["ios"], {"projects": ["iosApp/Reader.xcodeproj"], "workspaces": [],
-                        "schemes": ["Reader"], "bundleIds": [fixture.OLD], "generatedProjectSources": [],
-                        "bundleId": fixture.OLD, "project": "iosApp/Reader.xcodeproj", "scheme": "Reader"})
+                    # Required identity facts, not a golden of every passive
+                    # hint. appTargets is additive guidance, not edit authority.
+                    ios = hints["ios"]
+                    project = fixture.PBX_PATH.rsplit("/", 1)[0]
+                    self.assertEqual(ios["bundleId"], fixture.OLD)
+                    self.assertEqual(ios["bundleIds"], [fixture.OLD])
+                    self.assertEqual(ios["project"], project)
+                    self.assertEqual(ios["projects"], [project])
+                    self.assertEqual(ios["scheme"], "Reader")
+                    self.assertEqual(ios["schemes"], ["Reader"])
+                    self.assertEqual([target["name"] for row in ios["appTargets"]
+                        if row["project"] == project for target in row["targets"]], ["Reader"])
                 else:
                     self.assertEqual(hints["android"], {"module": ":app", "buildFile": fixture.ANDROID_PATH,
                         "applicationId": fixture.NEW if case in fixture.RECOVERY_CASES else fixture.OLD,
