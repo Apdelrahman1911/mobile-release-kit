@@ -43,8 +43,9 @@ class CandidateBootstrapTests(unittest.TestCase):
                 ('MRK_MACOS_NATIVE_SCOPE', 'git-native', 'tool-setup'),
                 ('DEVELOPER_DIR', '/Library/Developer/CommandLineTools', '/Applications/Xcode.app/Contents/Developer')):
             self.assertIn(key + ': ' + expression % (git, tool), job)
+        tool_source = json.loads((ROOT / C.RETAINED_OBSERVER_SELECTION_PATH).read_bytes())['origin']['source']
         for key in ('MRK_CANDIDATE_SOURCE', 'MRK_MACOS_INSTALL_SOURCE_COMMIT'):
-            self.assertIn(key + ': ' + expression % (C.candidate.RETAINED_GIT_TUPLE[0], 'a498dd67ffba352e8aaa4a9e3f53c892a76e834f'), job)
+            self.assertIn(key + ': ' + expression % (C.candidate.RETAINED_GIT_TUPLE[0], tool_source), job)
         sections = re.split(r'^      - name: ', job, flags=re.M)[1:]
         steps = {section.splitlines()[0]: section for section in sections}
         tool_names = ('Verify four supported project identity edits', 'Start the fixed native service and verify readiness',

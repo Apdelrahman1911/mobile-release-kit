@@ -215,7 +215,6 @@ def retained_fixture(*, git=False):
                ('distribution/MobileReleaseKit-Observation.dmg', b'old-request-image'),
                ('distribution/MobileReleaseKit.dmg', b'plain-package-image')]
     if git:
-        entries = entries[3:]
         row.update(zip(('source', 'runId', 'runAttempt'), M.RETAINED_GIT_TUPLE))
         run.update(id=int(row['runId']), run_attempt=int(row['runAttempt']), head_sha=row['source'])
         job.update(run_id=run['id'], run_attempt=run['run_attempt'], head_sha=row['source'])
@@ -257,16 +256,18 @@ def retained_receipt_fixture(selection, entries):
 
 
 class RetainedObserverCarrierData(unittest.TestCase):
-    def test_git_selection_is_original_tuple_and_closed_two_member_roster_not_optional_tool_files(self):
+    def test_git_selection_is_original_tuple_and_closed_five_member_roster_not_optional_diagnostics(self):
         selected, _, _, *_ = retained_fixture(git=True)
         tool, *_ = retained_fixture()
         self.assertEqual(M.retained_observer_selection_data(selected), selected)
-        self.assertEqual(len(selected['members']), 2)
-        changes = (dict(selected, members=tool['members']), dict(tool, members=selected['members']),
-            dict(selected, nativeScope='tool-setup'), dict(selected, nativeScope='git-fetch-native'),
-            dict(selected, members=selected['members'][1:]))
+        self.assertEqual(len(selected['members']), 5)
+        self.assertEqual(set(M.RETAINED_GIT_MEMBERS), set(M.RETAINED_OBSERVER_MEMBERS))
+        changes = (dict(tool, nativeScope='git-native'), dict(selected, nativeScope='git-fetch-native'),
+            dict(selected, members=selected['members'][1:]), dict(selected, members=selected['members'][-2:]),
+            dict(selected, members=selected['members'] + [selected['members'][0]]))
         changes += tuple(dict(selected, origin=dict(selected['origin'], **{key: value}))
             for key, value in (('source', tool['origin']['source']), ('runId', '42'), ('runAttempt', '2'),
+                               ('source', '216a2d3a559dd562164e852ea78b7235916e7c3a'), ('runId', '39998949850'),
                                ('target', 'x86_64-apple-darwin')))
         for changed in changes:
             with self.subTest(changed=changed), self.assertRaises(ValueError):
@@ -297,9 +298,9 @@ class RetainedObserverCarrierData(unittest.TestCase):
         changed['steps'][0]['name'] = 'Build only the current nonshipping observer'
         with self.assertRaises(ValueError): M.retained_observer_metadata_data(run, changed, artifact, selected)
 
-    def test_git_two_member_codec_keeps_same_chunk_crc_eof_roster_and_main_only_memory_rules(self):
+    def test_git_five_member_codec_keeps_same_chunk_crc_eof_roster_and_main_only_memory_rules(self):
         selection, entries, *_ = retained_fixture(git=True)
-        entries = [(name, data * 10000) for name, data in entries]
+        entries = [(name, data * 10000 if name.startswith('distribution/') else data) for name, data in entries]
         selection['members'] = [dict(name=name, bytes=len(data)) for name, data in entries]
         expected = {'image': entries[-1][1], 'members': [dict(name=name, bytes=len(data), sha256=M.sha(data))
                                                        for name, data in entries]}
@@ -320,18 +321,21 @@ class RetainedObserverCarrierData(unittest.TestCase):
                      mock.patch.object(zipfile.ZipFile, 'open', side_effect=AssertionError('no second decode')):
                     self.assertEqual(M.retained_observer_members(body, selected, CLOCK,
                         before_image=lambda size: events.append(size)), expected)
-                self.assertEqual(events, [len(entries[-1][1]), entries[-1][0], entries[0][0]])
+                self.assertEqual(events, [len(entries[-1][1]), *(name for name, _ in reversed(entries))])
                 with zipfile.ZipFile(io.BytesIO(body)) as archive_data:
-                    ignored = archive_data.getinfo(entries[0][0])
-                local = struct.unpack('<4s5H3L2H', body[ignored.header_offset:ignored.header_offset + 30])
-                start = ignored.header_offset + 30 + local[9] + local[10]
-                changed = bytearray(body); changed[start] ^= 1; changed = bytes(changed)
-                invalid = dict(selection, origin=dict(origin, artifactSha256=M.sha(changed)))
-                with self.assertRaises((ValueError, zlib.error)):
-                    M.retained_observer_members(changed, invalid, CLOCK)
+                    discarded = [archive_data.getinfo(name) for name, data in entries[:-1] if data]
+                for ignored in discarded:
+                    local = struct.unpack('<4s5H3L2H', body[ignored.header_offset:ignored.header_offset + 30])
+                    start = ignored.header_offset + 30 + local[9] + local[10]
+                    changed = bytearray(body); changed[start] ^= 1; changed = bytes(changed)
+                    invalid = dict(selection, origin=dict(origin, artifactSha256=M.sha(changed)))
+                    with self.subTest(discarded=ignored.filename), self.assertRaises((ValueError, zlib.error)):
+                        M.retained_observer_members(changed, invalid, CLOCK)
         tool, *_ = retained_fixture()
-        body, origin = archive(selection['origin'], entries + [('android-helper-distribution-detach.stdout', b'')])
-        with self.assertRaises(ValueError): M.retained_observer_members(body, dict(selection, origin=origin), CLOCK)
+        for wrong in (entries[-2:], entries[:2] + [(entries[2][0], b'x')] + entries[3:],
+                      entries + [('PREVIEW.json', b'{}')]):
+            body, origin = archive(selection['origin'], wrong)
+            with self.assertRaises(ValueError): M.retained_observer_members(body, dict(selection, origin=origin), CLOCK)
         self.assertEqual(M.retained_observer_memory_requirement(selection, 17),
             3 * selection['origin']['artifactBytes'] + (16 << 20) + 17 + (512 << 20) + (1 << 30))
         with self.assertRaises(ValueError):
@@ -345,7 +349,7 @@ class RetainedObserverCarrierData(unittest.TestCase):
         self.assertEqual(M.retained_observer_install_receipt_data(receipt, *args), receipt)
         for key, value in (('nativeScope', 'tool-setup'), ('consumerRunId', selected['origin']['runId']),
                 ('originalMountDetached', False), ('sameRequestReadback', False), ('originalInstallerReturnedZero', False),
-                ('members', retained_receipt_fixture(*retained_fixture()[:2])['members'])):
+                ('nomination', retained_fixture()[0]['origin']), ('members', receipt['members'][-2:])):
             with self.subTest(key=key), self.assertRaises(ValueError):
                 M.retained_observer_install_receipt_data(dict(receipt, **{key: value}), *args)
 

@@ -147,7 +147,7 @@ def candidate_members(body, nomination, clock, *, before_image=None):
 RETAINED_OBSERVER_IMAGE = 'distribution/MobileReleaseKit.dmg'
 RETAINED_OBSERVER_OPERATIONS = ('install-retained-observer', 'install-retained-git-observer')
 RETAINED_GIT_SELECTION_PATH = 'desktop/macos-installed-inputs/retained-git-observer-selection.json'
-RETAINED_GIT_TUPLE = ('216a2d3a559dd562164e852ea78b7235916e7c3a', '39998949850', '1')
+RETAINED_GIT_TUPLE = ('5212f4be8ae091bb186bd63936c045684702719d', '40086813826', '1')
 RETAINED_OBSERVER_STEPS = (
     'Build the current nonshipping observer',
     'Record the effective pinned compiler and preflight configured observer DATA',
@@ -246,7 +246,7 @@ def retained_observer_metadata_data(run, job, artifact, selection):
 
 
 def retained_observer_members(body, selection, clock, *, before_image=None):
-    """Validate/hash the exact Tool5 or Git2 originals; keep only the main image."""
+    """Validate/hash the exact five retained originals; keep only the main image."""
     selected = retained_observer_selection_data(selection)
     origin = selected['origin']
     need(type(body) is bytes and len(body) == origin['artifactBytes'] and sha(body) == origin['artifactSha256'],

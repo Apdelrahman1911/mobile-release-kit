@@ -39,7 +39,7 @@ RETAINED_REF = "refs/heads/verify/desktop-macos-observer-reuse"
 RETAINED_WORKFLOW = REPOSITORY + "/.github/workflows/desktop-macos-candidate-consume.yml@" + RETAINED_REF
 RETAINED_SELECTION = "desktop/macos-installed-inputs/retained-observer-selection.json"
 RETAINED_GIT_SELECTION = "desktop/macos-installed-inputs/retained-git-observer-selection.json"
-RETAINED_GIT_TUPLE = ("216a2d3a559dd562164e852ea78b7235916e7c3a", "39998949850", "1")
+RETAINED_GIT_TUPLE = ("5212f4be8ae091bb186bd63936c045684702719d", "40086813826", "1")
 RETAINED_GIT_SCOPES = (*GIT_CLI_SCOPES, FETCH_SCOPE, PUSH_SCOPE, PUSH_CREATE_SCOPE, UPSTREAM_SCOPE)
 RETAINED_SCOPES = (SCOPE, SERVICE_SCOPE, TOOLS_SCOPE, PUBLIC_TOOLS_SCOPE, CLI_SCOPE,
                    *UPLOAD_SCOPES, COLD_SCOPE, BACKUP_SCOPE, BACKUP_CLI_SCOPE, *RETAINED_GIT_SCOPES)

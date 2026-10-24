@@ -117,7 +117,7 @@ class CurrentRouteTests(InertOnly):
             with self.subTest(key=key), self.assertRaises(M.Refused):
                 M.retained_context({**env, key: value}, M.TARGET)
 
-    def test_retained_git_six_invocations_bind_original216a_without_relabelling_current_helper_context(self):
+    def test_retained_git_six_invocations_bind_original5212_without_relabelling_current_helper_context(self):
         env = retained_git_environment()
         selection = json.loads((ROOT / M.RETAINED_GIT_SELECTION).read_bytes())
         selected = (None, b"INERT nomination seam", selection)
@@ -617,7 +617,6 @@ class RetainedBindingFilesTests(InertOnly):
             self.put(self.helper / "desktop/tools" / name, b"# INERT held Git helper SOURCE\n")
         self.selection['nativeScope'] = M.GIT_SCOPE
         self.selection['origin'].update(zip(('source', 'runId', 'runAttempt'), M.RETAINED_GIT_TUPLE))
-        self.selection['members'] = self.selection['members'][-2:]
         self.selection_body = STAGE.canonical(self.selection)
         self.put(self.helper / M.RETAINED_GIT_SELECTION, self.selection_body)
         manifest = json.loads((self.installed / 'manifest.json').read_bytes())
@@ -628,7 +627,7 @@ class RetainedBindingFilesTests(InertOnly):
         manifest['inventorySha256'] = A.digest(STAGE.canonical(manifest['files']))
         manifest = STAGE.canonical(manifest)
         self.put(self.installed / 'manifest.json', manifest)
-        self.receipt.update(nativeScope=M.GIT_SCOPE, nomination=self.selection['origin'], members=self.receipt['members'][-2:])
+        self.receipt.update(nativeScope=M.GIT_SCOPE, nomination=self.selection['origin'])
         self.receipt['release'].update(sourceCommit=self.binding.source, runtimeManifestSha256=A.digest(manifest))
         self.put(self.work / 'retained-observer-install.json', STAGE.canonical(self.receipt))
         self.new_book()

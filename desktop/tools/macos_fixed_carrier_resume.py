@@ -46,10 +46,9 @@ RETAINED_OBSERVER_MEMBERS = {
     'distribution/MobileReleaseKit-Observation.dmg': LIMIT,
     'distribution/MobileReleaseKit.dmg': LIMIT,
 }
-# The original Git job failed before attach: its actual archive has only these
-# two images. This is a separate closed roster, not optional Tool diagnostics.
-RETAINED_GIT_MEMBERS = {name: RETAINED_OBSERVER_MEMBERS[name] for name in (
-    'distribution/MobileReleaseKit-Observation.dmg', 'distribution/MobileReleaseKit.dmg')}
+# The selected5212 Git job returned Installer0/readback, then detach16. Its
+# exact archive also has all three detach originals; none are optional.
+RETAINED_GIT_MEMBERS = dict(RETAINED_OBSERVER_MEMBERS)
 
 STATE = {'phase': 'admission', 'firstFailurePhase': None, 'lastRole': None, 'originalClosesKnown': False,
          'privateOutputsRetired': False, 'workloadsKnownSettled': False, 'resourceAdmission': None, 'installerObservation': None}
@@ -456,7 +455,7 @@ def member_stream_complete(stream, info, data_start, central_start, deadline=Non
     """Same original span, real codec EOF and CRC; never ZipExtFile private state."""
     need(on_chunk is None or (limits is RETAINED_OBSERVER_MEMBERS or limits is RETAINED_GIT_MEMBERS) and callable(on_chunk),
          'collector-public-chunk-profile')
-    need(type(empty) is bool and (not empty or limits is RETAINED_OBSERVER_MEMBERS
+    need(type(empty) is bool and (not empty or (limits is RETAINED_OBSERVER_MEMBERS or limits is RETAINED_GIT_MEMBERS)
          and info.filename == 'android-helper-distribution-detach.stdout' and info.file_size == 0),
          'collector-public-empty-profile')
     need(type(data_start) is int and type(central_start) is int and data_start >= 0
