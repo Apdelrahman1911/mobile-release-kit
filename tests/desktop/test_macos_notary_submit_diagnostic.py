@@ -68,6 +68,92 @@ class StagerFailureLocationTests(unittest.TestCase):
 
 
 class NotarySubmitDiagnosticTests(unittest.TestCase):
+    def failed_submit(self, body=b"NSURLErrorDomain Code=-1003\n" + PRIVATE):
+        diagnostic = HELPER.notary_submit_diagnostic(body)
+        op = object.__new__(HELPER.Operation)
+        op.__dict__.update(phase="notarize-payload", calls=[{
+            "role": "payload-submit", "entered": True, "returned": True, "capturesSettled": True,
+            "returncode": 1, "stderrSha256": diagnostic["stderrSha256"], "notarySubmitDiagnostic": diagnostic,
+            "stderr": body, "stdout": PRIVATE, "argv": [PRIVATE.decode()]}],
+            receipt={"failure": {"stage": "payload-submit", "reason": "original-nonzero-payload-submit"},
+                "passed": False, "targetRetired": True, "originalClosesKnown": True},
+            credential_calls=[], credential_contexts=[], errors=[])
+        return op
+
+    def test_failed_submit_line_projects_existing_safe_data_without_mutation(self):
+        for body in (b"", b"HTTP status code: 503\n" + PRIVATE, b"NSURLErrorDomain Code=-1001\n" + PRIVATE,
+                PRIVATE, b"\xff" + PRIVATE, b"HTTP status 401; HTTP status 999\n" + PRIVATE,
+                b"HTTP status 401\n" * 17 + PRIVATE, b"x" * 65536):
+            with self.subTest(body_bytes=len(body)):
+                op = self.failed_submit(body); before = copy.deepcopy(op.__dict__)
+                error = HELPER.Refused("helper-package-incomplete")
+                out = io.StringIO()
+                with contextlib.redirect_stderr(out):
+                    HELPER.emit_failure_diagnostic(error, operation=op, phase=op.phase,
+                        target=HELPER.ARM_TARGET, main_stage="operation-execute")
+                value = json.loads(out.getvalue())
+                self.assertEqual(value["lastRecordedNative"].get("notarySubmitDiagnostic"),
+                                 op.calls[-1]["notarySubmitDiagnostic"])
+                self.assertEqual(value["lastRecordedNative"]["returncode"], 1)
+                self.assertEqual(value["originalFailure"]["reason"], "original-nonzero-payload-submit")
+                self.assertEqual(value["terminal"]["reason"], "helper-package-incomplete")
+                self.assertTrue(value["cleanup"]["targetRetired"] and value["cleanup"]["originalClosesKnown"])
+                self.assertTrue(value["diagnosticOnly"]); self.assertFalse(value["productReady"])
+                self.assertLessEqual(len(out.getvalue().encode("ascii")), 4096)
+                self.assertNotIn(PRIVATE.decode(), out.getvalue()); self.assertEqual(op.__dict__, before)
+                self.assertEqual(error.args, ("helper-package-incomplete",))
+                projected = HELPER.failure_diagnostic(error, operation=op)["lastRecordedNative"]["notarySubmitDiagnostic"]
+                self.assertIsNot(projected["matches"], op.calls[-1]["notarySubmitDiagnostic"]["matches"])
+
+    def test_failed_submit_projection_requires_current_settled_original(self):
+        error = HELPER.Refused("helper-package-incomplete")
+        project = lambda op: HELPER.failure_diagnostic(error, operation=op,
+            phase="notarize-payload")["lastRecordedNative"].get("notarySubmitDiagnostic")
+        self.assertIsNotNone(project(self.failed_submit()))
+        for key, bad in (("role", "payload-log"), ("entered", False), ("entered", 1),
+                ("returned", False), ("capturesSettled", False), ("returncode", 0),
+                ("returncode", True), ("returncode", "1"), ("returncode", 65536),
+                ("returncode", -65537), ("stderrSha256", "a" * 64), ("stderrSha256", PRIVATE.decode())):
+            op = self.failed_submit(); op.calls[-1][key] = bad
+            with self.subTest(field=key, bad_type=type(bad).__name__): self.assertIsNone(project(op))
+        for phase in (None, "prepare", "finalize-package"):
+            op = self.failed_submit(); op.phase = phase
+            self.assertIsNone(project(op))
+        op = self.failed_submit(); op.calls.append({"role": "payload-log", "returncode": 0})
+        self.assertIsNone(project(op))  # Never borrow an earlier original's diagnostic.
+        op = self.failed_submit(); del op.calls[-1]["notarySubmitDiagnostic"]
+        self.assertIsNone(project(op))
+
+    def test_failed_submit_projection_rejects_malformed_private_fields(self):
+        error = HELPER.Refused("helper-package-incomplete")
+        good = self.failed_submit()
+        self.assertIsNotNone(HELPER.failure_diagnostic(error, operation=good)["lastRecordedNative"].get("notarySubmitDiagnostic"))
+        corruptions = (("schemaVersion", True), ("kind", PRIVATE.decode()), ("diagnosticOnly", 1),
+            ("nativeSuccessInferred", True), ("policyUnchanged", False), ("stderrBytes", True),
+            ("stderrBytes", -1), ("stderrBytes", 65537), ("stderrSha256", PRIVATE.decode()),
+            ("stderrSha256", "a" * 64), ("formatClass", "empty"), ("formatClass", PRIVATE.decode()),
+            ("lexicalState", "none"), ("lexicalState", PRIVATE.decode()), ("errorClass", "network-tls"),
+            ("errorClass", PRIVATE.decode()), ("matches", [PRIVATE.decode()]), ("matches", [True]),
+            ("matches", ["url-1003"] * 17), ("matchesTruncated", True), ("matchesTruncated", 1),
+            ("stderr", PRIVATE.decode()), ("argv", [PRIVATE.decode()]))
+        for key, bad in corruptions:
+            with self.subTest(field=key, bad_type=type(bad).__name__):
+                op = copy.deepcopy(good); op.calls[-1]["notarySubmitDiagnostic"][key] = bad
+                before = copy.deepcopy(op.__dict__); out = io.StringIO()
+                with contextlib.redirect_stderr(out): HELPER.emit_failure_diagnostic(error, operation=op)
+                value = json.loads(out.getvalue())
+                self.assertIsNone(value["lastRecordedNative"].get("notarySubmitDiagnostic"))
+                self.assertEqual(value["lastRecordedNative"]["returncode"], 1)
+                self.assertEqual(value["terminal"]["reason"], "helper-package-incomplete")
+                self.assertNotIn(PRIVATE.decode(), out.getvalue()); self.assertEqual(op.__dict__, before)
+        for bad in (None, [], {}, dict(good.calls[-1]["notarySubmitDiagnostic"], matches=("url-1003",))):
+            op = copy.deepcopy(good); op.calls[-1]["notarySubmitDiagnostic"] = bad
+            self.assertIsNone(HELPER.failure_diagnostic(error, operation=op)["lastRecordedNative"]["notarySubmitDiagnostic"])
+        for bad in (PRIVATE.decode(), "A" * 64, "a" * 63):
+            op = copy.deepcopy(good); op.calls[-1]["stderrSha256"] = bad
+            op.calls[-1]["notarySubmitDiagnostic"]["stderrSha256"] = bad
+            self.assertIsNone(HELPER.failure_diagnostic(error, operation=op)["lastRecordedNative"]["notarySubmitDiagnostic"])
+
     def test_final_input_refusals_are_distinct_without_exporting_private_values(self):
         stager = load("notary_final_stager_data", "stage_macos_installed.py")
         for reason in ("applications-launcher-file", "applications-launcher-installed-correspondence",
@@ -172,11 +258,14 @@ class NotarySubmitDiagnosticTests(unittest.TestCase):
                     raise RuntimeError("synthetic-unsettled-original")
                 return subprocess.CompletedProcess(actual, 0 if fault == "return-zero" else 1,
                     b"", b"NSURLErrorDomain Code=-1003\n" + PRIVATE)
-            def publish(name, body):
+            def publish(name, body, *, parent=None):
+                self.assertIsNone(parent)
                 if fault == "publish-error":
                     raise RuntimeError("synthetic-unsettled-output")
                 published[name] = body
-            op = SimpleNamespace(phase="notarize-payload", credential_known=lambda: True,
+            op = object.__new__(HELPER.Operation)
+            op.__dict__.update(phase="notarize-payload", credential_known=lambda: True,
+                candidate_removal_context=None, prepared_staging=False, setup_verify=False, setup_package=False,
                 credential_failed=False, credential_active=None, removal_final_active=lambda: False,
                 notary_retiring=False, notary_unknown=False, errors=[], stager_io_pending=None,
                 calls=[{"role": role, "returned": True, "capturesSettled": True} for role in HELPER.NOTARY_ROLES[:5]],

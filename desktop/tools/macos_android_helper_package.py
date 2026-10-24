@@ -411,6 +411,49 @@ def notary_submit_diagnostic(body):
     return result
 
 
+def notary_submit_diagnostic_data(phase, record):
+    """Closed same-original copy only; never read/reparse private captures."""
+    if (type(phase) is not str or phase != "notarize-payload" or type(record) is not dict
+            or type(record.get("role")) is not str or record["role"] != "payload-submit"
+            or not all(record.get(key) is True for key in ("entered", "returned", "capturesSettled"))
+            or type(record.get("returncode")) is not int
+            or not -65536 <= record["returncode"] <= 65535 or record["returncode"] == 0):
+        return None
+    value = record.get("notarySubmitDiagnostic")
+    fields = {"schemaVersion", "kind", "diagnosticOnly", "nativeSuccessInferred", "policyUnchanged",
+        "stderrBytes", "stderrSha256", "formatClass", "lexicalState", "errorClass", "matches", "matchesTruncated"}
+    if (type(value) is not dict or len(value) != len(fields)
+            or any(type(key) is not str for key in value) or set(value) != fields
+            or type(value["schemaVersion"]) is not int or value["schemaVersion"] != 1
+            or type(value["kind"]) is not str or value["kind"] != "failure-only-notary-submit"
+            or value["diagnosticOnly"] is not True or value["nativeSuccessInferred"] is not False
+            or value["policyUnchanged"] is not True):
+        return None
+    size, sha = value["stderrBytes"], value["stderrSha256"]
+    if (type(size) is not int or not 0 <= size <= 65536 or type(sha) is not str
+            or re.fullmatch(r"[0-9a-f]{64}", sha) is None
+            or type(record.get("stderrSha256")) is not str or sha != record["stderrSha256"]):
+        return None
+    form, state, error = value["formatClass"], value["lexicalState"], value["errorClass"]
+    matches, truncated = value["matches"], value["matchesTruncated"]
+    if (any(type(item) is not str for item in (form, state, error))
+            or form not in ("empty", "bounded-utf8", "invalid-utf8") or (form == "empty") != (size == 0)
+            or type(matches) is not list or len(matches) > 16 or type(truncated) is not bool
+            or any(type(key) is not str or key not in (*NOTARY_SUBMIT_CLASSES, "unsupported-http", "unsupported-url") for key in matches)
+            or truncated and len(matches) != 16 or form != "bounded-utf8" and (matches or truncated)):
+        return None
+    expected_state, expected_error = "none", "unclassified"
+    if form == "invalid-utf8" or any(key.startswith("unsupported-") for key in matches):
+        expected_state = "unrecognized"
+    elif truncated or len(matches) > 1:
+        expected_state = "multiple-or-conflicting"
+    elif matches:
+        expected_state, expected_error = "single-known", NOTARY_SUBMIT_CLASSES[matches[0]]
+    if state != expected_state or error != expected_error:
+        return None
+    return dict(value, matches=list(matches))
+
+
 def notary_json(body, limit):
     need(type(body) is bytes and 0 < len(body) <= limit, "notary-json-bound")
     def pairs(values):
@@ -2817,6 +2860,7 @@ def failure_diagnostic(error, *, phase=None, target=None, main_stage=None, opera
         },
         "lastRecordedNative": {
             "removeProducerReason": remove_producer_refusal_data(state.get("phase"), native),
+            "notarySubmitDiagnostic": notary_submit_diagnostic_data(state.get("phase"), native),
             "role": token(native.get("role"), ("resident-fetch",) + PREPARE_ROLES + notary_roles(True) + _PACKAGE_DIAGNOSTIC_ROLES + _FAILURE_SETUP_ROLES + _FAILURE_FIXTURE_ROLES),
             **{key: flag(native.get(key)) for key in ("entered", "returned", "capturesSettled", "dispatched", "contained", "cleanup_complete")},
             "returncode": integer(native.get("returncode"), -65536, 65535),
