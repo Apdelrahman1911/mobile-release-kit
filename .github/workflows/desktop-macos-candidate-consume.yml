@@ -19,6 +19,11 @@ on:
         description: Diagnose only bundled Python startup on the retained Git ARM build; do not launch or qualify the app
         type: boolean
         default: false
+      tool_resume_from:
+        description: Start independent Tool checks at service; skipped identity edits remain unverified
+        type: choice
+        options: [identity, service]
+        default: identity
 
 permissions:
   contents: read
@@ -53,6 +58,7 @@ jobs:
         env:
           RUNNER_ENVIRONMENT: ${{ runner.environment }}
           MRK_CORE_DIAGNOSTIC_REQUESTED: ${{ inputs.bundled_core_diagnostic }}
+          MRK_TOOL_RESUME_FROM: ${{ inputs.tool_resume_from }}
         run: |
           set +x
           set -euo pipefail
@@ -63,6 +69,11 @@ jobs:
           [[ "$RUNNER_TEMP" == /Users/runner/work/_temp && "$(/usr/bin/id -u)" != 0 && "$(/usr/bin/uname -m)" == arm64 ]]
           if [[ "$MRK_CORE_DIAGNOSTIC_REQUESTED" == true ]]; then
             [[ "$MRK_CANDIDATE_MODE" == install-retained-git-observer ]]
+          fi
+          [[ "$MRK_TOOL_RESUME_FROM" == identity || "$MRK_TOOL_RESUME_FROM" == service ]]
+          if [[ "$MRK_TOOL_RESUME_FROM" == service ]]; then
+            [[ "$MRK_CANDIDATE_MODE" == install-retained-observer ]]
+            printf '%s\n' 'Identity checks are skipped, not passed; testing independent service and Tool operations.'
           fi
       - name: Check out the unchanged signed application source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -147,7 +158,7 @@ jobs:
           # Do not run later native app cases against this prewarmed runtime.
           exec "$MRK_PYTHON" -I -S -B "$GITHUB_WORKSPACE/.candidate-consumer-helper/desktop/tools/macos_bundled_core_probe.py"
       - name: Verify four supported project identity edits
-        if: env.MRK_CANDIDATE_MODE == 'install-retained-observer'
+        if: env.MRK_CANDIDATE_MODE == 'install-retained-observer' && inputs.tool_resume_from != 'service'
         timeout-minutes: 15
         shell: bash
         env:
