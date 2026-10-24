@@ -4,21 +4,21 @@
   "packageRole": "installed-shell-observation",
   "nativeScope": "tool-setup",
   "origin": {
-    "source": "a498dd67ffba352e8aaa4a9e3f53c892a76e834f",
-    "tree": "1f95508dddbf50d9e3b244d99ba662871e31c2c6",
+    "source": "b81e16b842bbe8d79e8d240b18ae2246ea272399",
+    "tree": "693b67bb4cd360486cd8481f95380b76d23afa31",
     "target": "aarch64-apple-darwin",
-    "runId": "39953277862",
+    "runId": "40012674231",
     "runAttempt": "1",
-    "jobId": "120412767065",
-    "artifactId": "12507427012",
-    "artifactBytes": 294016923,
-    "artifactSha256": "1e2ef58199ae1d56cf62ff685ee6efb8465d54c6e4af0d3f79cfe2db2f86066a"
+    "jobId": "120616749290",
+    "artifactId": "12534750031",
+    "artifactBytes": 294035176,
+    "artifactSha256": "c08feb6a20fa05da604a267219bf54005f78eec748fd30389b0aed6c91bf6a17"
   },
   "members": [
     {"name": "android-helper-distribution-detach.status", "bytes": 3},
     {"name": "android-helper-distribution-detach.stderr", "bytes": 316},
     {"name": "android-helper-distribution-detach.stdout", "bytes": 0},
-    {"name": "distribution/MobileReleaseKit-Observation.dmg", "bytes": 147007863},
-    {"name": "distribution/MobileReleaseKit.dmg", "bytes": 147007857}
+    {"name": "distribution/MobileReleaseKit-Observation.dmg", "bytes": 147016985},
+    {"name": "distribution/MobileReleaseKit.dmg", "bytes": 147016988}
   ]
 }

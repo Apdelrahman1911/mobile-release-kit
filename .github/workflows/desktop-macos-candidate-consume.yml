@@ -32,7 +32,7 @@ jobs:
     timeout-minutes: 260
     env:
       MRK_CANDIDATE_MODE: ${{ inputs.operation }}
-      MRK_CANDIDATE_SOURCE: ${{ inputs.operation == 'install-retained-git-observer' && '216a2d3a559dd562164e852ea78b7235916e7c3a' || 'a498dd67ffba352e8aaa4a9e3f53c892a76e834f' }}
+      MRK_CANDIDATE_SOURCE: ${{ inputs.operation == 'install-retained-git-observer' && '216a2d3a559dd562164e852ea78b7235916e7c3a' || 'b81e16b842bbe8d79e8d240b18ae2246ea272399' }}
       MRK_MACOS_TARGET: aarch64-apple-darwin
       MRK_MACOS_RUNNER: ${{ inputs.operation == 'install-retained-git-observer' && 'xcode-27' || 'macos-26' }}
       MRK_MACOS_MACHINE: arm64
@@ -41,7 +41,7 @@ jobs:
       MRK_MACOS_PACKAGE_ROLE: installed-shell-observation
       MRK_MACOS_STORE_RUNTIME: signed-component
       MRK_EXPECTED_SHA: ${{ github.sha }}
-      MRK_MACOS_INSTALL_SOURCE_COMMIT: ${{ inputs.operation == 'install-retained-git-observer' && '216a2d3a559dd562164e852ea78b7235916e7c3a' || 'a498dd67ffba352e8aaa4a9e3f53c892a76e834f' }}
+      MRK_MACOS_INSTALL_SOURCE_COMMIT: ${{ inputs.operation == 'install-retained-git-observer' && '216a2d3a559dd562164e852ea78b7235916e7c3a' || 'b81e16b842bbe8d79e8d240b18ae2246ea272399' }}
       DEVELOPER_DIR: ${{ inputs.operation == 'install-retained-git-observer' && '/Library/Developer/CommandLineTools' || '/Applications/Xcode.app/Contents/Developer' }}
     steps:
       - name: Require the isolated disposable ARM host
