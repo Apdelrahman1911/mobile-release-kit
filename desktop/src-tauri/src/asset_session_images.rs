@@ -122,16 +122,17 @@ impl Binding {
 }
 
 pub(super) struct Registry {
-    active: Option<Selection>, last: Option<Selection>, observed_capability: Option<EditAvailability>,
+    active: Option<Selection>, last: Option<Selection>,
+    status_revision: u32, status_bytes: Vec<u8>,
 }
 impl Registry {
-    pub(super) fn new() -> Self { Self { active: None, last: None, observed_capability: None } }
+    pub(super) fn new() -> Self { Self { active: None, last: None, status_revision: 0, status_bytes: Vec::new() } }
     fn row(&self, id: &str) -> Option<&Selection> {
         self.active.as_ref().filter(|row| row.operation_id == id)
             .or_else(|| self.last.as_ref().filter(|row| row.operation_id == id))
     }
     pub(super) fn retained_bytes(&self) -> Option<usize> {
-        let mut total = std::mem::size_of::<Self>();
+        let mut total = std::mem::size_of::<Self>().checked_add(self.status_bytes.capacity())?;
         for row in self.active.iter().chain(&self.last) {
             total = total.checked_add(row.operation_id.capacity())?.checked_add(row.project_id.capacity())?
                 .checked_add(row.locale.capacity())?.checked_add(row.asset_type.capacity())?
@@ -691,6 +692,11 @@ impl DocumentBinding {
         if !state.lifetime.original_bound() || state.lost_observed || !self.inner.bridge.metadata_images_selection_available() {
             return unavailable(EditAvailability::RuntimeUnqualified);
         }
+        self.metadata_images_activity_capability(state, edit)
+    }
+    // Display-only composition after the unchanged native-profile checks.
+    fn metadata_images_activity_capability(&self, state: &DocumentState, edit: EditCapability) -> EditCapability {
+        let unavailable = |reason| EditCapability { available: false, reason };
         if let Err(error) = self.common_gate(state, false) {
             return unavailable(match error.reason {
                 Reason::CleanupUnknown => EditAvailability::CleanupUnknown,
@@ -720,13 +726,31 @@ impl DocumentBinding {
     fn metadata_images_selection_snapshot_locked(&self, state: &mut DocumentState) -> Result<wire::SelectionStatus, BridgeError> {
         let edit = self.inner.bridge.edits.metadata_images_status()?;
         let capability = self.metadata_images_capability(state, edit.capability);
-        if state.images.observed_capability != Some(capability.reason) {
-            state.images.observed_capability = Some(capability.reason); self.bump(state);
-        }
+        self.metadata_images_selection_display_locked(state, edit.window_generation, capability)
+    }
+    fn metadata_images_selection_display_locked(&self, state: &mut DocumentState, window_generation: String,
+        capability: EditCapability) -> Result<wire::SelectionStatus, BridgeError> {
+        if state.images.status_revision == u32::MAX { return Err(BridgeError::cleanup_unknown()); }
         refresh(state);
-        let status = wire::SelectionStatus { schema_version: 1, domain: "metadata_images_selection", window_generation: edit.window_generation,
-            status_revision: state.revision, capability, active: state.images.active.clone(), last_terminal: state.images.last.clone() };
-        crate::edit_protocol::bounded(&status, SELECTION_STATUS_LIMIT)?; Ok(status)
+        let mut status = wire::SelectionStatus { schema_version: 1, domain: "metadata_images_selection", window_generation,
+            status_revision: state.images.status_revision, capability, active: state.images.active.clone(), last_terminal: state.images.last.clone() };
+        // Like installation status, this projection owns its display revision.
+        // A peer becoming busy is not a Document edit: bump() would stop that
+        // same Git read. Compare the complete bounded wire data so capability,
+        // selection, terminal and window changes never share one revision.
+        let bytes = crate::edit_protocol::bounded(&status, SELECTION_STATUS_LIMIT)?;
+        if bytes != state.images.status_bytes {
+            let Some(next) = status_successor(state.images.status_revision) else {
+                state.images.status_revision = u32::MAX;
+                self.exhaust(state, UnknownOrigin::Exhausted);
+                return Err(BridgeError::cleanup_unknown());
+            };
+            status.status_revision = next;
+            let bytes = crate::edit_protocol::bounded(&status, SELECTION_STATUS_LIMIT)?;
+            state.images.status_bytes = bytes;
+            state.images.status_revision = next;
+        }
+        Ok(status)
     }
     pub(crate) fn metadata_images_selection_status(&self) -> Result<wire::SelectionStatus, BridgeError> {
         self.reconcile(); let mut state = self.lock(); self.expire(&mut state, Instant::now());
@@ -895,10 +919,156 @@ pub(super) async fn run(document: &DocumentBinding, owner: &Arc<OriginalWork>, a
 
 #[cfg(test)]
 mod tests {
-    // Inert DATA/negative-authority predicates only: no DesktopBridge, source
-    // open, native dialog, RNG, thread or fabricated ORIGINAL join is used.
+    // Inert selection DATA and in-memory Document/Supervisor display checks.
+    // No source open, native dialog, child or fabricated ORIGINAL join is used.
     // Native success/cancel/import remains a separate qualification obligation.
     use super::*;
+
+    fn display_document() -> DocumentBinding {
+        let document = DocumentBinding::new(Arc::new(DesktopBridge::new(
+            "/never-opened-image-display-fixture".into())));
+        document.inner.bridge.edits.initial_document(MAIN).unwrap();
+        let mut state = document.lock();
+        state.lifetime.crash_hook_installed();
+        state.lifetime.started(true);
+        state.lifetime.finished(true);
+        drop(state);
+        document
+    }
+    fn activity_display(document: &DocumentBinding, state: &mut DocumentState) -> wire::SelectionStatus {
+        // Exercise actual Document/Supervisor activity and status publication
+        // below native qualification. No native admission, child, or settled
+        // Git receipt is manufactured by this in-memory regression.
+        let capability = document.metadata_images_activity_capability(state,
+            EditCapability { available: true, reason: EditAvailability::Available });
+        document.metadata_images_selection_display_locked(state, "a".repeat(32), capability).unwrap()
+    }
+    fn git_observation(state: &DocumentState) -> (crate::git_read_protocol::Phase, Instant, Option<BridgeError>) {
+        let Some(git_read::Entry::Original { ticket, .. }) = &state.git_read else { panic!("original missing") };
+        assert!(matches!(ticket.receipt(), crate::supervisor::GitReadReceipt::Pending));
+        let (end, error) = ticket.display_fixture_observation();
+        (ticket.pending_phase(), end, error)
+    }
+    #[test]
+    fn image_display_refresh_preserves_pending_git_read_context() {
+        let document = display_document();
+        let mut state = document.lock();
+        assert!(document.inner.bridge.supervisor.can_exit());
+        let idle = activity_display(&document, &mut state);
+        assert_eq!(idle.capability.reason, EditAvailability::Available);
+        let revision = state.revision;
+        state.git_read = Some(git_read::pending_display_fixture(&document, &state));
+        let before = git_observation(&state);
+        assert!(!document.inner.bridge.supervisor.can_exit());
+        let busy = activity_display(&document, &mut state);
+        assert_eq!(busy.capability.reason, EditAvailability::OtherEditActive);
+        assert!(busy.status_revision > idle.status_revision);
+        assert_eq!(git_observation(&state), before, "a passive image refresh must not stop the original read");
+        assert_eq!(state.revision, revision, "display revisions are not Document authority");
+        let repeated = activity_display(&document, &mut state);
+        assert_eq!(serde_json::to_value(repeated).unwrap(), serde_json::to_value(busy).unwrap());
+        assert_eq!(git_observation(&state), before);
+        let Some(git_read::Entry::Original { gate, .. }) = &state.git_read else { unreachable!() };
+        assert_eq!(gate.context().revision, format!("document-{revision}"));
+        let gate = gate.clone();
+        drop(state);
+        assert!(gate.check_current("query-1").is_err(), "fixture has no registered native source authority");
+    }
+    #[test]
+    fn image_display_does_not_weaken_real_git_stop_or_original_finality() {
+        use crate::{error::GitReadFailureOrigin, git_read_protocol::Phase as GitPhase};
+        for cause in ["document-change", "document-loss", "shutdown", "explicit-cancel"] {
+            let document = display_document();
+            let mut state = document.lock();
+            activity_display(&document, &mut state);
+            state.git_read = Some(git_read::pending_display_fixture(&document, &state));
+            activity_display(&document, &mut state);
+            assert_eq!(git_observation(&state).0, GitPhase::Starting);
+            match cause {
+                "document-change" => document.bump(&mut state),
+                "document-loss" => document.loss_locked(&mut state, None),
+                "shutdown" => {
+                    state.stopping = true;
+                    invalidate_all(&mut state);
+                    document.bump(&mut state);
+                }
+                _ => {
+                    drop(state);
+                    document.git_read_cancel("query-1").unwrap();
+                    state = document.lock();
+                }
+            }
+            let stopped = git_observation(&state);
+            assert_eq!(stopped.0, GitPhase::Stopping);
+            let error = stopped.2.as_ref().unwrap();
+            assert_eq!(error.git_read_failure_provenance().unwrap().origin,
+                if cause == "explicit-cancel" { GitReadFailureOrigin::ExplicitCancel } else { GitReadFailureOrigin::DocumentStop });
+            for _ in 0..3 {
+                activity_display(&document, &mut state);
+                document.bump(&mut state);
+                let after = git_observation(&state);
+                assert_eq!(after, stopped, "later refresh/stop must keep the first error and endpoint");
+                assert_eq!(after.2.unwrap().git_read_failure_provenance(), error.git_read_failure_provenance());
+            }
+            assert!(!document.inner.bridge.supervisor.can_exit());
+        }
+    }
+    #[test]
+    fn image_display_revision_tracks_complete_projection_without_document_edits() {
+        let document = display_document();
+        let mut state = document.lock();
+        let document_revision = state.revision;
+        let first = activity_display(&document, &mut state);
+        let (_, binding, _) = model();
+        // Bounded display data, not an admitted image selection.
+        state.images.active = Some(binding.initial());
+        let active = activity_display(&document, &mut state);
+        assert!(active.status_revision > first.status_revision);
+        state.images.active.as_mut().unwrap().reason = ImageReason::Busy;
+        let changed = activity_display(&document, &mut state);
+        assert!(changed.status_revision > active.status_revision);
+        state.images.last = state.images.active.take();
+        let last = activity_display(&document, &mut state);
+        assert!(last.status_revision > changed.status_revision);
+        let window = document.metadata_images_selection_display_locked(&mut state, "b".repeat(32),
+            EditCapability { available: true, reason: EditAvailability::Available }).unwrap();
+        assert!(window.status_revision > last.status_revision);
+        assert_eq!(state.revision, document_revision);
+        let retained = state.images.retained_bytes().unwrap();
+        let capacity = state.images.status_bytes.capacity();
+        assert!(capacity > 0 && capacity <= SELECTION_STATUS_LIMIT);
+        state.images.status_bytes = Vec::new();
+        assert_eq!(retained - state.images.retained_bytes().unwrap(), capacity);
+    }
+    #[test]
+    fn image_display_revision_exhaustion_fails_closed_without_wrapping_or_finality() {
+        let document = display_document();
+        let mut state = document.lock();
+        activity_display(&document, &mut state);
+        state.git_read = Some(git_read::pending_display_fixture(&document, &state));
+        state.images.status_revision = u32::MAX - 1;
+        for _ in 0..2 {
+            let error = document.metadata_images_selection_display_locked(&mut state, "a".repeat(32),
+                EditCapability { available: false, reason: EditAvailability::OtherEditActive }).err().unwrap();
+            assert_eq!(error.code, "cleanup_unknown");
+            assert_eq!(state.images.status_revision, u32::MAX);
+            assert_eq!(state.revision, u32::MAX);
+            assert!(state.exhausted && state.unknown && state.stopping);
+            assert_eq!(git_observation(&state).0, crate::git_read_protocol::Phase::Stopping);
+        }
+    }
+    #[test]
+    fn image_display_public_status_is_passive_and_keeps_native_qualification() {
+        let document = display_document();
+        let revision = document.lock().revision;
+        let first = document.metadata_images_selection_status().unwrap();
+        let next = document.metadata_images_selection_status().unwrap();
+        assert_eq!(serde_json::to_value(first).unwrap(), serde_json::to_value(next).unwrap());
+        assert_eq!(document.lock().revision, revision);
+        // This headless test has no installed-runtime qualification.
+        #[cfg(not(feature = "desktop-shell"))]
+        assert!(!document.metadata_images_selection_status().unwrap().capability.available);
+    }
 
     #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
     #[test]

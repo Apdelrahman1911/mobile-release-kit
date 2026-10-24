@@ -131,6 +131,23 @@ pub(crate) struct GitReadTicket {
     receipt: Arc<Mutex<GitReadReceipt>>,
 }
 impl GitReadTicket {
+    #[cfg(test)]
+    pub(crate) fn pending_display_fixture(supervisor: &Supervisor) -> Self {
+        // Actual owner/roster/ticket bookkeeping, with no driver, native IO or
+        // fabricated completion. This fixture cannot qualify an installed read.
+        let mut owner = super::tests::inert_owner();
+        owner.profile = Profile::GitRead;
+        let endpoints = Endpoints::at(Instant::now()).unwrap();
+        owner.git_read_endpoints = Some(endpoints);
+        owner.state = Mutex::new(OwnerState::new(endpoints.work, None));
+        let owner = Arc::new(owner);
+        assert!(lock(&supervisor.inner.owners).insert(owner.key, owner.clone()).is_none());
+        Self { owner, receipt: Arc::new(Mutex::new(GitReadReceipt::Pending)) }
+    }
+    #[cfg(test)]
+    pub(crate) fn display_fixture_observation(&self) -> (Instant, Option<BridgeError>) {
+        (self.owner.endpoint(), lock(&self.owner.state).error.clone())
+    }
     pub(crate) fn operation_id(&self) -> &str {
         &self.owner.id
     }

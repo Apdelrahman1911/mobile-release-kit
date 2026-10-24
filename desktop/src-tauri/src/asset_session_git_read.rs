@@ -77,6 +77,27 @@ pub(super) fn stop(state: &DocumentState) {
         }
     }
 }
+#[cfg(test)]
+pub(super) fn pending_display_fixture(document: &DocumentBinding, state: &DocumentState) -> Entry {
+    // In-memory original Document context only. No registered source or native
+    // admission is claimed, and the receipt deliberately remains Pending.
+    let generation = document.inner.bridge.registry_generation();
+    let context = wire::Context { project_id: "display-fixture".into(), generation,
+        revision: format!("document-{}", state.revision) };
+    let connection = state.github.local_git_read_session(&context.project_id, generation, Instant::now()).unwrap();
+    Entry::Original {
+        ticket: GitReadTicket::pending_display_fixture(&document.inner.bridge.supervisor),
+        gate: GitReadGate(Arc::new(Selection {
+            document: Arc::downgrade(&document.inner),
+            root: asset_source::RegisteredRoot { path: "/never-opened-git-display-fixture".into(),
+                identity: asset_source::ProjectIdentity::Posix(asset_source::DirectoryIdentity::synthetic_evidence_identity()) },
+            context, document_revision: state.revision, connection,
+            action: wire::Action { kind: wire::Kind::Observe, expected_revision: None, paths: vec![], staged: false },
+            #[cfg(any(target_os="linux",target_os="macos"))]
+            agent_observation: None,
+        })),
+    }
+}
 fn error_reason(error: &BridgeError) -> (&'static str, wire::Outcome) {
     use wire::Outcome;
     match error.code.as_str() {
