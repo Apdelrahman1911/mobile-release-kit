@@ -372,7 +372,7 @@ fn store_missing_material_or_consumed_missing_native_owner_never_becomes_clean()
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 fn store_raw_main_request_is_bounded_before_closed_decode() {
     use crate::asset_session::agent_store::{decode, Allow};
-    let value = serde_json::json!({"kind":"access-check","operationId":id('a'),"ownerGeneration":id('b'),"expectedStatusRevision":3,"consentVersion":"agent-android-store-access-once-v1"});
+    let value = serde_json::json!({"kind":"access-check","operationId":id('a'),"ownerGeneration":id('b'),"expectedStatusRevision":3,"expectedPermissionRevision":"1","consentVersion":"agent-android-store-access-once-v1"});
     let mut bytes = serde_json::to_vec(&value).unwrap();
     assert!(decode::<Allow>(&bytes).is_ok());
     bytes.resize(p::RAW_LIMIT, b' ');

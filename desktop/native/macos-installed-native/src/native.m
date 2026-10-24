@@ -1656,10 +1656,19 @@ static BOOL mrk_ax_before(MRKPrompt *s, AXUIElementRef element) {
         return mrk_ax_selection_limit(s, MRK_SELECT_LIMIT_AX_CALLS, used, cap, 0);
     MRKOpenTimeout timeout = {0};
     if (!mrk_ax_admit(s, 0, 0, &timeout)) return NO;
-    if (!isfinite(timeout.seconds) || timeout.seconds <= 0 || (double)timeout.seconds > 0.1
-        || timeout.required_ns == 0 || timeout.required_ns > 100000000
+    // Open/save panel controls live in an AppKit service. A cold query may
+    // need more than 100ms even after the owning sheet is ready. All queries
+    // still consume the caller's same two-second endpoint; never retry an AX
+    // operation. Keep the action acknowledgment allowance at its original cap.
+    if (!isfinite(timeout.seconds) || timeout.seconds <= 0 || (double)timeout.seconds > 0.5
+        || timeout.required_ns == 0 || timeout.required_ns > 500000000
         || timeout.required_ns != (uint64_t)ceil((double)timeout.seconds * 1000000000.0))
         return mrk_ax_fail(s, MRK_OPEN_INPUT);
+    if ((s->result.site == MRK_OPEN_ADMISSION || s->result.site == MRK_OPEN_PRESS)
+        && timeout.required_ns > 100000000) {
+        timeout.seconds = nextafterf(0.1f, 0.0f);
+        timeout.required_ns = (uint64_t)ceil((double)timeout.seconds * 1000000000.0);
+    }
     // Only this selecting original may reuse its exact pointer's known timeout.
     // Equal-but-distinct AX objects do not share a per-object messaging timeout.
     BOOL reuse = s->result.selection_mode == 1 && s->timeout_element == element

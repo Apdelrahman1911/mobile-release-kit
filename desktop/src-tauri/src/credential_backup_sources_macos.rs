@@ -346,13 +346,13 @@ mod tests {
     // not qualify macOS capture or original worker/custody finality.
     #[test]
     fn backup_and_exact_code_are_distinct_fixed_input_roles() {
-        assert_eq!(CODE_BYTES, 79);
+        assert_eq!(CODE_BYTES, 80);
         assert!(SOURCE_CONTROL_BYTES <= 1024 * 1024);
         assert!(input_size(0, backup::BACKUP_LIMIT));
         assert!(!input_size(0, backup::BACKUP_LIMIT + 1));
         assert!(!input_size(0, 0));
-        assert!(input_size(1, 79));
-        for length in [0, 78, 80, 128, usize::MAX] { assert!(!input_size(1, length)); }
+        assert!(input_size(1, 80));
+        for length in [0, 78, 79, 81, 128, usize::MAX] { assert!(!input_size(1, length)); }
         assert!(!input_size(2, 79));
     }
 

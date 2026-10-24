@@ -8,6 +8,7 @@ import os
 from pathlib import Path
 import stat
 import subprocess
+import sys
 import tempfile
 from types import SimpleNamespace
 import unittest
@@ -89,6 +90,18 @@ def operation():
 
 
 class DistributionDetachData(unittest.TestCase):
+    @unittest.skipUnless(sys.platform == 'darwin', 'Darwin source metadata policy')
+    def test_source_metadata_exception_never_accepts_other_file_attributes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'source.json'
+            path.write_bytes(b'{}\n')
+            with path.open('rb') as source:
+                S.no_xattrs(source.fileno(), source_metadata=True)
+                subprocess.run(['/usr/bin/xattr', '-w', 'dev.mrk.fixture', 'inert', str(path)], check=True)
+                for source_metadata in (False, True):
+                    with self.assertRaises(S.Refused):
+                        S.no_xattrs(source.fileno(), source_metadata=source_metadata)
+
     def test_stderr_is_closed_bounded_data_not_exception_text(self):
         for raw, reason in ((b'', 'empty'), (b'hdiutil: detach failed - Resource busy\n', 'resource-busy'),
                             (b'hdiutil: detach failed - Permission denied\n', 'permission-denied'),
@@ -158,6 +171,49 @@ class DistributionDetachData(unittest.TestCase):
 
 
 class DistributionDetachCustody(unittest.TestCase):
+    def test_installer_uses_identical_retained_host_copy_not_the_mounted_package(self):
+        with operation() as op:
+            source = op.package_directory('producer-observation-root')
+            copied = op.package_file(source, op.package_name, b'inert package')
+            path = op.installer_package_path(source)
+            self.assertEqual(path, op.work / 'producer-observation-root' / op.package_name)
+            self.assertNotEqual(path.parent, op.transport_mount)
+            self.assertEqual(path.read_bytes(), (op.transport_mount / op.package_name).read_bytes())
+            self.assertFalse(copied['closed'])
+            self.assertFalse(op.mount_detached)
+            self.assertEqual(len(op.calls), len(H._PACKAGE_DIAGNOSTIC_ROLES) - 1)
+
+    def test_installer_host_copy_rejects_changes_substitution_and_missing_original(self):
+        for fault in ('bytes', 'symlink', 'missing', 'foreign-root', 'digest'):
+            with self.subTest(fault=fault), operation() as op:
+                source = op.package_directory('producer-observation-root')
+                copied = op.package_file(source, op.package_name, b'inert package')
+                path = op.work / source['name'] / op.package_name
+                if fault == 'bytes':
+                    os.pwrite(copied['fd'], b'changed', 0)
+                elif fault == 'symlink':
+                    path.unlink(); path.symlink_to(op.transport_mount / op.package_name)
+                elif fault == 'missing':
+                    op.package_outputs.clear()
+                elif fault == 'foreign-root':
+                    source = dict(source)
+                else:
+                    op.package_outputs[0] = (copied, '0' * 64)
+                with self.assertRaises(H.Refused):
+                    op.installer_package_path(source)
+                self.assertFalse(op.mount_detached)
+
+    def test_installer_log_correlation_accepts_only_the_exact_host_copy_name(self):
+        args = SimpleNamespace(fixture=False, expected_source='a' * 40, expected_inventory='b' * 64,
+            expected_manifest='c' * 64, run_id='123', run_attempt='1', target=H.ARM_TARGET,
+            request_id='1' * 32, package=Path('/private/test/producer-observation-root') /
+                S.distribution_request_name('1' * 32))
+        self.assertEqual(S.installer_log_binding(args)['packagePath'], str(args.package))
+        for package in (args.package.with_name(S.distribution_request_name('2' * 32)),
+                        args.package.parent.parent / 'other' / args.package.name):
+            with self.subTest(package=package), self.assertRaises(S.Refused):
+                S.installer_log_binding(SimpleNamespace(**{**vars(args), 'package': package}))
+
     def assert_closed(self, descriptors):
         for fd in descriptors:
             with self.assertRaises(OSError) as raised:
@@ -198,6 +254,7 @@ class DistributionDetachCustody(unittest.TestCase):
                 inventorySha256=args.expected_inventory, packageSha256=args.expected_package)
             readback_fds, events = [], []
             real_open, real_close = os.open, os.close
+            fixture_xattrs = S.no_xattrs
             def opened(*a, **kw):
                 fd = real_open(*a, **kw); readback_fds.append(fd); return fd
             def readback(argument):
@@ -205,6 +262,10 @@ class DistributionDetachCustody(unittest.TestCase):
                 # finally clauses. Only unrelated producer-schema DATA is inert.
                 with (mock.patch.object(S, 'selected_build', return_value=selected),
                       mock.patch.object(S, 'maintenance_producer_data', return_value={'releaseSet': {'current': current}}),
+                      # This is an FD-custody fixture, not installed payload
+                      # qualification. Allow only Apple's local attribution
+                      # metadata on these newly created fixture files.
+                      mock.patch.object(S, 'no_xattrs', side_effect=lambda fd: fixture_xattrs(fd, source_metadata=True)),
                       mock.patch.object(S.os, 'open', side_effect=opened)):
                     S.maintenance_producer_inputs(argument, selected)
                 self.assert_closed(readback_fds)

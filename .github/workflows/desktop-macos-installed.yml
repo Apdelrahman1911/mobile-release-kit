@@ -244,6 +244,17 @@ jobs:
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: '3.14.7'
+      - name: Check Mac installer transport and native dialog compilation before expensive preparation
+        if: matrix.native_scope == 'git-native' || matrix.native_scope == 'tool-setup'
+        timeout-minutes: 3
+        shell: bash
+        env:
+          MRK_PYTHON: ${{ steps.python.outputs.python-path }}
+        run: |
+          set -euo pipefail
+          umask 077
+          "$MRK_PYTHON" -I -B desktop/tools/macos_local_preflight.py --transport \
+            --output "$RUNNER_TEMP/mrk-fast-macos-preflight"
       - name: Refuse unconfigured update before any artifact download or native preparation
         if: github.ref == 'refs/heads/verify/desktop-macos-positive-update'
         id: update_selection
@@ -2093,7 +2104,7 @@ jobs:
         env:
           RUNNER_ENVIRONMENT: ${{ runner.environment }}
           MRK_UPDATE_SEGMENT: update-p0-bootstrap
-        run: &mrk_update_credentials |
+        run: |
           set +x
           set +a
           set -euo pipefail

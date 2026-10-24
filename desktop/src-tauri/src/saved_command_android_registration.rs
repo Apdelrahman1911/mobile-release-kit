@@ -21,7 +21,10 @@ use crate::installed_runtime::{AndroidRegistrationSourceSlots, AndroidRegistrati
 const WORK:Duration=Duration::from_secs(wire::WORK_SECONDS);
 const HARD:Duration=Duration::from_secs(wire::FINALITY_SECONDS);
 const REVIEW:Duration=Duration::from_secs(wire::REVIEW_SECONDS);
-const OWNED_LIMIT:usize=64*1024*1024;
+// The complete supported catalogue with its previous review retained uses
+// 71,093,161 bytes on ARM64. Fund that actual ownership overlap; keep a fixed
+// cap and the existing checked arithmetic, exact-boundary and overflow tests.
+const OWNED_LIMIT:usize=72*1024*1024;
 // Same bounded control-only class as the Document census. This accounts for
 // this owner's watches/oneshots and wake cells; it is NOT a native SDK bound,
 // allocator/RSS estimate, payload allowance or source/service custody receipt.
@@ -1658,7 +1661,7 @@ fn operation_admission_bytes(previous:usize,data:&wire::Operation,review_id:&Str
     let added=operation_allocation_bytes(data,review_id,instance,control,phase_storage)?;
     if data.kind==wire::Kind::Registration {
         // Registration's native Preparation includes one complete installation
-        // inspector. Pure source Inspection retains the original64MiB limit.
+        // inspector. Pure source Inspection uses its separately funded fixed limit.
         if phase_storage<crate::macos_install_record::CONTROL_LIMIT{return None;}
         previous.checked_add(added).filter(|bytes|crate::macos_install_record::installed_control_fits(*bytes,1))
     }else{bounded_operation_sum(previous,added)}

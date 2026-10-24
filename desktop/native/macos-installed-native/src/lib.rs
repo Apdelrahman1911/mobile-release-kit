@@ -1853,7 +1853,7 @@ mod observation {
         rechecks: [Option<OpenRecheckReturn>; 3], next_recheck: usize, custody_known: bool, press: OpenPressCapture,
     }
     fn timeout_for(remaining: Duration) -> Option<OpenTimeout> {
-        let allowance = remaining.as_nanos().min(100_000_000);
+        let allowance = remaining.as_nanos().min(500_000_000);
         if allowance == 0 { return None; }
         let mut seconds = (allowance as f64 / 1_000_000_000.0) as f32;
         // Round DOWN, including the nonexact f32 representation of0.1s. C
@@ -1873,7 +1873,9 @@ mod observation {
             // Spend even a refused/unwound first return admission. A later
             // CF-cleanup callback must never substitute its clock for Press.
             let first_after = context.press.first_return_attempt(after);
-            if !matches!(after, 0 | 1) || required_ns > 100_000_000 || !timeout.is_null() && required_ns != 0 {
+            if !matches!(after, 0 | 1)
+                || required_ns > if after == 1 { 100_000_000 } else { 500_000_000 }
+                || !timeout.is_null() && required_ns != 0 {
                 context.custody_known = false; return 9;
             }
             let Some(allowed) = (context.admit)(after == 1) else { context.custody_known = false; return 9; };
@@ -2534,9 +2536,9 @@ mod observation {
         }
         let changed = recheck_return(RecheckWire { prompt: 2, error: 13, ..rw }, 2);
         if !changed.is_some_and(|r| r.custody_known && !r.matched()) { return false; }
-        for ns in [1, 99, 10_000_001, 99_999_999, 100_000_000, 2_000_000_000] {
+        for ns in [1, 99, 10_000_001, 99_999_999, 100_000_000, 499_999_999, 500_000_000, 2_000_000_000] {
             let Some(t) = timeout_for(Duration::from_nanos(ns)) else { return false; };
-            if t.required_ns > ns.min(100_000_000) || t.required_ns == 0
+            if t.required_ns > ns.min(500_000_000) || t.required_ns == 0
                 || t.required_ns != (f64::from(t.seconds) * 1_000_000_000.0).ceil() as u64 { return false; }
         }
         let Some(failed_press) = ordinary_return(OpenWire { flags: 11, error: 11, ax_error: -25204,
@@ -2592,6 +2594,15 @@ mod observation {
     /// Pure checks called by the existing instrumented observer entry, not a
     /// native query or a separate test executable/qualification route.
     pub fn installed_observation_flags_data_check() -> bool {
+        #[cfg(test)] {
+            assert!(action_diagnostics_data_check(), "action diagnostics");
+            assert!(identity_data_check(), "identity");
+            assert!(semantic_data_check(), "semantic");
+            assert!(original_window_data_check(), "original window");
+            assert!(project_field_data_check(), "project field");
+            assert!(evidence_folder_abi_data_check(), "evidence folder ABI");
+            assert!(public_images_abi_data_check(), "public images ABI");
+        }
         action_diagnostics_data_check() && identity_data_check() && semantic_data_check() && original_window_data_check()
             && project_field_data_check() && evidence_folder_abi_data_check() && public_images_abi_data_check()
             && [0, 0x1000, 0x2000, 0x12000, 0x3000, 0xf000, 0x1f002, 0x2200c, 0x4200c, 0x6201c, 0x7ffff, 0x9f00f, 0x15f00f, 0x17f01f]
@@ -2860,6 +2871,11 @@ fn evidence_folder_abi_data_check() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[cfg(feature = "installed-observation")]
+    #[test]
+    fn installed_observation_data_contracts_are_consistent() {
+        assert!(installed_observation_flags_data_check());
+    }
     #[test]
     fn compiled_machine_and_translation_data_refuse_foreign_or_unknown_hosts() {
         use nix::errno::Errno;

@@ -27,7 +27,7 @@ fn projected() -> RunProjection {
     }
 }
 #[test]
-fn apple_cli_all_fifteen_modes_are_closed_and_key_recover_still_refuses() {
+fn apple_cli_modes_are_closed_and_key_recover_requires_prepared_context() {
     use apple_wire::Mode as M;
     for m in [
         M::Review,
@@ -86,7 +86,7 @@ fn apple_cli_all_fifteen_modes_are_closed_and_key_recover_still_refuses() {
     let mut c = context();
     c.mode = M::KeyRecover;
     assert!(!c.valid());
-    assert!(mode(c.mode).is_err());
+    assert_eq!(mode(c.mode).unwrap(), p::Mode::KeyRecover);
 }
 #[test]
 fn apple_cli_terminal_data_alone_does_not_project_native_retirement() {

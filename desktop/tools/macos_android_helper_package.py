@@ -9018,6 +9018,28 @@ class Operation:
              "remove-producer.sig" if self.removal else "producer.sig"}, "package-mounted-post-roster")
         self.recheck_mount()
 
+    def installer_package_path(self, source):
+        """Use the verified host copy so PackageKit never owns a mounted file.
+
+        The distribution image is still mounted and independently read back.
+        Both originals remain checked before/after Installer; this changes only
+        which identical signed package is supplied to the system service.
+        """
+        need(source.get("parent_entry") is self.work_entry
+             and source.get("name") == "producer-observation-root",
+             "package-installer-source")
+        self.recheck_directory(source)
+        local = [(entry, sha) for entry, sha in self.package_outputs
+                 if entry.get("parent_entry") is source and entry["name"] == self.package_name]
+        mounted = [entry for entry in self.entries
+                   if entry["kind"] == "mounted-file" and entry["name"] == self.package_name]
+        need(len(local) == len(mounted) == 1, "package-installer-source")
+        entry, expected = local[0]
+        need(expected == mounted[0]["sha256"] and digest(self.read(entry)) == expected,
+             "package-installer-source")
+        self.mounted_post()
+        return self.work / source["name"] / self.package_name
+
     def observe_distribution_detach_failure(self, original):
         """One bounded nonroot observation of this SAME failed detach only."""
         admitted = self.distribution_detach_refusal
@@ -9634,7 +9656,7 @@ class Operation:
         args = argparse.Namespace(target=self.target, fixture=False, input=self.work / "input", expected_source=self.image_source,
             expected_inventory=inventory_hash, expected_manifest=manifest_hash, request_id=request_id, expected_package=digest(body),
             producer_descriptor=mount_path / "producer.json", producer_signature=mount_path / "producer.sig",
-            installer_status=self.work / "installer-output.status", package=mount_path / self.package_name,
+            installer_status=self.work / "installer-output.status", package=self.installer_package_path(observed_root),
             run_id=self.environment["GITHUB_RUN_ID"], run_attempt=self.environment["GITHUB_RUN_ATTEMPT"])
         self.package_stager_io("result-absence", args)
         if self.update is not None:

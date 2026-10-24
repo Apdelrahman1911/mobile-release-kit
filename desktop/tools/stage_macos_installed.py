@@ -685,14 +685,14 @@ def parent(path):
         yield originals[-1], parts[-1]
 
 
-def no_xattrs(fd):
+def no_xattrs(fd, *, source_metadata=False):
     # CPython's os xattr helpers are not portable to every Darwin build. This
     # fixed read-only system ABI is for the nonroot DATA stager only. The root
     # installer independently checks the actual staged originals in native C.
     global _DARWIN_XATTRS
     if sys.platform == "darwin":
+        import ctypes
         if _DARWIN_XATTRS is None:
-            import ctypes
             library = ctypes.CDLL("/usr/lib/libSystem.B.dylib", use_errno=True)
             call = library.flistxattr
             call.argtypes = [ctypes.c_int, ctypes.c_void_p, ctypes.c_size_t, ctypes.c_int]
@@ -700,14 +700,24 @@ def no_xattrs(fd):
             _DARWIN_XATTRS = call
         count = _DARWIN_XATTRS(fd, None, 0, 0)
         need(count >= 0, "file-extended-attributes-query")
-        need(count == 0, "file-extended-attributes")
+        if source_metadata and count:
+            # macOS attaches this attribution metadata to locally created
+            # checkout files. Admit it only for the fixed SOURCE version JSON;
+            # package, payload and installed-file policies remain unchanged.
+            expected = b"com.apple.provenance\0"
+            need(count == len(expected), "file-extended-attributes")
+            names = ctypes.create_string_buffer(count)
+            need(_DARWIN_XATTRS(fd, names, count, 0) == count and names.raw == expected,
+                 "file-extended-attributes")
+        else:
+            need(count == 0, "file-extended-attributes")
     elif sys.platform == "linux":
         need(not os.listxattr(fd), "file-extended-attributes")
     else:
         raise Refused("unsupported-data-host")
 
 
-def read_at(fd, name, limit, *, zero_flags=False):
+def read_at(fd, name, limit, *, zero_flags=False, source_metadata=False):
     before = os.stat(name, dir_fd=fd, follow_symlinks=False)
     need(stat.S_ISREG(before.st_mode) and before.st_nlink == 1 and 0 <= before.st_size <= limit
          and (not zero_flags or getattr(before, "st_flags", None) == 0), "ordinary-file-bound")
@@ -716,7 +726,10 @@ def read_at(fd, name, limit, *, zero_flags=False):
         opened = os.fstat(original)
         need(signature(opened) == signature(before)
              and (not zero_flags or getattr(opened, "st_flags", None) == 0), "file-open-changed")
-        no_xattrs(original)
+        if source_metadata:
+            no_xattrs(original, source_metadata=True)
+        else:
+            no_xattrs(original)
         data = bytearray()
         while len(data) <= limit:
             block = os.read(original, min(65536, limit + 1 - len(data)))
@@ -743,7 +756,9 @@ def source_build_release(*, target=ARM_TARGET):
     target = mac_target(target)
     path = (BUILD_RELEASE_INPUT if target == ARM_TARGET else
             DESKTOP / "macos-installed-inputs/build-release-intel.json")
-    value = build_release_data(read(path, BUILD_RELEASE_LIMIT), target=target)
+    with parent(path) as (fd, name):
+        body, _ = read_at(fd, name, BUILD_RELEASE_LIMIT, source_metadata=True)
+    value = build_release_data(body, target=target)
     return value["packageVersion"], value["release"]
 
 
@@ -5365,6 +5380,7 @@ def installer_log_binding(args):
          and all(ord(c) >= 32 and ord(c) != 127 for c in package)
          and all(part and part not in (".", "..") for part in package.split("/")[1:])
          and (package.split("/")[-2:] == [dirname, basename]
+              or not args.fixture and package.split("/")[-2:] == ["producer-observation-root", basename]
               or not args.fixture and package == str(Path("/Volumes") /
                   ("MRK-Install-" + digest("\n".join((args.run_id, args.run_attempt,
                       command_target(args), "package-install")).encode("ascii"))[:32]) / basename)), "log-input-binding")

@@ -162,11 +162,11 @@ test('existing LOCAL permission family carries exact upstream and never accepts 
  const selected={projectId:'project-1',expectedDocumentRevision:1,readOperationId:'read-observe',action:action()};
  assert.ok(copyGitRepositoryApproval(selected));assert.equal(copyGitRepositoryApproval({...selected,readOperationId:null}),null);
  for(const kind of ['fetch','push','push-new-branch'])assert.equal(copyGitRepositoryApproval({...selected,action:{...action(),kind}}),null);
- const access={enabled:true,remainingMs:900000,consumed:false,projectId:'1'.repeat(32),grantId:'2'.repeat(32),selection:{action:action(),selectionSha256:'3'.repeat(64)}};
+ const access={permissionRevision:'1',enabled:true,remainingMs:900000,consumed:false,projectId:'1'.repeat(32),grantId:'2'.repeat(32),selection:{action:action(),selectionSha256:'3'.repeat(64)}};
  assert.ok(parseGitRepositoryAccess(access));const calls=[];
  const api=createGitRepositoryPermissionApi('native',async(command,raw)=>{calls.push([command,decode(raw)]);return access;});
- await api.allow(selected);assert.equal(calls[0][0],'allow_agent_git_repository');
- assert.deepEqual(calls[0][1],{...selected,consentVersion:'agent-local-git-repository-once-v1'});
+ await api.allow(selected,'1');assert.equal(calls[0][0],'allow_agent_git_repository');
+ assert.deepEqual(calls[0][1],{...selected,expectedPermissionRevision:'1',consentVersion:'agent-local-git-repository-once-v1'});
  assert.equal(createGitRepositoryPermissionApi('preview',()=>assert.fail()),null);
 });
 test('local permission uses same current read/draft witness and reentrant change withdraws unsent Allow',async()=>{

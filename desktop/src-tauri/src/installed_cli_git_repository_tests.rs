@@ -196,7 +196,8 @@ fn compiled_repository_catalogue_preserves_old_families_and_local_output_bound()
             "branch-create",
             "branch-switch",
             "branch-rename",
-            "fast-forward"
+            "fast-forward",
+            "set-upstream"
         ])
     );
     assert_eq!(own["commands"].as_array().unwrap().len(), 5);

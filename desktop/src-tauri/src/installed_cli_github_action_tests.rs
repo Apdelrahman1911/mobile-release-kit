@@ -93,11 +93,15 @@ fn real_local_catalogue_keeps_one_closed_mutation_family_and_finite_output() {
         "preflight-prepare", "preflight-dispatch", "preflight-pending", "preflight-observe",
         "release-prepare", "release-dispatch", "release-pending", "release-observe",
         "setup-prepare", "counter-prepare", "counter-create", "publication-pending", "counter-reconcile",
-        "counter-enrollment-review", "counter-enrollment-connect"
+        "counter-enrollment-review", "counter-enrollment-connect", "remote-setup-prepare", "remote-setup-apply",
+        "repository-prepare", "repository-pending", "repository-reconcile", "pr-prepare", "pr-pending", "pr-reconcile",
+        "failed-jobs-prepare", "failed-jobs-pending", "failed-jobs-reconcile"
     ]));
     assert_eq!(v["readOnlyKinds"], serde_json::json!([
         "setup-reconcile", "activity-overview", "preflight-pending", "preflight-observe",
-        "release-pending", "release-observe", "publication-pending", "counter-reconcile", "counter-enrollment-review"
+        "release-pending", "release-observe", "publication-pending", "counter-reconcile", "counter-enrollment-review",
+        "repository-prepare", "repository-pending", "repository-reconcile", "pr-prepare", "pr-pending", "pr-reconcile",
+        "failed-jobs-prepare", "failed-jobs-pending", "failed-jobs-reconcile", "remote-setup-prepare"
     ]));
     let enrollment = &v["counterEnrollment"];
     for key in ["reviewRequiresSeparateConsent", "connectRequiresNewConsent", "explicitCheckAfterSubmit",
@@ -109,8 +113,11 @@ fn real_local_catalogue_keeps_one_closed_mutation_family_and_finite_output() {
     }
     let help = super::super::capabilities(false).unwrap();
     assert!(help.len() <= crate::installed_cli::CAPABILITIES_BYTES);
-    assert!(std::str::from_utf8(&help).unwrap().contains("After each github-submit, Check"));
-    assert_eq!(v["prepareKinds"], serde_json::json!(["preflight-prepare", "release-prepare", "counter-prepare", "setup-prepare"]));
+    assert!(std::str::from_utf8(&help).unwrap().contains("For counter enrollment, after github-submit, Check"));
+    assert_eq!(v["prepareKinds"], serde_json::json!([
+        "preflight-prepare", "release-prepare", "counter-prepare", "setup-prepare",
+        "repository-prepare", "pr-prepare", "failed-jobs-prepare", "remote-setup-prepare"
+    ]));
     for key in ["oneUse", "mutating", "requiresExactDesktopConsent", "requiresRunningDesktop", "requiresProjectReadGrant",
         "normalPrCreation", "counterSetup", "firstCounterOnly", "counterPrepareMayCreateLocalState", "cliPendingLoad",
         "cliPrepare", "workflowDispatch", "dispatchMayRunProjectCode"] {

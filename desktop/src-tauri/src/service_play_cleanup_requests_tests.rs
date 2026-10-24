@@ -309,7 +309,7 @@ fn known_preinsertion_refusal_keeps_tombstone_and_capacity_does_not_evict_it() {
     assert!(f.inbox.allow(f.scope.clone()).is_err());
     assert_eq!(f.inbox.book.lock().unwrap().entries.len(), p::REQUEST_LIMIT);
     assert!(
-        DOCUMENT_BACKING
+        DOCUMENT_BACKING + 8 * IPC_WORKER_BACKING
             >= p::REQUEST_LIMIT * 4096
                 + 8 * (crate::service_protocol::REQUEST_BYTES + 2 * p::STATUS_LIMIT)
     );
