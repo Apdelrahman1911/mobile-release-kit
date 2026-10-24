@@ -15,6 +15,10 @@ on:
         type: choice
         options: [both, arm64, x86_64]
         default: both
+      bundled_core_diagnostic:
+        description: Diagnose only bundled Python startup on the retained Git ARM build; do not launch or qualify the app
+        type: boolean
+        default: false
 
 permissions:
   contents: read
@@ -27,7 +31,7 @@ concurrency:
 jobs:
   install-retained-observer:
     if: github.repository == 'Apdelrahman1911/mobile-release-kit' && github.event_name == 'workflow_dispatch' && (inputs.operation == 'install-retained-observer' || inputs.operation == 'install-retained-git-observer') && inputs.architecture == 'arm64' && github.ref == 'refs/heads/verify/desktop-macos-observer-reuse'
-    name: Reuse signed Mac build and complete core functional checks
+    name: ${{ inputs.bundled_core_diagnostic && 'Diagnose bundled Mac core startup (no rebuild)' || 'Reuse signed Mac build and complete core functional checks' }}
     runs-on: ${{ inputs.operation == 'install-retained-git-observer' && 'xcode-27' || 'macos-26' }}
     timeout-minutes: 260
     env:
@@ -48,6 +52,7 @@ jobs:
         shell: bash
         env:
           RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          MRK_CORE_DIAGNOSTIC_REQUESTED: ${{ inputs.bundled_core_diagnostic }}
         run: |
           set +x
           set -euo pipefail
@@ -56,6 +61,9 @@ jobs:
           [[ "$GITHUB_REF" == refs/heads/verify/desktop-macos-observer-reuse ]]
           [[ "$GITHUB_WORKSPACE" == /Users/runner/work/mobile-release-kit/mobile-release-kit ]]
           [[ "$RUNNER_TEMP" == /Users/runner/work/_temp && "$(/usr/bin/id -u)" != 0 && "$(/usr/bin/uname -m)" == arm64 ]]
+          if [[ "$MRK_CORE_DIAGNOSTIC_REQUESTED" == true ]]; then
+            [[ "$MRK_CANDIDATE_MODE" == install-retained-git-observer ]]
+          fi
       - name: Check out the unchanged signed application source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -123,6 +131,21 @@ jobs:
           [[ "$saved_status" == 0 ]] || exit "$saved_status"
           # Only a real return0, fresh Installer/readback and unforced detach0
           # allow later cases. The JSON cannot certify its own future exit.
+      - name: Diagnose the unchanged bundled core without launching the application
+        if: inputs.bundled_core_diagnostic && env.MRK_CANDIDATE_MODE == 'install-retained-git-observer'
+        timeout-minutes: 2
+        shell: bash
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          MRK_MACOS_BUNDLED_CORE_DIAGNOSTIC: 'true'
+        run: |
+          set +x
+          set -euo pipefail
+          umask 077
+          ulimit -c 0
+          # Diagnostic only: no app launch, project, credential, or provider input.
+          # Do not run later native app cases against this prewarmed runtime.
+          exec "$MRK_PYTHON" -I -S -B "$GITHUB_WORKSPACE/.candidate-consumer-helper/desktop/tools/macos_bundled_core_probe.py"
       - name: Verify four supported project identity edits
         if: env.MRK_CANDIDATE_MODE == 'install-retained-observer'
         timeout-minutes: 15
@@ -204,7 +227,7 @@ jobs:
           exec "$MRK_PYTHON" -I -S -B "$driver" --retained-observer --target "$MRK_MACOS_TARGET" --scope upload-key-backup-cli
 
       - name: Verify fifteen existing Git cases on the freshly installed signed Git observer
-        if: env.MRK_CANDIDATE_MODE == 'install-retained-git-observer'
+        if: env.MRK_CANDIDATE_MODE == 'install-retained-git-observer' && !inputs.bundled_core_diagnostic
         timeout-minutes: 25
         shell: bash
         env:
