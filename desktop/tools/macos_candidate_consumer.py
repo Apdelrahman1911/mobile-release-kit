@@ -35,6 +35,7 @@ LEGACY_PATH = 'desktop/tools/macos_fixed_carrier_resume.py'
 PARSER_PATH = 'desktop/tools/macos_candidate_carrier.py'
 STAGER_PATH = 'desktop/tools/stage_macos_installed.py'
 CONSUMER_PATH = 'desktop/tools/macos_candidate_consumer.py'
+CONSUMER_SOURCE_LIMIT = 112 << 10
 FIXTURE_PATH = 'desktop/tools/macos_app_absence_fixture.py'
 BASELINE_RECEIPT = 'candidate-baseline.json'
 BASELINE_STATUS = 'candidate-baseline.status'
@@ -521,7 +522,7 @@ class CandidateResume(resume.Resume):
     def load_sources(self):
         """Actual source paths stay distinct; retain originals across native use."""
         resume.need(not self.__source_loaded, 'candidate-source-once')
-        self.source(CONSUMER_PATH, 96 << 10)
+        self.source(CONSUMER_PATH, CONSUMER_SOURCE_LIMIT)
         self.child_sources = {LEGACY_PATH: self.source(LEGACY_PATH, resume.SOURCE_LIMIT),
                               PARSER_PATH: self.source(PARSER_PATH, PARSER_SOURCE_LIMIT)}
         self.child_bootstrap = (acquisition_bootstrap(self.root, self.child_sources)

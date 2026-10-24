@@ -2,6 +2,15 @@
 
 ## Latest continuation — 2026-10-25
 
+Retained-Git run [40140364346](https://github.com/Apdelrahman1911/mobile-release-kit/actions/runs/40140364346)
+on helper `ac14c5cadeb4949ddf8884326ff01919534079ba` failed before acquisition/native
+installation: the added helper exceeded its old 96 KiB source-input cap (99,042
+bytes). The cap is now a named finite 112 KiB allowance, included in existing
+retained-memory accounting. The actual workflow/source-bound test passes; it
+will catch this size mismatch locally. The broader bootstrap module still has
+legacy DATA fixture failures and is not an all-green suite. No ejection or native
+Git success was obtained from this failed attempt.
+
 **Run 40132594293 completed with failure** on candidate
 `ed91b0dd582ca35a6dc57556aa73d60f1fc852a2`, tree
 `27e03272ab0f31bf4769a7236322427707cbddae`.

@@ -71,7 +71,7 @@ class CandidateBootstrapTests(unittest.TestCase):
         self.assertNotIn('continue-on-error', job)
         self.assertNotIn('secrets.', job)
         self.assertEqual(R.MAX_ORIGINALS, 96)
-        for path, cap in ((C.CONSUMER_PATH, 96 << 10), (C.LEGACY_PATH, R.SOURCE_LIMIT), (C.PARSER_PATH, C.PARSER_SOURCE_LIMIT)):
+        for path, cap in ((C.CONSUMER_PATH, C.CONSUMER_SOURCE_LIMIT), (C.LEGACY_PATH, R.SOURCE_LIMIT), (C.PARSER_PATH, C.PARSER_SOURCE_LIMIT)):
             self.assertLessEqual((ROOT / path).stat().st_size, cap)
 
     def exercise(self, target, fault=None, purpose="install", transport=None):
