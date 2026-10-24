@@ -14,6 +14,7 @@ use std::{
         atomic::{AtomicBool, Ordering},
         Arc, OnceLock, Weak,
     },
+    time::Instant,
 };
 #[path = "installed_shell_observation_macos_git_cli_fixture.rs"]
 mod fixture;
@@ -823,6 +824,44 @@ impl Observation {
         let Some(mut r) = self.record() else {
             return false;
         };
+        if self.failed.load(Ordering::SeqCst) && !c.completed() {
+            // The exit observer already requires actual Document quit, the
+            // original relay join and this returned Host shutdown. A failed
+            // first ReadWait precedes Allow: no CLI work was admitted, so its
+            // unstarted success journey cannot be a failure-exit obligation.
+            if self.case != OuterCase::GitCli(c.case)
+                || r.step != OuterStep::GitCli(Step::ReadWait)
+                || r.pending.is_some()
+                || !r.relay_joined
+                || !self.open_custody.try_lock().map(|v| v.is_none()).unwrap_or(false)
+                || !report.settled()
+                || !report.failures.is_empty()
+                || report.workers_joined.is_some()
+                || Instant::now() >= self.end
+            {
+                return false;
+            }
+            let Some(v) = r.git_cli.as_mut() else { return false };
+            if v.read_count != 0
+                || v.reads.len() != 1
+                || v.project.is_some()
+                || v.grant.is_some()
+                || v.origin.is_some()
+                || v.revision.is_some()
+                || v.references.is_some()
+                || v.selection_hash.is_some()
+                || v.prepared.is_some()
+                || v.terminal.is_some()
+                || v.after.is_some()
+                || v.empty_revoke || v.checked || v.revoked || v.reallowed
+                || v.driver_done || v.normal_quit || v.host.is_some()
+            {
+                return false;
+            }
+            // These are still real retained originals. Use their existing
+            // sole POST/close, never a Drop, retry, fresh clock or success flag.
+            return v.files.close().is_ok() && v.files.closed() && Instant::now() < self.end;
+        }
         let Some(v) = r.git_cli.as_mut() else {
             return false;
         };

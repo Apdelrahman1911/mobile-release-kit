@@ -217,6 +217,118 @@ class GitCliTests(unittest.TestCase):
                 self.assertTrue(j.fixture.inflight and j.cli.joined)
                 self.assertFalse(j.cli.calls.returned)
 
+    def test_early_nonzero_app_return_survives_join_of_unstarted_cli_journey(self):
+        for case in G.CASES:
+            for code in (1, -9):
+                with self.subTest(case=case, code=code), self.journey(case) as j:
+                    original = subprocess.CompletedProcess([A.EXECUTABLE, case], code, b"", b"INERT failure")
+                    j.app = lambda argv, kw: original
+                    self.assertIs(self.invoke(j), original)
+                    self.assertEqual((j.calls, j.cli.calls.next, j.cli.calls.results), ([], 0, []))
+                    self.assertIsNone(j.cli.calls.inflight)
+                    self.assertTrue(j.cli.joined and j.cli.calls.closed and j.cli.calls.failed)
+                    self.assertFalse(j.cli.thread.is_alive() or j.cli.calls.returned)
+                    # invoke never itself claims app finality or fixture closure.
+                    self.assertTrue(j.fixture.inflight)
+                    self.assertFalse(j.fixture.last_returned)
+                    self.assertEqual(j.reads, 1)  # Existing installed-source POST remains required.
+
+    def test_early_return_does_not_relax_result_claim_join_or_source_contracts(self):
+        for fault in ("zero", "foreign", "bool-code", "text-output", "oversize", "shaped",
+                      "claim", "returned-call", "expired-join", "source", "exception"):
+            with self.subTest(fault=fault), self.journey() as j:
+                original = subprocess.CompletedProcess([A.EXECUTABLE, j.case], 1, b"", b"")
+                error = RuntimeError("INERT original app unavailable")
+                def app(argv, kw):
+                    if fault == "zero": original.returncode = 0
+                    elif fault == "foreign": original.args = [A.EXECUTABLE, G.BRANCH]
+                    elif fault == "bool-code": original.returncode = True
+                    elif fault == "text-output": original.stdout = ""
+                    elif fault == "oversize": original.stdout = b"x" * (2 * 1024 * 1024 + 1)
+                    elif fault == "shaped": return SimpleNamespace(**original.__dict__)
+                    elif fault in ("claim", "returned-call"):
+                        # Explicit ledger DATA, never a launched child.
+                        j.cli.calls.claim(0)
+                        if fault == "returned-call": j.cli.calls.returned_call(0, original)
+                    elif fault == "expired-join": j.cli.calls.clock = lambda: j.cli.calls.hard_end
+                    elif fault == "exception": raise error
+                    return original
+                j.app = app
+                if fault == "source":
+                    j.cli.current_cli = lambda: (_ for _ in ()).throw(ValueError("INERT source changed"))
+                with self.assertRaises((ValueError, RuntimeError)) as caught:
+                    self.invoke(j)
+                if fault == "exception": self.assertIs(caught.exception, error)
+                self.assertTrue(j.fixture.inflight)
+                self.assertFalse(j.fixture.last_returned or j.cli.calls.returned)
+                self.assertEqual(j.calls, [])
+                if fault != "expired-join": self.assertFalse(j.cli.thread.is_alive())
+                if fault == "claim": self.assertEqual(j.cli.calls.inflight, 0)
+                if fault == "returned-call": self.assertEqual(j.cli.calls.next, 1)
+                if fault == "expired-join": self.assertFalse(j.cli.joined)
+
+    def test_early_failure_does_not_change_other_cli_recipes_or_unknown_thread_join(self):
+        with tempfile.TemporaryDirectory(prefix="mrk-cli-failure-data-") as tmp:
+            j = base.InertJourney(Path(tmp))
+            try:
+                j.app = lambda argv, kw: subprocess.CompletedProcess(argv, 1, b"", b"")
+                with self.assertRaisesRegex(ValueError, "cli-thread-originals-not-returned"):
+                    C.invoke(j.fixture, j.owner, [A.EXECUTABLE, C.SCOPE], {}, j.root)
+                self.assertTrue(j.cli.joined and j.fixture.inflight)
+            finally:
+                j.close_files()
+        class UnjoinedThread:
+            def __init__(self, **kwargs): self.joins = 0
+            def start(self): pass  # Explicit DATA: no native/worker work exists.
+            def join(self, timeout): self.joins += 1
+            def is_alive(self): return True
+        with self.journey() as j, patch.object(C.threading, "Thread", UnjoinedThread):
+            j.app = lambda argv, kw: subprocess.CompletedProcess(argv, 1, b"", b"")
+            with self.assertRaisesRegex(ValueError, "cli-thread-originals-not-returned"):
+                self.invoke(j)
+            self.assertEqual(j.cli.thread.joins, 1)
+            self.assertTrue(j.fixture.inflight and j.cli.calls.failed)
+            self.assertFalse(j.cli.joined)
+            j.cli.thread = None  # Fake object removal is not actual cleanup proof.
+
+    def test_current_early_nonzero_is_failure_not_unknown_or_success_readback(self):
+        for case in G.CASES:
+            with self.subTest(case=case), self.journey(case) as j, ExitStack() as stack:
+                f = j.fixture; f.inflight = False
+                f.before_call = lambda c: (setattr(f, "case", c), C.before_call(f))
+                events = []; f.close = lambda: events.append("close")
+                original = subprocess.CompletedProcess([A.EXECUTABLE, case], 1, b"",
+                    b"MRK_MACOS_AQUA_FAILURE_STEP=GitCli(ReadWait)\n"
+                    b"MRK_MACOS_AQUA_FAILURE_REASON=git-cli-original-contract\n")
+                def app(argv, kw):
+                    events.append("app-return")
+                    return original
+                j.app = app
+                owner = SimpleNamespace(run_owned=j.owner, ProcessError=type("InertProcessError", (Exception,), {}),
+                                        ProcessInterrupted=type("InertInterrupted", (Exception,), {}))
+                stack.enter_context(patch.object(A, "Fixtures", return_value=f))
+                stack.enter_context(patch.object(A, "load_owner", return_value=owner))
+                stack.enter_context(patch.object(M, "_admit_runtime"))
+                stack.enter_context(patch.object(M, "_current"))
+                stack.enter_context(patch.object(G, "before_invocation"))
+                readback = stack.enter_context(patch.object(C, "readback", side_effect=AssertionError("failure readback")))
+                later = stack.enter_context(patch.object(G, "remaining", side_effect=AssertionError("failure continued")))
+                stdout, stderr = io.StringIO(), io.StringIO()
+                with redirect_stdout(stdout), redirect_stderr(stderr):
+                    code = M._run(A, BINDING, 501, 20, "inert", j.root,
+                        {"MRK_MACOS_NATIVE_SCOPE": M.GIT_SCOPE}, scope=G.scope(case))
+                self.assertEqual((code, stdout.getvalue(), events), (1, "", ["app-return", "close"]), stderr.getvalue())
+                diagnostic = json.loads(stderr.getvalue())
+                self.assertEqual((diagnostic["reason"], diagnostic["appReturncode"]), ("app-return", 1))
+                self.assertTrue(diagnostic["originalCallReturned"] and diagnostic["laterCasesStopped"])
+                self.assertEqual(diagnostic["invocationFinality"], "no-pending-invocation")
+                self.assertEqual(diagnostic["innerDiagnosticSource"], "completed-output")
+                self.assertEqual(diagnostic["innerFailureStep"], "GitCli(ReadWait)")
+                self.assertEqual(diagnostic["innerFailureReason"], "git-cli-original-contract")
+                self.assertFalse(f.inflight or j.cli.calls.returned)
+                self.assertTrue(j.cli.joined and f.last_returned)
+                readback.assert_not_called(); later.assert_not_called()
+
     def test_git_phase_limits_and_original_replacement_are_not_new_authority(self):
         for case in G.CASES:
             with self.subTest(case=case), self.journey(case) as j:

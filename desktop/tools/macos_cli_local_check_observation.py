@@ -486,8 +486,19 @@ def invoke(f, run_owned, argv, env, state):
         if not started or not c.joined or calls.inflight is not None:
             calls.failed = True
         # Existing run_cases alone clears Fixtures.inflight after THIS returns.
-    need(c.joined and not calls.failed and calls.returned and calls.next == calls.count
-         and calls.inflight is None and len(calls.results) == calls.count, "cli-thread-originals-not-returned")
+    # A genuinely returned failed Git app can precede its first Allow. Preserve
+    # that exact result only after the original waiting thread joined, with no
+    # CLI claim ever made. This is not completion of the success journey and
+    # cannot discharge an unreturned app/CLI call or an unknown thread join.
+    early_app_failure = (calls.case in GIT_CLI.CASES and c.joined and calls.closed
+        and not calls.returned and calls.next == 0 and calls.inflight is None and calls.results == []
+        and type(result) is subprocess.CompletedProcess and type(result.args) is list
+        and len(result.args) == 2 and all(type(arg) is str for arg in result.args) and result.args == argv
+        and type(result.returncode) is int and result.returncode != 0
+        and type(result.stdout) is bytes and type(result.stderr) is bytes
+        and len(result.stdout) + len(result.stderr) <= 2 * 1024 * 1024)
+    need(early_app_failure or (c.joined and not calls.failed and calls.returned and calls.next == calls.count
+         and calls.inflight is None and len(calls.results) == calls.count), "cli-thread-originals-not-returned")
     c.current_cli()
     return result
 
