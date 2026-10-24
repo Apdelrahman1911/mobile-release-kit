@@ -1,5 +1,25 @@
 # Continue Mobile Release Kit on the owner's Mac
 
+## Latest Mac continuation — 2026-10-24
+
+Continue from `codex/macos-git-read-continuation`. The image-status/GitRead
+cancellation fix is committed as `148e7c6234a51a548e07bbc87095527e7beaa584`.
+The Mac reproduced the Document-stop failure with actual in-memory Document,
+Supervisor and ticket state, then passed 28 focused Rust tests, 117 frontend
+tests, the frontend build and an ARM64 Desktop compilation after the fix.
+This is not an installed-runtime qualification or a signed installer.
+
+The existing signed verification workflow is running the fixed source in
+[run 40110783814](https://github.com/Apdelrahman1911/mobile-release-kit/actions/runs/40110783814).
+Consume that run before starting a replacement. The original Tool26 job finished
+with a native Open Project automation failure, not a service result; its original
+invocation finality remains unknown. No production feature gate was enabled.
+
+Read [MACOS-LOCAL-RESULTS.md](MACOS-LOCAL-RESULTS.md) for the current evidence,
+limits and next steps. The original checkpoint record below is historical where
+it differs from that continuation. The owner's installation, credentials and
+original dirty checkout have not been modified.
+
 Checkpoint: **2026-10-24, 15:27 UTC**.
 
 - Repository: <https://github.com/Apdelrahman1911/mobile-release-kit>
