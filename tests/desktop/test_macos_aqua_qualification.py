@@ -384,6 +384,90 @@ def inert_created_directory(gid=GID):
                               mkdir=mkdir, opening=opening, chown=changing_group, chmod=changing_mode)
 
 
+class GitReadFailureDataTests(unittest.TestCase):
+    """Safe returned Git DATA; no Git, native operation, or UI is executed."""
+
+    @staticmethod
+    def detail():
+        return {"snapshotSource": "record", "pending": None, "nativeHandler": None, "lastPanel": None,
+                "gitReadFailure": {"check": "terminal-phase", "phase": "cleanup-unknown",
+                                   "outcome": "cleanup-unknown", "reason": "unknown", "resultValid": None}}
+
+    def row(self, value, step="GitCli(ReadWait)", reason="git-cli-original-contract"):
+        return project_selection_row(value, reason, step)
+
+    def test_returned_read_failure_is_preserved_for_each_git_family(self):
+        for family, reason, cases in (
+                ("GitCli", "git-cli-original-contract", M.GIT_CLI.CASES),
+                ("GitUpstream", "git-upstream-original-contract", M.UPSTREAM.CASES),
+                ("GitFetch", "git-fetch-original-contract", M.FETCH.CASES),
+                ("GitPush", "git-push-original-contract", M.PUSH.ALL_CASES)):
+            for case in cases:
+                value = self.detail()
+                self.assertEqual(M.failure_context(b"", self.row(value, f"{family}(ReadWait)", reason), case), value)
+        for check in ("missing-operation", "missing-fixture", "missing-original", "original-mismatch",
+                      "terminal-phase", "terminal-outcome", "terminal-reason", "result-schema",
+                      "fixture-comparison", "reference-revision"):
+            value = self.detail(); value["gitReadFailure"]["check"] = check
+            self.assertEqual(M.failure_context(b"", self.row(value), M.GIT_CLI.INDEX), value)
+
+    def test_partial_and_inconsistent_status_cannot_establish_success_or_finality(self):
+        for phase, outcome, reason, valid in (
+                (None, None, None, None), ("stopping", None, None, None),
+                ("settled", "refused", "unsupported-repository", None),
+                ("settled", "ok", None, False), ("starting", "timed-out", "deadline", True),
+                ("running", "cancelled", "authorization", None),
+                ("cleanup-unknown", "cleanup-unknown", "unrecognized", None)):
+            value = self.detail()
+            value["gitReadFailure"].update(phase=phase, outcome=outcome, reason=reason, resultValid=valid)
+            self.assertEqual(M.failure_context(b"", self.row(value), M.GIT_CLI.INDEX), value)
+            with self.assertRaises(M.Refused):
+                M.parse_result(b"", self.row(value), BINDING, M.GIT_CLI.INDEX)
+            fixtures = InertFixtures()
+            fixtures.case, fixtures.stage, fixtures.inflight = M.GIT_CLI.INDEX, "invocation", True
+            fixtures.inner_failure_context = M.failure_context(b"", self.row(value), fixtures.case)
+            report = M.diagnostic(M.Refused("original-deadline"), None, fixtures)
+            self.assertEqual((report["status"], report["appReturncode"], report["invocationFinality"],
+                              report["originalCallReturned"]), ("failed", None, "unknown", False))
+
+    def test_private_unknown_or_misbound_fields_are_rejected(self):
+        for key, bad in (("check", "private detail"), ("phase", "/private/path"), ("outcome", {}),
+                         ("reason", "private repository error"), ("resultValid", 1),
+                         ("operationId", "private"), ("result", {"token": "private"})):
+            value = self.detail(); value["gitReadFailure"][key] = bad
+            self.assertIsNone(M.failure_context(b"", self.row(value), M.GIT_CLI.INDEX), key)
+        for key in self.detail()["gitReadFailure"]:
+            value = self.detail(); del value["gitReadFailure"][key]
+            self.assertIsNone(M.failure_context(b"", self.row(value), M.GIT_CLI.INDEX), key)
+        for step in ("GitCli(Read)", "GitCli(Allow)", "GitFetch(ReadWait)", "ToolService(RequestWait)"):
+            self.assertIsNone(M.failure_context(b"", self.row(self.detail(), step), M.GIT_CLI.INDEX))
+        for case in (None, "first-save", M.UPSTREAM.CASE, M.FETCH.CASES[0], M.PUSH.CASES[0]):
+            self.assertIsNone(M.failure_context(b"", self.row(self.detail()), case))
+        self.assertIsNone(M.failure_context(b"", self.row(self.detail(), reason="observer-deadline"), M.GIT_CLI.INDEX))
+        value = self.detail(); value["snapshotSource"] = "prearm-open-progress"
+        self.assertIsNone(M.failure_context(b"", self.row(value), M.GIT_CLI.INDEX))
+        self.assertIsNone(M.failure_context(b"", self.row(self.detail()) + context_row(self.detail()), M.GIT_CLI.INDEX))
+
+    def test_completed_git_failure_retains_nonzero_exit_without_raw_output(self):
+        fixtures, emitted = InertFixtures(), []
+        fixtures.path = Path("/inert-git-fixture")
+        fixtures.recovery_runtime_paths = lambda: None
+        detail = self.detail()
+        def invoke(_fixtures, _runner, argv, _environment, _state):
+            return CompletedProcess(args=argv, returncode=1, stdout=b"PRIVATE OUTPUT", stderr=self.row(detail))
+        with patch.object(M.GIT_CLI, "before_invocation"), patch.object(M.CLI, "invoke", side_effect=invoke), \
+                self.assertRaisesRegex(M.Refused, "^app-return$") as caught:
+            M.run_cases(BINDING, fixtures, None, UID, "runner", emitted.append, M.GIT_CLI.SCOPES[0])
+        report = M.diagnostic(caught.exception, None, fixtures)
+        self.assertEqual(report["innerFailureContext"], detail)
+        self.assertEqual((report["status"], report["appReturncode"], report["innerFailureStep"]),
+                         ("failed", 1, "GitCli(ReadWait)"))
+        self.assertEqual((report["originalCallReturned"], report["invocationFinality"]), (True, "no-pending-invocation"))
+        self.assertEqual((fixtures.reads, emitted, report["typedLifetimeFacts"]), ([], [], []))
+        output = io.StringIO(); M.emit_record(report, output)
+        self.assertNotIn("PRIVATE", output.getvalue())
+
+
 class ToolServiceFailureDataTests(unittest.TestCase):
     """Returned service DATA only; no native operation or UI automation."""
 
