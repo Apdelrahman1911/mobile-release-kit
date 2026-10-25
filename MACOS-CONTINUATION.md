@@ -27,7 +27,7 @@ Source changes that alter the app still need a new signed candidate; they cannot
 be hidden by reusing old binaries. Keep source, build attempt and consumer attempt
 separate. No current-run origin is nominated from the older diagnostic artifacts.
 
-Local staged checks: 48 checkpoint/runtime-driver tests pass; actual Installer
+Local staged checks: 49 checkpoint/runtime-driver tests pass; actual Installer
 metadata parser mutations pass; all six preflight steps pass including real DMG
 transport and dialog compilation/allowance checks. Actionlint and diff checks pass.
 The older prepared suite has 20 passing tests and four subtest errors caused by

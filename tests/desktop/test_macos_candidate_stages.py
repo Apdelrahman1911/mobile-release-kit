@@ -179,6 +179,20 @@ class CandidateWorkflowTests(unittest.TestCase):
             'puts JSON.generate(YAML.respond_to?(:unsafe_load_file) ? YAML.unsafe_load_file(ARGV[0]) : YAML.load_file(ARGV[0]))',str(ROOT/'.github/workflows/desktop-macos-installed.yml')],
             check=True,capture_output=True,text=True,timeout=10).stdout)
 
+    def test_workflow_files_stay_below_github_size_limit(self):
+        for name in ('desktop-macos-installed.yml','desktop-macos-candidate-tests.yml'):
+            with self.subTest(name=name):
+                self.assertLessEqual((ROOT/'.github/workflows'/name).stat().st_size,500*1024)
+
+    @classmethod
+    def saved_test_job(cls):
+        caller=cls.workflow['jobs']['candidate-tests']
+        path=ROOT/caller['uses'].removeprefix('./')
+        workflow=json.loads(subprocess.run(['ruby','-ryaml','-rjson','-e',
+            'puts JSON.generate(YAML.respond_to?(:unsafe_load_file) ? YAML.unsafe_load_file(ARGV[0]) : YAML.load_file(ARGV[0]))',
+            str(path)],check=True,capture_output=True,text=True,timeout=10).stdout)
+        return workflow['jobs']['candidate-tests']
+
     def test_successful_build_exports_before_any_install_or_ui_test(self):
         job=self.workflow['jobs']['engineering-install'];steps=job['steps']
         ids={row.get('id'):row for row in steps if row.get('id')}
@@ -194,8 +208,8 @@ class CandidateWorkflowTests(unittest.TestCase):
             self.assertIn('github.run_attempt',ids[key]['with']['name'])
 
     def test_every_group_is_an_independent_fresh_runner_and_has_no_app_build_or_notary(self):
-        job=self.workflow['jobs']['candidate-tests']
-        self.assertEqual(job['needs'],'engineering-install')
+        job=self.saved_test_job()
+        self.assertEqual(self.workflow['jobs']['candidate-tests']['needs'],'engineering-install')
         self.assertIs(job['strategy']['fail-fast'],False)
         rows=job['strategy']['matrix']['include']
         self.assertEqual({r['group'] for r in rows},{'git-local','git-fetch','git-push','git-create','git-upstream',
@@ -215,7 +229,7 @@ class CandidateWorkflowTests(unittest.TestCase):
         for row in rows:self.assertEqual(row['runner'],P.NATIVE_HOSTS[row['native_scope']])
 
     def test_no_publication_or_production_branch_and_no_signing_credentials_in_artifacts(self):
-        job=self.workflow['jobs']['candidate-tests']
+        job=self.saved_test_job()
         self.assertIn('refs/heads/verify/desktop-macos-candidate',job['if'])
         for step in job['steps']:
             script=step.get('run','')

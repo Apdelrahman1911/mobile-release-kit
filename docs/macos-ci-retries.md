@@ -1,7 +1,8 @@
 # macOS candidate retries
 
 Use the verification branch `verify/desktop-macos-candidate`. This workflow does
-not modify `main` or publish a release.
+not modify `main` or publish a release. The main workflow builds the candidates;
+`desktop-macos-candidate-tests.yml` contains the reusable test groups.
 
 ```mermaid
 flowchart LR

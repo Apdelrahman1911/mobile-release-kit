@@ -2,6 +2,16 @@
 
 ## Latest continuation — 2026-10-25
 
+The first staged source `331693d865534935ffbbbd6a5aea440c7b31a456`
+was rejected before any runner/job: the workflow was 518,614 bytes, exceeding
+GitHub's 500 KiB file limit. Runs40151965782/40151965831 contain the original
+validation failure; `staged-run40151965831.html` records its annotation.
+The test groups now live in a separate reusable workflow (18,948 bytes), and the
+caller is 499,939 bytes. A local regression checks the actual GitHub file cap.
+Actionlint validates both files, and all 49 checkpoint/runtime-driver tests pass.
+This validation-only rejection consumed no Mac build. The corrected first hosted
+rehearsal is still pending; no saved package exists for the rejected source.
+
 Staged CI implementation (pending first hosted rehearsal): two build/sign/notary
 jobs retain source-bound prepared packages for 14 days. Eleven independent test
 groups install that exact package on fresh runners, with a producer-only compiler
@@ -16,7 +26,7 @@ identity or service/SDK state is adopted. A single real process owner is loaded
 and shared through checkpoint admission and the test invocation.
 
 New local evidence in the private evidence directory:
-- `staged-contract-and-driver-tests.log`: 48 tests pass (12 new + 36 existing).
+- `staged-reusable-tests.log`: 49 tests pass (13 new + 36 existing).
 - `staged-install-gate-tests.log`: actual installation metadata gate/mutation
   test passes across both targets and supported install actions.
 - `preflight-staged/`: six steps pass, including real disposable DMG transport,
