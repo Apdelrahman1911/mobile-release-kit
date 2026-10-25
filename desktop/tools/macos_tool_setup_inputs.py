@@ -22,6 +22,7 @@ BYTES = (578785018, 102589879, 102589879)
 ARCHIVE_BYTES = 388193648
 TARGET = "aarch64-apple-darwin"
 _CONTEXT = None
+_PREPARED_OWNER = None
 _ATTEMPT = None  # Retain the sole original attempt, including failed/unknown IO.
 
 
@@ -40,7 +41,7 @@ def source_root(source, run, attempt, home, need):
 
 
 def context(a):
-    global _CONTEXT
+    global _CONTEXT, _PREPARED_OWNER
     a.need(_CONTEXT is None and a.RUN_SCOPE == a.TOOL_SCOPE
            and os.environ.get("MRK_MACOS_NATIVE_SCOPE") == SCOPE
            and os.environ.get("MRK_MACOS_TARGET") == TARGET
@@ -56,6 +57,10 @@ def context(a):
         source, run, attempt, work = driver.retained_fixture_context(os.environ, TARGET, uid, gid)
     else:
         source, run, attempt, work = driver.current_context(os.environ, TARGET)
+        if os.environ.get("MRK_MACOS_PREPARED_TEST") == "true":
+            prepared, _PREPARED_OWNER = driver.prepared_binding(dict(os.environ))
+            origin = prepared.origin
+            source, run, attempt = origin["source"], origin["runId"], origin["runAttempt"]
         uid, gid, username, _host = driver._native_user(os.environ)
     account = pwd.getpwuid(uid)
     a.need(account.pw_uid == uid and account.pw_gid == gid and username == account.pw_name
@@ -312,9 +317,13 @@ def _parent(a, work, private, clock):
     if retained:
         for key in ("MRK_CANDIDATE_MODE", "MRK_CANDIDATE_SOURCE"):
             environment[key] = os.environ[key]
+    if os.environ.get("MRK_MACOS_PREPARED_TEST") == "true":
+        for key in ("MRK_MACOS_PREPARED_TEST", "MRK_CONSUMER_TREE", "RUSTUP_TOOLCHAIN",
+                    "DEVELOPER_DIR", "MACOSX_DEPLOYMENT_TARGET"):
+            environment[key] = os.environ[key]
     environment["MRK_ANDROID_ACQUISITION_CHILD"] = "1"
     cwd = a.UI_CONSUMER_SOURCE.parent if retained else a.SOURCE
-    phase = a.N.NormalPhase(a.N.load_normal_owner(a.SOURCE), environment, cwd, clock)
+    phase = a.N.NormalPhase(_PREPARED_OWNER if _PREPARED_OWNER is not None else a.N.load_normal_owner(a.SOURCE), environment, cwd, clock)
     _ATTEMPT["phase"] = phase
     # Reuse the existing original caller and fixed source PRE/POST commands.
     _ATTEMPT["inflight"] = True

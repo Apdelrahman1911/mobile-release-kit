@@ -8804,9 +8804,12 @@ class Operation:
         expected_major = 26
         if self.environment.get("MRK_MACOS_RUNNER") == "xcode-27":
             # Additional scope restriction after the original hosted SOURCE
-            # admission; never extend ordinary/prepared/Update/Remove to27.
+            # admission; only the same-source Git checkpoint may also use27.
+            # Ordinary prepared packages, Update and Remove still cannot.
             need(self.phase == "package-install" and self.target == ARM_TARGET
-                 and self.prepared_binding is None
+                 and (self.prepared_binding is None or (self.prepared_binding.same_source
+                      and self.prepared_binding.origin.get("nativeScope") == "git-native"
+                      and self.prepared_binding.origin.get("hostProfile") == "xcode-27"))
                  and all(self.environment.get(key) == value for key, value in {
                      "GITHUB_EVENT_NAME": "push", "GITHUB_REF": CANDIDATE_REF,
                      "MRK_MACOS_NATIVE_SCOPE": "git-native",

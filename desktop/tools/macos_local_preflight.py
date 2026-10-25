@@ -46,6 +46,8 @@ def main():
     run('retained-source-bounds', [sys.executable, '-m', 'unittest', 'discover', '-s', 'tests/desktop',
         '-p', 'test_macos_candidate_bootstrap.py', '-k',
         'test_retained_workflow_adds_only_closed_git_operation_and_preserves_original_handoff_and_clocks'])
+    run('candidate-checkpoints', [sys.executable, '-m', 'unittest',
+        'tests.desktop.test_macos_candidate_stages'])
     executable = output / 'macos-dialog-smoke'
     run('native-dialog-compile', ['/usr/bin/xcrun', 'clang', '-fno-objc-arc', '-fblocks',
         '-framework', 'AppKit', '-framework', 'ApplicationServices',

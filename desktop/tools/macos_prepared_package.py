@@ -29,6 +29,13 @@ PRODUCER_STEPS = (
     'Publish only the prepared signed input checkpoint; not installed',
     'Retain prepared signed input for failed-job-only installation retries',
 )
+NATIVE_PRODUCER_STEPS = (
+    'Sign and notarize the same completed observer package before final P',
+    *PRODUCER_STEPS[1:],
+)
+NATIVE_HOSTS = {'tool-setup': 'macos-26', 'git-native': 'xcode-27'}
+NATIVE_JOB_NAMES = {'tool-setup': 'Build signed candidate (Tool26)',
+                    'git-native': 'Build signed candidate (Git27)'}
 _SEAL = object()
 
 
@@ -64,14 +71,21 @@ def decode(body, limit):
 
 
 def origin_data(value):
-    need(type(value) is dict and set(value) == {'source', 'tree', 'target', 'runId', 'runAttempt', 'jobId'}
+    ordinary = {'source', 'tree', 'target', 'runId', 'runAttempt', 'jobId'}
+    native = type(value) is dict and set(value) == ordinary | {'nativeScope', 'hostProfile'}
+    need(type(value) is dict and (set(value) == ordinary or native)
          and all(hex_data(value[k], 40) for k in ('source', 'tree')) and value['target'] in TARGETS
          and all(decimal(value[k]) for k in ('runId', 'runAttempt', 'jobId')), 'prepared-origin')
+    if native:
+        need(value['target'] == TARGETS[0] and type(value['nativeScope']) is str and value['nativeScope'] in NATIVE_HOSTS
+             and value['hostProfile'] == NATIVE_HOSTS[value['nativeScope']], 'prepared-native-origin')
     return dict(value)
 
 
 def artifact_name(origin):
     origin = origin_data(origin)
+    if 'nativeScope' in origin:
+        return 'macos-candidate-package-' + origin['nativeScope'] + '-' + origin['source'] + '-' + origin['runId'] + '-' + origin['runAttempt']
     return 'mobile-release-kit-macos26-' + origin['target'] + '-prepared-' + origin['source'] + '-' + origin['runId'] + '-' + origin['runAttempt']
 
 
@@ -79,13 +93,21 @@ def manifest_data(value):
     fields = {'schemaVersion', 'scope', 'origin', 'packageRole', 'packageVersion', 'release',
               'packagerUid', 'packagerGid', 'inventorySha256', 'runtimeManifestSha256', 'members',
               'originalFinalizationReturnedZero', 'originalClosesKnown', 'installed', 'productReady', 'normalBuild'}
+    native = type(value) is dict and value.get('schemaVersion') == 2
+    if native:
+        fields = fields - {'normalBuild'} | {'observerBuild'}
     need(type(value) is dict and set(value) == fields and type(value['schemaVersion']) is int
-         and value['schemaVersion'] == 1 and value['scope'] == SCOPE and value['packageRole'] == 'ordinary-image'
+         and value['schemaVersion'] == (2 if native else 1) and value['scope'] == SCOPE
+         and value['packageRole'] == ('installed-shell-observation' if native else 'ordinary-image')
          and value['originalFinalizationReturnedZero'] is value['originalClosesKnown'] is True
          and value['installed'] is value['productReady'] is False, 'prepared-manifest')
     origin_data(value['origin'])
-    need(type(value['normalBuild']) is dict and set(value['normalBuild']) == {'appBinarySha256BeforeSigning', 'desktopImageSha256BeforeSigning'}
-         and all(hex_data(v) for v in value['normalBuild'].values()), 'prepared-original-normal-build')
+    need(('nativeScope' in value['origin']) is native, 'prepared-origin-role')
+    build = value['observerBuild'] if native else value['normalBuild']
+    build_keys = ({'appBinarySha256BeforeSigning', 'entryBinarySha256BeforeSigning'} if native
+                  else {'appBinarySha256BeforeSigning', 'desktopImageSha256BeforeSigning'})
+    need(type(build) is dict and set(build) == build_keys
+         and all(hex_data(v) for v in build.values()), 'prepared-original-build')
     need(all(type(value[k]) is int and 0 <= value[k] < 2**32 for k in ('packagerUid', 'packagerGid'))
          and value['packagerUid'] != 0 and all(hex_data(value[k]) for k in ('inventorySha256', 'runtimeManifestSha256'))
          and type(value['release']) is str and re.fullmatch('[a-z0-9_.-]{1,63}', value['release'])
@@ -103,13 +125,14 @@ def manifest_data(value):
     return value
 
 
-def producer_steps_data(job):
+def producer_steps_data(job, *, native=False):
+    required = NATIVE_PRODUCER_STEPS if native else PRODUCER_STEPS
     steps = job.get('steps')
-    need(type(steps) is list and len(PRODUCER_STEPS) <= len(steps) <= 256
+    need(type(steps) is list and len(required) <= len(steps) <= 256
          and all(type(row) is dict and type(row.get('number')) is int and 0 < row['number'] <= 256 for row in steps)
          and len({row['number'] for row in steps}) == len(steps), 'prepared-service-steps')
     previous = 0
-    for name in PRODUCER_STEPS:
+    for name in required:
         rows = [row for row in steps if row.get('name') == name]
         need(len(rows) == 1 and rows[0].get('status') == 'completed' and rows[0].get('conclusion') == 'success'
              and rows[0]['number'] > previous, 'prepared-service-cut')
@@ -119,6 +142,7 @@ def producer_steps_data(job):
 def metadata_data(run, job, artifact, manifest):
     """Authenticate exact closed cut; whole-job success is not its substitute."""
     origin = manifest_data(manifest)['origin']
+    native_scope = origin.get('nativeScope')
     need(type(run) is type(job) is type(artifact) is dict, 'prepared-service-shape')
     need(all(type(run.get(k)) is int and run[k] == int(origin[v]) for k, v in (('id', 'runId'), ('run_attempt', 'runAttempt')))
          and run.get('head_sha') == origin['source'] and run.get('head_branch') == BRANCH and run.get('event') == 'push'
@@ -126,9 +150,10 @@ def metadata_data(run, job, artifact, manifest):
          and type(run.get('repository')) is dict
          and run['repository'].get('full_name') == REPOSITORY, 'prepared-service-run')
     need(all(type(job.get(k)) is int and job[k] == int(origin[v]) for k, v in (('id', 'jobId'), ('run_id', 'runId'), ('run_attempt', 'runAttempt')))
-         and job.get('head_sha') == origin['source'] and job.get('name') == 'normal-installed-' + origin['target'],
+         and job.get('head_sha') == origin['source']
+         and job.get('name') == (NATIVE_JOB_NAMES[native_scope] if native_scope else 'normal-installed-' + origin['target']),
          'prepared-service-job')
-    producer_steps_data(job)
+    producer_steps_data(job, native=native_scope is not None)
     producer = artifact.get('workflow_run')
     need(type(artifact.get('id')) is int and artifact['id'] > 0 and artifact.get('name') == artifact_name(origin)
          and artifact.get('expired') is False and type(artifact.get('size_in_bytes')) is int
@@ -207,11 +232,29 @@ class PreparedBinding:
                 'MRK_MACOS_INSTALL_SOURCE_COMMIT': old['source']}
 
 
+def native_origin(environment):
+    scope = environment.get('MRK_MACOS_NATIVE_SCOPE', 'disabled')
+    if scope == 'disabled':
+        return {}
+    need(type(scope) is str and scope in NATIVE_HOSTS
+         and environment.get('MRK_MACOS_RUNNER') == NATIVE_HOSTS[scope]
+         and environment.get('MRK_MACOS_PACKAGE_ROLE') == 'installed-shell-observation', 'prepared-native-selection')
+    return dict(nativeScope=scope, hostProfile=NATIVE_HOSTS[scope])
+
+
+def consumer_data(environment, tree, target):
+    return dict(source=environment['GITHUB_SHA'], tree=tree, target=target,
+        runId=environment['GITHUB_RUN_ID'], runAttempt=environment['GITHUB_RUN_ATTEMPT'], **native_origin(environment))
+
+
 def admit_data(values, service, consumer):
     manifest = cohort_data(values)
     need(type(service) is dict and set(service) == {'run', 'job', 'artifact'}, 'prepared-service-records')
     artifact = metadata_data(service['run'], service['job'], service['artifact'], manifest)
-    need(type(consumer) is dict and set(consumer) == {'source', 'tree', 'target', 'runId', 'runAttempt'}
+    native = {k: manifest['origin'][k] for k in ('nativeScope', 'hostProfile') if k in manifest['origin']}
+    need(type(consumer) is dict and set(consumer) == {'source', 'tree', 'target', 'runId', 'runAttempt'} | set(native)
+         and all(consumer[k] == v for k, v in native.items())
+         and (not native or consumer['source'] == manifest['origin']['source'])
          and all(hex_data(consumer[k], 40) for k in ('source', 'tree'))
          and all(decimal(consumer[k]) for k in ('runId', 'runAttempt'))
          and consumer['target'] == manifest['origin']['target']
@@ -323,13 +366,16 @@ def export_checkpoint(op, origin):
         op.package_outputs.extend(((final, sha(package)), (original, sha(old))))
         selection = op.stager.build_release_data(op.read(op.release_entry), target=op.target)
         normal = original_build_facts(op, origin, package_version=selection['packageVersion'])
-        manifest = dict(schemaVersion=1, scope=SCOPE, origin=origin, packageRole='ordinary-image',
+        native = 'nativeScope' in origin
+        manifest = dict(schemaVersion=2 if native else 1, scope=SCOPE, origin=origin,
+            packageRole='installed-shell-observation' if native else 'ordinary-image',
             packageVersion=selection['packageVersion'], release=selection['release'],
             packagerUid=os.getuid(), packagerGid=os.getgid(),
             inventorySha256=op.environment['MRK_MACOS_INSTALL_INVENTORY_SHA256'],
             runtimeManifestSha256=op.environment['MRK_BUNDLED_RUNTIME_MANIFEST_SHA256'],
             members=[{'name': name, 'bytes': len(values[name]), 'sha256': sha(values[name])} for name in sorted(FILES)],
-            originalFinalizationReturnedZero=True, originalClosesKnown=True, installed=False, productReady=False, normalBuild=normal)
+            originalFinalizationReturnedZero=True, originalClosesKnown=True, installed=False, productReady=False,
+            **{'observerBuild' if native else 'normalBuild': normal})
         manifest_data(manifest)
         # Bind the manifest's inventory/runtime anchors to the same original
         # package, before publishing a checkpoint, not only on its consumer.
@@ -402,14 +448,32 @@ def original_build_facts(op, origin, *, package_version):
         body = op.read(entry)
         op.package_outputs.append((entry, sha(body)))
         return body
-    need(retained('normal-build.status', 4) == b'0\n', 'prepared-original-build-zero')
+    native = 'nativeScope' in origin
+    need(retained('observer-build.status' if native else 'normal-build.status', 4) == b'0\n', 'prepared-original-build-zero')
     source = decode(retained('source-inventory.json', 2 * MIB), 2 * MIB)
     bound = decode(retained('source-binding.json', 65536), 65536)
     need(source.get('source') == bound.get('source') == origin['source']
          and source.get('tree') == bound.get('tree') == origin['tree']
          and bound.get('workflowSource') == origin['source'] and bound.get('runId') == origin['runId']
          and bound.get('runAttempt') == origin['runAttempt'] and bound.get('scope') == 'current-macos-candidate'
-         and bound.get('instrumented') is False and bound.get('packageRole') == 'ordinary-image', 'prepared-build-source')
+         and bound.get('instrumented') is native
+         and bound.get('packageRole') == ('installed-shell-observation' if native else 'ordinary-image'), 'prepared-build-source')
+    if native:
+        binary = Path(op.environment.get('MRK_MACOS_OBSERVER_BINARY', ''))
+        need(binary.is_absolute() and binary.parent == op.work / 'cargo-target' / op.target / 'debug/deps'
+             and re.fullmatch(r'installed_shell_observation-[0-9a-f]+', binary.name), 'prepared-observer-path')
+        compiled = op.stager.observer_cargo_artifact(retained('observer-build.jsonl', 8 * MIB), binary,
+            op.work / 'cargo-target', retained(str(binary.relative_to(op.work)), PACKAGE_LIMIT, (0o444, 0o555, 0o644, 0o755)),
+            target=op.target, package_version=package_version)
+        entry = retained('mrk-macos-entry', MIB, (0o555, 0o755))
+        op.stager.entry_macho(entry, target=op.target)
+        app = decode(retained('app-result.json', RECEIPT_LIMIT), RECEIPT_LIMIT)
+        need(app.get('packageRole') == 'installed-shell-observation'
+             and app.get('observerCargoArtifact') == compiled
+             and app.get('appBinarySha256BeforeSigning') == compiled['binarySha256']
+             and app.get('entryBinarySha256BeforeSigning') == sha(entry)
+             and 'desktopImageCargoArtifact' not in app, 'prepared-observer-originals')
+        return {k: app[k] for k in ('appBinarySha256BeforeSigning', 'entryBinarySha256BeforeSigning')}
     path = 'cargo-target/' + op.target + '/release/libmrk_desktop_image.dylib'
     normal = op.stager.image_cargo_artifact(retained('normal-build.jsonl', 8 * MIB), op.work / path,
         op.work / 'cargo-target', retained(path, PACKAGE_LIMIT, (0o444, 0o555, 0o644, 0o755)), 'desktop', target=op.target, package_version=package_version)
@@ -472,11 +536,13 @@ class ResourceGuard:
         self.op.package_clock()
 
 
-def selected_job_data(body, source, run, target, *, completed):
+def selected_job_data(body, source, run, target, *, completed, native_scope=None):
     value = decode(body, 8 * MIB)
     need(type(value) is dict and type(value.get('jobs')) is list and type(value.get('total_count')) is int
          and len(value['jobs']) == value['total_count'] <= 100, 'prepared-jobs-page-complete')
-    rows = [row for row in value['jobs'] if type(row) is dict and row.get('name') == 'normal-installed-' + target]
+    need(native_scope is None or type(native_scope) is str and native_scope in NATIVE_HOSTS, 'prepared-job-scope')
+    name = NATIVE_JOB_NAMES[native_scope] if native_scope else 'normal-installed-' + target
+    rows = [row for row in value['jobs'] if type(row) is dict and row.get('name') == name]
     if completed:
         # All-attempt API page: select the exact successful checkpoint cut,
         # not its whole job's conclusion. Later unrelated cleanup may fail;
@@ -486,7 +552,7 @@ def selected_job_data(body, source, run, target, *, completed):
             if row.get('status') != 'completed':
                 continue
             try:
-                producer_steps_data(row)
+                producer_steps_data(row, native=native_scope is not None)
             except ValueError:
                 continue
             closed.append(row)
@@ -497,7 +563,7 @@ def selected_job_data(body, source, run, target, *, completed):
          and row.get('head_sha') == source and type(row.get('run_attempt')) is int and row['run_attempt'] > 0,
          'prepared-job-context')
     if completed:
-        producer_steps_data(row)
+        producer_steps_data(row, native=native_scope is not None)
     return row
 
 
@@ -578,6 +644,25 @@ def source_head(op, source):
     op.package_sources.append((entry, body))
 
 
+def native_binding(environment):
+    """Re-admit the saved package using fresh owners; never change caller identity."""
+    from types import SimpleNamespace
+    from desktop.tools import macos_android_helper_package as helper
+    need(environment.get('MRK_MACOS_PREPARED_TEST') == 'true' and native_origin(environment),
+         'prepared-native-test-only')
+    target = environment.get('MRK_MACOS_TARGET')
+    work = admit_host(helper, environment, SimpleNamespace(target=target, phase='hydrate'))
+    root = helper.CHECKOUT
+    stager = helper.load_data(root, 'stage_macos_installed.py', '_mrk_native_prepared_stager')
+    qualification = helper.load_data(root, 'macos_aqua_qualification.py', '_mrk_native_prepared_owner')
+    owner = qualification.load_owner(root)
+    operation = helper.Operation(owner, root, work, 'package-install', environment, stager, target=target)
+    values, binding = acquire_checkpoint(operation, consumer_data(environment, environment.get('MRK_CONSUMER_TREE'), target))
+    need(binding.same_source and binding.origin.get('nativeScope') == environment['MRK_MACOS_NATIVE_SCOPE'],
+         'prepared-native-same-source')
+    return binding, owner
+
+
 def main():
     """Fixed hosted entry; no arbitrary checkout, command or Installer path."""
     import argparse
@@ -619,12 +704,12 @@ def main():
                     operation.package_outputs.append((entry, sha(body)))
                     return body
                 need(small('prepared-api.status') == b'0\n', 'prepared-api-original-status')
-                job = selected_job_data(small('prepared-jobs.json'), args.producer_source, args.producer_run, args.target, completed=True)
+                job = selected_job_data(small('prepared-jobs.json'), args.producer_source, args.producer_run, args.target, completed=True, native_scope=native_origin(environment).get('nativeScope'))
                 commit = decode(small('prepared-commit.json'), 8 * MIB)
                 need(commit.get('sha') == args.producer_source and type(commit.get('tree')) is dict
                      and hex_data(commit['tree'].get('sha'), 40), 'prepared-selected-tree')
                 origin = origin_data(dict(source=args.producer_source, tree=commit['tree']['sha'], target=args.target,
-                    runId=args.producer_run, runAttempt=str(job['run_attempt']), jobId=str(job['id'])))
+                    runId=args.producer_run, runAttempt=str(job['run_attempt']), jobId=str(job['id']), **native_origin(environment)))
                 artifact = selected_artifact_data(small('prepared-artifacts.json'), origin)
                 directory = operation.package_directory('prepared-service')
                 operation.package_file(directory, 'job.json', canonical(job))
@@ -645,14 +730,13 @@ def main():
             source = decode(stager.read(work / 'source-inventory.json', 2 * MIB), 2 * MIB)
             need(stager.read(work / 'prepared-api.status', 4) == b'0\n', 'prepared-api-original-status')
             job = selected_job_data(stager.read(work / 'prepared-jobs.json', 8 * MIB), environment['GITHUB_SHA'],
-                                    environment['GITHUB_RUN_ID'], args.target, completed=False)
+                                    environment['GITHUB_RUN_ID'], args.target, completed=False, native_scope=native_origin(environment).get('nativeScope'))
             need(str(job['run_attempt']) == environment['GITHUB_RUN_ATTEMPT'], 'prepared-export-attempt')
             export_checkpoint(operation, dict(source=environment['GITHUB_SHA'], tree=source['tree'], target=args.target,
-                runId=environment['GITHUB_RUN_ID'], runAttempt=environment['GITHUB_RUN_ATTEMPT'], jobId=str(job['id'])))
+                runId=environment['GITHUB_RUN_ID'], runAttempt=environment['GITHUB_RUN_ATTEMPT'], jobId=str(job['id']), **native_origin(environment)))
             return 0
         need(hex_data(args.consumer_tree, 40), 'prepared-consumer-tree')
-        consumer = dict(source=environment['GITHUB_SHA'], tree=args.consumer_tree, target=args.target,
-                        runId=environment['GITHUB_RUN_ID'], runAttempt=environment['GITHUB_RUN_ATTEMPT'])
+        consumer = consumer_data(environment, args.consumer_tree, args.target)
         operation = helper.Operation(owner, root, work, 'package-install', environment, stager, target=args.target)
         values, binding = acquire_checkpoint(operation, consumer)
         built_root = root if binding.same_source else root / 'prepared-built-source'
@@ -667,6 +751,8 @@ def main():
             operation = helper.Operation(owner, built_root, work, 'package-install', environment, stager,
                                          target=args.target, prepared=binding)
             hydrate_checkpoint(operation, values, binding)
+            print('MRK_MACOS_INSTALL_INVENTORY_SHA256=' + manifest['inventorySha256'])
+            print('MRK_BUNDLED_RUNTIME_MANIFEST_SHA256=' + manifest['runtimeManifestSha256'])
             return 0
         del values  # Admission copies no longer overlap compiler/image work.
         if args.phase == 'candidate':

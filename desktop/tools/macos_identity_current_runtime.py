@@ -337,6 +337,81 @@ def _admit_runtime(aqua, fixtures, binding, work, environment):
     _current(aqua, fixtures)
 
 
+def prepared_binding(environment):
+    # The artifact action checks the service digest; the existing prepared
+    # owner rechecks API provenance, every member hash and all original closes.
+    import importlib
+    sys.path.insert(0, str(CHECKOUT))
+    try:
+        parser = importlib.import_module('desktop.tools.macos_prepared_package')
+    finally:
+        sys.path.pop(0)
+    need(Path(parser.__file__).absolute() == CHECKOUT / 'desktop/tools/macos_prepared_package.py',
+         'prepared-native-parser-source')
+    return parser.native_binding(environment)
+
+
+def _admit_prepared_runtime(aqua, fixtures, binding, work, environment, prepared):
+    source, run, attempt, actual_work = current_context(environment, binding.target)
+    manifest = prepared.manifest
+    origin = manifest['origin']
+    aqua.need(prepared.same_source and actual_work == work
+              and prepared.consumer['runId'] == run and prepared.consumer['runAttempt'] == attempt
+              and (binding.source, binding.run, binding.attempt) ==
+                  (origin['source'], origin['runId'], origin['runAttempt'])
+              and origin['nativeScope'] == environment['MRK_MACOS_NATIVE_SCOPE'], 'prepared-native-fixture-origin')
+    checkout = aqua._gate_directory(fixtures, str(CHECKOUT))
+    git = aqua._gate_directory(fixtures, '.git', checkout)
+    head, _ = aqua._gate_file(fixtures, 'HEAD', git, 41)
+    aqua.need(head == (source + '\n').encode('ascii'), 'prepared-native-source-head')
+    work_fd = aqua._gate_directory(fixtures, str(work), private=True)
+    transport = aqua._gate_directory(fixtures, 'prepared-input', work_fd)
+    body, _ = aqua._gate_file(fixtures, 'PREPARED.json', transport, 16384)
+    aqua.need(aqua._gate_json(body, 16384) == manifest, 'prepared-native-manifest-changed')
+    fixtures.admit_normal_account_runtime(CHECKOUT, work, application_source=binding.source)
+    aqua.need(len(fixtures.normal_stager_registrations) == 1, 'prepared-native-stager')
+    stage = fixtures.normal_stager_registrations[0]
+    selection = stage.source_build_selection(binding.target)
+    aqua.need((selection.release, selection.package_version) == (manifest['release'], manifest['packageVersion']),
+              'prepared-native-release')
+    names = {'package-install.status': 4, 'package-request-id.txt': 33, 'package-audit.json': 16384,
+             'producer-descriptor-input.json': 65536, 'android-helper-package-install.json': 16384,
+             'installation-observation.json': 65536, 'installer-output.status': 4}
+    anchors = {name: aqua._gate_file(fixtures, name, work_fd, limit)[0] for name, limit in names.items()}
+    current = aqua.Binding(source, run, attempt, binding.target).checked()
+    expected = dict(environment, MRK_MACOS_INSTALL_INVENTORY_SHA256=manifest['inventorySha256'],
+                    MRK_BUNDLED_RUNTIME_MANIFEST_SHA256=manifest['runtimeManifestSha256'])
+    aqua._gate_installation(anchors['installation-observation.json'], anchors['installer-output.status'],
+        current, expected, stage, selection, anchors, workflow=WORKFLOW)
+    receipt = aqua._gate_json(anchors['android-helper-package-install.json'], 16384)
+    package = next(row for row in manifest['members'] if row['name'] == 'MobileReleaseKit.pkg')
+    aqua.need(receipt['distribution']['packageSha256'] == package['sha256']
+              and receipt['distribution']['packageBytes'] == package['bytes'], 'prepared-native-installed-package')
+    installed_manifest, _ = _retained_installed_original(aqua, fixtures, 'manifest.json', stage.MANIFEST_BYTES,
+        expected=manifest['runtimeManifestSha256'], capture=True)
+    _retained_installed_original(aqua, fixtures, stage.INSTALLATION_INVENTORY_NAME, stage.INVENTORY_BYTES,
+        expected=manifest['inventorySha256'])
+    record_body, _ = _retained_installed_original(aqua, fixtures, stage.INSTALLATION_RECORD_NAME,
+        stage.INSTALLATION_RECORD_LIMIT, capture=True)
+    observation = aqua._gate_json(anchors['installation-observation.json'], 65536)
+    aqua.need(stage.decode(record_body).get('instance') == observation['invocation'], 'prepared-native-fresh-instance')
+    _, rows = stage.manifest_files(installed_manifest, manifest['runtimeManifestSha256'], current=True, target=binding.target)
+    if origin['nativeScope'] == GIT_SCOPE:
+        aqua.need(set(rows) & stage.GIT_OBSERVATION_BOOTSTRAPS == stage.GIT_OBSERVATION_BOOTSTRAPS,
+                  'prepared-git-bootstrap-roster')
+        parent = next(item[0] for item in fixtures.recovery_runtime_originals if item[1] == 'manifest.json')
+        for entry in sorted(stage.GIT_OBSERVATION_BOOTSTRAPS):
+            original, hashed, _ = fixtures._recovery_read(parent, entry, 0, 64 * 1024, 0o444, retain=True)
+            entry_parent, entry_name, entry_fd, entry_before = fixtures.recovery_runtime_originals[-1]
+            fixtures.normal_runtime_policy[entry_fd] = original[2]
+            fixtures.gate_files.append(dict(parent=entry_parent, name=entry_name, fd=entry_fd,
+                full9=entry_before, sha256=rows[entry]['sha256']))
+            aqua.need(original[6] == rows[entry]['size'] and hashed == rows[entry]['sha256'], 'prepared-git-bootstrap-bytes')
+    _current(aqua, fixtures)
+    return dict(origin=dict(origin), consumerRunId=run, consumerRunAttempt=attempt,
+                freshInstallReceiptSha256=aqua.digest(anchors['android-helper-package-install.json']), productReady=False)
+
+
 def _retained_installed_original(aqua, fixtures, name, limit, *, expected=None, capture=False):
     """Hash the SAME installed original, retained in the existing Fixtures book."""
     originals = [item for item in fixtures.recovery_runtime_originals if item[1] == name]
@@ -493,7 +568,7 @@ def _current(aqua, fixtures):
     fixtures.recovery_runtime_paths()
 
 
-def _run(aqua, binding, uid, gid, username, work, environment, *, scope=SCOPE, host=None, retained=None):
+def _run(aqua, binding, uid, gid, username, work, environment, *, scope=SCOPE, host=None, retained=None, prepared=None, prepared_owner=None):
     """One fixed invocation; test doubles never supply production authority."""
     fixtures = owner = error = None
     count = 0
@@ -505,13 +580,18 @@ def _run(aqua, binding, uid, gid, username, work, environment, *, scope=SCOPE, h
         cases = aqua.TOOLS.RUN_ORDER if scope == TOOLS_SCOPE else aqua.selected_cases(scope)
         fixtures = aqua.Fixtures(binding, uid, gid, scope)
         fixtures.prepare()
-        if retained is None:
+        if prepared is not None:
+            aqua.need(retained is None, "prepared-native-single-mode")
+            provenance = {"runtimeMode": "prepared-package", "preparedPackage":
+                _admit_prepared_runtime(aqua, fixtures, binding, work, environment, prepared)}
+        elif retained is None:
             _admit_runtime(aqua, fixtures, binding, work, environment)
         else:
             aqua.need(scope in RETAINED_SCOPES, "retained-observer-scope")
             provenance = {"runtimeMode": "retained-observer", "retainedObserver":
                 _admit_retained_runtime(aqua, fixtures, binding, work, environment, retained)}
-        owner = aqua.load_owner(HELPER_ROOT if retained is not None else CHECKOUT)
+        aqua.need((prepared is None) == (prepared_owner is None), "prepared-native-owner-pair")
+        owner = prepared_owner if prepared is not None else aqua.load_owner(HELPER_ROOT if retained is not None else CHECKOUT)
         _current(aqua, fixtures)
 
         def emit_checked(value):
@@ -586,13 +666,19 @@ def main():
         source, run, attempt, work = (retained_context if retained_mode else current_context)(environment, TARGET)
         uid, gid, username, host = _native_user(environment, retained=True) if retained_mode else _native_user(environment)
         retained = _retained_selection(environment) if retained_mode else None
+        prepared, prepared_owner = (prepared_binding(environment)
+            if environment.get("MRK_MACOS_PREPARED_TEST") == "true" else (None, None))
+        need(prepared is None or not retained_mode, "prepared-native-single-mode")
+        if prepared is not None:
+            origin = prepared.origin
+            source, run, attempt = origin["source"], origin["runId"], origin["runAttempt"]
         aqua = _load_observer(retained=True) if retained_mode else _load_observer()
         if retained is not None:
             origin = retained[2]["origin"]
             source, run, attempt = origin["source"], origin["runId"], origin["runAttempt"]
         binding = aqua.Binding(source, run, attempt, TARGET).checked()
         os.umask(0o077)
-        return _run(aqua, binding, uid, gid, username, work, environment, scope=scope, host=host,
+        return _run(aqua, binding, uid, gid, username, work, environment, scope=scope, host=host, prepared=prepared, prepared_owner=prepared_owner,
                     **({"retained": retained} if retained is not None else {}))
     except BaseException as error:
         # No source paths, environment values, transcripts or exception text.

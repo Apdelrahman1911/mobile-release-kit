@@ -2,6 +2,64 @@
 
 ## Latest continuation — 2026-10-25
 
+Staged CI implementation (pending first hosted rehearsal): two build/sign/notary
+jobs retain source-bound prepared packages for 14 days. Eleven independent test
+groups install that exact package on fresh runners, with a producer-only compiler
+and the unchanged image-signing/Installer/readback owners. Successful app builds
+and test jobs are reused by GitHub's failed-job rerun. Native manifests use an
+explicit observer role, scope/host, source/tree/version, producer job/run/attempt,
+and member sizes/SHA256. Download checks the artifact-service digest; native
+admission repeats metadata/member checks and compares fresh installed originals.
+Build-time fixture namespace stays tied to the producer attempt; installation
+receipts remain tied to the real new consumer attempt. No old work-directory
+identity or service/SDK state is adopted. A single real process owner is loaded
+and shared through checkpoint admission and the test invocation.
+
+New local evidence in the private evidence directory:
+- `staged-contract-and-driver-tests.log`: 48 tests pass (12 new + 36 existing).
+- `staged-install-gate-tests.log`: actual installation metadata gate/mutation
+  test passes across both targets and supported install actions.
+- `preflight-staged/`: six steps pass, including real disposable DMG transport,
+  actual native dialog compilation and timeout-setting contract. The checkpoint
+  tests were added to the early workflow preflight before expensive preparation.
+- Actionlint passes with the existing Xcode27 hosted label documented in config;
+  native code still verifies the actual hosted environment/OS/machine.
+- `staged-prepared-tests.log`: older prepared suite ran 24 tests, 20 passed and
+  four subtest errors hit strict attribute rejection on local fixture files.
+  Its checks are unchanged. No all-tests-green claim.
+
+The latest Mac session observation remains locked. Actual Open Project has not
+been rerun; the owner's unlock question is pending. The latest Tool26 control
+projection failure is not fixed or reclassified by this CI restructuring.
+
+
+
+Run [40143037171](https://github.com/Apdelrahman1911/mobile-release-kit/actions/runs/40143037171)
+on `dc7c5f0e76ef553d389b73453b9aff19e22809e0` (tree
+`5ca97052e939028b41b7c62d751b56b1f7a516fa`) finished with failure. Its monitor is
+closed; do not restart or poll the old session.
+
+- Git27 job121018568381 passed compilation, app signing, app notarization and
+  package finalization. In step64, the original disk-image signer returned1
+  (`original-nonzero-distribution-sign`). Installer was never entered, readback
+  false, no detach. Captures/closes and credential cleanup were known. Detailed
+  codesign stderr was written on the runner but omitted from the upload, so its
+  native cause remains unknown. Artifact12582032208 is147100082 bytes and has
+  only the first distribution image; it is not an approved signed-image pair.
+- Tool26 job121018568677 passed installation/readback/ejection. Step68 failed
+  BEFORE service registration at OpenProject: original panel binding passed,
+  control projection returned changed after42 AX calls, last roleSplitGroup,
+  depth1; no Press, native original call did not return, finalityunknown. The
+  caller's process cleanup was contained but does not close the native original.
+  Fixtures were preserved. Artifact12582006465 is294121932 bytes and retains
+  the signed pair; it can be nominated only through full provenance checks.
+
+The owner now requests small resumable workflow stages, superseding the older
+avoid-CI-redesign handoff. No new monolithic candidate should be launched while
+that split is implemented. Raw job logs are private files
+`candidate-run40143037171-{git,tool}.log`; prior local verification is recorded
+in `git-flags-local-verification.json` against the exact candidate tree.
+
 Retained-Git run [40141597634](https://github.com/Apdelrahman1911/mobile-release-kit/actions/runs/40141597634)
 on helper `2cb018014c3843e88a4d3dd72ee0f10490c19b35` finished with failure in job
 `121014311545`, step17. Fresh install, readback, signatures and unforced ejection

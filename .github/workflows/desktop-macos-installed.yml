@@ -1,4 +1,4 @@
-name: Desktop Mac normal package and limited early preview (Aqua gate separate)
+name: Desktop Mac candidate build and independent checks
 
 on:
   workflow_dispatch:
@@ -51,10 +51,10 @@ jobs:
   engineering-install:
     if: github.event_name == 'push' && (github.ref == 'refs/heads/verify/desktop-macos-candidate' || github.ref == 'refs/heads/verify/desktop-macos-preview' || github.ref == 'refs/heads/verify/desktop-macos-removal-lifecycle' || github.ref == 'refs/heads/verify/desktop-macos-app-signature' || github.ref == 'refs/heads/verify/desktop-macos-app-absence-fixture' || github.ref == 'refs/heads/verify/desktop-macos-positive-update')
     environment: macos-developer-id
-    name: normal-installed-${{ matrix.target }}${{ matrix.native_scope == 'git-native' && '-git-native' || '' }}${{ matrix.removal_case && format('-removal-{0}', matrix.removal_case) || '' }}
+    name: ${{ matrix.native_scope == 'tool-setup' && 'Build signed candidate (Tool26)' || matrix.native_scope == 'git-native' && 'Build signed candidate (Git27)' || format('normal-installed-{0}{1}', matrix.target, matrix.removal_case && format('-removal-{0}', matrix.removal_case) || '') }}
     runs-on: ${{ matrix.runner }}
     outputs:
-      prepared-input-ready: ${{ steps.prepared_upload.outcome == 'success' }}
+      prepared-input-ready: ${{ (matrix.native_scope || 'disabled') == 'disabled' && steps.prepared_upload.outcome == 'success' }}
     # Historical pre-installed-UI raw timed-step union602min (ARM) /642min (Intel) includes the retained42min alternative.
     # Late installed-only DATA adds mutually exclusive28 nominal minutes; no current-route fit is claimed.
     # Remaining-three additionally requires ordinary saved-checks2; both cohorts are independent.
@@ -1953,7 +1953,7 @@ jobs:
 
       - name: Publish only the prepared signed input checkpoint; not installed
         id: prepared_export
-        if: github.ref == 'refs/heads/verify/desktop-macos-candidate' && env.MRK_MACOS_NATIVE_SCOPE == 'disabled'
+        if: github.ref == 'refs/heads/verify/desktop-macos-candidate' && (env.MRK_MACOS_NATIVE_SCOPE == 'disabled' || env.MRK_MACOS_NATIVE_SCOPE == 'tool-setup' || env.MRK_MACOS_NATIVE_SCOPE == 'git-native')
         timeout-minutes: 5
         shell: bash
         env:
@@ -1979,7 +1979,7 @@ jobs:
         timeout-minutes: 5
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: mobile-release-kit-macos26-${{ matrix.target }}-prepared-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          name: ${{ (matrix.native_scope == 'tool-setup' || matrix.native_scope == 'git-native') && format('macos-candidate-package-{0}', matrix.native_scope) || format('mobile-release-kit-macos26-{0}-prepared', matrix.target) }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ steps.work.outputs.root }}/prepared/*
           if-no-files-found: error
           retention-days: 14
@@ -1992,7 +1992,7 @@ jobs:
         timeout-minutes: 5
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: mobile-release-kit-macos26-${{ matrix.target }}-prepared-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          name: ${{ (matrix.native_scope == 'tool-setup' || matrix.native_scope == 'git-native') && format('macos-candidate-package-{0}', matrix.native_scope) || format('mobile-release-kit-macos26-{0}-prepared', matrix.target) }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ steps.work.outputs.root }}/prepared/*
           if-no-files-found: error
           retention-days: 14
@@ -2152,7 +2152,7 @@ jobs:
           phase summary
 
       - name: Standard Installer only is privileged; never execute the app or Python as root
-        if: (github.ref != 'refs/heads/verify/desktop-macos-candidate' && github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref != 'refs/heads/verify/desktop-macos-positive-update' || steps.update_p0_credentials.outcome == 'success')) || (github.ref == 'refs/heads/verify/desktop-macos-candidate' && (env.MRK_MACOS_NATIVE_SCOPE == 'project-identity-native' || env.MRK_MACOS_NATIVE_SCOPE == 'tool-setup' || env.MRK_MACOS_NATIVE_SCOPE == 'git-native') && env.MRK_MACOS_PACKAGE_ROLE == 'installed-shell-observation')
+        if: (github.ref != 'refs/heads/verify/desktop-macos-candidate' && github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref != 'refs/heads/verify/desktop-macos-positive-update' || steps.update_p0_credentials.outcome == 'success')) || (github.ref == 'refs/heads/verify/desktop-macos-candidate' && env.MRK_MACOS_NATIVE_SCOPE == 'project-identity-native' && env.MRK_MACOS_PACKAGE_ROLE == 'installed-shell-observation')
         id: package_install
         timeout-minutes: ${{ github.ref == 'refs/heads/verify/desktop-macos-app-absence-fixture' && 32 || 18 }}
         shell: bash
@@ -2209,35 +2209,6 @@ jobs:
           if-no-files-found: ignore
           retention-days: 14
           compression-level: 0
-      - name: Observe fifteen existing Git cases on the same installed observer
-        id: git_native
-        if: github.ref == 'refs/heads/verify/desktop-macos-candidate' && matrix.target == 'aarch64-apple-darwin' && matrix.native_scope == 'git-native' && env.MRK_MACOS_NATIVE_SCOPE == 'git-native' && env.MRK_MACOS_PACKAGE_ROLE == 'installed-shell-observation' && steps.package_install.outcome == 'success'
-        timeout-minutes: 25
-        shell: bash
-        env:
-          RUNNER_ENVIRONMENT: ${{ runner.environment }}
-        run: |
-          set -euo pipefail
-          umask 077
-          ulimit -c 0
-          # Six success-ordered invocations, fifteen existing cases: local
-          # Index1, Branch1, Fetch4, Push3, create-only Push5, local Upstream1.
-          # Upstream has no retained native pass; source/DATA tests do not count.
-          # SAME built/signed/installed git-native image, held M and all four
-          # runtime originals; no relabelled tool image or cross-run adoption.
-          # Existing600s suite/120s case, Git2 clipped135s app-return ceiling
-          # and45/55s Git endpoints remain. Fifteen120s case ceilings exceed
-          # the unchanged25min outer cap: no worst-case completion promise.
-          # First nonzero/unknown/78 stops later calls; only final Upstream execs.
-          # No retry, account/keychain access, live remote write or nomination.
-          "$MRK_PYTHON" -I -S -B desktop/tools/macos_identity_current_runtime.py --target "$MRK_MACOS_TARGET" --scope git-index-cli-native
-          "$MRK_PYTHON" -I -S -B desktop/tools/macos_identity_current_runtime.py --target "$MRK_MACOS_TARGET" --scope git-branch-cli-native
-          "$MRK_PYTHON" -I -S -B desktop/tools/macos_identity_current_runtime.py --target "$MRK_MACOS_TARGET" --scope git-fetch-native
-          "$MRK_PYTHON" -I -S -B desktop/tools/macos_identity_current_runtime.py --target "$MRK_MACOS_TARGET" --scope git-push-native
-          "$MRK_PYTHON" -I -S -B desktop/tools/macos_identity_current_runtime.py --target "$MRK_MACOS_TARGET" --scope git-push-create-native
-          exec "$MRK_PYTHON" -I -S -B desktop/tools/macos_identity_current_runtime.py --target "$MRK_MACOS_TARGET" --scope git-upstream-native
-      # Identity4 passed in run40062565859 at cadc8d9c. Continue Tool at the
-      # failed service boundary; keep the dedicated identity route available.
       - name: Observe four original identity edits on the current installed observer
         id: identity_native
         if: github.ref == 'refs/heads/verify/desktop-macos-candidate' && env.MRK_MACOS_NATIVE_SCOPE == 'project-identity-native' && env.MRK_MACOS_PACKAGE_ROLE == 'installed-shell-observation' && steps.package_install.outcome == 'success'
@@ -2257,97 +2228,6 @@ jobs:
           # No UI automation, raw output export, compiler deletion, shipping
           # claim, synthesized completion or retry after an uncertain return.
           exec "$MRK_PYTHON" -I -S -B desktop/tools/macos_identity_current_runtime.py --target "$MRK_MACOS_TARGET"
-      - name: Request the fixed native service once and confirm its joined readiness
-        id: tool_service
-        if: github.ref == 'refs/heads/verify/desktop-macos-candidate' && env.MRK_MACOS_NATIVE_SCOPE == 'tool-setup' && env.MRK_MACOS_PACKAGE_ROLE == 'installed-shell-observation' && steps.package_install.outcome == 'success'
-        timeout-minutes: 13
-        shell: bash
-        env:
-          RUNNER_ENVIRONMENT: ${{ runner.environment }}
-        run: |
-          set -euo pipefail
-          umask 077
-          ulimit -c 0
-          # Register once, then Check. Exit78 is unexecuted, never a pass/retry.
-          exec "$MRK_PYTHON" -I -S -B desktop/tools/macos_identity_current_runtime.py --target "$MRK_MACOS_TARGET" --scope tool-service-prerequisite
-      - name: Verify the installed CLI against the joined native service
-        id: installed_cli_native
-        if: github.ref == 'refs/heads/verify/desktop-macos-candidate' && env.MRK_MACOS_NATIVE_SCOPE == 'tool-setup' && env.MRK_MACOS_PACKAGE_ROLE == 'installed-shell-observation' && steps.tool_service.outcome == 'success'
-        timeout-minutes: 3
-        shell: bash
-        env:
-          RUNNER_ENVIRONMENT: ${{ runner.environment }}
-        run: |
-          set -euo pipefail
-          umask 077
-          ulimit -c 0
-          # Same image: one local check, seven CLI calls, eight IPC joins.
-          # Separate step contains its original135s caller and cleanup; the
-          # service's preceding765s caller cannot consume this outer budget.
-          exec "$MRK_PYTHON" -I -S -B desktop/tools/macos_identity_current_runtime.py --target "$MRK_MACOS_TARGET" --scope installed-cli-local-check
-      - name: Prepare three isolated platform-only SDK sources with shared JDK and Gradle
-        id: tool_inputs
-        if: github.ref == 'refs/heads/verify/desktop-macos-candidate' && env.MRK_MACOS_NATIVE_SCOPE == 'tool-setup' && steps.installed_cli_native.outcome == 'success'
-        timeout-minutes: 22
-        shell: bash
-        env:
-          RUNNER_ENVIRONMENT: ${{ runner.environment }}
-        run: |
-          set -euo pipefail
-          umask 077
-          ulimit -c 0
-          export MRK_ANDROID_PREPARATION_WORK="$MRK_MACOS_WORK"
-          # Existing bounded download/extraction originals, once per pinned
-          # public archive; never supplier execution or sdkmanager. At least
-          # 8GiB free, unchanged private ancestry and no prior task leaf required.
-          exec "$MRK_PYTHON" -I -S -B desktop/tools/macos_android_dependency_preparation.py prepare-tool-setup-inputs
-      - name: Observe public acquisition, cancellation and missing-only SDK registration reuse
-        id: tool_native
-        if: github.ref == 'refs/heads/verify/desktop-macos-candidate' && env.MRK_MACOS_NATIVE_SCOPE == 'tool-setup' && env.MRK_MACOS_PACKAGE_ROLE == 'installed-shell-observation' && steps.tool_inputs.outcome == 'success'
-        timeout-minutes: 122
-        shell: bash
-        env:
-          RUNNER_ENVIRONMENT: ${{ runner.environment }}
-        run: |
-          set -euo pipefail
-          umask 077
-          ulimit -c 0
-          # SAME installed observer/package. Public pair FIRST: its Cold case
-          # uses a separate fixed cache and an explicitly picked empty SDK;
-          # the old three retain the first actual protected Register below.
-          # Same2400s cases and122min outer; no renewal or ignored78/Unknown.
-          "$MRK_PYTHON" -I -S -B desktop/tools/macos_identity_current_runtime.py --target "$MRK_MACOS_TARGET" --scope tool-setup --tool-cases public-acquisition
-          exec "$MRK_PYTHON" -I -S -B desktop/tools/macos_identity_current_runtime.py --target "$MRK_MACOS_TARGET" --scope tool-setup
-      - name: Verify upload-key reuse, cancellation, cold restart and backend backup
-        id: upload_key_native
-        if: github.ref == 'refs/heads/verify/desktop-macos-candidate' && env.MRK_MACOS_NATIVE_SCOPE == 'tool-setup' && env.MRK_MACOS_PACKAGE_ROLE == 'installed-shell-observation' && steps.tool_native.outcome == 'success'
-        timeout-minutes: 60
-        shell: bash
-        env:
-          RUNNER_ENVIRONMENT: ${{ runner.environment }}
-        run: |
-          set -euo pipefail
-          umask 077
-          ulimit -c 0
-          # Same installed observer, protected catalogue and original owners;
-          # no second package/build/sign/install or shipping availability change.
-          # Old3 + ColdA's two genuine processes + backend1 + CLI1 = seven495s
-          # original callers (57.75min maxima); this60min step only contains them.
-          # All per-case clocks and the350min job cap stay fixed; no fit claim.
-          # Nonzero/unexecuted78 stops later scopes; never retry or clear unknown.
-          # ColdA owns its returned first-process/private-readback/POST gate.
-          # Backend backup uses real sinks/NEW/Bind; the CLI sibling adds
-          # actual export/restore pickers and second-picker cancellation.
-          # Neither case claims crash recovery or renderer-interaction coverage.
-          "$MRK_PYTHON" -I -S -B desktop/tools/macos_identity_current_runtime.py --target "$MRK_MACOS_TARGET" --scope upload-key-roundtrip
-          "$MRK_PYTHON" -I -S -B desktop/tools/macos_identity_current_runtime.py --target "$MRK_MACOS_TARGET" --scope upload-key-stop-before-go
-          "$MRK_PYTHON" -I -S -B desktop/tools/macos_identity_current_runtime.py --target "$MRK_MACOS_TARGET" --scope upload-key-stop-after-new
-          "$MRK_PYTHON" -I -S -B desktop/tools/macos_identity_current_runtime.py --target "$MRK_MACOS_TARGET" --scope upload-key-cold-restart
-          "$MRK_PYTHON" -I -S -B desktop/tools/macos_identity_current_runtime.py --target "$MRK_MACOS_TARGET" --scope upload-key-backup-roundtrip
-          exec "$MRK_PYTHON" -I -S -B desktop/tools/macos_identity_current_runtime.py --target "$MRK_MACOS_TARGET" --scope upload-key-backup-cli
-      # Positive-update delivery retains genuine P0 bootstrap and P1 Installer/
-      # owned-file preservation evidence. P1 UI, Keychain/decrypt, Bind/Delete
-      # and normal Quit require the owner's manual test; no P1 result is made.
       - name: Notarize, staple and verify only the final user image
         id: finalize_image
         if: github.ref != 'refs/heads/verify/desktop-macos-candidate' && github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == 'refs/heads/verify/desktop-macos-candidate' || github.ref == 'refs/heads/verify/desktop-macos-preview' || github.ref == 'refs/heads/verify/desktop-macos-installed') && steps.package_install.outcome == 'success' || (github.ref == 'refs/heads/verify/desktop-macos-positive-update' && steps.update_p0_credentials.outcome == 'success' && steps.package_install.outcome == 'success')
@@ -5517,9 +5397,386 @@ jobs:
               os.unlink(path)
           PY_CLEAN
 
-  # Compile the real shipping graph only: no signing environment, installed app,
-  # supplier receipt, launch, package or Store operation. Independent of the
-  # configured installed/preview engineering job above.
+  # Each group gets a fresh runner and the exact completed signed package.
+  candidate-tests:
+    needs: engineering-install
+    # On a rerun, select the successful producer attempt from the all-attempts
+    # API. Never substitute the consumer's attempt or rebuild its signed app.
+    if: ${{ !cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-macos-candidate' }}
+    environment: macos-developer-id
+    name: Test saved candidate (${{ matrix.group }})
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: ${{ matrix.timeout }}
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      matrix:
+        include:
+          - target: aarch64-apple-darwin
+            group: git-local
+            native_scope: git-native
+            runner: xcode-27
+            hosted_job: github-hosted-xcode27-arm64
+            timeout: 65
+          - target: aarch64-apple-darwin
+            group: git-fetch
+            native_scope: git-native
+            runner: xcode-27
+            hosted_job: github-hosted-xcode27-arm64
+            timeout: 65
+          - target: aarch64-apple-darwin
+            group: git-push
+            native_scope: git-native
+            runner: xcode-27
+            hosted_job: github-hosted-xcode27-arm64
+            timeout: 65
+          - target: aarch64-apple-darwin
+            group: git-create
+            native_scope: git-native
+            runner: xcode-27
+            hosted_job: github-hosted-xcode27-arm64
+            timeout: 65
+          - target: aarch64-apple-darwin
+            group: git-upstream
+            native_scope: git-native
+            runner: xcode-27
+            hosted_job: github-hosted-xcode27-arm64
+            timeout: 65
+          - target: aarch64-apple-darwin
+            group: service-cli
+            native_scope: tool-setup
+            runner: macos-26
+            hosted_job: github-hosted-macos26-arm64
+            timeout: 65
+          - target: aarch64-apple-darwin
+            group: public-acquisition
+            native_scope: tool-setup
+            runner: macos-26
+            hosted_job: github-hosted-macos26-arm64
+            timeout: 160
+          - target: aarch64-apple-darwin
+            group: sdk-registration
+            native_scope: tool-setup
+            runner: macos-26
+            hosted_job: github-hosted-macos26-arm64
+            timeout: 165
+          - target: aarch64-apple-darwin
+            group: upload-keys
+            native_scope: tool-setup
+            runner: macos-26
+            hosted_job: github-hosted-macos26-arm64
+            timeout: 190
+          - target: aarch64-apple-darwin
+            group: cold-restart
+            native_scope: tool-setup
+            runner: macos-26
+            hosted_job: github-hosted-macos26-arm64
+            timeout: 190
+          - target: aarch64-apple-darwin
+            group: backup
+            native_scope: tool-setup
+            runner: macos-26
+            hosted_job: github-hosted-macos26-arm64
+            timeout: 190
+    env:
+      RUSTUP_TOOLCHAIN: '1.98.1'
+      MRK_MACOS_TARGET: aarch64-apple-darwin
+      MRK_MACOS_RUNNER: ${{ matrix.runner }}
+      MRK_MACOS_MACHINE: arm64
+      MRK_MACOS_HOSTED_JOB: ${{ matrix.hosted_job }}
+      MRK_EXPECTED_SHA: ${{ github.sha }}
+      MRK_MACOS_INSTALL_SOURCE_COMMIT: ${{ github.sha }}
+      MRK_MACOS_PACKAGE_ROLE: installed-shell-observation
+      MRK_MACOS_NATIVE_SCOPE: ${{ matrix.native_scope }}
+      MRK_MACOS_PREPARED_TEST: 'true'
+      MRK_MACOS_STORE_RUNTIME: signed-component
+      MRK_MACOS_SAME_PACKAGE_SCOPE: disabled
+      MACOSX_DEPLOYMENT_TARGET: '26.0'
+      DEVELOPER_DIR: /Library/Developer/CommandLineTools
+    steps:
+      - name: Admit only the disposable hosted prepared-input route
+        timeout-minutes: 1
+        shell: bash
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: |
+          set -euo pipefail
+          [[ "$RUNNER_ENVIRONMENT" == github-hosted && "$RUNNER_OS" == macOS && "$GITHUB_REF" == refs/heads/verify/desktop-macos-candidate ]] || exit 1
+          [[ "$GITHUB_SHA" == "$GITHUB_WORKFLOW_SHA" && "$GITHUB_REPOSITORY" == Apdelrahman1911/mobile-release-kit ]] || exit 1
+          case "$MRK_MACOS_TARGET/$RUNNER_ARCH/$(/usr/bin/uname -m)" in
+            aarch64-apple-darwin/ARM64/arm64|x86_64-apple-darwin/X64/x86_64) ;;
+            *) exit 1 ;;
+          esac
+          expected_host_major=26
+          if [[ "$MRK_MACOS_NATIVE_SCOPE" == git-native ]]; then expected_host_major=27; fi
+          [[ "$(/usr/bin/id -u)" != 0 && "$(/usr/bin/sw_vers -productVersion)" == "$expected_host_major".* ]] || exit 1
+      - name: Check out the exact current harness source without credentials
+        timeout-minutes: 3
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Select DATA Python, never the packaged interpreter
+        id: python
+        timeout-minutes: 3
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.14.7'
+      - name: Reserve one fresh consumer work directory
+        id: work
+        timeout-minutes: 1
+        shell: bash
+        env:
+          MRK_PYTHON: ${{ steps.python.outputs.python-path }}
+        run: |
+          set -euo pipefail
+          umask 077
+          [[ "$RUNNER_TEMP" == /Users/runner/work/_temp && "$GITHUB_WORKSPACE" == /Users/runner/work/mobile-release-kit/mobile-release-kit ]] || exit 1
+          [[ "$(/usr/bin/git rev-parse HEAD)" == "$GITHUB_SHA" ]] || exit 1
+          tree=$(/usr/bin/git rev-parse 'HEAD^{tree}')
+          [[ "$tree" =~ ^[0-9a-f]{40}$ ]] || exit 1
+          root=$(/usr/bin/mktemp -d "$RUNNER_TEMP/mrk-macos-installed.XXXXXXXX")
+          printf 'root=%s\n' "$root" >> "$GITHUB_OUTPUT"
+          printf 'MRK_MACOS_WORK=%s\nMRK_PYTHON=%s\nMRK_CONSUMER_TREE=%s\nCARGO_TARGET_DIR=%s/cargo-target\n' "$root" "$MRK_PYTHON" "$tree" "$root" >> "$GITHUB_ENV"
+      - name: Select the one closed upstream target checkpoint without matrix output ambiguity
+        id: prepared
+        timeout-minutes: 4
+        shell: bash
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          PRODUCER_SOURCE: ${{ github.sha }}
+          PRODUCER_RUN: ${{ github.run_id }}
+          GH_TOKEN: ${{ github.token }}
+          GH_HOST: github.com
+        run: |
+          set +x
+          set -euo pipefail
+          set -o noclobber
+          umask 077
+          ulimit -c 0
+          [[ "$PRODUCER_SOURCE" =~ ^[0-9a-f]{40}$ && "$PRODUCER_RUN" =~ ^[1-9][0-9]{0,19}$ ]] || exit 1
+          fetch() { (ulimit -f 16384; gh api "$1" > "$2"); }
+          fetch "repos/$GITHUB_REPOSITORY/actions/runs/$PRODUCER_RUN/jobs?filter=all&per_page=100" "$MRK_MACOS_WORK/prepared-jobs.json"
+          fetch "repos/$GITHUB_REPOSITORY/actions/runs/$PRODUCER_RUN/artifacts?per_page=100" "$MRK_MACOS_WORK/prepared-artifacts.json"
+          fetch "repos/$GITHUB_REPOSITORY/git/commits/$PRODUCER_SOURCE" "$MRK_MACOS_WORK/prepared-commit.json"
+          printf '0\n' > "$MRK_MACOS_WORK/prepared-api.status"
+          unset GH_TOKEN
+          "$MRK_PYTHON" -I -S -B desktop/tools/macos_prepared_package.py select --target "$MRK_MACOS_TARGET" \
+            --producer-source "$PRODUCER_SOURCE" --producer-run "$PRODUCER_RUN" > "$MRK_MACOS_WORK/prepared-selection.txt"
+          /bin/cat "$MRK_MACOS_WORK/prepared-selection.txt" >> "$GITHUB_OUTPUT"
+      - name: Capture the exact selected producer attempt, not the current rerun attempt
+        timeout-minutes: 2
+        shell: bash
+        env:
+          PRODUCER_RUN: ${{ github.run_id }}
+          PRODUCER_ATTEMPT: ${{ steps.prepared.outputs.producer-attempt }}
+          GH_TOKEN: ${{ github.token }}
+          GH_HOST: github.com
+        run: |
+          set +x
+          set -euo pipefail
+          set -o noclobber
+          umask 077
+          [[ "$PRODUCER_RUN" =~ ^[1-9][0-9]{0,19}$ && "$PRODUCER_ATTEMPT" =~ ^[1-9][0-9]{0,19}$ ]] || exit 1
+          (ulimit -f 16384; gh api "repos/$GITHUB_REPOSITORY/actions/runs/$PRODUCER_RUN/attempts/$PRODUCER_ATTEMPT" > "$MRK_MACOS_WORK/prepared-service/run.json")
+          printf '0\n' > "$MRK_MACOS_WORK/prepared-service/metadata.status"
+      - name: Download only the selected prepared artifact with service digest verification
+        timeout-minutes: 5
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          artifact-ids: ${{ steps.prepared.outputs.artifact-id }}
+          github-token: ${{ github.token }}
+          repository: Apdelrahman1911/mobile-release-kit
+          run-id: ${{ github.run_id }}
+          path: ${{ steps.work.outputs.root }}/prepared-input
+          merge-multiple: true
+          digest-mismatch: error
+          skip-decompress: 'false'
+      - name: Reconstruct fresh script originals and repeat full finalized product audit
+        timeout-minutes: 5
+        shell: bash
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: |
+          set -euo pipefail
+          ulimit -c 0
+          "$MRK_PYTHON" -I -S -B desktop/tools/macos_prepared_package.py hydrate --target "$MRK_MACOS_TARGET" --consumer-tree "$MRK_CONSUMER_TREE" > "$MRK_MACOS_WORK/prepared-runtime.env"
+          /bin/cat "$MRK_MACOS_WORK/prepared-runtime.env" >> "$GITHUB_ENV"
+      - name: Install and verify only the pinned producer toolchain
+        timeout-minutes: 8
+        shell: bash
+        run: *mrk_installed_direct_rust
+      - name: Fetch only the exact producer source dependencies before its unchanged offline build
+        timeout-minutes: 8
+        shell: bash
+        env:
+          BUILT_SOURCE: ${{ steps.prepared.outputs.producer-source }}
+        run: |
+          set -euo pipefail
+          checkout="$GITHUB_WORKSPACE"
+          if [[ "$BUILT_SOURCE" != "$GITHUB_SHA" ]]; then checkout="$checkout/prepared-built-source"; fi
+          [[ "$(/usr/bin/git -C "$checkout" rev-parse HEAD)" == "$BUILT_SOURCE" ]] || exit 1
+          /usr/bin/env -i PATH="/Users/runner/.rustup/toolchains/${RUSTUP_TOOLCHAIN}-$MRK_MACOS_TARGET/bin:/usr/bin:/bin:/usr/sbin:/sbin" \
+            HOME=/Users/runner CARGO_HOME=/Users/runner/.cargo RUSTUP_HOME=/Users/runner/.rustup \
+            RUSTUP_TOOLCHAIN="$RUSTUP_TOOLCHAIN" RUSTUP_AUTO_INSTALL=0 \
+            DEVELOPER_DIR="$DEVELOPER_DIR" MACOSX_DEPLOYMENT_TARGET=26.0 \
+            "/Users/runner/.rustup/toolchains/${RUSTUP_TOOLCHAIN}-$MRK_MACOS_TARGET/bin/cargo" fetch \
+              --manifest-path "$checkout/desktop/src-tauri/Cargo.toml" --locked --target "$MRK_MACOS_TARGET"
+      - name: Standard Installer only is privileged; never execute the app or Python as root
+        if: success()
+        id: package_install
+        timeout-minutes: 18
+        shell: bash
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          MRK_MACOS_DEVELOPER_ID_P12_BASE64: ${{ secrets.MRK_MACOS_DEVELOPER_ID_P12_BASE64 }}
+          MRK_MACOS_DEVELOPER_ID_P12_PASSWORD: ${{ secrets.MRK_MACOS_DEVELOPER_ID_P12_PASSWORD }}
+        run: |
+          set +x
+          set +a
+          export -n MRK_MACOS_DEVELOPER_ID_P12_BASE64 MRK_MACOS_DEVELOPER_ID_P12_PASSWORD
+          set -euo pipefail
+          set -o noclobber
+          umask 077
+          # Existing owner/deadlines cover signature, readonly mount, Installer
+          # and V2 readback; earlier construction is not installation evidence.
+          set +e
+          MRK_MACOS_DEVELOPER_ID_P12_BASE64="$MRK_MACOS_DEVELOPER_ID_P12_BASE64" \
+          MRK_MACOS_DEVELOPER_ID_P12_PASSWORD="$MRK_MACOS_DEVELOPER_ID_P12_PASSWORD" \
+            "$MRK_PYTHON" -I -S -B desktop/tools/macos_prepared_package.py package-install --target "$MRK_MACOS_TARGET" --consumer-tree "$MRK_CONSUMER_TREE" \
+            > "$MRK_MACOS_WORK/package-install.stdout"
+          package_status=$?
+          printf '%s\n' "$package_status" > "$MRK_MACOS_WORK/package-install.status"
+          package_status_saved=$?
+          set -e
+          if [[ "$package_status" != 0 ]]; then exit "$package_status"; fi
+          [[ "$package_status_saved" == 0 ]] || exit "$package_status_saved"
+          # The receipt is not its own exit proof: only this original0, the
+          # saved Installer0, same-request readback and known detach permit use.
+          # Unknown resources remain retained; no forced detach or root Python.
+          unset MRK_MACOS_DEVELOPER_ID_P12_BASE64 MRK_MACOS_DEVELOPER_ID_P12_PASSWORD
+      - name: Retain bounded image signing and detach diagnostics
+        if: ${{ !cancelled() && (steps.package_install.outcome == 'success' || steps.package_install.outcome == 'failure') }}
+        timeout-minutes: 2
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: candidate-install-diagnostics-${{ matrix.group }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ steps.work.outputs.root }}/android-helper-distribution-sign.stderr
+            ${{ steps.work.outputs.root }}/android-helper-distribution-sign.stdout
+            ${{ steps.work.outputs.root }}/android-helper-distribution-sign.status
+            ${{ steps.work.outputs.root }}/android-helper-observation-sign.stderr
+            ${{ steps.work.outputs.root }}/android-helper-observation-sign.stdout
+            ${{ steps.work.outputs.root }}/android-helper-observation-sign.status
+            ${{ steps.work.outputs.root }}/android-helper-distribution-detach.stderr
+            ${{ steps.work.outputs.root }}/android-helper-distribution-detach.status
+          if-no-files-found: ignore
+          retention-days: 14
+      - name: Run only this independent Git group
+        if: matrix.native_scope == 'git-native' && steps.package_install.outcome == 'success'
+        timeout-minutes: 25
+        shell: bash
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          TEST_GROUP: ${{ matrix.group }}
+        run: |
+          set -euo pipefail
+          umask 077
+          ulimit -c 0
+          observe() { "$MRK_PYTHON" -I -S -B desktop/tools/macos_identity_current_runtime.py --target "$MRK_MACOS_TARGET" --scope "$1"; }
+          case "$TEST_GROUP" in
+            git-local) observe git-index-cli-native; observe git-branch-cli-native ;;
+            git-fetch) observe git-fetch-native ;;
+            git-push) observe git-push-native ;;
+            git-create) observe git-push-create-native ;;
+            git-upstream) observe git-upstream-native ;;
+            *) exit 1 ;;
+          esac
+      - name: Request the fixed native service once and confirm its joined readiness
+        id: tool_service
+        if: matrix.native_scope == 'tool-setup' && steps.package_install.outcome == 'success'
+        timeout-minutes: 13
+        shell: bash
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: |
+          set -euo pipefail
+          umask 077
+          ulimit -c 0
+          # Register once, then Check. Exit78 is unexecuted, never a pass/retry.
+          exec "$MRK_PYTHON" -I -S -B desktop/tools/macos_identity_current_runtime.py --target "$MRK_MACOS_TARGET" --scope tool-service-prerequisite
+      - name: Verify the installed CLI against the joined native service
+        id: installed_cli_native
+        if: matrix.native_scope == 'tool-setup' && steps.tool_service.outcome == 'success'
+        timeout-minutes: 3
+        shell: bash
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: |
+          set -euo pipefail
+          umask 077
+          ulimit -c 0
+          # Same image: one local check, seven CLI calls, eight IPC joins.
+          # Separate step contains its original135s caller and cleanup; the
+          # service's preceding765s caller cannot consume this outer budget.
+          exec "$MRK_PYTHON" -I -S -B desktop/tools/macos_identity_current_runtime.py --target "$MRK_MACOS_TARGET" --scope installed-cli-local-check
+      - name: Prepare three isolated platform-only SDK sources with shared JDK and Gradle
+        id: tool_inputs
+        if: matrix.native_scope == 'tool-setup' && matrix.group != 'service-cli' && steps.installed_cli_native.outcome == 'success'
+        timeout-minutes: 22
+        shell: bash
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: |
+          set -euo pipefail
+          umask 077
+          ulimit -c 0
+          export MRK_ANDROID_PREPARATION_WORK="$MRK_MACOS_WORK"
+          # Existing bounded download/extraction originals, once per pinned
+          # public archive; never supplier execution or sdkmanager. At least
+          # 8GiB free, unchanged private ancestry and no prior task leaf required.
+          exec "$MRK_PYTHON" -I -S -B desktop/tools/macos_android_dependency_preparation.py prepare-tool-setup-inputs
+      - name: Observe public acquisition, cancellation and missing-only SDK registration reuse
+        id: tool_native
+        if: matrix.native_scope == 'tool-setup' && matrix.group != 'service-cli' && steps.tool_inputs.outcome == 'success'
+        timeout-minutes: 122
+        shell: bash
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: |
+          set -euo pipefail
+          umask 077
+          ulimit -c 0
+          if [[ '${{ matrix.group }}' == public-acquisition ]]; then
+            exec "$MRK_PYTHON" -I -S -B desktop/tools/macos_identity_current_runtime.py --target "$MRK_MACOS_TARGET" --scope tool-setup --tool-cases public-acquisition
+          fi
+          # Fresh registration is required on each isolated runner. No saved
+          # service or SDK state is accepted from another runner's test result.
+          exec "$MRK_PYTHON" -I -S -B desktop/tools/macos_identity_current_runtime.py --target "$MRK_MACOS_TARGET" --scope tool-setup
+      - name: Run only this key or backup group
+        if: (matrix.group == 'upload-keys' || matrix.group == 'cold-restart' || matrix.group == 'backup') && steps.tool_native.outcome == 'success'
+        timeout-minutes: 60
+        shell: bash
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          TEST_GROUP: ${{ matrix.group }}
+        run: |
+          set -euo pipefail
+          umask 077
+          ulimit -c 0
+          observe() { "$MRK_PYTHON" -I -S -B desktop/tools/macos_identity_current_runtime.py --target "$MRK_MACOS_TARGET" --scope "$1"; }
+          case "$TEST_GROUP" in
+            upload-keys)
+              observe upload-key-roundtrip
+              observe upload-key-stop-before-go
+              observe upload-key-stop-after-new ;;
+            cold-restart) observe upload-key-cold-restart ;;
+            backup)
+              observe upload-key-backup-roundtrip
+              observe upload-key-backup-cli ;;
+            *) exit 1 ;;
+          esac
+
   # Same SOURCE companion only: no main artifact, runtime supplier, npm or app build.
   xcode-setup-companion:
     if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/verify/desktop-macos-xcode-setup' && inputs.operation == 'xcode-setup-companion'

@@ -6498,7 +6498,7 @@ def _gate_headless(bodies, binding, checkout, work):
     return value, native
 
 
-def _gate_package_anchors(anchors, binding, environment, stage, selection):
+def _gate_package_anchors(anchors, binding, environment, stage, selection, *, workflow=WORKFLOW):
     # Five independent, same-book originals. Neither this receipt nor parsed
     # producer DATA supplies its own original exit or signature authority.
     binding.checked()
@@ -6529,7 +6529,7 @@ def _gate_package_anchors(anchors, binding, environment, stage, selection):
          and all(_gate_sha(audit[key]) for key in ("originalPackageSha256", "packageInfoSha256")), "gate-package-audit-bound")
     receipt = _gate_json(anchors["android-helper-package-install.json"], 16384)
     fixed = {"schemaVersion": 1, "phase": "package-install", "target": binding.target, "source": binding.source,
-        "workflowSource": binding.source, "workflow": WORKFLOW, "runId": binding.run, "runAttempt": binding.attempt,
+        "workflowSource": binding.source, "workflow": workflow, "runId": binding.run, "runAttempt": binding.attempt,
         "packageRole": "installed-shell-observation", "toolchain": target_data(binding.target)["toolchain"],
         "helperIdentifier": "dev.mobile-release-kit.desktop.android-register", "passed": True,
         "originalClosesKnown": True, "targetRetired": True, "outerFinalityRequired": True,
@@ -6586,9 +6586,9 @@ def _gate_package_anchors(anchors, binding, environment, stage, selection):
     return producer, request, summary
 
 
-def _gate_installation(body, status, binding, environment, stage, selection, anchors):
+def _gate_installation(body, status, binding, environment, stage, selection, anchors, *, workflow=WORKFLOW):
     need(type(status) is bytes and status == b"0\n", "gate-installer-status-binding")
-    producer, request, summary = _gate_package_anchors(anchors, binding, environment, stage, selection)
+    producer, request, summary = _gate_package_anchors(anchors, binding, environment, stage, selection, workflow=workflow)
     current = producer["releaseSet"]["current"]
     value = _gate_json(body, 65536)
     fixed = {"schemaVersion": 2, "sourceCommit": binding.source, "inventorySha256": current["inventorySha256"],

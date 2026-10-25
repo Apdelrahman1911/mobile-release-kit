@@ -2,6 +2,39 @@
 
 ## Latest Mac continuation — 2026-10-25
 
+**Latest owner steering:** split the workflow into small resumable parts so a
+late failure does not rebuild the whole 90-minute pipeline. This explicitly
+authorizes restructuring CI despite the older handoff's avoid-redesign guidance.
+Continue the original fix/test/follow-to-success objective with this new approach.
+Do not dispatch another monolithic build while implementing the stage boundaries.
+
+Run40143037171 on `dc7c5f0e76ef553d389b73453b9aff19e22809e0` has finished with
+failure; its monitor exited. Git27 failed BEFORE Installer at disk-image
+`distribution-sign` (codesign returned1, no detailed stderr was uploaded).
+Tool26 installed successfully but its Open Project control projection refused
+`changed` on a SplitGroup; Press was not attempted, native invocation finality
+remains unknown, and service registration was never reached. Preserve these
+facts; neither the Git source correction nor service correction got its intended
+installed check. Both source fixes passed their recorded local tests.
+
+The staged workflow is now implemented: the two signed-candidate build jobs
+export schema2 prepared packages, followed by eleven independent native test
+groups. Each group validates the original successful producer attempt, hydrates
+fresh files, and runs the existing image signing/Installer/readback owner before
+its selected tests. Tests do not rebuild/notarize the app. Rerun failed jobs,
+not the whole run. See `docs/macos-ci-retries.md` for the graph and limits.
+Source changes that alter the app still need a new signed candidate; they cannot
+be hidden by reusing old binaries. Keep source, build attempt and consumer attempt
+separate. No current-run origin is nominated from the older diagnostic artifacts.
+
+Local staged checks: 48 checkpoint/runtime-driver tests pass; actual Installer
+metadata parser mutations pass; all six preflight steps pass including real DMG
+transport and dialog compilation/allowance checks. Actionlint and diff checks pass.
+The older prepared suite has 20 passing tests and four subtest errors caused by
+local com.apple.provenance fixture attributes. Do not relax its native attribute
+policy. The Mac remains locked; a request to unlock it for actual Open Project
+verification is pending. No Accessibility change is needed.
+
 **Active request:** follow both candidate jobs until they succeed; investigate,
 fix, locally test and rerun failures. Work remains on
 `codex/macos-git-read-continuation` in the isolated clone
