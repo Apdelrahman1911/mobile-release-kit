@@ -51,7 +51,7 @@ permissions:
 concurrency:
   # Candidate jobs use isolated runners. A targeted continuation must not wait
   # for a different, still-valid candidate job; distribution refs stay serialized.
-  group: desktop-macos-installed-${{ github.ref }}${{ github.ref == 'refs/heads/verify/desktop-macos-candidate' && format('-{0}', github.sha) || '' }}
+  group: desktop-macos-installed-${{ github.ref }}${{ github.ref == 'refs/heads/verify/desktop-macos-candidate' && format('-{0}', github.sha) || '' }}${{ github.event_name == 'workflow_dispatch' && inputs.operation == 'candidate-tests' && format('-{0}', inputs.test_group) || '' }}
   cancel-in-progress: false
 
 jobs:

@@ -342,6 +342,8 @@ class CandidateWorkflowTests(unittest.TestCase):
         self.assertIn('compare/$PRODUCER_SOURCE...$GITHUB_SHA',commands)
         old=next(r for r in steps if r['name'].startswith('Check out the immutable producer source'))
         self.assertEqual(old['with']['path'],'prepared-built-source')
+        self.assertIn('inputs.test_group',self.workflow['concurrency']['group'])
+        self.assertIs(self.workflow['concurrency']['cancel-in-progress'],False)
 
     def test_no_publication_or_production_branch_and_no_signing_credentials_in_artifacts(self):
         job=self.saved_test_job()
