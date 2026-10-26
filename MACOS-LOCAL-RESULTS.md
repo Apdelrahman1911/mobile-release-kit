@@ -2,6 +2,18 @@
 
 ## Latest continuation — 2026-10-26
 
+Git-only helper run40333720831 on34c87010 confirmed the secret inheritance fix,
+then reported hydration memory refusal:3091282141 required versus3014819840
+available bytes; disk sufficient. Streaming the actual saved gzip in64KiB windows
+counts502539264 expansion bytes without retaining them. The unchanged full
+parsers confirm7231 files /501190237 payload bytes; the revised quote is2953955549
+bytes with all copies counted, and the extra hydration file dictionary is dropped
+before the independent full audit.57 targeted tests pass.
+Local production write_tree still refuses automatically generated Apple provenance
+on a disposable CodeResources file. Production policy is unchanged. Any separate
+local DATA audit normalizes only that attribute on its disposable fixture and is
+not proof that production write_tree passed locally.
+
 Run40152218901 attempt1: Git27 build/checkpoint passed; Tool26 notarization
 failed with original payload-submit1 and network-connection/url-1009. Four Git
 groups refused hydration (original ValueError unclassified); git-push hydrated

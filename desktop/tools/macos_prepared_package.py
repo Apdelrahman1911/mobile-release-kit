@@ -322,7 +322,65 @@ def quote_data(package_bytes, original_bytes, expanded_bytes, inventory_bytes):
             'diskBytes': 2 * (package_bytes + original_bytes) + expanded_bytes + inventory_bytes + 32 * MIB}
 
 
-def original_scripts_data(stager, original, manifest, *, allocation_budget=None):
+def gzip_expansion_bytes(body, *, check=lambda: None, limit=PACKAGE_LIMIT):
+    """Count a single gzip stream with64KiB input/output windows, never retain it."""
+    import zlib
+    stream = zlib.decompressobj(31)
+    total = 0
+    for offset in range(0, len(body), 65536):
+        check()
+        pending = body[offset:offset + 65536]
+        while pending:
+            output = stream.decompress(pending, 65536)
+            total += len(output)
+            need(total <= limit and not stream.unused_data, 'prepared-streamed-expansion-bound')
+            pending = stream.unconsumed_tail
+    need(stream.eof and not stream.unused_data and not stream.unconsumed_tail and 0 < total <= limit,
+         'prepared-streamed-expansion-complete')
+    return total
+
+
+def original_expansion_bytes(stager, original, *, check=lambda: None):
+    """Small XAR index + streaming census before any full Scripts allocation.
+
+    This chooses a resource quote only. The unchanged full XAR/CPIO/package
+    parsers still validate every byte. Other valid XAR encodings retain the
+    conservative maximum rather than guessing their nested expansion size.
+    """
+    import struct
+    import xml.etree.ElementTree as ET
+    need(type(original) is bytes and 28 <= len(original) <= PACKAGE_LIMIT, 'prepared-expansion-header')
+    magic, header, version, compressed, expanded, _ = struct.unpack_from('>IHHQQI', original)
+    need(magic == 0x78617221 and header == 28 and version == 1
+         and 0 < compressed <= MIB and 0 < expanded <= 2 * MIB
+         and header + compressed <= len(original), 'prepared-expansion-header')
+    body = stager.inflate(original[header:header + compressed], expanded)
+    need(len(body) == expanded and b'<!DOCTYPE' not in body.upper() and b'<!ENTITY' not in body.upper(),
+         'prepared-expansion-index')
+    root = ET.fromstring(body)
+    rows = root.findall('toc/file')
+    need(root.tag == 'xar' and len(root.findall('toc')) == 1 and len(rows) == 2
+         and {r.findtext('name') for r in rows} == {'PackageInfo', 'Scripts'}, 'prepared-expansion-index')
+    row = next(r for r in rows if r.findtext('name') == 'Scripts')
+    fields = [row.findtext('data/' + k) for k in ('offset', 'length', 'size')]
+    need(all(type(v) is str and re.fullmatch(r'[0-9]{1,10}', v) for v in fields), 'prepared-expansion-index')
+    offset, length, size = map(int, fields)
+    start = header + compressed + offset
+    need(0 < length <= PACKAGE_LIMIT and 0 < size <= PACKAGE_LIMIT and start + length <= len(original)
+         and row.findtext('type') == 'file' and not row.findall('file'), 'prepared-expansion-index')
+    encoding = row.find('data/encoding')
+    need(encoding is not None and encoding.get('style') in ('application/octet-stream', 'application/x-gzip'),
+         'prepared-expansion-index')
+    if encoding.get('style') != 'application/octet-stream':
+        return PACKAGE_LIMIT
+    need(length == size, 'prepared-expansion-index')
+    view = memoryview(original)[start:start + length]
+    if view[:2] == b'\x1f\x8b':
+        return gzip_expansion_bytes(view, check=check)
+    return size
+
+
+def original_scripts_data(stager, original, manifest, *, allocation_budget=None, expanded_limit=PACKAGE_LIMIT):
     manifest_data(manifest)
     need(stager.packager_ids() == (manifest['packagerUid'], manifest['packagerGid']), 'prepared-packager-identity')
     members = stager.xar_members(original, allocation_budget=allocation_budget)
@@ -331,7 +389,10 @@ def original_scripts_data(stager, original, manifest, *, allocation_budget=None)
     stager.package_info(members['PackageInfo'], selection=selection)
     body = members['Scripts']
     if body[:2] == b'\x1f\x8b':
-        body = stager.inflate(body, stager.MAX_BYTES, gzip=True)
+        if allocation_budget is not None:
+            allocation_budget('scripts-inflate', len(original) + sum(map(len, members.values())), len(body), expanded_limit)
+        body = stager.inflate(body, expanded_limit, gzip=True)
+    need(0 < len(body) <= expanded_limit <= PACKAGE_LIMIT, 'prepared-expansion-correspondence')
     rows = stager._cpio_members(body, stager.packager_ids(), allocation_budget=allocation_budget, store_runtime=True)
     files = {name: value for name, value in rows.items() if value[0] is not None}
     need(rows == {**files, **{name: (None, 0o555) for name in stager.directories(files, mac_store_prefix='input/runtime/store')}},
@@ -453,20 +514,25 @@ def hydrate_checkpoint(op, values, binding):
     completed = False
     try:
         initialize_staging(op)
-        # Quote the maximum permitted expansion BEFORE parser allocations, then
-        # the exact smaller peak at each existing parser allocation callback.
-        quote = quote_data(len(values['MobileReleaseKit.pkg']), len(values['MobileReleaseKit-original.pkg']),
-                           PACKAGE_LIMIT, 12 * MIB)
         guard = ResourceGuard(op)
+        package_size, original_size = len(values['MobileReleaseKit.pkg']), len(values['MobileReleaseKit-original.pkg'])
+        # First admit only the retained packages plus the small bounded index/
+        # streaming windows. Count expansion before allocating its full vector.
+        guard.check(quote_data(package_size, original_size, 1, 1))
+        expanded = original_expansion_bytes(op.stager, values['MobileReleaseKit-original.pkg'], check=op.package_clock)
+        quote = quote_data(package_size, original_size, expanded, 12 * MIB)
         guard.check(quote)
         files = original_scripts_data(op.stager, values['MobileReleaseKit-original.pkg'], manifest,
-                                      allocation_budget=guard.allocation)
+                                      allocation_budget=guard.allocation, expanded_limit=expanded)
         inventory = files['input/' + op.stager.INSTALLATION_INVENTORY_NAME][0]
         # Existing finite writer performs positive leaf closes and full readback;
         # exceptions remain pending, so no later owner may accept these copies.
         op.stager_io_pending = 'prepared-scripts'
         op.stager.write_tree(op.work / 'scripts', files, root_mode=0o755, mac_store_prefix='input/runtime/store')
         op.stager_io_pending = None
+        # The independent full audit rereads the fresh tree. Retaining this
+        # extra whole-payload dictionary would overlap another501MiB with it.
+        del files
         root = op.package_directory('package-final')
         op.package_file(root, 'MobileReleaseKit.pkg', values['MobileReleaseKit.pkg'])
         op.package_file(op.work_entry, 'MobileReleaseKit-original.pkg', values['MobileReleaseKit-original.pkg'])
@@ -579,10 +645,10 @@ class ResourceGuard:
     def allocation(self, phase, live, packed, output):
         need(self.quote is not None and all(type(v) is int and 0 <= v <= 8 * PACKAGE_LIMIT for v in (live, packed, output)),
              'prepared-allocation-values')
-        need(phase in ('xar-toc', 'xar-member', 'cpio-window', 'cpio-slice'), 'prepared-allocation-phase')
+        need(phase in ('xar-toc', 'xar-member', 'scripts-inflate', 'cpio-window', 'cpio-slice'), 'prepared-allocation-phase')
         required = live + 3 * packed + 2 * (output + 1) + 16 * MIB
-        # The initial peak includes both retained packages and full 512MiB
-        # expansion/copy windows; no logical-size-only accounting or cap rise.
+        # The quote includes both retained packages and four actual expansion/
+        # copy windows; no logical-size-only accounting or cap rise.
         need(required <= self.quote['memoryBytes'], 'prepared-codec-window')
         self.op.package_clock()
 
@@ -735,6 +801,11 @@ def native_binding(environment):
 
 # Only fixed public refusal codes are logged; arbitrary exception text is private.
 PREPARED_FAILURE_CODES = frozenset({
+    'prepared-streamed-expansion-bound',
+    'prepared-streamed-expansion-complete',
+    'prepared-expansion-header',
+    'prepared-expansion-index',
+    'prepared-expansion-correspondence',
     'prepared-allocation-phase',
     'prepared-allocation-values',
     'prepared-api-original-status',

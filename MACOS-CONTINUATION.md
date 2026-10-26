@@ -10,6 +10,18 @@ ValueError; the one that hydrated reached producer signing and failed because
 both environment secrets were empty in the reusable job. Do not invent a more
 specific cause for those four hydration failures.
 
+The helper-only Git run40333720831 (source34c87010) passed credential presence,
+selected/downloaded the old package, then refused hydration with exact reason
+prepared-resource-insufficient: required3091282141 bytes, available3014819840.
+The new correction counts the actual gzip expansion in64KiB windows before full
+allocation, keeps every existing byte/hash/owner audit, and drops the extra whole
+payload dictionary before the independent audit. Real saved package expansion is
+502539264 bytes and all7231 file/member correspondences pass; the conservative
+quote becomes2953955549 bytes. See staged-real-package-expansion.json.
+57 targeted tests pass. The local production writer still refuses this Mac's
+automatically added com.apple.provenance; do not call that writer a pass or relax
+its policy. Separate disposable DATA-audit evidence is marked accordingly.
+
 Only Tool26 has been rerun: attempt2, job121604550887. Monitor session78535.
 The Git build is reused, not recompiled. Check private live metadata before
 another dispatch. A new helper-only continuation adds explicit secret inheritance,

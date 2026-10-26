@@ -2,6 +2,9 @@
 import copy
 import json
 import re
+import gzip
+import struct
+import zlib
 import subprocess
 import unittest
 from pathlib import Path
@@ -30,6 +33,36 @@ def native_fixture(scope='git-native'):
 
 
 class CandidateCheckpointTests(unittest.TestCase):
+    def test_streaming_census_enforces_real_expansion_and_complete_single_stream(self):
+        body=b'inert payload\n'*100000
+        packed=gzip.compress(body,mtime=0)
+        clock=mock.Mock()
+        self.assertEqual(P.gzip_expansion_bytes(memoryview(packed),check=clock),len(body))
+        clock.assert_called()
+        for wrong,limit in ((packed,len(body)-1),(packed[:-1],len(body)),(packed+packed,len(body)*2)):
+            with self.subTest(size=len(wrong)),self.assertRaises(ValueError):
+                P.gzip_expansion_bytes(memoryview(wrong),limit=limit)
+
+    def test_small_xar_index_chooses_actual_cpio_expansion_before_full_allocation(self):
+        payload=gzip.compress(b'INERT scripts'*100000,mtime=0)
+        def archive(size):
+            toc=('<xar><toc><file><name>PackageInfo</name><type>file</type></file>'
+                 '<file><name>Scripts</name><type>file</type><data>'
+                 f'<offset>0</offset><length>{len(payload)}</length><size>{size}</size>'
+                 '<encoding style="application/octet-stream"/></data></file></toc></xar>').encode()
+            packed=zlib.compress(toc)
+            return struct.pack('>IHHQQI',0x78617221,28,1,len(packed),len(toc),0)+packed+payload
+        stage=SimpleNamespace(inflate=lambda body,limit:zlib.decompress(body))
+        measured=P.original_expansion_bytes(stage,archive(len(payload)))
+        self.assertEqual(measured,1300000)
+        with self.assertRaisesRegex(ValueError,'prepared-expansion-index'):
+            P.original_expansion_bytes(stage,archive(len(payload)+1))
+        actual=P.quote_data(147511836,147514243,503000000,12*P.MIB)
+        maximum=P.quote_data(147511836,147514243,P.PACKAGE_LIMIT,12*P.MIB)
+        available=3014819840
+        self.assertLess(actual['memoryBytes'],available)
+        self.assertGreater(maximum['memoryBytes'],available)
+
     def test_helper_continuation_requires_complete_ancestor_comparison_and_no_product_changes(self):
         values, manifest, service, consumer = native_fixture()
         consumer.update(source='6'*40, tree='7'*40)
