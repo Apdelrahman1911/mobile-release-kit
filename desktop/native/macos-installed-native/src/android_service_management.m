@@ -76,6 +76,12 @@ static uint32_t status_data(SMAppService *service) {
         default:return 5;
     }
 }
+static uint32_t management_version(uint32_t action) {
+#if defined(MRK_INSTALLED_OBSERVATION)
+    if (action==1) return 4;
+#endif
+    return action==3?3:2;
+}
 void *mrk_android_management_new(uint32_t action) {
     if (action>3 || pthread_main_np()!=1 || getuid()==0 || geteuid()!=getuid()
         || !mrk_android_identity_available()) return NULL;
@@ -83,7 +89,7 @@ void *mrk_android_management_new(uint32_t action) {
     if (!original) return NULL;
     original->magic=MRK_ANDROID_MANAGEMENT_MAGIC;
     mrk_entry_init(&original->reservation);
-    original->report.version=action==3?3:2;original->report.action=action;original->report.status=4;
+    original->report.version=management_version(action);original->report.action=action;original->report.status=4;
     return original;
 }
 #if defined(MRK_E2_NATIVE_FIXTURE)
@@ -98,7 +104,7 @@ void *mrk_android_e2_fixture_management_new(uint32_t action,void *identity) {
     }
     original->magic=MRK_ANDROID_MANAGEMENT_MAGIC;original->fixture_identity=identity;
     mrk_entry_init(&original->reservation);
-    original->report.version=action==3?3:2;original->report.action=action;original->report.status=4;
+    original->report.version=management_version(action);original->report.action=action;original->report.status=4;
     return original;
 }
 #endif
@@ -139,6 +145,22 @@ static uint32_t registration_outcome(BOOL accepted,NSError *error) {
     }
     return 7;
 }
+#if defined(MRK_INSTALLED_OBSERVATION)
+// v4 is nonshipping, fixed DATA from the original register return. No NSError,
+// description, path, new service query or framework resource crosses the ABI.
+static uint32_t registration_return_data(BOOL accepted,NSError *error) {
+    uint32_t category=0;
+    if (error) {
+        category=13; // other domain
+        if ([[error domain] isEqualToString:SMAppServiceErrorDomain]) {
+            const NSInteger code=[error code];
+            category=code>=kSMErrorInternalFailure && code<=kSMErrorAlreadyRegistered
+                ? (uint32_t)(code-kSMErrorInternalFailure+1) : 12;
+        }
+    }
+    return 1u|(accepted?2u:0u)|(error?4u:0u)|(category<<8);
+}
+#endif
 // One fixed phase only. Rust applies original W/H/F before entry and imports the
 // actual return before ANY next phase. Native entry/consumption is not inferred
 // from a gate or a dropped Rust future.
@@ -222,6 +244,9 @@ int mrk_android_management_step(void *raw,uint32_t phase,mrk_android_management_
                     const BOOL accepted=[(SMAppService *)original->service registerAndReturnError:&error];
                     original->report.returned=1;
                     original->report.outcome=registration_outcome(accepted,error);
+#if defined(MRK_INSTALLED_OBSERVATION)
+                    original->report.reserved=registration_return_data(accepted,error);
+#endif
                 }
                 break;
             }

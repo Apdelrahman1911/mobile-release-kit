@@ -21,6 +21,12 @@ flowchart LR
   TP --> B[Backups]
 ```
 
+New candidate pushes build both packages and run Git local plus service/CLI first.
+After those pass, dispatch the remaining nine groups independently with the same
+saved source/run. All eleven successful groups remain required; unexecuted groups
+are pending, never passes. This avoids spending five more Tool jobs on a shared
+service failure.
+
 After a failure, open the run and choose **Re-run failed jobs**. To retry one job,
 use that job's **Re-run job** control. Successful jobs and their saved packages
 are reused; **Re-run all jobs** deliberately rebuilds and is not the recovery
@@ -45,6 +51,19 @@ Packages are kept for 14 days and named by full source commit, scope, run and
 producer attempt. A retry selects the one successful producer checkpoint across
 run attempts, not the newest artifact or the current test attempt. Missing,
 expired, damaged, mismatched or ambiguous inputs fail before installation.
+
+Before either candidate build starts expensive preparation, fast checks cover
+Installer transport, dialog compilation, checkpoint gates, and the real runner's
+Git/Library flags, and actual Objective-C service phases with inert service and
+gate edges in ordinary and observed builds. The flag check directly compiles the application's small guard
+with the pinned Rust compiler; it needs no application build or credentials.
+The local preflight additionally exercises actual Git source custody beneath a
+disposable hidden ancestor when supplied a compiled Git test binary.
+
+The compiled observer also runs its startup DATA contracts before more helper
+builds or notarization. Local preflight accepts `--observer-test-bin` for this
+check; the binary must have explicit recorded runtime manifest/protocol inputs.
+This does not install or qualify a service.
 
 Changing application code requires a new signed candidate. A failed build before
 its checkpoint also still needs a build retry. This split removes the repeated

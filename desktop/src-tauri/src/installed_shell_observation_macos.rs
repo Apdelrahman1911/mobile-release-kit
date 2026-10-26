@@ -5042,16 +5042,23 @@ fn final_fixture_readback_data_check() -> bool {
 fn final_fixture_readback_requires_matching_verified_case() {
     assert!(final_fixture_readback_data_check());
 }
+macro_rules! data_contract_failure {
+    () => {{
+        // Fixed source location only, before any fixture/native/UI admission.
+        super::diagnostic(concat!("MRK_MACOS_DATA_CONTRACT_FAILURE=",line!(),"\n").as_bytes());
+        false
+    }};
+}
 fn observer_data_checks() -> bool {
     use mrk_macos_installed_native::{PanelKind, PanelObservation, PanelResponse};
-    if !final_fixture_readback_data_check() { return false; }
-    if !git_read_wait_data_checks() || !git_read_failure_data_checks() { return false; }
-    if !project_chooser_data_checks() { return false; }
+    if !final_fixture_readback_data_check() { return data_contract_failure!(); }
+    if !git_read_wait_data_checks() || !git_read_failure_data_checks() { return data_contract_failure!(); }
+    if !project_chooser_data_checks() { return data_contract_failure!(); }
     crate::asset_session::assert_project_selection_gate_contract();
     // harness=false does not discover private #[test] functions. These exact
     // inert DATA bodies are shared with their ordinary libtest wrappers.
     // Exercise the positive normal-Mac description; no Finder/native call.
-    if !crate::installation::NORMAL_MAC_PROFILE { return false; }
+    if !crate::installation::NORMAL_MAC_PROFILE { return data_contract_failure!(); }
     crate::installation::assert_installation_description_contract();
     crate::installation::assert_installation_reveal_request_contract();
     crate::installation::assert_installation_inspection_wire_contract();
@@ -5063,15 +5070,15 @@ fn observer_data_checks() -> bool {
     crate::android_toolchain_macos_policy::assert_macos_toolchain_policy_data_contract();
     if !crate::installed_runtime::installed_android_data_check()
         || !crate::installed_runtime::common_acl_data_check()
-        || !crate::supervisor::common_acl_owner_data_check() { return false; }
+        || !crate::supervisor::common_acl_owner_data_check() { return data_contract_failure!(); }
     crate::runtime::assert_installed_session_selection_contract();
     if !crate::runtime::installed_macos_offline_profile_data_check()
         || !crate::installed_runtime::installed_offline_slots_data_check()
-        || !crate::saved_command_owner::installed_offline_owner_data_check() { return false; }
+        || !crate::saved_command_owner::installed_offline_owner_data_check() { return data_contract_failure!(); }
     if !crate::runtime::installed_macos_doctor_recovery_profile_data_check()
         || !crate::installed_runtime::installed_doctor_recovery_slots_data_check()
         || !crate::environment_diagnostics_owner::installed_environment_owner_data_check()
-        || !crate::saved_command_owner::installed_project_recovery_owner_data_check() { return false; }
+        || !crate::saved_command_owner::installed_project_recovery_owner_data_check() { return data_contract_failure!(); }
     // This target has harness=false; run these inert contracts explicitly.
     // They prove routing/refusal DATA only, not native Apply or worker finality.
     crate::runtime::assert_installed_workflow_profile_contract();
@@ -5087,30 +5094,30 @@ fn observer_data_checks() -> bool {
     crate::supervisor::macos_github_readonly_original_contract();
     crate::runtime::macos_github_actions_profile_contract();
     crate::supervisor::macos_github_actions_original_contract();
-    if !crate::installed_runtime::installed_github_actions_slots_data_check() { return false; }
+    if !crate::installed_runtime::installed_github_actions_slots_data_check() { return data_contract_failure!(); }
     crate::asset_session::assert_installed_evidence_gate_contract();
     crate::bridge::assert_native_capability_intersection_contract();
     if !crate::runtime::installed_macos_evidence_profile_data_check()
         || !super::owned_macos::evidence_folder_routing_data_check()
         || !crate::runtime::installed_macos_images_profile_data_check()
-        || !super::owned_macos::public_images_routing_data_check() { return false; }
+        || !super::owned_macos::public_images_routing_data_check() { return data_contract_failure!(); }
     // Compiled profile DATA only: this inert path is never resolved or opened.
     // The real builder must still establish every installed/native original.
     let profile = crate::runtime::RuntimeConfig::packaged(PathBuf::from("/inert-mrk-profile-not-opened"));
     if !profile.project_selection_profile_available() || profile.project_path_selection_profile_available() != crate::runtime::INSTALLED_MAC_PROJECT_FIELDS_QUALIFIED
-        || !profile.evidence_selection_profile_available() { return false; }
+        || !profile.evidence_selection_profile_available() { return data_contract_failure!(); }
     if !mrk_macos_installed_native::installed_observation_flags_data_check()
         || !super::owned_macos::observation::open_release_data_check() || !native_recheck_data_check()
         || !original_window_witness_data_check() || !completion_ownership_data_check() || !ios::data_checks()
         || !session::data_checks() || !project_fields::data_checks() || !vault::data_checks()
-        || !installation_check::data_checks() || !recovery::data_checks() || !local_edits::data_checks() || !checks::data_checks() || !identity::data_checks() || !tool_setup::service_data_checks() { return false; }
+        || !installation_check::data_checks() || !recovery::data_checks() || !local_edits::data_checks() || !checks::data_checks() || !identity::data_checks() || !tool_setup::service_data_checks() { return data_contract_failure!(); }
     let inspection = Case::Installation;
     if inspection.quit_id() != 3 || inspection.rounds() != 0 || inspection.loses_document()
         || inspection.inputs() || inspection.accepted_id(1) || inspection.open_id(Step::OpenProject).is_some()
-        || inspection.panel_index(Step::Quit) != Some(1) { return false; }
+        || inspection.panel_index(Step::Quit) != Some(1) { return data_contract_failure!(); }
     for ios_case in ios::Case::ALL {
         let case = Case::Ios(ios_case);
-        if case.panel_index(Step::Quit) != Some(1) || case.quit_id() != if ios_case.inputs() { session::quit_original(ios_case) } else { 2 } { return false; }
+        if case.panel_index(Step::Quit) != Some(1) || case.quit_id() != if ios_case.inputs() { session::quit_original(ios_case) } else { 2 } { return data_contract_failure!(); }
         // One captured DATA roster, not a second native scan after refusal.
         let primary = if ios_case == ios::Case::AndroidInputs { ANDROID_INPUT_ROSTER }
             else if ios_case == ios::Case::RecoveryPending { PENDING_ACCOUNT_ROSTER } else { CURRENT_IOS_ROSTER };
@@ -5118,35 +5125,35 @@ fn observer_data_checks() -> bool {
         let mut unsigned: Vec<String> = UNSIGNED_IOS_ROSTER.iter().map(|v| (*v).to_owned()).collect(); unsigned.sort();
         let alternate = ios_alternate_roster(ios_case);
         if !directory_roster_matches(&current, primary, alternate)
-            || directory_roster_matches(&unsigned, primary, alternate) != ios::Case::ALL[..5].contains(&ios_case) { return false; }
+            || directory_roster_matches(&unsigned, primary, alternate) != ios::Case::ALL[..5].contains(&ios_case) { return data_contract_failure!(); }
         for mut invalid in [current[..current.len()-1].to_vec(), unsigned[..unsigned.len()-1].to_vec(), current.clone()] {
             invalid.push("unrecognized".to_owned()); invalid.sort();
-            if directory_roster_matches(&invalid, primary, alternate) { return false; }
+            if directory_roster_matches(&invalid, primary, alternate) { return data_contract_failure!(); }
         }
         for i in 0..session::count(ios_case) as u8 {
-            let Some(id) = case.input_id(i) else { return false; };
+            let Some(id) = case.input_id(i) else { return data_contract_failure!(); };
             let step = Step::Session(session::Step::Native(i));
             if (case.open_id(step) == Some(id)) != case.input_accepted(i)
                 || case.panel_index(step).is_some() || case.file_index(id) != Some(i)
-                || open_step_entry(case, Some(Pending::Accessibility(id)), step, id) != case.input_accepted(i) { return false; }
+                || open_step_entry(case, Some(Pending::Accessibility(id)), step, id) != case.input_accepted(i) { return data_contract_failure!(); }
         }
     }
     let p2 = Case::ProjectFields;
-    if p2.quit_id() != 12 || p2.rounds() != 0 || p2.inputs() || p2.field_index(1).is_some() || p2.field_index(12).is_some() { return false; }
+    if p2.quit_id() != 12 || p2.rounds() != 0 || p2.inputs() || p2.field_index(1).is_some() || p2.field_index(12).is_some() { return data_contract_failure!(); }
     for i in 0..project_fields::COUNT as u8 {
-        let Some(id) = project_fields::id(i) else { return false; }; let step = Step::ProjectFields(project_fields::Step::Native(i));
+        let Some(id) = project_fields::id(i) else { return data_contract_failure!(); }; let step = Step::ProjectFields(project_fields::Step::Native(i));
         if p2.field_index(id) != Some(i) || p2.file_index(id).is_some() || p2.panel_index(step).is_some()
             || (p2.open_id(step) == Some(id)) != project_fields::accepts(i)
             || p2.accepted_id(id) != project_fields::accepts(i)
             || open_step_entry(p2, Some(Pending::Accessibility(id)), step, id) != project_fields::accepts(i)
-            || open_step_entry(p2, Some(Pending::Accessibility(id + 1)), step, id + 1) { return false; }
+            || open_step_entry(p2, Some(Pending::Accessibility(id + 1)), step, id + 1) { return data_contract_failure!(); }
     }
     let mut prepared = OpenInputSample::preparing(2, Step::OpenProject);
     prepared.prepared = true;
-    if prepared.succeeded() || prepared.entered != Some(false) || prepared.attempted != Some(false) || prepared.returned { return false; }
+    if prepared.succeeded() || prepared.entered != Some(false) || prepared.attempted != Some(false) || prepared.returned { return data_contract_failure!(); }
     prepared.requested();
     if prepared.succeeded() || prepared.entered.is_some() || prepared.attempted.is_some() || prepared.press_returned.is_some()
-        || prepared.returned || prepared.retired { return false; }
+        || prepared.returned || prepared.retired { return data_contract_failure!(); }
     for id in [1, 2] {
         let case = if id == 1 { Case::NoopStale } else { Case::FirstSave };
         let mut pending = Some(Pending::Accessibility(id));
@@ -5154,13 +5161,13 @@ fn observer_data_checks() -> bool {
             || retire_returned_open(case, &mut pending, Step::ProjectSettled, id)
             || retire_returned_open(case, &mut pending, Step::OpenProject, 3 - id)
             || pending != Some(Pending::Accessibility(id))
-            || !retire_returned_open(case, &mut pending, Step::OpenProject, id) || pending.is_some() { return false; }
+            || !retire_returned_open(case, &mut pending, Step::OpenProject, id) || pending.is_some() { return data_contract_failure!(); }
     }
     for pending in [None, Some(Pending::Native(Step::OpenProject)), Some(Pending::Accessibility(0)),
         Some(Pending::Accessibility(3)), Some(Pending::Close(Step::OpenProject)), Some(Pending::FailureClose)] {
         let mut unchanged = pending;
         if open_step_entry(Case::FirstSave, unchanged, Step::OpenProject, 2) || retire_returned_open(Case::FirstSave, &mut unchanged, Step::OpenProject, 2)
-            || unchanged != pending { return false; }
+            || unchanged != pending { return data_contract_failure!(); }
     }
     let fresh = || ObservedPanel { id: 1, action_allowed: true, native: PanelObservation {
         kind: PanelKind::Project, started: true, attached: false, directory_bound: false,
@@ -5172,14 +5179,14 @@ fn observer_data_checks() -> bool {
     }};
     for dismissed in [false, true] {
         let mut panel = fresh(); panel.native.dismissed = dismissed;
-        if panel_readiness(&panel, 1, mrk_macos_installed_native::PanelKind::Project, false, false, false) != Ok(false) { return false; }
-        if panel_readiness(&panel, 1, mrk_macos_installed_native::PanelKind::Project, true, false, false) != Err("native-attachment-lost") { return false; }
-        if panel_readiness(&panel, 1, mrk_macos_installed_native::PanelKind::Project, false, true, false) != Err("native-preaction-history") { return false; }
+        if panel_readiness(&panel, 1, mrk_macos_installed_native::PanelKind::Project, false, false, false) != Ok(false) { return data_contract_failure!(); }
+        if panel_readiness(&panel, 1, mrk_macos_installed_native::PanelKind::Project, true, false, false) != Err("native-attachment-lost") { return data_contract_failure!(); }
+        if panel_readiness(&panel, 1, mrk_macos_installed_native::PanelKind::Project, false, true, false) != Err("native-preaction-history") { return data_contract_failure!(); }
         panel.native.attached = true;
         panel.native.parent_references_panel = Some(true); panel.native.panel_references_parent = Some(true);
         panel.native.panel_visible = Some(true);
         let expected = if dismissed { Err("native-dismissed") } else { Ok(true) };
-        if panel_readiness(&panel, 1, mrk_macos_installed_native::PanelKind::Project, false, false, false) != expected { return false; }
+        if panel_readiness(&panel, 1, mrk_macos_installed_native::PanelKind::Project, false, false, false) != expected { return data_contract_failure!(); }
     }
     let mut preconfigured = fresh();
     preconfigured.native.directory_bound = true; preconfigured.native.directory_returned = true;
@@ -5188,7 +5195,7 @@ fn observer_data_checks() -> bool {
         if panel_readiness(&preconfigured, 1, mrk_macos_installed_native::PanelKind::Project, false, false, true) != Ok(false)
             || panel_readiness(&preconfigured, 1, mrk_macos_installed_native::PanelKind::Project, true, false, true) != Err("native-attachment-lost")
             || panel_readiness(&preconfigured, 1, mrk_macos_installed_native::PanelKind::Project, false, true, true) != Err("native-preaction-history")
-            || panel_readiness(&preconfigured, 1, mrk_macos_installed_native::PanelKind::Project, false, false, false) != Err("native-preaction-history") { return false; }
+            || panel_readiness(&preconfigured, 1, mrk_macos_installed_native::PanelKind::Project, false, false, false) != Err("native-preaction-history") { return data_contract_failure!(); }
     }
     let mutations: [fn(&mut ObservedPanel); 14] = [
         |p| p.id = 2, |p| p.native.kind = PanelKind::Quit, |p| p.native.started = false,
@@ -5200,34 +5207,34 @@ fn observer_data_checks() -> bool {
     ];
     for mutation in mutations {
         let mut panel = fresh(); mutation(&mut panel);
-        if panel_readiness(&panel, 1, mrk_macos_installed_native::PanelKind::Project, false, false, false).is_ok() { return false; }
+        if panel_readiness(&panel, 1, mrk_macos_installed_native::PanelKind::Project, false, false, false).is_ok() { return data_contract_failure!(); }
     }
     for (step, original) in [(Step::CancelProject, 0), (Step::OpenProject, 1),
         (Step::PickerPending, 1), (Step::QuitCancel, 2), (Step::Quit, 3)] {
         let mut prior = [true; 4]; prior[original] = false;
-        if same_panel_action_returned(step, &prior) != Ok(false) { return false; }
+        if same_panel_action_returned(step, &prior) != Ok(false) { return data_contract_failure!(); }
         prior[original] = true;
-        if same_panel_action_returned(step, &prior) != Ok(true) { return false; }
+        if same_panel_action_returned(step, &prior) != Ok(true) { return data_contract_failure!(); }
     }
     for pending in [None, Some(Pending::Native(Step::Quit)), Some(Pending::Accessibility(2)),
         Some(Pending::Dom(DomDispatch { step: Step::CancelProject, sequence: 1 })),
         Some(Pending::Close(Step::CancelProject)), Some(Pending::Reload), Some(Pending::FailureClose)] {
         let mut original = pending;
-        if retire_returned_native(&mut original, Step::CancelProject, Step::CancelProject) || original != pending { return false; }
+        if retire_returned_native(&mut original, Step::CancelProject, Step::CancelProject) || original != pending { return data_contract_failure!(); }
     }
     let mut original = Some(Pending::Native(Step::CancelProject));
     if retire_returned_native(&mut original, Step::Quit, Step::CancelProject)
-        || original != Some(Pending::Native(Step::CancelProject)) { return false; }
-    if !retire_returned_native(&mut original, Step::CancelProject, Step::CancelProject) || original.is_some() { return false; }
+        || original != Some(Pending::Native(Step::CancelProject)) { return data_contract_failure!(); }
+    if !retire_returned_native(&mut original, Step::CancelProject, Step::CancelProject) || original.is_some() { return data_contract_failure!(); }
     for (on_main, timely, expected) in [(false, false, Err("native-wrong-thread")),
         (false, true, Err("native-wrong-thread")), (true, false, Ok(false)), (true, true, Ok(true))] {
         let result = native_step_entry(on_main, timely);
-        if result != expected { return false; }
+        if result != expected { return data_contract_failure!(); }
         let mut pending = Some(Pending::Native(Step::CancelProject));
         // The same entry result and refusal rule as native_step: late main
         // no-action may retire; either wrong-thread refusal must stay pending.
-        if result == Ok(false) && !retire_returned_native(&mut pending, Step::CancelProject, Step::CancelProject) { return false; }
-        if pending.is_none() != (on_main && !timely) { return false; }
+        if result == Ok(false) && !retire_returned_native(&mut pending, Step::CancelProject, Step::CancelProject) { return data_contract_failure!(); }
+        if pending.is_none() != (on_main && !timely) { return data_contract_failure!(); }
     }
     let first_dom = DomDispatch { step: Step::ChooseCancel, sequence: 1 };
     let next_dom = DomDispatch { sequence: 2, ..first_dom };
@@ -5236,28 +5243,28 @@ fn observer_data_checks() -> bool {
         Some(Pending::Dom(DomDispatch { step: Step::ChooseProject, ..first_dom }))] {
         let mut unchanged = pending;
         if dom_step_entry(unchanged, first_dom.step, first_dom)
-            || retire_returned_dom(&mut unchanged, first_dom) || unchanged != pending { return false; }
+            || retire_returned_dom(&mut unchanged, first_dom) || unchanged != pending { return data_contract_failure!(); }
     }
     for sequence in [0, 161] {
         let invalid = DomDispatch { sequence, ..first_dom };
         let mut pending = Some(Pending::Dom(invalid));
         if dom_step_entry(pending, invalid.step, invalid) || retire_returned_dom(&mut pending, invalid)
-            || pending != Some(Pending::Dom(invalid)) { return false; }
+            || pending != Some(Pending::Dom(invalid)) { return data_contract_failure!(); }
     }
     for returned in [first_dom, next_dom, DomDispatch { sequence: 160, ..first_dom }] {
         let mut pending = Some(Pending::Dom(returned));
         let mut current = returned.step;
-        if !dom_step_entry(pending, current, returned) { return false; }
+        if !dom_step_entry(pending, current, returned) { return data_contract_failure!(); }
         current = Step::CancelProject; // A successful body may advance Step.
         if dom_step_entry(pending, current, returned) || pending != Some(Pending::Dom(returned))
-            || !retire_returned_dom(&mut pending, returned) || pending.is_some() { return false; }
+            || !retire_returned_dom(&mut pending, returned) || pending.is_some() { return data_contract_failure!(); }
     }
     // Repeated polls at the same Step have distinct original custody. A stale
     // callback cannot enter or retire the next poll, even if its body had failed.
     let mut pending = Some(Pending::Dom(next_dom));
     if dom_step_entry(pending, next_dom.step, first_dom) || retire_returned_dom(&mut pending, first_dom)
         || pending != Some(Pending::Dom(next_dom)) || !dom_step_entry(pending, next_dom.step, next_dom)
-        || !retire_returned_dom(&mut pending, next_dom) { return false; }
+        || !retire_returned_dom(&mut pending, next_dom) { return data_contract_failure!(); }
 
     use crate::asset_commands::{AssetError, Reason};
     let empty = Ok(None);
@@ -5265,44 +5272,44 @@ fn observer_data_checks() -> bool {
     let error = Err(AssetError { code: "untrusted-supplied-code", message: "untrusted-supplied-message",
         retryable: true, ..AssetError::new(Reason::SourceRefused) });
     for step in [Step::ChooseCancel, Step::ChooseProject, Step::Snapshot] {
-        if project_return_route(Case::FirstSave, step, false, false, false, &error) != Err("asset_source_refused") { return false; }
+        if project_return_route(Case::FirstSave, step, false, false, false, &error) != Err("asset_source_refused") { return data_contract_failure!(); }
         for result in [&empty, &selected] {
-            if project_return_route(Case::FirstSave, step, false, false, false, result) != Err("picker-unexpected-result") { return false; }
+            if project_return_route(Case::FirstSave, step, false, false, false, result) != Err("picker-unexpected-result") { return data_contract_failure!(); }
         }
     }
     for step in [Step::CancelProject, Step::CancelSettled] {
         if project_return_route(Case::FirstSave, step, false, false, false, &empty) != Ok(ProjectReturn::Cancelled)
             || project_return_route(Case::FirstSave, step, false, false, false, &selected) != Err("cancel-unexpected-project")
-            || project_return_route(Case::FirstSave, step, false, false, false, &error) != Err("asset_source_refused") { return false; }
+            || project_return_route(Case::FirstSave, step, false, false, false, &error) != Err("asset_source_refused") { return data_contract_failure!(); }
         for result in [&empty, &selected, &error] {
-            if project_return_route(Case::FirstSave, step, false, true, false, result) != Err("cancel-duplicate-result") { return false; }
+            if project_return_route(Case::FirstSave, step, false, true, false, result) != Err("cancel-duplicate-result") { return data_contract_failure!(); }
         }
     }
     for step in [Step::OpenProject, Step::ProjectSettled] {
         if project_return_route(Case::FirstSave, step, false, false, false, &selected) != Ok(ProjectReturn::Selected)
             || project_return_route(Case::FirstSave, step, false, false, false, &empty) != Err("picker-unexpected-result")
-            || project_return_route(Case::FirstSave, step, false, false, false, &error) != Err("asset_source_refused") { return false; }
+            || project_return_route(Case::FirstSave, step, false, false, false, &error) != Err("asset_source_refused") { return data_contract_failure!(); }
     }
     for result in [&empty, &error] {
-        if project_return_route(Case::PickerLoss, Step::Lost, true, false, false, result) != Ok(ProjectReturn::Lost) { return false; }
+        if project_return_route(Case::PickerLoss, Step::Lost, true, false, false, result) != Ok(ProjectReturn::Lost) { return data_contract_failure!(); }
     }
     for result in [&empty, &selected, &error] {
-        if project_return_route(Case::PickerLoss, Step::Lost, true, false, true, result) != Err("observer-invariant") { return false; }
+        if project_return_route(Case::PickerLoss, Step::Lost, true, false, true, result) != Err("observer-invariant") { return data_contract_failure!(); }
     }
     if project_return_route(Case::PickerLoss, Step::Lost, true, false, false, &selected) != Err("observer-invariant")
         || project_return_route(Case::PickerLoss, Step::PickerPending, false, false, false, &error) != Err("asset_source_refused")
-        || project_return_route(Case::SaveLoss, Step::Lost, true, false, false, &error) != Err("asset_source_refused") { return false; }
+        || project_return_route(Case::SaveLoss, Step::Lost, true, false, false, &error) != Err("asset_source_refused") { return data_contract_failure!(); }
 
-    if !project_selection_data_checks() { return false; }
-    if !project_snapshot_failure_data_checks() { return false; }
-    if !bootstrap_diagnostic_data_checks() { return false; }
+    if !project_selection_data_checks() { return data_contract_failure!(); }
+    if !project_snapshot_failure_data_checks() { return data_contract_failure!(); }
+    if !bootstrap_diagnostic_data_checks() { return data_contract_failure!(); }
     // Every closed reason survives later generic cleanup/deadline failures.
     for reason in FAILURE_REASONS {
-        if !reason.is_ascii() || reason.len() > 48 { return false; }
+        if !reason.is_ascii() || reason.len() > 48 { return data_contract_failure!(); }
         let first = AtomicU8::new(0); let failed = AtomicBool::new(false);
-        if first_failure_reason(&first).is_some() { return false; }
+        if first_failure_reason(&first).is_some() { return data_contract_failure!(); }
         latch_failure(&first, &failed, *reason);
-        if !failed.load(Ordering::SeqCst) || first_failure_reason(&first) != Some(*reason) { return false; }
+        if !failed.load(Ordering::SeqCst) || first_failure_reason(&first) != Some(*reason) { return data_contract_failure!(); }
         latch_failure(&first, &failed, "observer-invariant");
         latch_failure(&first, &failed, "observer-deadline");
         latch_failure(&first, &failed, "native-wrong-thread");
@@ -5310,7 +5317,7 @@ fn observer_data_checks() -> bool {
         // DATA for a known returned body after failure/deadline; retirement
         // changes only this marker, never the first failure or success latch.
         if !retire_returned_dom(&mut pending, first_dom) || pending.is_some()
-            || !failed.load(Ordering::SeqCst) || first_failure_reason(&first) != Some(*reason) { return false; }
+            || !failed.load(Ordering::SeqCst) || first_failure_reason(&first) != Some(*reason) { return data_contract_failure!(); }
     }
     true
 }

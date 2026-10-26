@@ -15,11 +15,11 @@ on:
           - candidate-tests
           - xcode-setup-companion
       prepared_source:
-        description: Exact built source required for prepared-install only
+        description: Full source commit of the saved package
         required: false
         type: string
       prepared_run:
-        description: Exact producer run required for prepared-install only
+        description: GitHub run that produced the saved package
         required: false
         type: string
       test_group:
@@ -554,6 +554,19 @@ jobs:
         timeout-minutes: 8
         shell: bash
         run: &mrk_installed_direct_rust /bin/bash desktop/tools/macos_installed_direct_rust.sh
+      - name: Check actual Git and Library flags before the expensive candidate build
+        if: matrix.native_scope == 'git-native' || matrix.native_scope == 'tool-setup'
+        timeout-minutes: 1
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          [[ "$(/usr/bin/id -u)" != 0 && "$HOME" == /Users/runner ]] || exit 1
+          [[ ! -e "$MRK_MACOS_WORK/git-flags-smoke" && ! -L "$MRK_MACOS_WORK/git-flags-smoke" ]] || exit 1
+          "/Users/runner/.rustup/toolchains/${RUSTUP_TOOLCHAIN}-$MRK_MACOS_TARGET/bin/rustc" \
+            --edition=2021 --test tests/desktop/macos_git_flags_smoke.rs -o "$MRK_MACOS_WORK/git-flags-smoke"
+          "$MRK_MACOS_WORK/git-flags-smoke" --test-threads=1 --nocapture | /usr/bin/tee "$MRK_MACOS_WORK/git-flags-smoke.log"
+          /usr/bin/grep -F 'test result: ok. 5 passed; 0 failed; 0 ignored;' "$MRK_MACOS_WORK/git-flags-smoke.log"
       - name: Check the corrected macOS minimum and actual native host before signing
         # Identity4 reaches the actual native host checks in the existing owners;
         # do not schedule the separate DATA/platform test pair for that scope.
@@ -1333,6 +1346,24 @@ jobs:
           MRK_IMAGE_RELEASE_ID: ${{ steps.android_helper.outputs['image-release-id'] }}
         run: |
           builtin source ./desktop/tools/macos_installed_app_build.sh image
+      - name: Check the compiled observer before building more helpers or notarizing
+        if: matrix.native_scope == 'git-native' || matrix.native_scope == 'tool-setup'
+        timeout-minutes: 1
+        shell: bash
+        run: |
+          "$MRK_PYTHON" -I -S -B - <<'PY'
+          import hashlib, json, os, pathlib, re, subprocess
+          binary = pathlib.Path(os.environ['MRK_MACOS_OBSERVER_BINARY'])
+          with binary.open('rb') as stream:
+              if hashlib.file_digest(stream, 'sha256').hexdigest() != os.environ['MRK_MACOS_OBSERVER_SHA256']:
+                  raise SystemExit('compiled observer digest mismatch')
+          result = subprocess.run([str(binary), 'data-contracts'], capture_output=True, timeout=45)
+          lines = re.findall(rb'^MRK_MACOS_DATA_CONTRACT_FAILURE=([0-9]{1,6})$', result.stderr, re.M)
+          print(json.dumps({'check':'compiled-observer-data-contracts', 'returncode':result.returncode,
+                            'failureLines':[int(line) for line in lines[:4]]}))
+          if result.returncode or result.stdout != b'MRK_MACOS_DATA_CONTRACTS=passed\n' or result.stderr:
+              raise SystemExit('compiled observer DATA contracts failed before further packaging')
+          PY
       - name: Build the fixed remover and selected removal-only observer
         id: app_remover
         timeout-minutes: 60

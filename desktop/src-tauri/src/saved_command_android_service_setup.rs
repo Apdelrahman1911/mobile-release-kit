@@ -470,7 +470,8 @@ impl CapturedFailure {
 }
 #[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
 #[derive(Clone,Copy)]
-struct CallbackReturned {native:Option<(management::Progress,management::Custody)>,failure:CapturedFailure,at:Instant}
+struct CallbackReturned {native:Option<(management::Progress,management::Custody)>,failure:CapturedFailure,at:Instant,
+    registration_return:Option<(bool,&'static str)>}
 #[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
 struct CallbackOriginal {
     gate:WorkGate,action:management::Action,serial:u32,retirement:Arc<Retirement>,
@@ -664,6 +665,7 @@ impl CallbackOriginal {
     }
     fn perform(original:&Self){
         let mut failure=CapturedFailure::default();
+        let mut registration_return=None;
         let native=if !installed_native::main_thread(){None}else{
             MAIN.try_with(|slot|{
                 let Ok(mut slot)=slot.try_borrow_mut()else{return None;};
@@ -687,6 +689,7 @@ impl CallbackOriginal {
                     slot.binding=Some(MainBinding{retirement:original.retirement.clone(),serial:original.serial});
                 }else{slot.binding.as_mut().unwrap().serial=original.serial;}
                 let progress=slot.manager.perform_phased(original.action,&mut|point|original.gate(point,&mut failure));
+                registration_return=slot.manager.registration_return();
                 Some((progress,slot.manager.custody()))
                 // Never clear the binding. The sole exception to fully-finalized
                 // reuse is the fixed same-original consumed probe continuation.
@@ -695,7 +698,7 @@ impl CallbackOriginal {
         // The native/TLS mutable borrow has actually ended before this sole
         // returned record is published. No clone/Weak to CallbackOriginal exists.
         if native.is_none(){original.unknown(&mut failure);}
-        let returned=CallbackReturned{native,failure,at:Instant::now()};
+        let returned=CallbackReturned{native,failure,at:Instant::now(),registration_return};
         match original.returned.try_lock(){
             Ok(mut slot) if slot.is_none()=>{*slot=Some(returned);}
             _=>original.unknown(&mut failure),
@@ -881,7 +884,8 @@ impl Preparation {
                 management::Outcome::Refused=>wire::ServiceOutcome::Refused,management::Outcome::Error=>wire::ServiceOutcome::Error,management::Outcome::Unknown=>wire::ServiceOutcome::Unknown,
                 management::Outcome::UnregisterAccepted=>return None},
             mutation_entered:observed.mutation_entered,mutation_returned:observed.mutation_returned,
-            mutation_uncertain:observed.mutation_uncertain,native_settled:true})
+            mutation_uncertain:observed.mutation_uncertain,native_settled:true,
+            registration_return:returned.registration_return})
     }
     /// SAME registered blocking worker owns all identity native calls/cleanup.
     /// Main dispatch/actual capture extraction belongs to its independent async
@@ -1765,7 +1769,7 @@ mod callback_lifecycle_tests {
         let observation=observed(management::Status::Enabled);
         let custody=management::Custody{action:None,phase:None,cell:CellCustody::Consumed,service:ServiceCustody::Settled,
             observation:Some(observation),..deferred()};
-        CallbackReturned{native:Some((management::Progress::Finished(observation),custody)),failure:CapturedFailure::default(),at}
+        CallbackReturned{native:Some((management::Progress::Finished(observation),custody)),failure:CapturedFailure::default(),at,registration_return:None}
     }
 
     #[test]
@@ -1906,7 +1910,7 @@ mod callback_lifecycle_tests {
                 first_failure:Some(at),observation:Some(observed)};
             let returned=CallbackReturned{native:Some((management::Progress::Unknown(management::Observation{
                 outcome:management::Outcome::Unknown,..observed}),custody)),
-                failure:CapturedFailure{first:Some((wire::Reason::CleanupUnknown,at)),unknown:true,native_veto_without_first:false,..CapturedFailure::default()},at};
+                failure:CapturedFailure{first:Some((wire::Reason::CleanupUnknown,at)),unknown:true,native_veto_without_first:false,..CapturedFailure::default()},at,registration_return:None};
             let (unregister_accepted,not_registered)=Preparation::maintenance_observation(Some(returned));
             assert!(unregister_accepted && not_registered);
             assert!(!management_settled(custody));
@@ -1926,7 +1930,7 @@ mod callback_lifecycle_tests {
             }
         }
         assert_eq!(Preparation::maintenance_observation(None),(false,false));
-        let absent=wire::ServiceObservation{state:wire::ServiceState::NotRegistered,outcome:wire::ServiceOutcome::Observed,
+        let absent=wire::ServiceObservation{registration_return:None,state:wire::ServiceState::NotRegistered,outcome:wire::ServiceOutcome::Observed,
             mutation_entered:false,mutation_returned:false,mutation_uncertain:false,native_settled:true};
         assert_eq!(MaintenancePreparation::observed_branch(Some(absent),true),MaintenanceBranch::ObservedAbsent);
         assert_eq!(MaintenancePreparation::observed_branch(Some(wire::ServiceObservation{state:wire::ServiceState::Enabled,..absent}),true),

@@ -92,15 +92,36 @@ struct Report {
     phase:u32,service_state:u32,called:u32,reserved:u32,
     #[cfg(feature="e2-native-fixture")] fixture_lookup:FixtureBundleLookup,
 }
+fn registration_return(raw:Report)->Option<(bool,&'static str)> {
+    if raw.version!=4 || raw.action!=1 || raw.entered!=1 || raw.returned!=1
+        || raw.reserved&!0x0f07!=0 || raw.reserved&1==0 {return None;}
+    let category=raw.reserved>>8;
+    let labels=["none","internal-failure","invalid-signature","authorization-failure",
+        "tool-not-valid","job-not-found","service-unavailable","job-plist-not-found",
+        "job-must-be-enabled","invalid-plist","launch-denied-by-user","already-registered",
+        "other-service-error","other-error-domain"];
+    if category>=labels.len() as u32 || (category!=0)!=(raw.reserved&4!=0) {return None;}
+    Some((raw.reserved&2!=0,labels[category as usize]))
+}
+fn report_version_valid(raw:Report,action:Action)->bool {
+    if raw.version==2 {return raw.reserved==0;}
+    if !cfg!(feature="installed-observation") || raw.version!=4 || action!=Action::RequestRegistration {return false;}
+    if raw.returned==0 {return raw.reserved==0;}
+    let Some((accepted,error))=registration_return(raw) else{return false;};
+    let expected=match (accepted,error) {(true,"none")=>2,(_,"already-registered")=>3,
+        (_,"launch-denied-by-user")=>9,_=>7};
+    raw.outcome==expected || raw.unknown==1 && raw.outcome==8
+        || raw.phase>=5 && raw.status==5 && raw.outcome==7
+}
 fn decode(raw:Report,action:Action,phase:Phase)->Option<Observation> {
     #[cfg(feature="e2-native-fixture")]
     if !raw.fixture_lookup.valid() || raw.fixture_lookup.observed()
         && (action!=Action::Observe || !matches!(phase,Phase::ObserveStatus|Phase::ReleaseService)
             || raw.status==4) { return None; }
     if action==Action::UnregisterAfterQuiescence{return decode_maintenance(raw,phase);}
-    if raw.version!=2 || raw.action!=action.code() || Some(raw.phase)!=phase.code()
+    if !report_version_valid(raw,action) || raw.action!=action.code() || Some(raw.phase)!=phase.code()
         || raw.status>5 || raw.outcome>9 || raw.entered>1 || raw.returned>raw.entered
-        || raw.cleanup_known>1 || raw.unknown>1 || raw.called!=1 || raw.reserved!=0
+        || raw.cleanup_known>1 || raw.unknown>1 || raw.called!=1
         || raw.service_state>5
         || (raw.unknown==1)!=(raw.outcome==8)
         || raw.unknown==1 && (raw.cleanup_known!=0 || raw.outcome!=8)
@@ -373,6 +394,10 @@ pub struct ServiceManager {
 }
 impl Default for ServiceManager { fn default()->Self { Self::new() } }
 impl ServiceManager {
+    /// Copied finite diagnostic only; never queries native state or grants Ready.
+    pub fn registration_return(&self)->Option<(bool,&'static str)> {
+        registration_return(self.report)
+    }
     pub fn new()->Self { Self {
         pointer:None,active:None,next:Phase::AllocateCell,report:Report::default(),observation:None,
         action_admitted:false,cell:CellCustody::Absent,service:ServiceCustody::NotAcquired,
@@ -542,6 +567,8 @@ impl ServiceManager {
                 #[cfg(feature="e2-native-fixture")]
                 if self.report.fixture_lookup.observed() && raw.fixture_lookup!=self.report.fixture_lookup { return false; }
                 raw.entered>=self.report.entered && raw.returned>=self.report.returned
+                    && (self.report.version!=4 || self.report.reserved==0
+                        || raw.version==4 && raw.reserved==self.report.reserved)
             });
             if let Some(observation)=decoded {
                 self.report=raw;
@@ -760,6 +787,30 @@ impl IdentityBook {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn registration_diagnostic_preserves_return_without_changing_original_outcome() {
+        let original=Report{version:4,action:1,status:3,outcome:7,entered:1,returned:1,
+            phase:4,service_state:2,called:1,reserved:5|(7<<8),..Report::default()};
+        assert_eq!(registration_return(original),Some((false,"job-plist-not-found")));
+        assert_eq!(decode(original,Action::RequestRegistration,Phase::Mutate).is_some(),cfg!(feature="installed-observation"));
+        for bad in [Report{version:2,..original},Report{returned:0,..original},
+            Report{reserved:5|(14<<8),..original},Report{reserved:1|(7<<8),..original},
+            Report{reserved:original.reserved|8,..original},Report{outcome:2,..original},
+            Report{action:0,..original}] {
+            assert!(decode(bad,Action::RequestRegistration,Phase::Mutate).is_none());
+        }
+        for category in 0..=13 {
+            let outcome=match category{10=>9,11=>3,_=>7};
+            let raw=Report{outcome,reserved:1|if category>0{4|(category<<8)}else{0},..original};
+            assert!(registration_return(raw).is_some());
+            assert_eq!(decode(raw,Action::RequestRegistration,Phase::Mutate).is_some(),cfg!(feature="installed-observation"));
+        }
+        let accepted=Report{outcome:2,reserved:3,..original};
+        assert_eq!(registration_return(accepted),Some((true,"none")));
+        let legacy=Report{version:2,reserved:0,..original};
+        assert!(decode(legacy,Action::RequestRegistration,Phase::Mutate).is_some());
+        assert_eq!(registration_return(legacy),None);
+    }
     #[test]
     fn signing_report_requires_exact_phase_slot_and_consuming_return() {
         assert_eq!(std::mem::size_of::<IdentityReport>(),80);

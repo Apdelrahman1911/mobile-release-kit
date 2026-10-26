@@ -19,6 +19,8 @@ def main():
     parser.add_argument('--transport', action='store_true')
     parser.add_argument('--dialog', action='store_true')
     parser.add_argument('--git-test-bin', type=Path)
+    parser.add_argument('--observer-test-bin', type=Path,
+                        help='compiled observer with recorded runtime inputs; runs DATA contracts only')
     parser.add_argument('--output', type=Path, required=True)
     args = parser.parse_args()
     if sys.platform != 'darwin' or sys.version_info < (3, 11) or os.getuid() == 0:
@@ -48,18 +50,39 @@ def main():
         'test_retained_workflow_adds_only_closed_git_operation_and_preserves_original_handoff_and_clocks'])
     run('candidate-checkpoints', [sys.executable, '-m', 'unittest',
         'tests.desktop.test_macos_candidate_stages'])
+    for profile, defines in (('ordinary', []), ('observed', ['-DMRK_INSTALLED_OBSERVATION'])):
+        service = output / ('macos-service-phases-' + profile)
+        run('native-service-compile-' + profile, ['/usr/bin/xcrun', 'clang', '-fno-objc-arc', *defines,
+            '-framework', 'Foundation', '-framework', 'ServiceManagement', '-framework', 'Security',
+            'tests/desktop/macos_service_phase_smoke.m', '-o', str(service)])
+        run('native-service-phases-' + profile, [str(service)],
+            expected_output=b'16 actual Objective-C phase cases passed; service and gate edges inert')
     executable = output / 'macos-dialog-smoke'
     run('native-dialog-compile', ['/usr/bin/xcrun', 'clang', '-fno-objc-arc', '-fblocks',
         '-framework', 'AppKit', '-framework', 'ApplicationServices',
         'tests/desktop/macos_dialog_smoke.m', '-o', str(executable)])
     run('native-dialog-allowances', [str(executable), '--allowance-contract'])
+    if args.observer_test_bin:
+        run('observer-data-contracts', [str(args.observer_test_bin.resolve(strict=True)), 'data-contracts'],
+            expected_output=b'MRK_MACOS_DATA_CONTRACTS=passed')
     if args.git_test_bin:
         test_bin = args.git_test_bin.resolve(strict=True)
         env['RUST_MIN_STACK'] = '16777216'
         run('native-git-sources', [str(test_bin), 'git_sources_native_tests', '--ignored', '--test-threads=1'],
             expected_output=b'2 passed; 0 failed')
+        # Match Finder's hidden Library ancestor without changing the owner's
+        # Library or any installation. Only this new disposable directory gets
+        # the harmless presentation flag; real source/ACL checks still run.
+        hidden = temporary / 'hidden-library'; hidden.mkdir(mode=0o700)
+        os.chflags(hidden, 0x00008000)
+        env['TMPDIR'] = str(hidden)
+        try:
+            run('native-git-hidden-ancestor', [str(test_bin), 'git_sources_native_tests', '--ignored', '--test-threads=1'],
+                expected_output=b'2 passed; 0 failed')
+        finally:
+            env['TMPDIR'] = str(temporary)
         run('git-source-flags', [str(test_bin), 'git_source_flags::tests', '--test-threads=1'],
-            expected_output=b'3 passed; 0 failed')
+            expected_output=b'4 passed; 0 failed')
     if args.transport:
         env['MRK_RUN_LOCAL_MAC_SMOKE'] = '1'
         run('native-transport', [sys.executable, '-m', 'unittest', 'discover', '-s', 'tests/desktop',

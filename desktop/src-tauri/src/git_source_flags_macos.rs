@@ -9,12 +9,17 @@ pub(super) enum Kind { SystemGit, Directory, RepositoryFile }
 // root-owned CLT executable. System directories may carry SF_RESTRICTED,
 // SF_NOUNLINK, SF_FIRMLINK and UF_HIDDEN (the real /private Finder flag).
 const COMPRESSED: u32 = 0x00000020;
-const ANCESTOR_FLAGS: u32 = 0x00080000 | 0x00100000 | 0x00800000 | 0x00008000;
+const HIDDEN: u32 = 0x00008000;
+const ANCESTOR_FLAGS: u32 = 0x00080000 | 0x00100000 | 0x00800000 | HIDDEN;
 
 pub(super) fn permits(flags: u32, owner: u32, kind: Kind) -> bool {
     let allowed = match (owner, kind) {
         (0, Kind::SystemGit) => COMPRESSED,
         (0, Kind::Directory) => ANCESTOR_FLAGS,
+        // Finder hides the ordinary user's Library. This display flag does
+        // not grant write access; callers still require the original owner,
+        // mode, ACL and held/named identity, with unchanged flags on POST.
+        (_, Kind::Directory) => HIDDEN,
         _ => 0,
     };
     flags & !allowed == 0
@@ -57,6 +62,21 @@ mod tests {
             if flags & ANCESTOR_FLAGS == 0 { assert!(!permits(flags, 0, Kind::Directory)); }
             if flags != COMPRESSED { assert!(!permits(flags, 0, Kind::SystemGit)); }
         }
+    }
+    #[test]
+    fn hidden_user_library_is_an_ancestor_not_a_mutable_git_source() {
+        assert!(permits(HIDDEN, 501, Kind::Directory));
+        for kind in [Kind::SystemGit, Kind::RepositoryFile] {
+            assert!(!permits(HIDDEN, 501, kind));
+        }
+        for bit in 0..32 {
+            let flags = 1 << bit;
+            if flags != HIDDEN { assert!(!permits(flags, 501, Kind::Directory)); }
+        }
+        let mut snapshots = Snapshots::<1>::new();
+        assert_eq!(snapshots.observe(0, HIDDEN, HIDDEN, 501, Kind::Directory), Ok(()));
+        assert_eq!(snapshots.observe(0, HIDDEN, 0, 501, Kind::Directory), Err(Reason::SourceChanged));
+        assert_eq!(snapshots.observe(0, 0, 0, 501, Kind::Directory), Err(Reason::SourceChanged));
     }
     #[test]
     fn held_named_and_later_original_flags_must_match() {

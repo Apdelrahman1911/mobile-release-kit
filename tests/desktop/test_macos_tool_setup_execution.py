@@ -54,6 +54,40 @@ class PassiveOnly(unittest.TestCase):
 
 
 class ServiceReports(PassiveOnly):
+    def test_original_registration_error_is_visible_without_claiming_readiness(self):
+        value = service(False)
+        value['finding'] = 'service-not-found'
+        value['terminal'] = {'validation': 'terminal', 'statusValid': True, 'phase': 'refused',
+            'reason': 'service-unavailable', 'prerequisite': 'service-unavailable',
+            'observation': {'state': 'not-found', 'outcome': 'error', 'mutationEntered': True,
+                'mutationReturned': True, 'mutationUncertain': False, 'nativeSettled': True},
+            'registrationReturn': {'accepted': False, 'error': 'job-plist-not-found'}}
+        self.assertIs(T.service_report(value, OBS.need), value)
+        binding = OBS.Binding('a' * 40, '1', '1')
+        expected = OBS.expected_result(binding, T.SERVICE_CASE)
+        expected['toolSetup'] = value
+        framed = OBS.MARKER + json.dumps(expected, separators=(',', ':')).encode() + b'\n'
+        self.assertEqual(OBS.parse_result(framed, b'', binding, T.SERVICE_CASE)['toolSetup'], value)
+        for change in ({'error': 'private/path'}, {'accepted': 1}, {'code': 8}):
+            changed = copy.deepcopy(value)
+            changed['terminal']['registrationReturn'].update(change)
+            with self.subTest(change=change), self.assertRaises(OBS.Refused):
+                T.service_report(changed, OBS.need)
+        for change in ({'mutationReturned': False}, {'nativeSettled': False}, {'mutationUncertain': True}):
+            changed = copy.deepcopy(value)
+            changed['terminal']['observation'].update(change)
+            with self.subTest(change=change), self.assertRaises(OBS.Refused):
+                T.service_report(changed, OBS.need)
+        # A refused reservation retains the pre-status, with no native call.
+        refused = copy.deepcopy(value)
+        del refused['terminal']['registrationReturn']
+        refused['terminal']['observation'].update(outcome='refused', mutationEntered=False, mutationReturned=False)
+        self.assertIs(T.service_report(refused, OBS.need), refused)
+        changed = copy.deepcopy(value)
+        changed.update(execution='ready', finding='ready', checkCalls=1, checkAdmitted=True, checkSettled=True)
+        with self.assertRaises(OBS.Refused):
+            T.service_report(changed, OBS.need)
+
     def test_ready_and_known_nonentry_are_distinct_after_real_caller_boundary(self):
         for value in (service(), service(False), service(False, nonentry=True)):
             self.assertIs(T.service_report(value, OBS.need), value)

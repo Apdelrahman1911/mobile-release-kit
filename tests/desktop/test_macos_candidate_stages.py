@@ -433,10 +433,12 @@ class CandidateWorkflowTests(unittest.TestCase):
         expression=job['strategy']['matrix']['include']
         literals=re.findall(r"fromJSON\('([^']+)'\)",expression)
         self.assertEqual(len(literals),2)
-        singles,rows=map(json.loads,literals)
-        self.assertEqual(singles,{r['group']:[r] for r in rows})
-        self.assertEqual({r['group'] for r in rows},{'git-local','git-fetch','git-push','git-create','git-upstream',
+        singles,initial=map(json.loads,literals)
+        self.assertEqual(set(singles),{'git-local','git-fetch','git-push','git-create','git-upstream',
             'service-cli','public-acquisition','sdk-registration','upload-keys','cold-restart','backup'})
+        self.assertEqual(initial,[singles['git-local'][0],singles['service-cli'][0]])
+        self.assertTrue(all(len(rows)==1 and rows[0]['group']==name for name,rows in singles.items()))
+        rows=[r[0] for r in singles.values()]
         steps=job['steps'];commands='\n'.join(r.get('run','') for r in steps)
         self.assertIn('mktemp -d',commands)
         self.assertIn('filter=all&per_page=100',commands)

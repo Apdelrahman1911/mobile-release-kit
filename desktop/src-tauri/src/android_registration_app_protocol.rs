@@ -167,6 +167,9 @@ pub(crate) struct ServiceObservation {
     pub(crate) state: ServiceState, pub(crate) outcome: ServiceOutcome,
     pub(crate) mutation_entered: bool, pub(crate) mutation_returned: bool,
     pub(crate) mutation_uncertain: bool, pub(crate) native_settled: bool,
+    // Nonshipping native v4 DATA. Ordinary UI protocol remains unchanged.
+    #[serde(skip)]
+    pub(crate) registration_return: Option<(bool, &'static str)>,
 }
 // Failure-only, finite DATA from the SAME original identity preparation. These
 // labels do not imply native entry, signature acceptance or Service readiness.
@@ -646,7 +649,7 @@ mod tests {
             availability:Availability::Available,prerequisite:Prerequisite::ApprovalRequired,
             phase:ServicePhase::Complete,reason:Reason::None,operation:Some(operation),
             identity_failure:None,
-            observation:Some(ServiceObservation {state:ServiceState::RequiresApproval,outcome:ServiceOutcome::Observed,
+            observation:Some(ServiceObservation {registration_return:None,state:ServiceState::RequiresApproval,outcome:ServiceOutcome::Observed,
                 mutation_entered:false,mutation_returned:false,mutation_uncertain:false,native_settled:true})};
         // Setup can finish correctly while native approval is still required.
         assert!(status.valid());
@@ -665,7 +668,7 @@ mod tests {
         status.observation.as_mut().unwrap().native_settled=false;assert!(!status.valid());
         status.observation=None;status.phase=ServicePhase::Unknown;status.reason=Reason::CleanupUnknown;
         status.availability=Availability::CleanupUnknown;assert!(status.valid());
-        status.observation=Some(ServiceObservation {state:ServiceState::Enabled,outcome:ServiceOutcome::AlreadyRegistered,
+        status.observation=Some(ServiceObservation {registration_return:None,state:ServiceState::Enabled,outcome:ServiceOutcome::AlreadyRegistered,
             mutation_entered:false,mutation_returned:false,mutation_uncertain:false,native_settled:true});
         assert!(!status.valid()); // Known-looking callback DATA cannot rewrite Unknown finality.
     }

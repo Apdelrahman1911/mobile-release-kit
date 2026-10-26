@@ -2,6 +2,70 @@
 
 ## Latest Mac continuation — 2026-10-26
 
+Tool retry [40364299644](https://github.com/Apdelrahman1911/mobile-release-kit/actions/runs/40364299644)
+finished with failure on source `61b0c21096ac2e772ac221006d951301cba32a34`,
+attempt1/job121717724392. Install/signature/readback/detach and actual Open
+Project passed. The explicit service request settled with service-not-found;
+Check and CLI were not entered. Its monitor has finished; no run is active.
+
+The read-only Apple diagnostic returned four matching events without an error
+code. Local read-only disposable fixtures reproduce Apple's "record not found"
+status with the expected plist present: it means a missing registration record,
+not proven missing service files. Do not move files based on that log. The next
+change must expose the original native registration return and terminal state,
+then combine that observation with the locally verified pending Git correction
+in a fresh signed candidate. No local service was registered or removed.
+
+The pending candidate combines the independently reproduced Git hidden-Library
+correction with finite service diagnostics. Observed native registration uses a
+version4 report of the same48-byte ABI; ordinary v2 and maintenance v3 keep their
+existing layout/semantics. Only returned BOOL and a fixed error category survive;
+no NSError, description, path, credential or additional service query is retained.
+The final prerequisite report now includes the actual entered/returned/outcome
+and that returned native category. Ready still requires joined registration and
+a separate fresh Enabled Check. This diagnostic is not a service fix or pass.
+
+Local checks:16 actual Objective-C phase cases pass in each of ordinary and
+observed builds with inert service/gate edges (no OS registration);14 native
+service Rust tests,14 app service/callback tests,69 parser/checkpoint/runtime
+tests, and10 preflight steps including real disposable DMG transport pass.
+Python tests required the source import path and a physical temporary directory;
+the first missing-module/symlink-path attempts were failures, then passed using
+the actual evidence/tmp path. Signed execution remains required.
+
+The full observed application now compiles locally and its actual
+`data-contracts` entry returns `MRK_MACOS_DATA_CONTRACTS=passed`. The initial
+unbound local build correctly refused its missing runtime manifest/protocol
+inputs; the passing build uses explicit hashes from the saved runtime only for
+local DATA checks (`service-return-local-compile-inputs.json`). A temporary
+non-static diagnostic format failed compilation and was corrected to fixed
+compile-time strings before this passing build. No native fixture or UI entered.
+The exact new CI check also passed locally against that binary: it verifies the
+compiler artifact digest and runs startup contracts before helper builds or
+notarization. The final10-step local preflight includes that observed executable.
+
+New pushes run only git-local and service-cli after the two build checkpoints.
+The other nine independent groups remain mandatory and must be dispatched with
+the new saved source/run after the initial checks pass. Existing source769
+packages do not qualify these changed application bytes.69 final targeted tests,
+workflow actionlint, and diff checks pass. The current change needs a fresh
+signed candidate; no service registration success is claimed yet.
+
+Run40355507324 finished with failure at the service prerequisite. The extended
+cold compiler budget worked: producer compilation, signing, Installer, readback
+and detach all passed. Actual Open Project also passed. The explicit service
+request settled with `service-not-found`; Check and CLI were not entered. The
+existing report does not expose Apple's underlying native error code, so it
+cannot yet establish why registration did not produce a ready service.
+
+The pending Git correction also has a fast standalone host check. It compiles
+the actual application flag module directly with the pinned Rust compiler and
+checks real CLT Git and user Library ancestors before expensive CI preparation.
+All five checks pass locally (under one second including compilation). The local
+preflight also passes both real source checks beneath a newly created hidden
+ancestor. It never changes the owner's Library or installed application. These
+checks supplement, rather than replace, the pending signed application test.
+
 Tool retry40351985673 repeated the producer-tests deadline before Installer.
 The saved-candidate compiler now has one900-second cold test/build envelope
 instead of480; only that compile budget and its enclosing package budget
@@ -39,9 +103,9 @@ remained unknown; no signing credential context or Installer had been entered.
 The exact cold compiler/test sequence passed locally in147.96 seconds; its
 following producer build and actual compiler-graph parser passed in3.04 seconds.
 This local check used no credentials or installed application.
-Retry40351985673 uses the existing8c18718f receipt correction and the same saved
-Tool package. Git retry40349520933 is also active. Check the private ledger and
-GitHub results before further dispatch. Do not rebuild either saved package.
+Both those earlier retries are now failed; their exact results are recorded
+above. Tool retry40364299644 has also failed as recorded above. Check the private
+ledger and GitHub results before further dispatch.
 
 Run40152218901 attempt1 failed. Git27 built and saved its signed package
 (artifact12585453039, origin769bd80d); Tool26's payload notarization returned1

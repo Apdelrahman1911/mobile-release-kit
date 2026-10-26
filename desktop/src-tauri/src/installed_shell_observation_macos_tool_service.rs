@@ -140,6 +140,13 @@ impl FailureSample {
         }
     }
     pub(crate) fn value(self) -> Value { json!(self) }
+    fn terminal_value(self)->Value {
+        let mut value=self.value();
+        if let Some((accepted,error))=self.observation.and_then(|value|value.registration_return) {
+            value["registrationReturn"]=json!({"accepted":accepted,"error":error});
+        }
+        value
+    }
 }
 
 #[derive(Default)]
@@ -153,6 +160,7 @@ pub(super) struct Record {
     finding: Option<Finding>,
     nonentry: bool,
     pub(super) failure: Option<FailureSample>,
+    terminal: Option<FailureSample>,
 }
 impl Record {
     pub(super) fn retained_bytes(&self) -> Option<usize> {
@@ -192,7 +200,7 @@ impl Record {
     pub(super) fn report(&self, control: &Control, normal_quit: bool) -> Option<Value> {
         if !normal_quit || !control.completed() || !self.complete()
             || control.unexecuted.load(super::Ordering::SeqCst) == self.ready() { return None; }
-        Some(json!({"mechanism":"same-original-tool-service-prerequisite-v1",
+        let mut value=json!({"mechanism":"same-original-tool-service-prerequisite-v1",
             "execution":if self.ready(){"ready"}else{"not-executed-prerequisite"},
             "finding":self.finding?.name(),"requestCalls":u8::from(self.request_called),
             "checkCalls":u8::from(self.check_called),"requestAdmitted":self.request.is_some(),
@@ -200,7 +208,11 @@ impl Record {
             "checkSettled":self.check_settled,"knownNonentry":self.nonentry,
             "sameOriginalBindings":true,"normalQuitOriginal":2,"allOriginalsSettled":true,
             "projectSentinelPreserved":true,"sourceInputsRead":false,"toolAcquisitionEntered":false,
-            "settingsOpened":false,"serviceUnregistered":false,"productionQualified":false}))
+            "settingsOpened":false,"serviceUnregistered":false,"productionQualified":false});
+        if let Some(sample)=self.terminal {
+            value["terminal"]=sample.terminal_value();
+        }
+        Some(value)
     }
 }
 
@@ -275,7 +287,8 @@ pub(super) async fn tick(q: &Arc<Observation>, document: &DocumentBinding, step:
                 record(q, |r| {
                     if check {if r.check_settled{return Err(invalid());} r.check_settled=true;}
                     else {if r.request_settled{return Err(invalid());} r.request_settled=true;}
-                    r.finding=Some(finding); Ok(())
+                    r.finding=Some(finding);
+                    r.terminal=Some(FailureSample::capture(Validation::Terminal,&status)); Ok(())
                 })?;
                 Some(super::Step::Prerequisite(if !check && finding==Finding::Ready {Step::Check}else{Step::Finish}))
             }
@@ -360,7 +373,7 @@ pub(super) fn data_checks() -> bool {
         identity_failure:None,
         operation:Some(wire::ServiceOperation {operation_id:"c".repeat(32),setup_generation:1,source_generation:0,
             action:request.action,context}),
-        observation:Some(wire::ServiceObservation {state:wire::ServiceState::Enabled,outcome:wire::ServiceOutcome::AlreadyRegistered,
+        observation:Some(wire::ServiceObservation {registration_return:None,state:wire::ServiceState::Enabled,outcome:wire::ServiceOutcome::AlreadyRegistered,
             mutation_entered:false,mutation_returned:false,mutation_uncertain:false,native_settled:true})};
     let Some(binding)=Binding::capture(&status,&request) else {return false;};
     if !binding.matches(&status) || terminal(&status,request.action)!=Some(Finding::Ready)
@@ -406,7 +419,7 @@ pub(super) fn data_checks() -> bool {
     if !status.valid() || !binding.matches(&status) || !pending(status.phase)
         || terminal(&status,request.action).is_some() {return false;}
     status.phase=wire::ServicePhase::Refused;
-    status.observation=Some(wire::ServiceObservation {state:wire::ServiceState::RequiresApproval,outcome:wire::ServiceOutcome::NeedsApproval,
+    status.observation=Some(wire::ServiceObservation {registration_return:None,state:wire::ServiceState::RequiresApproval,outcome:wire::ServiceOutcome::NeedsApproval,
         mutation_entered:false,mutation_returned:false,mutation_uncertain:false,native_settled:true});
     if !status.valid() || pending(status.phase) || terminal(&status,request.action)!=Some(Finding::Approval) {return false;}
     let mut approval=Record {request_called:true,request:Some(binding.clone()),request_settled:true,
@@ -427,7 +440,19 @@ pub(super) fn data_checks() -> bool {
     if !status.valid() || terminal(&status,request.action)!=Some(Finding::Approval) {return false;}
     status.phase=wire::ServicePhase::Refused;status.reason=wire::Reason::ApprovalDenied;
     status.availability=build::Availability::Available;status.prerequisite=wire::Prerequisite::ApprovalDenied;
-    status.observation=Some(wire::ServiceObservation {state:wire::ServiceState::RequiresApproval,outcome:wire::ServiceOutcome::DeniedByUser,
+    status.observation=Some(wire::ServiceObservation {registration_return:None,state:wire::ServiceState::RequiresApproval,outcome:wire::ServiceOutcome::DeniedByUser,
         mutation_entered:true,mutation_returned:true,mutation_uncertain:false,native_settled:true});
-    terminal(&status,request.action)==Some(Finding::Denied)
+    if terminal(&status,request.action)!=Some(Finding::Denied) {return false;}
+    status.reason=wire::Reason::ServiceUnavailable;status.prerequisite=wire::Prerequisite::ServiceUnavailable;
+    status.observation=Some(wire::ServiceObservation{state:wire::ServiceState::NotFound,
+        outcome:wire::ServiceOutcome::Error,mutation_entered:true,mutation_returned:true,
+        mutation_uncertain:false,native_settled:true,registration_return:Some((false,"job-plist-not-found"))});
+    let sample=FailureSample::capture(Validation::Terminal,&status);
+    terminal(&status,request.action)==Some(Finding::Missing)
+        && sample.terminal_value()==json!({"validation":"terminal","statusValid":true,
+            "phase":"refused","reason":"service-unavailable","prerequisite":"service-unavailable",
+            "observation":{"state":"not-found","outcome":"error","mutationEntered":true,
+                "mutationReturned":true,"mutationUncertain":false,"nativeSettled":true},
+            "registrationReturn":{"accepted":false,"error":"job-plist-not-found"}})
+        && sample.value().get("registrationReturn").is_none()
 }
