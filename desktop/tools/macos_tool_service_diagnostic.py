@@ -111,6 +111,93 @@ def collect(run_owned, environment, root):
         return dict(report, state='call-unknown')
 
 
+def background_tasks(body, current_uid):
+    """Finite persistent BTM records, never a fresh SMAppService observation.
+
+    Apple can retain a disabled/pending record after unregister succeeds. These
+    records explain an approval prerequisite; they cannot prove registration,
+    launch eligibility, current service status or successful cleanup.
+    """
+    need(type(body) is bytes and 0 < len(body) <= LIMIT
+         and type(current_uid) is int and 0 < current_uid < (1 << 31))
+    lines = body.decode('utf-8').splitlines()
+    need(len(lines) <= 8192 and all(len(line) <= 8192 for line in lines))
+    result = []
+    fields = {}
+    scope = None
+    active = False
+    headers = 0
+    own = '16.' + IDS[1]
+    relevant = ('Identifier', 'Type', 'Disposition', 'URL', 'Executable Path', 'Parent Identifier')
+
+    def finish():
+        if own not in fields.get('Identifier', []):
+            return
+        need(active and scope is not None and len(result) < 16
+             and all(len(fields.get(key, [])) == 1 for key in relevant))
+        need(fields['Identifier'] == [own] and fields['Type'] == ['daemon (0x10)'])
+        match = re.fullmatch(r'\[([^\[\]]+)\]( \(pending authorization\))? \(0x([0-9a-f]{1,8})\)',
+                             fields['Disposition'][0])
+        need(match is not None)
+        words = match[1].split(', ')
+        need(len(words) == 3 and words[0] in ('enabled', 'disabled')
+             and words[1] in ('allowed', 'disallowed') and words[2] in ('notified', 'not notified'))
+        plist = 'Contents/Library/LaunchDaemons/' + IDS[1] + '.plist'
+        executable = 'Contents/Helpers/mrk-android-register'
+        result.append({'scope': scope, 'type': 'daemon',
+            'disposition': [word.replace(' ', '-') for word in words],
+            'pendingAuthorization': match[2] is not None, 'dispositionBits': int(match[3], 16),
+            'plist': 'payload-relative-match' if fields['URL'][0] == plist else
+                'payload-absolute-match' if fields['URL'][0] == INNER + '/' + plist else 'other',
+            'executable': 'payload-relative-match' if fields['Executable Path'][0] == executable else
+                'payload-absolute-match' if fields['Executable Path'][0] == INNER + '/' + executable else 'other',
+            'parent': 'payload-identifier-match' if fields['Parent Identifier'][0] == '2.' + IDS[0] else 'other'})
+
+    for line in lines:
+        header = re.fullmatch(r'\s*Records for UID (-?(?:0|[1-9][0-9]{0,9})) : [0-9A-Fa-f-]{36}\s*', line)
+        if header:
+            finish()
+            uid = int(header[1])
+            need(-2 <= uid < (1 << 31))
+            headers += 1
+            scope = 'system' if uid == -2 else 'root' if uid == 0 else 'current-user' if uid == current_uid else 'other-user'
+            fields = {}
+            active = False
+        elif re.fullmatch(r'\s*#[1-9][0-9]{0,5}:\s*', line):
+            finish()
+            fields = {}
+            active = True
+        elif active:
+            field = re.fullmatch(r'\s*([^:]+): (.*)', line)
+            if field and field[1] in relevant:
+                fields.setdefault(field[1], []).append(field[2])
+    finish()
+    need(headers > 0)
+    return {'state': 'observed' if result else 'empty', 'matchingRecords': len(result), 'records': result,
+            'persistentRecordsOnly': True, 'recordsMayRemainAfterUnregister': True,
+            'serviceQualified': False}
+
+
+def collect_background_tasks(run_owned, environment, root, current_uid):
+    argv = ['/usr/bin/sfltool', 'dumpbtm']
+    report = {'diagnosticOnly': True, 'serviceQualified': False, 'originalCallReturned': False}
+    try:
+        result = run_owned(argv, environ=environment, cwd=root, timeout=20,
+                           capture=True, text=False, output_limit=LIMIT)
+        need(type(result) is subprocess.CompletedProcess and result.args == argv
+             and type(result.returncode) is int and type(result.stdout) is bytes
+             and type(result.stderr) is bytes and len(result.stdout) + len(result.stderr) <= LIMIT)
+        report.update(originalCallReturned=True, returncode=result.returncode)
+        if result.returncode:
+            return dict(report, state='call-failed')
+        try:
+            return dict(report, **background_tasks(result.stdout, current_uid))
+        except (ValueError, UnicodeError):
+            return dict(report, state='unparseable')
+    except Exception:
+        return dict(report, state='call-unknown')
+
+
 def main():
     if (sys.platform != 'darwin' or os.getuid() == 0
             or os.environ.get('RUNNER_ENVIRONMENT') != 'github-hosted'
@@ -126,7 +213,11 @@ def main():
     owner = module.load_owner(root)
     environment = {'PATH': '/usr/bin:/bin:/usr/sbin:/sbin', 'HOME': '/Users/runner',
                    'LANG': 'C', 'LC_ALL': 'C', 'TZ': 'UTC'}
-    print(json.dumps(collect(owner.run_owned, environment, root), sort_keys=True))
+    report = collect(owner.run_owned, environment, root)
+    # Do not start another diagnostic after an unknown original process return.
+    if report['originalCallReturned']:
+        report['backgroundTasks'] = collect_background_tasks(owner.run_owned, environment, root, os.getuid())
+    print(json.dumps(report, sort_keys=True))
 
 
 if __name__ == '__main__':

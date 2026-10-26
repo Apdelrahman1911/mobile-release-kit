@@ -2,6 +2,47 @@
 
 ## Current continuation — 2026-10-27
 
+The Git-only retry40412633220 finished with failure before Open Project or any
+Git operation. Signing, Installer, readback and detach passed. Bootstrap then
+reported `bootstrap-info-runtime-state` / `query_timeout` from query-wait.
+The app's original return/finality is unknown, although process containment
+cleanup completed. Do not call this a Git-source failure or an installed test
+pass. Monitor79328 has completed; inspect bootstrap's actual query owner next.
+
+A harness-only service diagnostic now reads Apple's persistent background-task
+records after a known returned log diagnostic. It reports only the fixed daemon's
+finite fields, never raw host records or service readiness.51 focused tests pass
+with a checked physical temporary directory, including six diagnostic checks.
+Two earlier temporary-directory attempts failed and are retained as failures.
+The three excluded baseline packaging methods still have four known attribute
+errors; they have not been fixed or counted as passes. Actionlint/diff checks pass.
+This harness change can reuse the source660 signed packages for a service-only
+retry; no application/native bytes changed and no new candidate is claimed.
+
+Real disposable local registration returned `false`, SMAppService-domain code1,
+then the same original's status became RequiresApproval in both single/nested
+bundles. Each unique original was successfully unregistered and its final status
+was NotRegistered. No working service, installation or credentials were touched.
+Read-only background-task DATA still contains a pending/disabled historical
+record after unregister: these records cannot replace a fresh native status.
+Apple's public header requires administrator approval before such daemons can
+bootstrap. This is a local finding, not proof of the hosted error's numeric code.
+
+Tool artifact12690494428 was downloaded and its exact295030014-byte archive and
+all member hashes verified. The unchanged package/inventory reader parsed7227
+files and confirmed the expected payload plist, helper path and bundle identity.
+No payload was installed/executed. pkgutil's separate Scripts expansion failed;
+that attempt is not a completed extraction. Preserve normal signing/admission.
+
+### Previous same-source retry
+
+The harness-only correction is committed/pushed as
+`82803e50745974ab920b04514b2335742a812882` (`[skip ci]`). Git-only retry
+[40412633220](https://github.com/Apdelrahman1911/mobile-release-kit/actions/runs/40412633220),
+job121886933303, is running against the saved source660 package. The complete
+GitHub ancestor comparison passed the existing harness allowlist. Monitor79328
+tracks this retry; the earlier run monitors have completed.
+
 Both signed build checkpoints for source `660493197818275da7239240b4a1b34eb24c32f4`
 succeeded in run40394195932. Their immutable saved package IDs/hashes are below.
 The original run and single Git retry40410215913 have now finished with failures;

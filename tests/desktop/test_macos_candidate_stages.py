@@ -78,6 +78,68 @@ class ServiceLogDiagnosticTests(unittest.TestCase):
         self.assertFalse(result['serviceQualified'])
         self.assertNotIn('CANARY', json.dumps(result))
 
+    def btm(self):
+        m = self.module
+        return (' Records for UID -2 : FFFFEEEE-DDDD-CCCC-BBBB-AAAAFFFFFFFE\n'
+            ' #1:\n'
+            '                 Name: CANARY_PRIVATE_NAME\n'
+            '                 Type: daemon (0x10)\n'
+            '          Disposition: [disabled, disallowed, not notified] (pending authorization) (0x10)\n'
+            '           Identifier: 16.' + m.IDS[1] + '\n'
+            '                  URL: Contents/Library/LaunchDaemons/' + m.IDS[1] + '.plist\n'
+            '      Executable Path: Contents/Helpers/mrk-android-register\n'
+            '    Parent Identifier: 2.' + m.IDS[0] + '\n'
+            ' Records for UID 501 : FFFFEEEE-DDDD-CCCC-BBBB-AAAA000001F5\n'
+            ' #1:\n'
+            '           Identifier: 16.' + m.IDS[1] + '.foreign\n'
+            '                  URL: /CANARY_PRIVATE_PATH\n').encode()
+
+    def test_btm_projects_exact_daemon_records_without_claiming_live_status(self):
+        m = self.module
+        result = m.background_tasks(self.btm(), 501)
+        self.assertEqual(result['matchingRecords'], 1)
+        self.assertEqual(result['records'], [dict(scope='system', type='daemon',
+            disposition=['disabled', 'disallowed', 'not-notified'], pendingAuthorization=True,
+            dispositionBits=16, plist='payload-relative-match', executable='payload-relative-match',
+            parent='payload-identifier-match')])
+        self.assertFalse(result['serviceQualified'])
+        self.assertTrue(result['recordsMayRemainAfterUnregister'])
+        self.assertNotIn('CANARY', json.dumps(result))
+        self.assertNotIn(m.IDS[1], json.dumps(result))
+        self.assertEqual(m.background_tasks(self.btm().replace(m.IDS[1].encode(), b'foreign'), 501)['state'], 'empty')
+
+    def test_btm_malformed_matched_records_are_refused(self):
+        m = self.module
+        body = self.btm()
+        own = ('           Identifier: 16.' + m.IDS[1] + '\n').encode()
+        for raw in (b'CANARY', body.replace(own, own + own), body.replace(b'daemon (0x10)', b'app (0x2)'),
+                body.replace(b'[disabled, disallowed, not notified]', b'[unknown]'),
+                body.replace(b'    Parent Identifier:', b'    Missing Identifier:'),
+                b' ' * (m.LIMIT + 1), body + b'\xff'):
+            with self.subTest(raw=raw[:30]), self.assertRaises((ValueError, UnicodeError)):
+                m.background_tasks(raw, 501)
+
+    def test_btm_original_errors_cannot_grant_service_readiness(self):
+        m = self.module
+        for code, body, state in ((0, self.btm(), 'observed'), (1, b'CANARY', 'call-failed'),
+                                 (0, b'CANARY', 'unparseable')):
+            def owned(argv, **kwargs):
+                self.assertEqual(argv, ['/usr/bin/sfltool', 'dumpbtm'])
+                self.assertEqual(kwargs['timeout'], 20)
+                self.assertEqual(kwargs['output_limit'], m.LIMIT)
+                return subprocess.CompletedProcess(argv, code, body, b'')
+            result = m.collect_background_tasks(owned, {}, ROOT, 501)
+            self.assertEqual(result['state'], state)
+            self.assertTrue(result['originalCallReturned'])
+            self.assertFalse(result['serviceQualified'])
+            self.assertNotIn('CANARY', json.dumps(result))
+        def unknown(*args, **kwargs):
+            raise RuntimeError('CANARY unknown original')
+        result = m.collect_background_tasks(unknown, {}, ROOT, 501)
+        self.assertEqual(result['state'], 'call-unknown')
+        self.assertFalse(result['originalCallReturned'])
+        self.assertFalse(result['serviceQualified'])
+
 
 def native_fixture(scope='git-native'):
     values, manifest, service, consumer = fixture()
