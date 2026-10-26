@@ -7,12 +7,13 @@ import gzip
 import struct
 import zlib
 import subprocess
+import tempfile
 import unittest
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
 
-from tests.desktop.test_macos_prepared_package import P, fixture
+from tests.desktop.test_macos_prepared_package import P, fixture, real_modules
 from tests.desktop import test_macos_identity_current_runtime as D
 from tests.desktop import test_macos_aqua_qualification as A
 
@@ -93,6 +94,67 @@ def native_fixture(scope='git-native'):
 
 
 class CandidateCheckpointTests(unittest.TestCase):
+    def test_dispatch_originals_distinguish_same_source_from_changed_harness(self):
+        _, stage, helper = real_modules()
+        for scope in P.NATIVE_HOSTS:
+            for changed, comparison_present, product_change, expected in (
+                (False, False, False, None),
+                (False, True, False, 'prepared-service-original-roster'),
+                (True, True, False, None),
+                (True, False, False, 'prepared-service-original-roster'),
+                (True, True, True, 'prepared-harness-files'),
+            ):
+                with self.subTest(scope=scope, changed=changed, comparison=comparison_present,
+                                  product_change=product_change), tempfile.TemporaryDirectory() as directory:
+                    root = Path(directory)
+                    checkout, work = root / 'source', root / 'work'
+                    checkout.mkdir(); work.mkdir(mode=0o700)
+                    (checkout / '.git').mkdir()
+                    values, manifest, service, consumer = native_fixture(scope)
+                    if changed:
+                        consumer.update(source='6' * 40, tree='7' * 40)
+                    (checkout / '.git/HEAD').write_text(consumer['source'] + '\n')
+                    service_root = work / 'prepared-service'; service_root.mkdir()
+                    records = dict(service, commit=dict(sha=manifest['origin']['source'],
+                        tree={'sha': manifest['origin']['tree']}))
+                    if comparison_present:
+                        base = dict(sha=manifest['origin']['source'],
+                                    commit={'tree': {'sha': manifest['origin']['tree']}})
+                        records['compatibility'] = dict(status='ahead', ahead_by=1, behind_by=0,
+                            total_commits=1, base_commit=base, merge_base_commit=base,
+                            commits=[dict(sha=consumer['source'], commit={'tree': {'sha': consumer['tree']}})],
+                            files=[dict(filename='desktop/src-tauri/src/main.rs' if product_change else
+                                'desktop/tools/macos_prepared_package.py', status='modified')])
+                    for name, value in records.items():
+                        (service_root / (name + '.json')).write_bytes(P.canonical(value))
+                    (service_root / 'metadata.status').write_bytes(b'0\n')
+                    inputs = work / 'prepared-input'; inputs.mkdir()
+                    for name, body in values.items():
+                        (inputs / name).write_bytes(body)
+                    env = dict(GITHUB_SHA=consumer['source'], GITHUB_WORKFLOW_SHA=consumer['source'],
+                        GITHUB_RUN_ID='41', GITHUB_RUN_ATTEMPT='2', MRK_MACOS_PREPARED_RESUME='true',
+                        GITHUB_WORKFLOW_REF=P.REPOSITORY + '/' + P.WORKFLOW + '@refs/heads/' + P.BRANCH,
+                        MRK_MACOS_PACKAGE_ROLE='installed-shell-observation')
+                    native = mock.Mock(side_effect=AssertionError('native execution is outside this DATA fixture'))
+                    op = helper.Operation(SimpleNamespace(run_owned=native), checkout, work,
+                                          'package-install', env, stage, target=P.TARGETS[0])
+                    # Original opens, reads, hashes, roster checks, provenance and closes are real.
+                    # Only OS resource admission is inert; this fixture cannot install or sign.
+                    with mock.patch.object(P, 'ResourceGuard'):
+                        if expected:
+                            with self.assertRaisesRegex(ValueError, expected):
+                                P.acquire_checkpoint(op, consumer)
+                        else:
+                            actual, binding = P.acquire_checkpoint(op, consumer)
+                            self.assertEqual(actual, values)
+                            self.assertEqual(binding.same_source, not changed)
+                            self.assertTrue(binding.native_compatible)
+                            self.assertEqual(binding.origin, manifest['origin'])
+                    native.assert_not_called()
+                    self.assertTrue(op.receipt['originalClosesKnown'] and op.receipt['targetRetired'])
+                    self.assertFalse(op.receipt['passed'])
+                    self.assertTrue(all(row['closed'] and row['fd'] is None for row in op.entries))
+
     def test_cold_producer_budget_does_not_extend_native_calls_or_ordinary_installs(self):
         from tests.desktop.test_macos_installed_staging import ANDROID_HELPER as H
         values, _, service, consumer = native_fixture('tool-setup')
@@ -466,6 +528,38 @@ class CandidateWorkflowTests(unittest.TestCase):
         self.assertEqual(old['with']['path'],'prepared-built-source')
         self.assertIn('inputs.test_group',self.workflow['concurrency']['group'])
         self.assertIs(self.workflow['concurrency']['cancel-in-progress'],False)
+
+    def test_actual_dispatch_capture_accepts_same_source_and_fetches_only_needed_comparison(self):
+        job = self.saved_test_job()
+        script = next(s['run'] for s in job['steps']
+                      if s['name'].startswith('Capture the exact selected producer attempt'))
+        stub = '''gh() {
+  [[ "$1" == api && $# == 2 ]] || return 90
+  case "$2" in
+    "repos/$GITHUB_REPOSITORY/actions/runs/41/attempts/1") printf '%s\\n' '{"inertRun":true}' ;;
+    "repos/$GITHUB_REPOSITORY/compare/$PRODUCER_SOURCE...$GITHUB_SHA") printf '%s\\n' '{"inertComparison":true}' ;;
+    *) return 91 ;;
+  esac
+}
+'''
+        for source, current, success, comparison in (
+            ('1' * 40, '1' * 40, True, False),
+            ('1' * 40, '6' * 40, True, True),
+            ('invalid', '6' * 40, False, False),
+        ):
+            with self.subTest(source=source, current=current), tempfile.TemporaryDirectory() as directory:
+                work = Path(directory); (work / 'prepared-service').mkdir()
+                env = dict(PATH='/usr/bin:/bin', GITHUB_REPOSITORY=P.REPOSITORY,
+                    PRODUCER_RUN='41', PRODUCER_ATTEMPT='1', PRODUCER_SOURCE=source,
+                    GITHUB_SHA=current, MRK_MACOS_PREPARED_RESUME='true', MRK_MACOS_WORK=str(work))
+                result = subprocess.run(['/bin/bash', '-c', stub + script], env=env,
+                                        capture_output=True, text=True, timeout=5)
+                self.assertEqual(result.returncode == 0, success, result.stderr)
+                self.assertEqual((work / 'prepared-service/compatibility.json').exists(), comparison)
+                status = work / 'prepared-service/metadata.status'
+                self.assertEqual(status.exists(), success)
+                if success:
+                    self.assertEqual(status.read_bytes(), b'0\n')
 
     def test_no_publication_or_production_branch_and_no_signing_credentials_in_artifacts(self):
         job=self.saved_test_job()

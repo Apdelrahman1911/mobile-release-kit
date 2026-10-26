@@ -75,6 +75,9 @@ For a test/packaging script correction, select **Run workflow**, operation
 and one `test_group`. This dispatch does not run either build. GitHub's complete
 ancestor comparison must contain only the finite harness/documentation allowlist;
 native/app/runtime code, compiler inputs, signing profiles and pins cannot change.
+When the current source is the saved source, dispatch accepts that exact match
+without an unnecessary comparison file. Changed test scripts still require the
+complete ancestor comparison and its existing allowlist checks.
 The package reader and small producer build still use the immutable original
 checkout. The current harness and original application source are recorded
 separately. A missing signing credential fails before package download.

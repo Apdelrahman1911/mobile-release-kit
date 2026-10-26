@@ -1,12 +1,70 @@
 # Continue Mobile Release Kit on the owner's Mac
 
+## Current continuation — 2026-10-27
+
+Both signed build checkpoints for source `660493197818275da7239240b4a1b34eb24c32f4`
+succeeded in run40394195932. Their immutable saved package IDs/hashes are below.
+The original run and single Git retry40410215913 have now finished with failures;
+both monitors have completed. No independent test group has succeeded yet.
+
+The Git retry failed before downloading the package: the dispatch's selected
+producer-attempt step incorrectly required its source to differ from the current
+source. The correction accepts an exact source match without a comparison file.
+Changed harness sources still require the complete authenticated ancestor
+comparison. Acquisition selects its exact metadata roster from the held package
+manifest and preserves the original source/tree/hash/close checks.
+
+Both regressions failed before this correction and now pass.48 focused checks
+pass, including real original-file acquisition and both host scopes; workflow
+syntax and diff checks pass. The broader51-test run retains four attribute
+errors in three unrelated packaging fixture methods. Running the original
+source660 baseline reproduces the same four errors among49 tests. They are not
+passes; a byte-identical disposable projection did not resolve macOS automatically
+adding com.apple.provenance. Strict product attribute checks remain in place.
+The next Git-only dispatch can reuse the signed source660 package after this
+harness-only commit. No application or native bytes changed.
+
+The new service diagnostic confirms that Apple's original registration mutation
+entered and returned: `accepted=false`, error category `other-service-error`,
+status `not-found`, outcome `error`, and all originals settled. Installer,
+readback, detach and actual Open Project passed. Check/CLI never entered.
+This excludes a skipped mutation, but the finite category does not identify
+Apple's numeric error. Do not treat it as a plist defect or a service success.
+Investigate the actual native error before retrying service/CLI.
+
 ## Latest Mac continuation — 2026-10-26
+
+Current fresh candidate run: [40394195932](https://github.com/Apdelrahman1911/mobile-release-kit/actions/runs/40394195932),
+source `660493197818275da7239240b4a1b34eb24c32f4`, attempt1. Both signed
+candidate builds succeeded. Git27 saved artifact12692160699
+(SHA256 `dfe9a262ed2063babc51524b58f42b0812cc73e8b48bf78f995193b21fc7b040`);
+Tool26 saved artifact12690494428
+(SHA256 `3d725d76c6b8ffdb2b75b1ea574dcf8ba3131723a9e6252ffd4daccc55b695da`).
+Producer step gates, source/run/attempt and artifact metadata were checked with
+the existing checkpoint selectors; the consumers verify downloaded bytes.
+Git-local job121874413468 failed before Installer: `prepared-resource-insufficient`.
+Available estimated memory was2,903,441,408 bytes; the unchanged full audit quote
+required2,954,020,401 bytes (50,578,993 bytes short). Artifact digest verification
+passed and original cleanup settled. The allocation test passes locally, and
+replaying the reported admission correctly preserves that refusal. No code or
+memory gate changed. Its one fresh-runner retry is
+[40410215913](https://github.com/Apdelrahman1911/mobile-release-kit/actions/runs/40410215913),
+job121878737194, using the same source660/saved package. If resource refusal
+repeats, investigate the allocation/host evidence before another retry.
+Service-cli job121874413479 remains running in the original build run.
+No independent group has succeeded yet. After both initial groups actually
+pass, dispatch the remaining nine using this same source/run. Monitor74380
+tracks the original run; monitor8846 tracks the Git retry. The ACTIVE follow-up
+remains in place. Source769 packages/failures remain historical evidence only.
+For future workflow mutations, use the repository owner's existing saved login
+in a per-command environment; another active CLI account lacks write access.
+Preserve the global account setting and never log or persist the token.
 
 Tool retry [40364299644](https://github.com/Apdelrahman1911/mobile-release-kit/actions/runs/40364299644)
 finished with failure on source `61b0c21096ac2e772ac221006d951301cba32a34`,
 attempt1/job121717724392. Install/signature/readback/detach and actual Open
 Project passed. The explicit service request settled with service-not-found;
-Check and CLI were not entered. Its monitor has finished; no run is active.
+Check and CLI were not entered. Its monitor has finished; the new run is recorded above.
 
 The read-only Apple diagnostic returned four matching events without an error
 code. Local read-only disposable fixtures reproduce Apple's "record not found"

@@ -729,9 +729,15 @@ def acquire_checkpoint(op, consumer):
         import time
         op.package_started = op.package_observed = time.monotonic_ns()
         op.package_endpoint = op.package_started + 180_000_000_000
+        root = op.directory(op.work_entry, 'prepared-input', 'prepared-transport-root')
+        need(set(os.listdir(root['fd'])) == NAMES, 'prepared-transport-original-roster')
+        marker = op.original(root, 'PREPARED.json', 'prepared-manifest-original', MANIFEST_LIMIT, (0o400, 0o444, 0o600, 0o644))
+        marker_body = op.read(marker)
+        manifest = manifest_data(decode(marker_body, MANIFEST_LIMIT))
         service_root = op.directory(op.work_entry, 'prepared-service', 'prepared-service-root')
         names = {'run.json', 'job.json', 'artifact.json', 'commit.json', 'metadata.status'}
-        if op.environment.get('MRK_MACOS_PREPARED_RESUME') == 'true':
+        if (op.environment.get('MRK_MACOS_PREPARED_RESUME') == 'true'
+            and manifest['origin']['source'] != consumer['source']):
             names.add('compatibility.json')
         need(set(os.listdir(service_root['fd'])) == names, 'prepared-service-original-roster')
         service = {}
@@ -743,11 +749,6 @@ def acquire_checkpoint(op, consumer):
                 need(body == b'0\n', 'prepared-service-original-status')
             else:
                 service[name[:-5]] = decode(body, 8 * MIB)
-        root = op.directory(op.work_entry, 'prepared-input', 'prepared-transport-root')
-        need(set(os.listdir(root['fd'])) == NAMES, 'prepared-transport-original-roster')
-        marker = op.original(root, 'PREPARED.json', 'prepared-manifest-original', MANIFEST_LIMIT, (0o400, 0o444, 0o600, 0o644))
-        marker_body = op.read(marker)
-        manifest = manifest_data(decode(marker_body, MANIFEST_LIMIT))
         commit = service.pop('commit')
         need(type(commit) is dict and commit.get('sha') == manifest['origin']['source']
              and type(commit.get('tree')) is dict and commit['tree'].get('sha') == manifest['origin']['tree'],
