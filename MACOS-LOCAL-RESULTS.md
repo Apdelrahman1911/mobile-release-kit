@@ -2,6 +2,25 @@
 
 ## Latest continuation — 2026-10-26
 
+Tool retry40351985673 repeated the producer-tests deadline before Installer.
+The saved-candidate compiler now has one900-second cold test/build envelope
+instead of480; only that compile budget and its enclosing package budget
+increase. Compiler inputs, signing/emitter/Installer/readback/detach caps
+and original settlement requirements are unchanged.58 targeted tests pass.
+The older producer/removal fixture has the same three errors on the prior
+helper and current helper; those unrelated fixture errors are not passes.
+
+Git retry40349520933 passed install and Open Project, then the actual first
+Git read settled with stale-observation. Native reproduction under this
+Mac's Library failed both source checks: user-owned Library has UF_HIDDEN,
+which the current source policy allowed only on root-owned directories.
+An uncommitted application correction now allows only that harmless
+directory flag while retaining original owner/mode/ACL/identity/POST checks.
+322 Git Rust tests and both real Library source checks pass. Keep this
+application change separate until the helper-only Tool retry is consumed;
+a changed app needs a fresh signed candidate. Do not qualify source769
+with the pending application change.
+
 Both producer checkpoints are now successful and immutable: Git27 attempt1
 artifact12585453039, Tool26 attempt2 artifact12661209060. The old run40152218901
 was cancelled only after both build jobs succeeded, to stop its obsolete test

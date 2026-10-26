@@ -29,7 +29,9 @@ path. The command-line equivalent for failed jobs is `gh run rerun RUN_ID --fail
 Each test job starts on a fresh Mac runner. It downloads the exact saved package,
 verifies its origin and checksums, then creates/signs the transport images and
 installs with the existing Installer and readback checks. It only compiles the
-small package producer. It does not compile the app, remover, CLI or runtime,
+small package producer. Cold producer tests/builds have a shared15-minute cap;
+all signing, Installer, readback and detach command caps stay unchanged.
+It does not compile the app, remover, CLI or runtime,
 and does not repeat app/package notarization. Disk-image signing or installation
 failures therefore rerun inside that test job, after the saved-package boundary.
 Bounded disk-image signing and detach logs are retained for diagnosis.

@@ -33,6 +33,41 @@ def native_fixture(scope='git-native'):
 
 
 class CandidateCheckpointTests(unittest.TestCase):
+    def test_cold_producer_budget_does_not_extend_native_calls_or_ordinary_installs(self):
+        from tests.desktop.test_macos_installed_staging import ANDROID_HELPER as H
+        values, _, service, consumer = native_fixture('tool-setup')
+        prepared = P.admit_data(values, service, consumer)
+        output = (b'\nrunning 1 test\ntest emitter::tests::fixed_cli_and_original_state_data_refuse_ambient_or_partial_routes ... ok\n\n'
+                  b'test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n\n')
+        class Compiler(H.Operation):
+            def __init__(self):
+                self.phase='package-install';self.prepared_binding=prepared
+                self.target=P.TARGETS[0];self.checkout=Path('/inert/source');self.work=Path('/inert/work')
+                self.target_name='compiler';self.image_package_version='0.2.0'
+                self.package_endpoint=1410_000_000_000;self.now=0;self.calls=[]
+            def package_clock(self):return self.now
+            def package_call(self,role,argv,**options):
+                self.calls.append((role,options['timeout']))
+                self.now+=(600 if role=='producer-tests' else 50)*1_000_000_000
+                return subprocess.CompletedProcess(argv,0,output if role=='producer-tests' else b'INERT graph',b'')
+        compiler=Compiler()
+        with mock.patch.object(H,'producer_artifact',return_value=Path('/inert/program')):
+            self.assertEqual(compiler.package_producer_compile({}),Path('/inert/program'))
+        self.assertEqual(compiler.calls,[('producer-tests',897),('producer-build',297)])
+        compiler.prepared_binding=None
+        self.assertEqual(compiler.package_compiler_seconds(),480)
+        compiler.prepared_binding=prepared;compiler.phase='package-remove'
+        self.assertEqual(compiler.package_compiler_seconds(),480)
+        for role in ('installer','producer-emitter','distribution-sign','distribution-detach'):
+            with self.subTest(role=role),self.assertRaises(H.Refused):
+                H.package_timeout_data(0,1410_000_000_000,900,phase='package-install',role=role,prepared_compiler=True)
+        for extended in (False,True):
+            with self.assertRaises(H.Refused):
+                H.package_timeout_data(0,1410_000_000_000,901,phase='package-install',role='producer-tests',prepared_compiler=extended)
+        with self.assertRaises(H.Refused):
+            H.package_timeout_data(898_000_000_000,900_000_000_000,900,
+                phase='package-install',role='producer-build',prepared_compiler=True)
+
     def test_streaming_census_enforces_real_expansion_and_complete_single_stream(self):
         body=b'inert payload\n'*100000
         packed=gzip.compress(body,mtime=0)

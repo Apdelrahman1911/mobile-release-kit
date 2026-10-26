@@ -2944,11 +2944,14 @@ def emit_failure_diagnostic(error, **context):
         pass
 
 
-def package_timeout_data(now, endpoint, requested, *, phase=None, role=None):
+def package_timeout_data(now, endpoint, requested, *, phase=None, role=None, prepared_compiler=False):
     """Leave the existing owner's three-second settlement inside this group."""
     need((phase is None and role is None) or (type(phase) is str and type(role) is str),
          "package-group-clock")
-    maximum = (3900 if phase == XCODE_SETUP_VERIFY and role == "setup-installer-first" else
+    need(type(prepared_compiler) is bool and (not prepared_compiler or
+         phase == "package-install" and role in ("producer-tests", "producer-build")), "package-group-clock")
+    maximum = (900 if prepared_compiler else
+               3900 if phase == XCODE_SETUP_VERIFY and role == "setup-installer-first" else
                900 if phase == XCODE_SETUP_VERIFY and role == "setup-installer-repeat" else
                1440 if phase == "prepare-app-absence" and role in
                ("app-absence-build", "app-absence-data-tests", "app-absence-cut-app-write-build",
@@ -8645,15 +8648,28 @@ class Operation:
             return self.final_image_call("final-image-detach", argv)
         need(self.package_settled(), "package-io-finality-unknown")
         endpoint = self.notary_clock()[1] if self.phase == SAME_PACKAGE_PHASE else self.package_endpoint
-        timeout = package_timeout_data(self.package_clock(), endpoint, timeout, phase=self.phase, role=role)
+        timeout = package_timeout_data(self.package_clock(), endpoint, timeout, phase=self.phase, role=role,
+            prepared_compiler=role in ("producer-tests", "producer-build") and self.package_compiler_seconds() > 480)
         result = self.call(role, argv, self.native_environment() if environment is None else environment,
                            cwd=self.work if cwd is None else cwd, timeout=timeout, limit=limit)
         self.package_clock()  # Original return AND the existing capture/status closes.
         return result
 
+    def package_compiler_seconds(self):
+        prepared = getattr(self, "prepared_binding", None)
+        # Saved-package jobs have a cold Cargo cache, unlike the original
+        # build job. Only these two nonshipping compiler calls get this budget;
+        # signing, emitter, Installer, readback and detach caps are unchanged.
+        return (900 if getattr(self, "phase", None) == "package-install"
+            and prepared is not None and prepared.native_compatible
+            and prepared.origin.get("nativeScope") in ("git-native", "tool-setup") else 480)
+
     def package_producer_compile(self, environment):
-        # One480s compiler envelope shared by tests and the normal example.
-        endpoint = min(self.package_endpoint, self.package_clock() + 480_000_000_000)
+        seconds = self.package_compiler_seconds()
+        endpoint = min(self.package_endpoint, self.package_clock() + seconds * 1_000_000_000)
+        def remaining(role):
+            return package_timeout_data(self.package_clock(), endpoint, seconds,
+                phase="package-install", role=role, prepared_compiler=seconds > 480)
         self.stage = "package-producer-tests"
         tested = self.package_call("producer-tests", [direct_rust_tools(self.target)[0], "test", "--manifest-path",
             str(self.checkout / "desktop/src-tauri/Cargo.toml"), "--locked", "--offline", "--release", "--config",
@@ -8661,20 +8677,20 @@ class Operation:
             "macos-package-producer", "--example", "macos_package_producer", "--message-format=short", "--color", "never",
             "--", "--exact", "emitter::tests::fixed_cli_and_original_state_data_refuse_ambient_or_partial_routes",
             "--test-threads=1", "--format", "pretty", "--color", "never"], environment=environment,
-            cwd=self.checkout / "desktop/src-tauri", timeout=package_timeout_data(self.package_clock(), endpoint, 480),
+            cwd=self.checkout / "desktop/src-tauri", timeout=remaining("producer-tests"),
             limit=4 * 1024 * 1024)
         producer_tests_result(tested.stdout)
-        remaining = package_timeout_data(self.package_clock(), endpoint, 480)
+        build_seconds = remaining("producer-build")
         del tested
         self.stage = "package-explicit-producer-compiler"
         compiled = self.package_call("producer-build", [direct_rust_tools(self.target)[0], "build", "--manifest-path",
             str(self.checkout / "desktop/src-tauri/Cargo.toml"), "--locked", "--offline", "--release", "--config",
             PRODUCER_CARGO_OVERRIDE, "--jobs", "1", "--target", self.target, "--no-default-features", "--features",
             "macos-package-producer", "--example", "macos_package_producer", "--message-format=json-render-diagnostics"],
-            environment=environment, cwd=self.checkout / "desktop/src-tauri", timeout=remaining, limit=4 * 1024 * 1024)
+            environment=environment, cwd=self.checkout / "desktop/src-tauri", timeout=build_seconds, limit=4 * 1024 * 1024)
         binary = producer_artifact(compiled.stdout, self.checkout, self.work / self.target_name, self.target,
             package_version=self.image_package_version)
-        package_timeout_data(self.package_clock(), endpoint, 480)
+        remaining("producer-build")
         return binary
 
     def package_directory(self, name):
@@ -9560,7 +9576,7 @@ class Operation:
         self.stage = "package-final-audit"
         if self.app_absence is None:
             self.package_started = self.package_observed = time.monotonic_ns()
-            self.package_endpoint = self.package_started + 990_000_000_000
+            self.package_endpoint = self.package_started + (990 + self.package_compiler_seconds() - 480) * 1_000_000_000
         self.package_clock()
         if self.environment.get("GITHUB_REF") == REMOVAL_REF:
             self.removal_baseline_admit()

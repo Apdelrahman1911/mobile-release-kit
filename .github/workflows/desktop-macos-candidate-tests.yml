@@ -201,7 +201,7 @@ jobs:
       - name: Standard Installer only is privileged; never execute the app or Python as root
         if: success()
         id: package_install
-        timeout-minutes: 18
+        timeout-minutes: 25
         shell: bash
         env:
           RUNNER_ENVIRONMENT: ${{ runner.environment }}
