@@ -117,7 +117,8 @@ def current_context(environment, target):
          and source != "0" * 40, "identity-native-source")
     required = {
         "GITHUB_ACTIONS": "true", "RUNNER_ENVIRONMENT": "github-hosted",
-        "RUNNER_OS": "macOS", "RUNNER_ARCH": "ARM64", "GITHUB_EVENT_NAME": "push",
+        "RUNNER_OS": "macOS", "RUNNER_ARCH": "ARM64", "GITHUB_EVENT_NAME": (
+            "workflow_dispatch" if environment.get("MRK_MACOS_PREPARED_RESUME") == "true" else "push"),
         "GITHUB_REPOSITORY": REPOSITORY, "GITHUB_REF": REF,
         "GITHUB_WORKSPACE": str(CHECKOUT), "GITHUB_WORKFLOW_REF": WORKFLOW,
         "GITHUB_WORKFLOW_SHA": source, "MRK_EXPECTED_SHA": source,
@@ -355,7 +356,7 @@ def _admit_prepared_runtime(aqua, fixtures, binding, work, environment, prepared
     source, run, attempt, actual_work = current_context(environment, binding.target)
     manifest = prepared.manifest
     origin = manifest['origin']
-    aqua.need(prepared.same_source and actual_work == work
+    aqua.need(prepared.native_compatible and actual_work == work
               and prepared.consumer['runId'] == run and prepared.consumer['runAttempt'] == attempt
               and (binding.source, binding.run, binding.attempt) ==
                   (origin['source'], origin['runId'], origin['runAttempt'])
@@ -382,7 +383,7 @@ def _admit_prepared_runtime(aqua, fixtures, binding, work, environment, prepared
     expected = dict(environment, MRK_MACOS_INSTALL_INVENTORY_SHA256=manifest['inventorySha256'],
                     MRK_BUNDLED_RUNTIME_MANIFEST_SHA256=manifest['runtimeManifestSha256'])
     aqua._gate_installation(anchors['installation-observation.json'], anchors['installer-output.status'],
-        current, expected, stage, selection, anchors, workflow=WORKFLOW)
+        current, expected, stage, selection, anchors, workflow=WORKFLOW, application_source=prepared.source)
     receipt = aqua._gate_json(anchors['android-helper-package-install.json'], 16384)
     package = next(row for row in manifest['members'] if row['name'] == 'MobileReleaseKit.pkg')
     aqua.need(receipt['distribution']['packageSha256'] == package['sha256']

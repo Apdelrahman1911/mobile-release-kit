@@ -1,6 +1,26 @@
 # Continue Mobile Release Kit on the owner's Mac
 
-## Latest Mac continuation — 2026-10-25
+## Latest Mac continuation — 2026-10-26
+
+Run40152218901 attempt1 failed. Git27 built and saved its signed package
+(artifact12585453039, origin769bd80d); Tool26's payload notarization returned1
+with network-connection/url-1009, before any prepared checkpoint. Its downstream
+groups had no package. Four Git groups refused during hydration with a generic
+ValueError; the one that hydrated reached producer signing and failed because
+both environment secrets were empty in the reusable job. Do not invent a more
+specific cause for those four hydration failures.
+
+Only Tool26 has been rerun: attempt2, job121604550887. Monitor session78535.
+The Git build is reused, not recompiled. Check private live metadata before
+another dispatch. A new helper-only continuation adds explicit secret inheritance,
+an early secret-presence check, finite prepared refusal/resource diagnostics,
+artifact-backed selection of original jobs despite GitHub's copied rerun rows,
+and a single-group dispatch that verifies the complete helper-only ancestor diff.
+No new application binary is claimed by that dispatch.
+
+The actual local Open Project test passed on the unlocked Mac on Oct26:216 AX
+calls, original selection/completion succeeded, native resources released.
+Evidence:dialog-full-recheck-oct26.log. No permission or installation was changed.
 
 **Latest owner steering:** split the workflow into small resumable parts so a
 late failure does not rebuild the whole 90-minute pipeline. This explicitly
@@ -32,8 +52,7 @@ metadata parser mutations pass; all six preflight steps pass including real DMG
 transport and dialog compilation/allowance checks. Actionlint and diff checks pass.
 The older prepared suite has 20 passing tests and four subtest errors caused by
 local com.apple.provenance fixture attributes. Do not relax its native attribute
-policy. The Mac remains locked; a request to unlock it for actual Open Project
-verification is pending. No Accessibility change is needed.
+policy. The Mac was subsequently unlocked and the actual Open Project test passed on Oct26. No Accessibility change was needed.
 
 **Active request:** follow both candidate jobs until they succeed; investigate,
 fix, locally test and rerun failures. Work remains on

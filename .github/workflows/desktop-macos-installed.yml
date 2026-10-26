@@ -10,6 +10,7 @@ on:
         default: prepared-install
         options:
           - prepared-install
+          - candidate-tests
           - xcode-setup-companion
       prepared_source:
         description: Exact built source required for prepared-install only
@@ -19,6 +20,12 @@ on:
         description: Exact producer run required for prepared-install only
         required: false
         type: string
+      test_group:
+        description: One independent saved-candidate group
+        required: false
+        type: choice
+        default: git-local
+        options: [git-local, git-fetch, git-push, git-create, git-upstream, service-cli, public-acquisition, sdk-registration, upload-keys, cold-restart, backup]
       target:
         description: Single selected target; no architecture fallback
         required: true
@@ -5399,8 +5406,9 @@ jobs:
 
   candidate-tests:
     needs: engineering-install
-    if: ${{ !cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-macos-candidate' }}
+    if: ${{ !cancelled() && github.ref == 'refs/heads/verify/desktop-macos-candidate' && (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && inputs.operation == 'candidate-tests')) }}
     uses: ./.github/workflows/desktop-macos-candidate-tests.yml
+    secrets: inherit
 
   # Same SOURCE companion only: no main artifact, runtime supplier, npm or app build.
   xcode-setup-companion:

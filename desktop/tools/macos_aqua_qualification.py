@@ -6498,10 +6498,13 @@ def _gate_headless(bodies, binding, checkout, work):
     return value, native
 
 
-def _gate_package_anchors(anchors, binding, environment, stage, selection, *, workflow=WORKFLOW):
+def _gate_package_anchors(anchors, binding, environment, stage, selection, *, workflow=WORKFLOW, application_source=None):
     # Five independent, same-book originals. Neither this receipt nor parsed
     # producer DATA supplies its own original exit or signature authority.
     binding.checked()
+    application_source = binding.source if application_source is None else application_source
+    need(type(application_source) is str and re.fullmatch(r"[0-9a-f]{40}", application_source)
+         and application_source != "0" * 40, "gate-package-application-source")
     need(type(selection) is stage.BuildSelection and selection.target == binding.target, "gate-package-target")
     stage.selected_build(selection)
     inventory, manifest = environment.get("MRK_MACOS_INSTALL_INVENTORY_SHA256"), environment.get("MRK_BUNDLED_RUNTIME_MANIFEST_SHA256")
@@ -6515,7 +6518,7 @@ def _gate_package_anchors(anchors, binding, environment, stage, selection, *, wo
     producer = stage.maintenance_producer_data(descriptor, target=binding.target)
     current = producer["releaseSet"]["current"]
     for key, expected in {"release": selection.release, "packageVersion": selection.package_version,
-            "sourceCommit": binding.source, "protocolSha256": stage.CURRENT_PROTOCOL,
+            "sourceCommit": application_source, "protocolSha256": stage.CURRENT_PROTOCOL,
             "inventorySha256": inventory, "runtimeManifestSha256": manifest}.items():
         _exact(current[key], expected)
     audit = _gate_json(anchors["package-audit.json"], 16384)
@@ -6586,12 +6589,14 @@ def _gate_package_anchors(anchors, binding, environment, stage, selection, *, wo
     return producer, request, summary
 
 
-def _gate_installation(body, status, binding, environment, stage, selection, anchors, *, workflow=WORKFLOW):
+def _gate_installation(body, status, binding, environment, stage, selection, anchors, *, workflow=WORKFLOW, application_source=None):
     need(type(status) is bytes and status == b"0\n", "gate-installer-status-binding")
-    producer, request, summary = _gate_package_anchors(anchors, binding, environment, stage, selection, workflow=workflow)
+    application_source = binding.source if application_source is None else application_source
+    producer, request, summary = _gate_package_anchors(anchors, binding, environment, stage, selection, workflow=workflow,
+                                                     application_source=application_source)
     current = producer["releaseSet"]["current"]
     value = _gate_json(body, 65536)
-    fixed = {"schemaVersion": 2, "sourceCommit": binding.source, "inventorySha256": current["inventorySha256"],
+    fixed = {"schemaVersion": 2, "sourceCommit": application_source, "inventorySha256": current["inventorySha256"],
         "runtimeManifestSha256": current["runtimeManifestSha256"], "completedPackageSha256": current["packageSha256"],
         "release": selection.release, "requestId": request, "originalInstallerReturnedZero": True, "originalWriterJoined": True,
         "producerSignatureAuthority": "native-parent-and-application-checks-separate", "historicalOuterExit": "unverified",

@@ -1,6 +1,7 @@
 """Checkpoint/rerun correspondence. All packages and native ports are inert."""
 import copy
 import json
+import re
 import subprocess
 import unittest
 from pathlib import Path
@@ -29,6 +30,42 @@ def native_fixture(scope='git-native'):
 
 
 class CandidateCheckpointTests(unittest.TestCase):
+    def test_helper_continuation_requires_complete_ancestor_comparison_and_no_product_changes(self):
+        values, manifest, service, consumer = native_fixture()
+        consumer.update(source='6'*40, tree='7'*40)
+        origin=manifest['origin']
+        base=dict(sha=origin['source'], commit={'tree':{'sha':origin['tree']}})
+        comparison=dict(status='ahead', ahead_by=1, behind_by=0, total_commits=1,
+            base_commit=base, merge_base_commit=base,
+            commits=[dict(sha=consumer['source'],commit={'tree':{'sha':consumer['tree']}})],
+            files=[dict(filename='desktop/tools/macos_prepared_package.py',status='modified')])
+        bound=P.admit_data(values,dict(service,compatibility=comparison),consumer)
+        self.assertFalse(bound.same_source)
+        self.assertTrue(bound.native_compatible)
+        self.assertEqual(bound.source,origin['source'])
+        for name in ('desktop/src-tauri/src/main.rs','desktop/native/macos-installed-native/src/native.m',
+                     'desktop/packaging/macos-android-service-signing.profile','desktop/tools/stage_macos_installed.py',
+                     'mobile_release/core.py'):
+            wrong=copy.deepcopy(comparison);wrong['files'][0]['filename']=name
+            with self.subTest(name=name),self.assertRaisesRegex(ValueError,'prepared-harness-files'):
+                P.admit_data(values,dict(service,compatibility=wrong),consumer)
+        changes=[('status','diverged'),('behind_by',1),('total_commits',2),('files',[]),
+                 ('files',comparison['files']*300),('merge_base_commit',dict(sha='9'*40)),
+                 ('commits',[dict(sha='9'*40,commit={'tree':{'sha':consumer['tree']}})])]
+        for key,value in changes:
+            wrong=copy.deepcopy(comparison);wrong[key]=value
+            with self.subTest(key=key),self.assertRaises(ValueError):
+                P.admit_data(values,dict(service,compatibility=wrong),consumer)
+
+    def test_failure_diagnostics_never_echo_unrecognized_exception_text(self):
+        for error in (ValueError('private token'),RuntimeError('prepared-resource-insufficient'),
+                      ValueError('prepared-resource-insufficient','private token')):
+            data=P.failure_data(error,'hydrate',None)
+            self.assertEqual(data['reason'],'unclassified')
+            self.assertNotIn('private token',json.dumps(data))
+        self.assertEqual(P.failure_data(ValueError('prepared-resource-insufficient'),'hydrate',None)['reason'],
+                         'prepared-resource-insufficient')
+
     def test_native_saved_package_keeps_build_attempt_and_current_consumer_separate(self):
         for scope in P.NATIVE_HOSTS:
             values, manifest, service, consumer = native_fixture(scope)
@@ -83,6 +120,19 @@ class CandidateCheckpointTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError,'prepared-one-target-job'):
             P.selected_job_data(P.canonical(dict(total_count=2,jobs=[old,other])), '1'*40,'41',P.TARGETS[0],
                                 completed=True,native_scope='git-native')
+
+    def test_github_copied_success_job_is_not_a_second_build(self):
+        _,manifest,service,_=native_fixture()
+        old=service['job'];copied=dict(old,id=99,run_attempt=2)
+        jobs=P.canonical(dict(total_count=2,jobs=[old,copied]))
+        artifacts=P.canonical(dict(total_count=1,artifacts=[service['artifact']]))
+        selected=P.selected_job_data(jobs,'1'*40,'41',P.TARGETS[0],completed=True,
+                                    native_scope='git-native',artifacts=artifacts)
+        self.assertEqual(selected['id'],old['id'])
+        second=dict(service['artifact'],id=100,name=P.artifact_name(dict(manifest['origin'],runAttempt='2')))
+        with self.assertRaisesRegex(ValueError,'prepared-one-target-job'):
+            P.selected_job_data(jobs,'1'*40,'41',P.TARGETS[0],completed=True,native_scope='git-native',
+                artifacts=P.canonical(dict(total_count=2,artifacts=[service['artifact'],second])))
 
     def test_native_role_cannot_use_ordinary_preview_or_same_named_foreign_job(self):
         values, manifest, service, consumer = native_fixture()
@@ -170,6 +220,22 @@ class CandidateCheckpointTests(unittest.TestCase):
                 with self.subTest(key=key),self.assertRaises(A.M.Refused):
                     check(dict(anchors,**{'android-helper-package-install.json':stage.canonical(changed)}))
 
+    def test_fresh_install_separates_application_source_from_current_harness_receipt(self):
+        with A.shipping_gate_stager_data() as stage:
+            old=A.BINDING
+            selection,env,observed,anchors=A.shipping_gate_installation_data(stage,old)
+            current=A.M.Binding('6'*40,'555','2',old.target).checked()
+            receipt=json.loads(anchors['android-helper-package-install.json'])
+            receipt.update(source=current.source,workflowSource=current.source,runId=current.run,
+                           runAttempt=current.attempt,workflow=D.M.WORKFLOW)
+            anchors['android-helper-package-install.json']=stage.canonical(receipt)
+            def check(source):
+                return A.M._gate_installation(stage.canonical(observed),b'0\n',current,env,stage,selection,anchors,
+                    workflow=D.M.WORKFLOW,application_source=source)
+            self.assertEqual(check(old.source),observed)
+            for wrong in (current.source,'0'*40,None):
+                with self.subTest(source=wrong),self.assertRaises(A.M.Refused):check(wrong)
+
 
 class CandidateWorkflowTests(unittest.TestCase):
     @classmethod
@@ -211,7 +277,11 @@ class CandidateWorkflowTests(unittest.TestCase):
         job=self.saved_test_job()
         self.assertEqual(self.workflow['jobs']['candidate-tests']['needs'],'engineering-install')
         self.assertIs(job['strategy']['fail-fast'],False)
-        rows=job['strategy']['matrix']['include']
+        expression=job['strategy']['matrix']['include']
+        literals=re.findall(r"fromJSON\('([^']+)'\)",expression)
+        self.assertEqual(len(literals),2)
+        singles,rows=map(json.loads,literals)
+        self.assertEqual(singles,{r['group']:[r] for r in rows})
         self.assertEqual({r['group'] for r in rows},{'git-local','git-fetch','git-push','git-create','git-upstream',
             'service-cli','public-acquisition','sdk-registration','upload-keys','cold-restart','backup'})
         steps=job['steps'];commands='\n'.join(r.get('run','') for r in steps)
@@ -227,6 +297,18 @@ class CandidateWorkflowTests(unittest.TestCase):
         self.assertIn('artifact-id',download['with']['artifact-ids'])
         self.assertEqual(job['env']['MRK_MACOS_PREPARED_TEST'],'true')
         for row in rows:self.assertEqual(row['runner'],P.NATIVE_HOSTS[row['native_scope']])
+
+    def test_dispatch_uses_selected_origin_and_checks_credentials_before_download(self):
+        job=self.saved_test_job();steps=job['steps']
+        credential=next(i for i,r in enumerate(steps) if r['name'].startswith('Check signing credential availability'))
+        download=next(i for i,r in enumerate(steps) if r.get('uses','').startswith('actions/download-artifact'))
+        self.assertLess(credential,download)
+        self.assertEqual(self.workflow['jobs']['candidate-tests']['secrets'],'inherit')
+        self.assertIn('prepared_run',steps[download]['with']['run-id'])
+        commands='\n'.join(r.get('run','') for r in steps)
+        self.assertIn('compare/$PRODUCER_SOURCE...$GITHUB_SHA',commands)
+        old=next(r for r in steps if r['name'].startswith('Check out the immutable producer source'))
+        self.assertEqual(old['with']['path'],'prepared-built-source')
 
     def test_no_publication_or_production_branch_and_no_signing_credentials_in_artifacts(self):
         job=self.saved_test_job()

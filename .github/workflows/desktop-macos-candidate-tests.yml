@@ -2,6 +2,11 @@ name: macOS saved-candidate test groups
 
 on:
   workflow_call:
+    secrets:
+      MRK_MACOS_DEVELOPER_ID_P12_BASE64:
+        required: false
+      MRK_MACOS_DEVELOPER_ID_P12_PASSWORD:
+        required: false
 
 permissions:
   contents: read
@@ -11,7 +16,7 @@ jobs:
   candidate-tests:
     # On a rerun, select the successful producer attempt from the all-attempts
     # API. Never substitute the consumer's attempt or rebuild its signed app.
-    if: ${{ !cancelled() && github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-macos-candidate' }}
+    if: ${{ !cancelled() && github.ref == 'refs/heads/verify/desktop-macos-candidate' && (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && github.event.inputs.operation == 'candidate-tests')) }}
     environment: macos-developer-id
     name: Test saved candidate (${{ matrix.group }})
     runs-on: ${{ matrix.runner }}
@@ -20,73 +25,7 @@ jobs:
       fail-fast: false
       max-parallel: 4
       matrix:
-        include:
-          - target: aarch64-apple-darwin
-            group: git-local
-            native_scope: git-native
-            runner: xcode-27
-            hosted_job: github-hosted-xcode27-arm64
-            timeout: 65
-          - target: aarch64-apple-darwin
-            group: git-fetch
-            native_scope: git-native
-            runner: xcode-27
-            hosted_job: github-hosted-xcode27-arm64
-            timeout: 65
-          - target: aarch64-apple-darwin
-            group: git-push
-            native_scope: git-native
-            runner: xcode-27
-            hosted_job: github-hosted-xcode27-arm64
-            timeout: 65
-          - target: aarch64-apple-darwin
-            group: git-create
-            native_scope: git-native
-            runner: xcode-27
-            hosted_job: github-hosted-xcode27-arm64
-            timeout: 65
-          - target: aarch64-apple-darwin
-            group: git-upstream
-            native_scope: git-native
-            runner: xcode-27
-            hosted_job: github-hosted-xcode27-arm64
-            timeout: 65
-          - target: aarch64-apple-darwin
-            group: service-cli
-            native_scope: tool-setup
-            runner: macos-26
-            hosted_job: github-hosted-macos26-arm64
-            timeout: 65
-          - target: aarch64-apple-darwin
-            group: public-acquisition
-            native_scope: tool-setup
-            runner: macos-26
-            hosted_job: github-hosted-macos26-arm64
-            timeout: 160
-          - target: aarch64-apple-darwin
-            group: sdk-registration
-            native_scope: tool-setup
-            runner: macos-26
-            hosted_job: github-hosted-macos26-arm64
-            timeout: 165
-          - target: aarch64-apple-darwin
-            group: upload-keys
-            native_scope: tool-setup
-            runner: macos-26
-            hosted_job: github-hosted-macos26-arm64
-            timeout: 190
-          - target: aarch64-apple-darwin
-            group: cold-restart
-            native_scope: tool-setup
-            runner: macos-26
-            hosted_job: github-hosted-macos26-arm64
-            timeout: 190
-          - target: aarch64-apple-darwin
-            group: backup
-            native_scope: tool-setup
-            runner: macos-26
-            hosted_job: github-hosted-macos26-arm64
-            timeout: 190
+        include: ${{ github.event_name == 'workflow_dispatch' && fromJSON('{"git-local":[{"target":"aarch64-apple-darwin","group":"git-local","native_scope":"git-native","runner":"xcode-27","hosted_job":"github-hosted-xcode27-arm64","timeout":65}],"git-fetch":[{"target":"aarch64-apple-darwin","group":"git-fetch","native_scope":"git-native","runner":"xcode-27","hosted_job":"github-hosted-xcode27-arm64","timeout":65}],"git-push":[{"target":"aarch64-apple-darwin","group":"git-push","native_scope":"git-native","runner":"xcode-27","hosted_job":"github-hosted-xcode27-arm64","timeout":65}],"git-create":[{"target":"aarch64-apple-darwin","group":"git-create","native_scope":"git-native","runner":"xcode-27","hosted_job":"github-hosted-xcode27-arm64","timeout":65}],"git-upstream":[{"target":"aarch64-apple-darwin","group":"git-upstream","native_scope":"git-native","runner":"xcode-27","hosted_job":"github-hosted-xcode27-arm64","timeout":65}],"service-cli":[{"target":"aarch64-apple-darwin","group":"service-cli","native_scope":"tool-setup","runner":"macos-26","hosted_job":"github-hosted-macos26-arm64","timeout":65}],"public-acquisition":[{"target":"aarch64-apple-darwin","group":"public-acquisition","native_scope":"tool-setup","runner":"macos-26","hosted_job":"github-hosted-macos26-arm64","timeout":160}],"sdk-registration":[{"target":"aarch64-apple-darwin","group":"sdk-registration","native_scope":"tool-setup","runner":"macos-26","hosted_job":"github-hosted-macos26-arm64","timeout":165}],"upload-keys":[{"target":"aarch64-apple-darwin","group":"upload-keys","native_scope":"tool-setup","runner":"macos-26","hosted_job":"github-hosted-macos26-arm64","timeout":190}],"cold-restart":[{"target":"aarch64-apple-darwin","group":"cold-restart","native_scope":"tool-setup","runner":"macos-26","hosted_job":"github-hosted-macos26-arm64","timeout":190}],"backup":[{"target":"aarch64-apple-darwin","group":"backup","native_scope":"tool-setup","runner":"macos-26","hosted_job":"github-hosted-macos26-arm64","timeout":190}]}')[github.event.inputs.test_group] || fromJSON('[{"target":"aarch64-apple-darwin","group":"git-local","native_scope":"git-native","runner":"xcode-27","hosted_job":"github-hosted-xcode27-arm64","timeout":65},{"target":"aarch64-apple-darwin","group":"git-fetch","native_scope":"git-native","runner":"xcode-27","hosted_job":"github-hosted-xcode27-arm64","timeout":65},{"target":"aarch64-apple-darwin","group":"git-push","native_scope":"git-native","runner":"xcode-27","hosted_job":"github-hosted-xcode27-arm64","timeout":65},{"target":"aarch64-apple-darwin","group":"git-create","native_scope":"git-native","runner":"xcode-27","hosted_job":"github-hosted-xcode27-arm64","timeout":65},{"target":"aarch64-apple-darwin","group":"git-upstream","native_scope":"git-native","runner":"xcode-27","hosted_job":"github-hosted-xcode27-arm64","timeout":65},{"target":"aarch64-apple-darwin","group":"service-cli","native_scope":"tool-setup","runner":"macos-26","hosted_job":"github-hosted-macos26-arm64","timeout":65},{"target":"aarch64-apple-darwin","group":"public-acquisition","native_scope":"tool-setup","runner":"macos-26","hosted_job":"github-hosted-macos26-arm64","timeout":160},{"target":"aarch64-apple-darwin","group":"sdk-registration","native_scope":"tool-setup","runner":"macos-26","hosted_job":"github-hosted-macos26-arm64","timeout":165},{"target":"aarch64-apple-darwin","group":"upload-keys","native_scope":"tool-setup","runner":"macos-26","hosted_job":"github-hosted-macos26-arm64","timeout":190},{"target":"aarch64-apple-darwin","group":"cold-restart","native_scope":"tool-setup","runner":"macos-26","hosted_job":"github-hosted-macos26-arm64","timeout":190},{"target":"aarch64-apple-darwin","group":"backup","native_scope":"tool-setup","runner":"macos-26","hosted_job":"github-hosted-macos26-arm64","timeout":190}]') }}
     env:
       RUSTUP_TOOLCHAIN: '1.98.1'
       MRK_MACOS_TARGET: aarch64-apple-darwin
@@ -98,6 +37,7 @@ jobs:
       MRK_MACOS_PACKAGE_ROLE: installed-shell-observation
       MRK_MACOS_NATIVE_SCOPE: ${{ matrix.native_scope }}
       MRK_MACOS_PREPARED_TEST: 'true'
+      MRK_MACOS_PREPARED_RESUME: ${{ github.event_name == 'workflow_dispatch' && 'true' || 'false' }}
       MRK_MACOS_STORE_RUNTIME: signed-component
       MRK_MACOS_SAME_PACKAGE_SCOPE: disabled
       MACOSX_DEPLOYMENT_TARGET: '26.0'
@@ -119,6 +59,20 @@ jobs:
           expected_host_major=26
           if [[ "$MRK_MACOS_NATIVE_SCOPE" == git-native ]]; then expected_host_major=27; fi
           [[ "$(/usr/bin/id -u)" != 0 && "$(/usr/bin/sw_vers -productVersion)" == "$expected_host_major".* ]] || exit 1
+      - name: Check signing credential availability before downloading the package
+        timeout-minutes: 1
+        shell: bash
+        env:
+          SIGNING_IDENTITY: ${{ secrets.MRK_MACOS_DEVELOPER_ID_P12_BASE64 }}
+          SIGNING_PASSWORD: ${{ secrets.MRK_MACOS_DEVELOPER_ID_P12_PASSWORD }}
+        run: |
+          set +x
+          set -euo pipefail
+          if [[ -z "$SIGNING_IDENTITY" || -z "$SIGNING_PASSWORD" ]]; then
+            printf '%s\n' '::error::The test job did not receive its macos-developer-id signing credentials.'
+            exit 1
+          fi
+          unset SIGNING_IDENTITY SIGNING_PASSWORD
       - name: Check out the exact current harness source without credentials
         timeout-minutes: 3
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -153,8 +107,8 @@ jobs:
         shell: bash
         env:
           RUNNER_ENVIRONMENT: ${{ runner.environment }}
-          PRODUCER_SOURCE: ${{ github.sha }}
-          PRODUCER_RUN: ${{ github.run_id }}
+          PRODUCER_SOURCE: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.prepared_source || github.sha }}
+          PRODUCER_RUN: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.prepared_run || github.run_id }}
           GH_TOKEN: ${{ github.token }}
           GH_HOST: github.com
         run: |
@@ -177,8 +131,9 @@ jobs:
         timeout-minutes: 2
         shell: bash
         env:
-          PRODUCER_RUN: ${{ github.run_id }}
+          PRODUCER_RUN: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.prepared_run || github.run_id }}
           PRODUCER_ATTEMPT: ${{ steps.prepared.outputs.producer-attempt }}
+          PRODUCER_SOURCE: ${{ steps.prepared.outputs.producer-source }}
           GH_TOKEN: ${{ github.token }}
           GH_HOST: github.com
         run: |
@@ -188,6 +143,10 @@ jobs:
           umask 077
           [[ "$PRODUCER_RUN" =~ ^[1-9][0-9]{0,19}$ && "$PRODUCER_ATTEMPT" =~ ^[1-9][0-9]{0,19}$ ]] || exit 1
           (ulimit -f 16384; gh api "repos/$GITHUB_REPOSITORY/actions/runs/$PRODUCER_RUN/attempts/$PRODUCER_ATTEMPT" > "$MRK_MACOS_WORK/prepared-service/run.json")
+          if [[ "$MRK_MACOS_PREPARED_RESUME" == true ]]; then
+            [[ "$PRODUCER_SOURCE" =~ ^[0-9a-f]{40}$ && "$PRODUCER_SOURCE" != "$GITHUB_SHA" ]] || exit 1
+            (ulimit -f 16384; gh api "repos/$GITHUB_REPOSITORY/compare/$PRODUCER_SOURCE...$GITHUB_SHA" > "$MRK_MACOS_WORK/prepared-service/compatibility.json")
+          fi
           printf '0\n' > "$MRK_MACOS_WORK/prepared-service/metadata.status"
       - name: Download only the selected prepared artifact with service digest verification
         timeout-minutes: 5
@@ -196,11 +155,19 @@ jobs:
           artifact-ids: ${{ steps.prepared.outputs.artifact-id }}
           github-token: ${{ github.token }}
           repository: Apdelrahman1911/mobile-release-kit
-          run-id: ${{ github.run_id }}
+          run-id: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.prepared_run || github.run_id }}
           path: ${{ steps.work.outputs.root }}/prepared-input
           merge-multiple: true
           digest-mismatch: error
           skip-decompress: 'false'
+      - name: Check out the immutable producer source for its package reader and producer build
+        if: github.event_name == 'workflow_dispatch'
+        timeout-minutes: 3
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ steps.prepared.outputs.producer-source }}
+          path: prepared-built-source
+          persist-credentials: false
       - name: Reconstruct fresh script originals and repeat full finalized product audit
         timeout-minutes: 5
         shell: bash

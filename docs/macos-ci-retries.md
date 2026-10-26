@@ -48,3 +48,19 @@ Changing application code requires a new signed candidate. A failed build before
 its checkpoint also still needs a build retry. This split removes the repeated
 long build from later installation and test failures; it does not claim that an
 unfinished build or an older binary can verify changed source.
+
+For a test/packaging script correction, select **Run workflow**, operation
+**candidate-tests**, the saved package's full `prepared_source` and `prepared_run`,
+and one `test_group`. This dispatch does not run either build. GitHub's complete
+ancestor comparison must contain only the finite harness/documentation allowlist;
+native/app/runtime code, compiler inputs, signing profiles and pins cannot change.
+The package reader and small producer build still use the immutable original
+checkout. The current harness and original application source are recorded
+separately. A missing signing credential fails before package download.
+
+When pushing only a harness correction for this route, `[skip ci]` in the commit
+message prevents the push-triggered builds; explicitly dispatch the selected
+test afterward. This does not qualify the changed application as newly built.
+GitHub copies successful job rows into rerun attempts; checkpoint selection also
+requires an actual artifact for the producer attempt so copied rows do not look
+like duplicate builds.

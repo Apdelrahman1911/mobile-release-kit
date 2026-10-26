@@ -8807,11 +8807,11 @@ class Operation:
             # admission; only the same-source Git checkpoint may also use27.
             # Ordinary prepared packages, Update and Remove still cannot.
             need(self.phase == "package-install" and self.target == ARM_TARGET
-                 and (self.prepared_binding is None or (self.prepared_binding.same_source
+                 and (self.prepared_binding is None or (self.prepared_binding.native_compatible
                       and self.prepared_binding.origin.get("nativeScope") == "git-native"
                       and self.prepared_binding.origin.get("hostProfile") == "xcode-27"))
                  and all(self.environment.get(key) == value for key, value in {
-                     "GITHUB_EVENT_NAME": "push", "GITHUB_REF": CANDIDATE_REF,
+                     "GITHUB_EVENT_NAME": ("workflow_dispatch" if self.environment.get("MRK_MACOS_PREPARED_RESUME") == "true" else "push"), "GITHUB_REF": CANDIDATE_REF,
                      "MRK_MACOS_NATIVE_SCOPE": "git-native",
                      "MRK_MACOS_PACKAGE_ROLE": "installed-shell-observation",
                      "MRK_MACOS_MACHINE": "arm64",
@@ -10445,6 +10445,12 @@ def load_data(checkout, filename, name):
 def xcode_setup_event(environment, phase):
     """Closed event choice only; all ordinary host/source admission still applies."""
     scope = environment.get("MRK_MACOS_XCODE_SETUP_SCOPE", "disabled")
+    if environment.get("MRK_MACOS_PREPARED_RESUME") == "true":
+        return (scope == "disabled" and environment.get("GITHUB_REF") == CANDIDATE_REF
+                and environment.get("GITHUB_EVENT_NAME") == "workflow_dispatch"
+                and environment.get("MRK_MACOS_PREPARED_TEST") == "true"
+                and environment.get("MRK_MACOS_NATIVE_SCOPE") in ("git-native", "tool-setup")
+                and phase == "package-install")
     if environment.get("GITHUB_REF") == XCODE_SETUP_REF:
         return (scope == "companion-only"
                 and environment.get("GITHUB_EVENT_NAME") == "workflow_dispatch"

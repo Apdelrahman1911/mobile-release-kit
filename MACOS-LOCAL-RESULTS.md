@@ -1,6 +1,29 @@
 # Mac continuation results — 2026-10-24
 
-## Latest continuation — 2026-10-25
+## Latest continuation — 2026-10-26
+
+Run40152218901 attempt1: Git27 build/checkpoint passed; Tool26 notarization
+failed with original payload-submit1 and network-connection/url-1009. Four Git
+groups refused hydration (original ValueError unclassified); git-push hydrated
+but received empty signing secrets and refused credential-input-bound before
+Installer. Tool groups had no saved package. Git artifact12585453039 is retained,
+295035396 bytes, service SHA256
+7867f30a5eea5c7b22eb9969badb8f56b45f5979219557d533afa480c6737825.
+Its source769bd80d67b065367eced4da9872bc0751fe5fb1/tree
+f3551c7862cd5a5ca3197dc03cfcdcc104df57d5 remains the application origin.
+
+Only Tool26 was retried on Oct26 (attempt2/job121604550887, monitor78535).
+The new helper continuation uses a complete GitHub ancestor comparison and a
+finite harness-only file allowlist. The original package producer/reader remains
+on its old checkout; current harness identity is distinct. Original copied-success
+job rows on failed-job reruns require an actual matching retained artifact.
+Signing presence is checked before download; prepared failures now emit only
+fixed reason codes and finite memory/disk facts.
+
+Local actual Open Project passed on Oct26:216 AX calls, completion/selection and
+release known, exit0; private dialog-full-recheck-oct26.log. Working installation
+and credentials remain untouched. Check staged-continuation-final-tests.log for
+current targeted correspondence checks; no full-suite or hosted-success claim.
 
 The first staged source `331693d865534935ffbbbd6a5aea440c7b31a456`
 was rejected before any runner/job: the workflow was 518,614 bytes, exceeding

@@ -176,15 +176,56 @@ def cohort_data(values):
     return manifest
 
 
+HARNESS_FILES = frozenset({
+    '.github/workflows/desktop-macos-installed.yml',
+    '.github/workflows/desktop-macos-candidate-tests.yml', '.github/actionlint.yaml',
+    'desktop/tools/macos_prepared_package.py', 'desktop/tools/macos_android_helper_package.py',
+    'desktop/tools/macos_identity_current_runtime.py', 'desktop/tools/macos_aqua_qualification.py',
+    'desktop/tools/macos_tool_setup_inputs.py', 'desktop/tools/macos_local_preflight.py',
+    'tests/desktop/test_macos_candidate_stages.py', 'tests/desktop/test_macos_prepared_package.py',
+    'MACOS-CONTINUATION.md', 'MACOS-LOCAL-RESULTS.md', 'docs/macos-ci-retries.md',
+})
+
+
+def compatible_harness_data(value, origin, consumer):
+    """Complete GitHub comparison, confined to test/packaging orchestration.
+
+    Application, native, runtime, compiler inputs, profiles and pins cannot
+    change. The original checkout still supplies the package producer build.
+    Compare responses contain at most300 files: strictly fewer proves that
+    this first page is complete. The commit list must also be complete.
+    """
+    need(type(value) is dict and value.get('status') == 'ahead'
+         and value.get('behind_by') == 0 and type(value.get('total_commits')) is int
+         and 0 < value['total_commits'] <= 50 and value.get('ahead_by') == value['total_commits'],
+         'prepared-harness-history')
+    need(value.get('base_commit', {}).get('sha') == origin['source']
+         and value.get('merge_base_commit', {}).get('sha') == origin['source'], 'prepared-harness-ancestor')
+    commits = value.get('commits')
+    need(type(commits) is list and len(commits) == value['total_commits']
+         and commits[-1].get('sha') == consumer['source']
+         and commits[-1].get('commit', {}).get('tree', {}).get('sha') == consumer['tree']
+         and value['base_commit'].get('commit', {}).get('tree', {}).get('sha') == origin['tree'],
+         'prepared-harness-source-tree')
+    rows = value.get('files')
+    need(type(rows) is list and 0 < len(rows) < 300
+         and all(type(row) is dict and row.get('filename') in HARNESS_FILES
+                 and row.get('status') in ('added', 'modified', 'removed')
+                 and 'previous_filename' not in row for row in rows)
+         and len({row['filename'] for row in rows}) == len(rows), 'prepared-harness-files')
+    return True
+
+
 class PreparedBinding:
     """Private admitted provenance, never old live-custody or a caller flag."""
-    __slots__ = ('_manifest', '_consumer', '_artifact')
+    __slots__ = ('_manifest', '_consumer', '_artifact', '_compatible')
 
-    def __init__(self, seal, manifest, consumer, artifact):
+    def __init__(self, seal, manifest, consumer, artifact, compatible=False):
         need(seal is _SEAL, 'prepared-binding-constructor')
         self._manifest = canonical(manifest)
         self._consumer = MappingProxyType(dict(consumer))
         self._artifact = MappingProxyType(dict(artifact))
+        self._compatible = compatible
 
     @property
     def manifest(self):
@@ -201,6 +242,10 @@ class PreparedBinding:
     @property
     def same_source(self):
         return self.source == self._consumer['source']
+
+    @property
+    def native_compatible(self):
+        return self.same_source or self._compatible is True
 
     @property
     def consumer(self):
@@ -249,17 +294,22 @@ def consumer_data(environment, tree, target):
 
 def admit_data(values, service, consumer):
     manifest = cohort_data(values)
-    need(type(service) is dict and set(service) == {'run', 'job', 'artifact'}, 'prepared-service-records')
+    need(type(service) is dict and set(service) in ({'run', 'job', 'artifact'},
+         {'run', 'job', 'artifact', 'compatibility'}), 'prepared-service-records')
     artifact = metadata_data(service['run'], service['job'], service['artifact'], manifest)
     native = {k: manifest['origin'][k] for k in ('nativeScope', 'hostProfile') if k in manifest['origin']}
     need(type(consumer) is dict and set(consumer) == {'source', 'tree', 'target', 'runId', 'runAttempt'} | set(native)
          and all(consumer[k] == v for k, v in native.items())
-         and (not native or consumer['source'] == manifest['origin']['source'])
          and all(hex_data(consumer[k], 40) for k in ('source', 'tree'))
          and all(decimal(consumer[k]) for k in ('runId', 'runAttempt'))
          and consumer['target'] == manifest['origin']['target']
          and (consumer['source'] != manifest['origin']['source'] or consumer['tree'] == manifest['origin']['tree']), 'prepared-consumer')
-    return PreparedBinding(_SEAL, manifest, consumer, artifact)
+    compatible = False
+    if native and consumer['source'] != manifest['origin']['source']:
+        compatible = compatible_harness_data(service.get('compatibility'), manifest['origin'], consumer)
+    elif 'compatibility' in service:
+        need(consumer['source'] != manifest['origin']['source'], 'prepared-harness-unnecessary')
+    return PreparedBinding(_SEAL, manifest, consumer, artifact, compatible)
 
 
 def quote_data(package_bytes, original_bytes, expanded_bytes, inventory_bytes):
@@ -521,6 +571,7 @@ class ResourceGuard:
         disk = os.fstatvfs(op.work_entry['fd'])
         facts = self.data.resource_admission_data(memory['availableEstimateBytes'], quote['memoryBytes'],
                   disk.f_frsize * disk.f_bavail, quote['diskBytes'])
+        op.prepared_resource_facts = facts
         need(facts['memorySufficient'] and facts['diskSufficient'], 'prepared-resource-insufficient')
         self.quote = dict(quote)
         op.package_post()
@@ -536,7 +587,7 @@ class ResourceGuard:
         self.op.package_clock()
 
 
-def selected_job_data(body, source, run, target, *, completed, native_scope=None):
+def selected_job_data(body, source, run, target, *, completed, native_scope=None, artifacts=None):
     value = decode(body, 8 * MIB)
     need(type(value) is dict and type(value.get('jobs')) is list and type(value.get('total_count')) is int
          and len(value['jobs']) == value['total_count'] <= 100, 'prepared-jobs-page-complete')
@@ -557,6 +608,23 @@ def selected_job_data(body, source, run, target, *, completed, native_scope=None
                 continue
             closed.append(row)
         rows = closed
+        if artifacts is not None:
+            # GitHub copies successful jobs into a failed-job rerun with a new
+            # job ID/attempt, even though no build or upload happened there.
+            # Only an actual immutable artifact for that attempt can nominate it.
+            listing = decode(artifacts, 8 * MIB)
+            need(type(listing) is dict and type(listing.get('artifacts')) is list
+                 and type(listing.get('total_count')) is int
+                 and len(listing['artifacts']) == listing['total_count'] <= 100,
+                 'prepared-artifact-page-complete')
+            names = {a.get('name') for a in listing['artifacts'] if type(a) is dict}
+            def retained(row):
+                if type(row.get('run_attempt')) is not int or row['run_attempt'] <= 0:
+                    return False
+                prefix = ('macos-candidate-package-' + native_scope if native_scope else
+                          'mobile-release-kit-macos26-' + target + '-prepared')
+                return prefix + '-' + source + '-' + run + '-' + str(row['run_attempt']) in names
+            rows = [row for row in rows if retained(row)]
     need(len(rows) == 1, 'prepared-one-target-job')
     row = rows[0]
     need(type(row.get('id')) is int and row['id'] > 0 and type(row.get('run_id')) is int and row['run_id'] == int(run)
@@ -596,6 +664,8 @@ def acquire_checkpoint(op, consumer):
         op.package_endpoint = op.package_started + 180_000_000_000
         service_root = op.directory(op.work_entry, 'prepared-service', 'prepared-service-root')
         names = {'run.json', 'job.json', 'artifact.json', 'commit.json', 'metadata.status'}
+        if op.environment.get('MRK_MACOS_PREPARED_RESUME') == 'true':
+            names.add('compatibility.json')
         need(set(os.listdir(service_root['fd'])) == names, 'prepared-service-original-roster')
         service = {}
         for name in sorted(names):
@@ -658,9 +728,120 @@ def native_binding(environment):
     owner = qualification.load_owner(root)
     operation = helper.Operation(owner, root, work, 'package-install', environment, stager, target=target)
     values, binding = acquire_checkpoint(operation, consumer_data(environment, environment.get('MRK_CONSUMER_TREE'), target))
-    need(binding.same_source and binding.origin.get('nativeScope') == environment['MRK_MACOS_NATIVE_SCOPE'],
+    need(binding.native_compatible and binding.origin.get('nativeScope') == environment['MRK_MACOS_NATIVE_SCOPE'],
          'prepared-native-same-source')
     return binding, owner
+
+
+# Only fixed public refusal codes are logged; arbitrary exception text is private.
+PREPARED_FAILURE_CODES = frozenset({
+    'prepared-allocation-phase',
+    'prepared-allocation-values',
+    'prepared-api-original-status',
+    'prepared-artifact-page-complete',
+    'prepared-binding-constructor',
+    'prepared-build-originals',
+    'prepared-build-source',
+    'prepared-built-source',
+    'prepared-caller-status',
+    'prepared-candidate-same-source-only',
+    'prepared-codec-window',
+    'prepared-cohort-bytes',
+    'prepared-cohort-roster',
+    'prepared-cohort-status',
+    'prepared-consumer',
+    'prepared-consumer-tree',
+    'prepared-cross-source-install-only',
+    'prepared-cross-source-not-candidate',
+    'prepared-current-consumer',
+    'prepared-current-source',
+    'prepared-dispatch-install-only',
+    'prepared-exact-detached-source',
+    'prepared-export-attempt',
+    'prepared-export-audit',
+    'prepared-export-caller-zero',
+    'prepared-export-incomplete',
+    'prepared-export-origin',
+    'prepared-export-original-package',
+    'prepared-fixed-candidate-route',
+    'prepared-fixed-entry',
+    'prepared-fixed-store-profile',
+    'prepared-harness-ancestor',
+    'prepared-harness-files',
+    'prepared-harness-history',
+    'prepared-harness-source-tree',
+    'prepared-harness-unnecessary',
+    'prepared-hosted-context',
+    'prepared-hosted-platform',
+    'prepared-hydrated-audit',
+    'prepared-hydration-binding',
+    'prepared-hydration-incomplete',
+    'prepared-job-context',
+    'prepared-job-scope',
+    'prepared-jobs-page-complete',
+    'prepared-json-bound',
+    'prepared-json-duplicate',
+    'prepared-manifest',
+    'prepared-manifest-bound',
+    'prepared-member-binding',
+    'prepared-member-count',
+    'prepared-member-original-size',
+    'prepared-native-origin',
+    'prepared-native-resume-phase',
+    'prepared-native-same-source',
+    'prepared-native-selection',
+    'prepared-native-test-only',
+    'prepared-observer-originals',
+    'prepared-observer-path',
+    'prepared-one-artifact',
+    'prepared-one-target-job',
+    'prepared-origin',
+    'prepared-origin-role',
+    'prepared-original-build',
+    'prepared-original-build-zero',
+    'prepared-original-directory-census',
+    'prepared-original-file-bound',
+    'prepared-original-inventory',
+    'prepared-original-resource-bound',
+    'prepared-original-roster',
+    'prepared-owned-work',
+    'prepared-package-binding',
+    'prepared-packager-identity',
+    'prepared-resource-insufficient',
+    'prepared-resource-quote',
+    'prepared-resource-sample-bound',
+    'prepared-resource-values',
+    'prepared-selected-tree',
+    'prepared-selection-context',
+    'prepared-service-artifact',
+    'prepared-service-cut',
+    'prepared-service-job',
+    'prepared-service-original-roster',
+    'prepared-service-original-status',
+    'prepared-service-records',
+    'prepared-service-run',
+    'prepared-service-shape',
+    'prepared-service-source-tree',
+    'prepared-service-steps',
+    'prepared-staging-original-closes',
+    'prepared-staging-owner',
+    'prepared-transport-original-roster',
+    'p0-memory-original',
+    'p0-memory-lines',
+    'p0-memory-header',
+    'p0-memory-page-size',
+    'p0-memory-counter',
+    'p0-memory-bound',
+    'resume-resource-diagnostic-bound',
+})
+
+
+def failure_data(error, phase, operation):
+    reason = error.args[0] if type(error) is ValueError and len(error.args) == 1 else None
+    known = type(reason) is str and reason in PREPARED_FAILURE_CODES
+    return dict(kind='prepared-checkpoint-failure', phase=phase,
+        reason=reason if known else 'unclassified', diagnosticOnly=True,
+        resourceAdmission=getattr(operation, 'prepared_resource_facts', None))
 
 
 def main():
@@ -704,13 +885,15 @@ def main():
                     operation.package_outputs.append((entry, sha(body)))
                     return body
                 need(small('prepared-api.status') == b'0\n', 'prepared-api-original-status')
-                job = selected_job_data(small('prepared-jobs.json'), args.producer_source, args.producer_run, args.target, completed=True, native_scope=native_origin(environment).get('nativeScope'))
+                artifact_body = small('prepared-artifacts.json')
+                job = selected_job_data(small('prepared-jobs.json'), args.producer_source, args.producer_run, args.target,
+                    completed=True, native_scope=native_origin(environment).get('nativeScope'), artifacts=artifact_body)
                 commit = decode(small('prepared-commit.json'), 8 * MIB)
                 need(commit.get('sha') == args.producer_source and type(commit.get('tree')) is dict
                      and hex_data(commit['tree'].get('sha'), 40), 'prepared-selected-tree')
                 origin = origin_data(dict(source=args.producer_source, tree=commit['tree']['sha'], target=args.target,
                     runId=args.producer_run, runAttempt=str(job['run_attempt']), jobId=str(job['id']), **native_origin(environment)))
-                artifact = selected_artifact_data(small('prepared-artifacts.json'), origin)
+                artifact = selected_artifact_data(artifact_body, origin)
                 directory = operation.package_directory('prepared-service')
                 operation.package_file(directory, 'job.json', canonical(job))
                 operation.package_file(directory, 'artifact.json', canonical(artifact))
@@ -772,6 +955,7 @@ def main():
         return 0
     except BaseException as error:
         print('Prepared signed-input refused; no installed candidate accepted.', file=sys.stderr)
+        print(json.dumps(failure_data(error, args.phase, operation), sort_keys=True), file=sys.stderr)
         if helper is not None:
             helper.emit_failure_diagnostic(error, phase=args.phase, target=args.target, main_stage='operation-execute',
                                            operation=operation, stager=getattr(operation, 'stager', None))
@@ -779,7 +963,10 @@ def main():
 
 
 def admit_host(helper, environment, args):
-    if environment.get('GITHUB_EVENT_NAME') == 'push':
+    if environment.get('GITHUB_EVENT_NAME') == 'push' or (
+        environment.get('MRK_MACOS_PREPARED_RESUME') == 'true' and native_origin(environment)):
+        need(args.phase in ('select', 'hydrate', 'package-install')
+             or environment.get('GITHUB_EVENT_NAME') == 'push', 'prepared-native-resume-phase')
         return helper.admit(environment, target=args.target, phase='package-install')
     # Diagnostic-only current harness. Never change the actual event/source or
     # let ordinary helper.admit accept dispatch/artifact claims as push evidence.

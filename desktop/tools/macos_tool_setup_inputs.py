@@ -321,6 +321,8 @@ def _parent(a, work, private, clock):
         for key in ("MRK_MACOS_PREPARED_TEST", "MRK_CONSUMER_TREE", "RUSTUP_TOOLCHAIN",
                     "DEVELOPER_DIR", "MACOSX_DEPLOYMENT_TARGET"):
             environment[key] = os.environ[key]
+        if os.environ.get("MRK_MACOS_PREPARED_RESUME") == "true":
+            environment["MRK_MACOS_PREPARED_RESUME"] = "true"
     environment["MRK_ANDROID_ACQUISITION_CHILD"] = "1"
     cwd = a.UI_CONSUMER_SOURCE.parent if retained else a.SOURCE
     phase = a.N.NormalPhase(_PREPARED_OWNER if _PREPARED_OWNER is not None else a.N.load_normal_owner(a.SOURCE), environment, cwd, clock)
