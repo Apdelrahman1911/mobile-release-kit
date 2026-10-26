@@ -2,6 +2,21 @@
 
 ## Latest Mac continuation — 2026-10-26
 
+Both producer checkpoints are now successful and immutable: Git27 attempt1
+artifact12585453039, Tool26 attempt2 artifact12661209060. The old run40152218901
+was cancelled only after both build jobs succeeded, to stop its obsolete test
+scripts. New tests use explicit single-group dispatch against saved source769.
+
+Git run40346979269 onb1c3615c passed hydration, full audit, signing, Installer,
+readback and detach. It then refused before launching the app at
+`gate-package-call-shape`: the current package owner adds optional `installerLog`
+diagnostics to two log calls, while the older Aqua receipt gate required exactly
+seven fields. The correction admits/validates only that finite diagnostic on
+those two roles and leaves every original status/hash/close gate intact.58
+focused tests pass, including actual producer diagnostic data and negative gates.
+Tool service run40348393240 on18aa3ff5 is still using the older receipt gate; check
+its result before any further dispatch. Do not rebuild either saved package.
+
 Run40152218901 attempt1 failed. Git27 built and saved its signed package
 (artifact12585453039, origin769bd80d); Tool26's payload notarization returned1
 with network-connection/url-1009, before any prepared checkpoint. Its downstream

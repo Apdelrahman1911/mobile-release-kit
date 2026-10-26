@@ -269,6 +269,31 @@ class CandidateCheckpointTests(unittest.TestCase):
             for wrong in (current.source,'0'*40,None):
                 with self.subTest(source=wrong),self.assertRaises(A.M.Refused):check(wrong)
 
+    def test_real_owner_log_diagnostics_do_not_replace_original_call_gates(self):
+        from desktop.tools import macos_android_helper_package as helper
+        with A.shipping_gate_stager_data() as stage:
+            binding=A.BINDING
+            selection,env,observed,anchors=A.shipping_gate_installation_data(stage,binding)
+            original=json.loads(anchors['android-helper-package-install.json'])
+            original['workflow']=D.M.WORKFLOW
+            receipt=copy.deepcopy(original)
+            for call in receipt['originalCalls']:
+                if call['role'] in ('installer-log-cursor','installer-log-capture'):
+                    call['installerLog']=helper.installer_log_diagnostic_data(dict(
+                        state='unknown',reason='log-no-project-lines',selection='not-created'))
+            def check(value):
+                rows=dict(anchors,**{'android-helper-package-install.json':stage.canonical(value)})
+                return A.M._gate_installation(stage.canonical(observed),b'0\n',binding,env,stage,selection,rows,
+                                              workflow=D.M.WORKFLOW)
+            self.assertEqual(check(receipt),observed)
+            index=next(i for i,c in enumerate(receipt['originalCalls']) if 'installerLog' in c)
+            for key,value in (('returned',False),('capturesSettled',False),('returncode',2),
+                              ('unexpected','no'),('installerLog',dict(state='observed',reason='arbitrary',selection=None))):
+                wrong=copy.deepcopy(receipt);wrong['originalCalls'][index][key]=value
+                with self.subTest(key=key),self.assertRaises(A.M.Refused):check(wrong)
+            wrong=copy.deepcopy(receipt);wrong['originalCalls'][0]['installerLog']=None
+            with self.assertRaises(A.M.Refused):check(wrong)
+
 
 class CandidateWorkflowTests(unittest.TestCase):
     @classmethod

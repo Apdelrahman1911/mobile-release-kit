@@ -6547,8 +6547,19 @@ def _gate_package_anchors(anchors, binding, environment, stage, selection, *, wo
     calls = receipt.get("originalCalls")
     need(type(calls) is list and len(calls) == len(stage.PACKAGING_CALL_ROLES), "gate-package-call-roster")
     for call, role in zip(calls, stage.PACKAGING_CALL_ROLES):
-        need(type(call) is dict and set(call) == {"role", "entered", "returned", "capturesSettled", "returncode",
-                                                "stdoutSha256", "stderrSha256"}, "gate-package-call-shape")
+        fields = {"role", "entered", "returned", "capturesSettled", "returncode", "stdoutSha256", "stderrSha256"}
+        # The existing owner attaches this finite diagnostic to its two log
+        # calls even on success. It is not an Installer/signature/close result.
+        diagnostic_fields = {"installerLog"} if role in ("installer-log-cursor", "installer-log-capture") else set()
+        need(type(call) is dict and set(call) in (fields, fields | diagnostic_fields), "gate-package-call-shape")
+        if "installerLog" in call and call["installerLog"] is not None:
+            log = call["installerLog"]
+            need(type(log) is dict and set(log) == {"state", "reason", "selection"}
+                 and type(log["state"]) is str and log["state"] in ("observed", "observed-project-correlated", "unknown")
+                 and (log["reason"] is None or type(log["reason"]) is str and log["reason"] in
+                      stage.LOG_REFUSALS | {"log-output-unavailable", "log-input-or-capture-unavailable"})
+                 and (log["selection"] is None or type(log["selection"]) is str and log["selection"] in
+                      ("not-created", "write-or-close-unknown-preserve-original")), "gate-package-log-diagnostic")
         for key, expected in {"role": role, "entered": True, "returned": True, "capturesSettled": True}.items():
             _exact(call[key], expected)
         codes = (0, 1) if role in ("installer-log-cursor", "installer-log-capture") else (0,)
