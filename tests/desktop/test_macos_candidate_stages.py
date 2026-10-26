@@ -1,5 +1,6 @@
 """Checkpoint/rerun correspondence. All packages and native ports are inert."""
 import copy
+import importlib.util
 import json
 import re
 import gzip
@@ -16,6 +17,65 @@ from tests.desktop import test_macos_identity_current_runtime as D
 from tests.desktop import test_macos_aqua_qualification as A
 
 ROOT = Path(__file__).resolve().parents[2]
+
+
+class ServiceLogDiagnosticTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        spec = importlib.util.spec_from_file_location('_test_service_log',
+            ROOT / 'desktop/tools/macos_tool_service_diagnostic.py')
+        cls.module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cls.module)
+
+    def test_only_finite_own_codes_paths_and_words_leave_the_parser(self):
+        m = self.module
+        rows = [{'subsystem': m.SUBSYSTEMS[0], 'eventMessage': m.IDS[1]
+            + ' failed to find plist "' + m.PATHS['outer-plist']
+            + '" Error Domain=SMAppServiceErrorDomain Code=8 CANARY_PRIVATE_DESCRIPTION'},
+            {'subsystem': m.SUBSYSTEMS[0], 'eventMessage': m.IDS[0]
+             + '.foreign Error Domain=NSPOSIXErrorDomain Code=13 CANARY_FOREIGN'},
+            {'processImagePath': m.SMD_PATHS[1], 'eventMessage': m.IDS[1]
+             + ' signature Error Domain=NSOSStatusErrorDomain Code=-67050 CANARY_OTHER'}]
+        result = m.project(json.dumps(rows).encode())
+        self.assertEqual(result['matchingEvents'], 2)
+        self.assertEqual(result['details'][0]['pathsMentioned'], ['outer-plist'])
+        self.assertEqual(result['details'][0]['errorCodes'], [{'domain': 'smappservice', 'code': 8}])
+        self.assertEqual(result['details'][1]['errorCodes'], [{'domain': 'osstatus', 'code': -67050}])
+        encoded = json.dumps(result)
+        self.assertNotIn('CANARY', encoded)
+        self.assertNotIn('/Library/', encoded)
+        self.assertNotIn('foreign', encoded)
+        self.assertFalse(m.project(b'[]')['matchingEvents'])
+
+    def test_malformed_or_excessive_data_is_not_a_diagnostic(self):
+        m = self.module
+        for raw in (b'{"a":1,"a":2}', b'[NaN]', b'[]' + b'x', b' ' * (m.LIMIT + 1),
+                    json.dumps([{'eventMessage': 'x' * 8193}]).encode(),
+                    json.dumps([{'eventMessage': ''}] * 513).encode()):
+            with self.subTest(raw=raw[:30]), self.assertRaises((ValueError, UnicodeError)):
+                m.project(raw)
+
+    def test_diagnostic_never_promotes_an_empty_or_failed_original_to_service_success(self):
+        m = self.module
+        for code, body, state in ((0, b'[]', 'empty'), (1, b'CANARY', 'call-failed'),
+                                  (0, b'CANARY', 'unparseable')):
+            def owned(argv, **kwargs):
+                self.assertEqual(kwargs['output_limit'], m.LIMIT)
+                self.assertEqual(kwargs['timeout'], 25)
+                self.assertEqual(argv[:2], ['/usr/bin/log', 'show'])
+                return subprocess.CompletedProcess(argv, code, body, b'')
+            result = m.collect(owned, {}, ROOT)
+            self.assertEqual(result['state'], state)
+            self.assertTrue(result['originalCallReturned'])
+            self.assertFalse(result['serviceQualified'])
+            self.assertNotIn('CANARY', json.dumps(result))
+        def unknown(*args, **kwargs):
+            raise RuntimeError('CANARY unknown original')
+        result = m.collect(unknown, {}, ROOT)
+        self.assertEqual(result['state'], 'call-unknown')
+        self.assertFalse(result['originalCallReturned'])
+        self.assertFalse(result['serviceQualified'])
+        self.assertNotIn('CANARY', json.dumps(result))
 
 
 def native_fixture(scope='git-native'):

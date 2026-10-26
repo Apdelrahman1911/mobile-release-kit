@@ -281,6 +281,15 @@ jobs:
           ulimit -c 0
           # Register once, then Check. Exit78 is unexecuted, never a pass/retry.
           exec "$MRK_PYTHON" -I -S -B desktop/tools/macos_identity_current_runtime.py --target "$MRK_MACOS_TARGET" --scope tool-service-prerequisite
+      - name: Report finite Apple service errors after a failed prerequisite
+        if: ${{ !cancelled() && steps.tool_service.outcome == 'failure' }}
+        timeout-minutes: 1
+        shell: bash
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: |
+          set -euo pipefail
+          "$MRK_PYTHON" -I -S -B desktop/tools/macos_tool_service_diagnostic.py
       - name: Verify the installed CLI against the joined native service
         id: installed_cli_native
         if: matrix.native_scope == 'tool-setup' && steps.tool_service.outcome == 'success'
