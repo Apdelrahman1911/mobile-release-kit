@@ -1,10 +1,12 @@
 name: Desktop Mac candidate build and independent checks
+run-name: >-
+  ${{ github.event_name == 'workflow_dispatch' && inputs.operation == 'candidate-tests' && format('macOS check / {0} / saved build {1}', inputs.test_group, inputs.prepared_run) || format('macOS / {0} / {1}', github.event_name == 'workflow_dispatch' && inputs.operation || 'candidate builds', github.ref_name) }}
 
 on:
   workflow_dispatch:
     inputs:
       operation:
-        description: Independent prepared install or standalone Xcode companion; no main rebuild
+        description: Choose a saved-candidate test, prepared install, or Xcode check
         required: true
         type: choice
         default: prepared-install

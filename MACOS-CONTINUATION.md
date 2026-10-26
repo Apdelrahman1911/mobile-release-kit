@@ -14,8 +14,15 @@ diagnostics to two log calls, while the older Aqua receipt gate required exactly
 seven fields. The correction admits/validates only that finite diagnostic on
 those two roles and leaves every original status/hash/close gate intact.58
 focused tests pass, including actual producer diagnostic data and negative gates.
-Tool service run40348393240 on18aa3ff5 is still using the older receipt gate; check
-its result before any further dispatch. Do not rebuild either saved package.
+Tool service run40348393240 on18aa3ff5 failed before Installer: the original
+producer-tests call exceeded its compiler deadline. Its return/capture cleanup
+remained unknown; no signing credential context or Installer had been entered.
+The exact cold compiler/test sequence passed locally in147.96 seconds; its
+following producer build and actual compiler-graph parser passed in3.04 seconds.
+This local check used no credentials or installed application.
+Retry40351985673 uses the existing8c18718f receipt correction and the same saved
+Tool package. Git retry40349520933 is also active. Check the private ledger and
+GitHub results before further dispatch. Do not rebuild either saved package.
 
 Run40152218901 attempt1 failed. Git27 built and saved its signed package
 (artifact12585453039, origin769bd80d); Tool26's payload notarization returned1
