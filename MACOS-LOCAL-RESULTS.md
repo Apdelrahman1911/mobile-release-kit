@@ -1,6 +1,45 @@
 # Mac continuation results — 2026-10-24
 
-## Current continuation — 2026-10-27 fresh service Check
+## Current continuation — 2026-10-27 checkpoint fixture permissions
+
+Run40467626387 failed in both producer jobs before expensive preparation.
+The captured logs now identify the same synthetic checkout HEAD refusal:
+`file-original-shape` in `Operation.original`, with six failures/four errors
+from the same-source/changed-harness fixture. The CI parent uses umask077,
+so Path.write_text created HEAD as0600; its real source contract permits0444
+or0644. This exact failure reproduces locally under umask077 with the saved
+Python3.14.7. It is a fixture defect, not a signed package or application result.
+Both failed producers created no artifact. Cancellation was requested for the
+remaining consumers, but the run finished with failure. Both consumers refused
+missing upstream checkpoints before Installer. The monitor confirms terminal
+failure; there is no active job to duplicate.
+
+The fixture now sets only its newly created dummy HEAD to0644 and a regression
+runs the full original acquisition/close cases under the private creation mask.
+Product source/owner/mode/identity/attribute checks remain strict.31 checkpoint
+checks pass under umask077/Python3.14.7;57 combined parser/checkpoint checks pass
+under the local default mask. All10 actual fast preflight steps pass using
+Python3.14.7, -I -B and umask077, including disposable DMG transport and17 native
+phase cases in each profile. Syntax/action and diff checks pass. This correction
+changes only tests and documentation, not native/application implementation.
+
+Commit/push this fix only to the two authorized branches after confirming the
+failed run is terminal. The fresh candidate must build/sign both Git27/Tool26
+packages and run initial git-local/service-cli. Their actual results still must
+resolve the earlier bootstrap query timeout and service registration/fresh Check.
+Only after both initial groups succeed, dispatch the other nine against the same
+saved source/run. All11 groups remain incomplete. Preserve historical failures,
+working installation, credentials and original dirty checkout; never change main
+or publish. The goal and heartbeat remain ACTIVE.
+
+## Previous service/preflight continuation — 2026-10-27
+
+Current retry [40467626387](https://github.com/Apdelrahman1911/mobile-release-kit/actions/runs/40467626387)
+has started on `5c970666e544238d0bdb6492845d74410ca6cc2b`, tree `0fc36f41c014e4e0cca48b8bbcf095aa56a9fc11`,
+after the previous run and monitor confirmed cancellation. The new preflight
+log-tail change is committed/pushed to both authorized branches. Check the new
+existing monitor before dispatch; both builds and all eleven groups remain
+unqualified. No source660 or ddb package qualifies this new source.
 
 The first fresh candidate40466561510 failed in Git27's fast candidate-checkpoints
 step before expensive preparation; no signed checkpoint was created. The job log

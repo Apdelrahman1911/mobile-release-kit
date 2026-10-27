@@ -2,6 +2,7 @@
 import copy
 import importlib.util
 import json
+import os
 import re
 import gzip
 import struct
@@ -175,7 +176,11 @@ class CandidateCheckpointTests(unittest.TestCase):
                     values, manifest, service, consumer = native_fixture(scope)
                     if changed:
                         consumer.update(source='6' * 40, tree='7' * 40)
-                    (checkout / '.git/HEAD').write_text(consumer['source'] + '\n')
+                    head = checkout / '.git/HEAD'
+                    head.write_text(consumer['source'] + '\n')
+                    # Match a real checkout's source-file contract even when
+                    # the CI parent creates disposable files under umask077.
+                    head.chmod(0o644)
                     service_root = work / 'prepared-service'; service_root.mkdir()
                     records = dict(service, commit=dict(sha=manifest['origin']['source'],
                         tree={'sha': manifest['origin']['tree']}))
@@ -216,6 +221,13 @@ class CandidateCheckpointTests(unittest.TestCase):
                     self.assertTrue(op.receipt['originalClosesKnown'] and op.receipt['targetRetired'])
                     self.assertFalse(op.receipt['passed'])
                     self.assertTrue(all(row['closed'] and row['fd'] is None for row in op.entries))
+
+    def test_dispatch_fixture_admits_originals_under_private_creation_mask(self):
+        previous = os.umask(0o077)
+        try:
+            self.test_dispatch_originals_distinguish_same_source_from_changed_harness()
+        finally:
+            os.umask(previous)
 
     def test_cold_producer_budget_does_not_extend_native_calls_or_ordinary_installs(self):
         from tests.desktop.test_macos_installed_staging import ANDROID_HELPER as H
