@@ -6,13 +6,14 @@ on:
   workflow_dispatch:
     inputs:
       operation:
-        description: Choose a saved-candidate test, prepared install, or Xcode check
+        description: Choose a saved-candidate test, Python source refresh, prepared install, or Xcode check
         required: true
         type: choice
         default: prepared-install
         options:
           - prepared-install
           - candidate-tests
+          - candidate-python-source
           - xcode-setup-companion
       prepared_source:
         description: Full source commit of the saved package
@@ -5436,6 +5437,12 @@ jobs:
                   raise ValueError("task cleanup closed log refused")
               os.unlink(path)
           PY_CLEAN
+
+  # Uses the registered dispatcher; this operation runs only the supplier.
+  # The local reusable workflow and caller are both bound to github.sha.
+  candidate-python-source:
+    if: github.repository == 'Apdelrahman1911/mobile-release-kit' && github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/verify/desktop-macos-candidate' && inputs.operation == 'candidate-python-source' && inputs.target == 'aarch64-apple-darwin' && github.sha == github.workflow_sha
+    uses: ./.github/workflows/desktop-macos-candidate-python-source.yml
 
   candidate-tests:
     needs: engineering-install

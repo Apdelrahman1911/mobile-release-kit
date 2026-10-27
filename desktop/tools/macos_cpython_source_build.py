@@ -1,9 +1,10 @@
 """One fixed native Darwin CPython SOURCE build, using the existing MRK owner.
 
 The accepted source recipe module is immutable DATA, not execution authority.
-This entry is for the two reviewed, disposable, credential-free macOS26 workflows
-only. It does not use a historical supplier, activate a consumer, install tools,
-sign a public release, or run on a shared development machine.
+This entry is for the reviewed, disposable, credential-free macOS26 source
+workflows and the explicit ARM candidate refresh. It does not use a historical
+supplier, activate a consumer, install tools, sign a public release, or run on a
+shared development machine.
 """
 from __future__ import annotations
 
@@ -31,6 +32,9 @@ MIB = 1024 * 1024
 REPOSITORY = "Apdelrahman1911/mobile-release-kit"
 REFERENCE = "refs/heads/verify/desktop-macos-cpython-source-build"
 WORKFLOW = ".github/workflows/desktop-macos-cpython-source-build.yml"
+CANDIDATE_REFERENCE = "refs/heads/verify/desktop-macos-candidate"
+CANDIDATE_WORKFLOW = ".github/workflows/desktop-macos-installed.yml"
+CANDIDATE_SOURCE_WORKFLOW = ".github/workflows/desktop-macos-candidate-python-source.yml"
 ARM_TARGET = "aarch64-apple-darwin"
 INTEL_TARGET = "x86_64-apple-darwin"
 _TARGET_PROFILES = {
@@ -389,6 +393,27 @@ def target_for_route(workflow_ref, reference):
     raise BuildRefused("fixed-producer-target-route")
 
 
+def producer_route(workflow_ref, reference, event):
+    """One explicit ARM refresh route; historical push routes stay exact."""
+    if reference == CANDIDATE_REFERENCE:
+        need(event == "workflow_dispatch"
+             and workflow_ref == REPOSITORY + "/" + CANDIDATE_WORKFLOW + "@" + reference,
+             "fixed-producer-target-route")
+        return ARM_TARGET, {**target_profile(ARM_TARGET), "reference": reference,
+                            "workflow": CANDIDATE_WORKFLOW}
+    need(event == "push", "fixed-producer-target-route")
+    target = target_for_route(workflow_ref, reference)
+    return target, target_profile(target)
+
+
+def admitted_sdk_version(value):
+    # The actual hosted CLT now reports27.0. Keep minimum deployment26.0,
+    # complete SDK/tool custody, linker inspection and native probes unchanged.
+    # A future SDK still needs its own reviewed observation.
+    return type(value) is str and (re.fullmatch(r"26\.[0-9]+(?:\.[0-9]+)?", value) is not None
+                                   or value == "27.0")
+
+
 def compiler_flags(sdk, target=ARM_TARGET):
     return f"-O2 -g0 -fPIC -arch {target_profile(target)['machine']} -isysroot {sdk} -mmacosx-version-min=26.0"
 
@@ -543,10 +568,11 @@ def load_module(name, path):
 
 
 class Build:
-    def __init__(self, root, work, source, owner, control, recipe, probe, target=ARM_TARGET):
+    def __init__(self, root, work, source, owner, control, recipe, probe, target=ARM_TARGET, *, source_workflow=None):
         self.root, self.work, self.source = root, work, source
         self.owner, self.control, self.recipe, self.probe = owner, control, recipe, probe
         self.target, self.profile = target, target_profile(target)
+        self.source_workflow = source_workflow or self.profile["workflow"]
         self.source_lock = recipe.source_binding(target)
         descriptor = recipe.target_description(target)
         need(self.source_lock["path"] == self.profile["lock"]
@@ -720,7 +746,7 @@ class Build:
         need(self.sdk.is_relative_to(DEVELOPER / "SDKs") and " " not in str(self.sdk), "fixed-Apple-sdk")
         self.protected_tool(self.sdk / "SDKSettings.json", role="sdk-settings", executable=False)
         sdk_version = self.run("sdk-version", [self.xcrun, "--sdk", "macosx", "--show-sdk-version"], maximum=30).stdout.decode().strip()
-        need(re.fullmatch(r"26\.[0-9]+(?:\.[0-9]+)?", sdk_version), "sdk-version")
+        need(admitted_sdk_version(sdk_version), "sdk-version")
         for name in ("clang", "ar", "ranlib", "ld"):
             path = self.run("tool-path-" + name, [self.xcrun, "--sdk", "macosx", "--find", name], maximum=30).stdout.decode().strip()
             setattr(self, name, self.protected_tool(Path(path), role=name))
@@ -1297,7 +1323,8 @@ class Build:
                         self.native_probes()
                         self.notices()
                         self.recheck_tools(full=True)
-                        need(source_snapshot(self.root, self.target) == self.source_binding, "producer-source-post")
+                        need(source_snapshot(self.root, self.target, workflow=self.source_workflow) == self.source_binding,
+                             "producer-source-post")
                         self.check()
                     except BaseException as error:
                         self.failure = {"phase": self.phase, "type": type(error).__name__,
@@ -1505,14 +1532,19 @@ def supplier_tar(root, output, files, *, deadline):
             "files": len(files), "directories": len(directories), "modePreservation": True}
 
 
-def source_snapshot(root, target=ARM_TARGET):
+def source_snapshot(root, target=ARM_TARGET, *, workflow=None):
     profile = target_profile(target)
-    fixed = {profile["workflow"], "desktop/tools/macos_cpython_source_build.py", "desktop/tools/macos_cpython_source_probe.py",
+    workflow = profile["workflow"] if workflow is None else workflow
+    need(workflow == profile["workflow"] or (target == ARM_TARGET and workflow == CANDIDATE_WORKFLOW),
+         "producer-source-workflow")
+    fixed = {workflow, "desktop/tools/macos_cpython_source_build.py", "desktop/tools/macos_cpython_source_probe.py",
              "desktop/tools/macos_cpython_orchestrator.py",
              "desktop/tools/macos_cpython_source_setup.local", "desktop/tools/macos_cpython_source_recipe.py",
              "desktop/tools/macos_aqua_qualification.py", profile["lock"],
              PROVENANCE[0]}
     fixed.update("desktop/cpython-source-inputs/" + name + "-source-inventory.json" for name in ("cpython", "libffi", "openssl", "zlib"))
+    if workflow == CANDIDATE_WORKFLOW:
+        fixed.add(CANDIDATE_SOURCE_WORKFLOW)
     fixed.update((directory / name).relative_to(root).as_posix()
                  for directory, _, names in walk_tree(root / "src/mobile_release") for name in names if name.endswith(".py"))
     fixed.update("desktop/src-tauri/tests/fixtures/github_tls/" + name for name in (
@@ -1527,8 +1559,8 @@ def source_snapshot(root, target=ARM_TARGET):
 
 
 def main():
-    target = target_for_route(os.environ.get("GITHUB_WORKFLOW_REF"), os.environ.get("GITHUB_REF"))
-    profile = target_profile(target)
+    target, profile = producer_route(os.environ.get("GITHUB_WORKFLOW_REF"), os.environ.get("GITHUB_REF"),
+                                     os.environ.get("GITHUB_EVENT_NAME"))
     need(len(sys.argv) == 1 and sys.platform == "darwin" and os.uname().machine == profile["machine"]
          and platform.mac_ver()[0].startswith("26.") and sys.version_info[:3] == (3, 14, 7)
          and sys.flags.isolated and sys.flags.no_site and sys.dont_write_bytecode
@@ -1537,7 +1569,8 @@ def main():
     need(re.fullmatch(r"[0-9a-f]{40}", source) and source != "0" * 40
          and all(re.fullmatch(r"[1-9][0-9]{0,19}", value) for value in (run, attempt)), "fixed-native-producer-run")
     route = {"GITHUB_ACTIONS": "true", "RUNNER_ENVIRONMENT": "github-hosted", "RUNNER_OS": "macOS",
-        "RUNNER_ARCH": profile["runnerArch"], "GITHUB_REPOSITORY": REPOSITORY, "GITHUB_EVENT_NAME": "push",
+        "RUNNER_ARCH": profile["runnerArch"], "GITHUB_REPOSITORY": REPOSITORY,
+        "GITHUB_EVENT_NAME": "workflow_dispatch" if profile["workflow"] == CANDIDATE_WORKFLOW else "push",
         "GITHUB_REF": profile["reference"], "GITHUB_WORKFLOW_SHA": source, "GITHUB_JOB": "producer",
         "GITHUB_WORKFLOW_REF": REPOSITORY + "/" + profile["workflow"] + "@" + profile["reference"],
         "GITHUB_WORKSPACE": str(CHECKOUT), "RUNNER_TEMP": str(WORK_PARENT)}
@@ -1552,7 +1585,7 @@ def main():
     need(0 < selected_limits[0] <= 1024 and selected_limits[1] == original_limits[1],
          "fixed-native-descriptor-bound")
     os.umask(0o077)
-    before = source_snapshot(CHECKOUT, target)
+    before = source_snapshot(CHECKOUT, target, workflow=profile["workflow"])
     tools = CHECKOUT / "desktop/tools"
     orchestration = load_module("_mrk_macos_orchestration", tools / "macos_cpython_orchestrator.py")
     need(orchestration._BUILD is None, "orchestration-facade-already-bound")
@@ -1567,7 +1600,8 @@ def main():
     from mobile_release import cancellation
     work = WORK_PARENT / f"{profile['workPrefix']}-{source}-{run}-{attempt}"
     work.mkdir(mode=0o700)  # No adoption, reset, overwrite or retry of an existing task.
-    build = Build(CHECKOUT, work, source, owner, cancellation, recipe, probe, target)
+    build = Build(CHECKOUT, work, source, owner, cancellation, recipe, probe, target,
+                  source_workflow=profile["workflow"])
     build.orchestration_config = orchestration_config
     build.descriptor_limits = {"original": original_limits, "selected": selected_limits}
     build.source_binding = before

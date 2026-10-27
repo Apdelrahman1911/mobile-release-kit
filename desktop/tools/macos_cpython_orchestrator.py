@@ -1068,8 +1068,8 @@ class FixedCalls:
 
 def context():
     b = build_data()
-    target = b.target_for_route(os.environ.get("GITHUB_WORKFLOW_REF"), os.environ.get("GITHUB_REF"))
-    profile = b.target_profile(target)
+    target, profile = b.producer_route(os.environ.get("GITHUB_WORKFLOW_REF"), os.environ.get("GITHUB_REF"),
+                                      os.environ.get("GITHUB_EVENT_NAME"))
     source, run, attempt = (os.environ.get(name, "") for name in ("GITHUB_SHA", "GITHUB_RUN_ID", "GITHUB_RUN_ATTEMPT"))
     need(sys.platform == "darwin" and sys.version_info >= (3, 9) and sys.flags.isolated
          and sys.flags.no_site and sys.dont_write_bytecode and os.getuid() == os.geteuid() != 0
@@ -1079,7 +1079,8 @@ def context():
          and all(re.fullmatch(r"[1-9][0-9]{0,19}", value) for value in (run, attempt)), "fixed-preparation-run")
     route = {"GITHUB_ACTIONS": "true", "RUNNER_ENVIRONMENT": "github-hosted", "RUNNER_OS": "macOS",
              "RUNNER_ARCH": profile["runnerArch"], "GITHUB_REPOSITORY": b.REPOSITORY,
-             "GITHUB_EVENT_NAME": "push", "GITHUB_REF": profile["reference"], "GITHUB_WORKFLOW_SHA": source,
+             "GITHUB_EVENT_NAME": "workflow_dispatch" if profile["workflow"] == b.CANDIDATE_WORKFLOW else "push",
+             "GITHUB_REF": profile["reference"], "GITHUB_WORKFLOW_SHA": source,
              "GITHUB_JOB": "producer", "GITHUB_WORKSPACE": str(b.CHECKOUT), "RUNNER_TEMP": str(b.WORK_PARENT),
              "GITHUB_WORKFLOW_REF": b.REPOSITORY + "/" + profile["workflow"] + "@" + profile["reference"]}
     need(all(os.environ.get(key) == value for key, value in route.items()), "fixed-preparation-route")
@@ -1087,6 +1088,7 @@ def context():
     root = b.WORK_PARENT / (profile["workPrefix"] + "-orchestrator-" + source + "-" + run + "-" + attempt)
     return {"sourceCommit": source, "run": run, "attempt": attempt, "target": target,
             "machine": profile["machine"], "root": root,
+            "sourceWorkflow": profile["workflow"],
             "buildRoot": b.WORK_PARENT / (profile["workPrefix"] + "-" + source + "-" + run + "-" + attempt)}
 
 
@@ -1115,7 +1117,8 @@ def atomic_record(path, record):
 
 def source_post(before, ctx):
     b = build_data()
-    need(b.source_snapshot(b.CHECKOUT, ctx["target"]) == before, "preparation-source-post")
+    need(b.source_snapshot(b.CHECKOUT, ctx["target"], workflow=ctx.get("sourceWorkflow")) == before,
+         "preparation-source-post")
 
 
 def protected_apple(path):
@@ -1306,7 +1309,7 @@ def enter_build(ctx):
     """Verify bytes with Apple Python, then replace this same original process."""
     b = build_data()
     protected_apple(sys.executable)
-    before = b.source_snapshot(b.CHECKOUT, ctx["target"])
+    before = b.source_snapshot(b.CHECKOUT, ctx["target"], workflow=ctx.get("sourceWorkflow"))
     prepared_layout(ctx)
     source_post(before, ctx)
     inherited = ("GITHUB_ACTIONS", "RUNNER_ENVIRONMENT", "RUNNER_OS", "RUNNER_ARCH", "GITHUB_REPOSITORY",
@@ -1705,7 +1708,7 @@ def prepare(ctx):
     b = build_data()
     root = ctx["root"]
     need(not root.exists() and not root.is_symlink(), "preparation-root-collision")
-    before = b.source_snapshot(b.CHECKOUT, ctx["target"])
+    before = b.source_snapshot(b.CHECKOUT, ctx["target"], workflow=ctx.get("sourceWorkflow"))
     root.mkdir(mode=0o700)
     (root / "home").mkdir(mode=0o700)
     (root / "tmp").mkdir(mode=0o700)

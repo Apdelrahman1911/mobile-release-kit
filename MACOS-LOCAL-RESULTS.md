@@ -1,6 +1,46 @@
 # Mac continuation results — 2026-10-24
 
+## Current results — 2026-10-27 Python dependency recovery
+
+Candidate40468939684 failed in both builds at the missing pinned Python
+artifact after both actual fast preflights and Git/Library checks passed.
+No package exists; both consumer groups refused missing checkpoints before
+Installer. The existing monitor is terminal. Signed Python12242597733 is also
+unavailable. Frozen supplier38343324660/attempt2 was retried without branch
+changes and failed on actual SDK27.0 versus its26.x guard. Preparation and
+original two-command/handler/scratch/FD/source retirement passed; it produced
+no supplier. Both evidence ZIPs were checked against service SHA/size.
+
+The independent candidate source refresh is reusable-only through the registered
+desktop-macos-installed.yml dispatcher, operation candidate-python-source. It
+admits only dispatch ARM hosted Mac26 on verify/desktop-macos-candidate, exact
+caller identity/source and both caller/callee SOURCE snapshots. The new standalone
+filename returned404 from the workflow API; no main change is required. No other
+application/install/signing job is admitted for this operation, and no secrets
+are inherited. All original producer lifecycle step bodies remain identical.
+It admits actual SDK27.0, preserves deployment26.0 and all native/linker/custody
+and finality checks, and retains its successful supplier90 days. It does not
+sign or run candidates. Eight new checks pass under full Python3.14.6 and3.11.16,
+umask077; unchanged workflow3 tests and syntax/diff checks pass. Local builder13
+tests retain two extended-attribute errors and discovered preparation6 tests one
+attribute failure. All three reproduce against the unchanged checkpoint code
+with fresh Mac27 fixture provenance. Reduced app Python lacks_lzma and cannot
+run these orchestration tests; its import attempts failed. A direct preparation
+test-file invocation executed zero tests and is not counted. No policy was relaxed.
+
+Next commit only the two authorized branches with[skip ci], dispatch only the
+independent supplier and verify actual success. Then separately sign/pin the new
+Python, bind its real runtime, build both fresh candidates and run all11 groups.
+No new candidate/package/group has passed. Preserve all earlier failed evidence,
+working installation, credentials, original checkout, main and production state.
+
 ## Current continuation — 2026-10-27 checkpoint fixture permissions
+
+The fixture fix is committed/pushed as `2385c3d4bb17a76c6ee9d7b77944c8a6c3f1fc2e` to both
+authorized branches. Fresh candidate [40468939684](https://github.com/Apdelrahman1911/mobile-release-kit/actions/runs/40468939684)
+uses tree `e44dae003e77c3275d25cf58c17f18e38a0d09bf`. The previous run and monitor are
+terminal with failure; the new monitor is active. Check live state before any
+dispatch. No new signed checkpoint or independent group has succeeded yet.
 
 Run40467626387 failed in both producer jobs before expensive preparation.
 The captured logs now identify the same synthetic checkout HEAD refusal:

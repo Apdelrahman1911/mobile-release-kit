@@ -27,6 +27,24 @@ saved source/run. All eleven successful groups remain required; unexecuted group
 are pending, never passes. This avoids spending five more Tool jobs on a shared
 service failure.
 
+If the pinned Python supplier is unavailable, dispatch `desktop-macos-installed.yml`
+with operation `candidate-python-source` and target `aarch64-apple-darwin` on
+the same candidate branch. It calls `desktop-macos-candidate-python-source.yml`
+and runs only the ARM source supplier. Both workflow files are source-bound;
+the other build/install/signing jobs stay closed and no signing secrets are passed.
+Its original preparation, native
+probes, source checks and retirement must succeed before it retains the tar and
+receipt for90 days. It accepts the actually observed SDK27.0 while retaining
+minimum deployment26.0; future SDK versions remain refused. The historical
+supplier branches are unchanged. This step does not start either candidate build
+or qualify a signed runtime. A separately verified signed derivation and new
+source-bound candidates are still required before installed test groups resume.
+
+```sh
+gh workflow run desktop-macos-installed.yml --ref verify/desktop-macos-candidate \
+  -f operation=candidate-python-source -f target=aarch64-apple-darwin
+```
+
 After a failure, open the run and choose **Re-run failed jobs**. To retry one job,
 use that job's **Re-run job** control. Successful jobs and their saved packages
 are reused; **Re-run all jobs** deliberately rebuilds and is not the recovery

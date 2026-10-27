@@ -1,6 +1,65 @@
 # Continue Mobile Release Kit on the owner's Mac
 
+## Current continuation — 2026-10-27 Python dependency recovery
+
+Candidate40468939684 is terminal with failure; monitor74541 has completed.
+Both Tool26/Git27 passed their fast preflight and actual Git/Library checks,
+then failed step16 because pinned supplier11788410124 is absent from original
+run38343324660. Its artifact GET returns404 and the pre-retry roster was empty.
+The pinned signed Python capsule12242597733 is also absent. Original supplier
+retention was14 days and the signing workflow requests7; the API cannot prove
+the deletion mechanism. No new signed package exists. Both consumers refused
+missing upstream checkpoints before Installer. All11 groups remain incomplete.
+
+Only the existing frozen supplier run was retried, without changing any branch.
+Run38343324660/attempt2 failed at sdk-version: actual CLT SDK output was27.0,
+while the frozen builder accepts26.x. Its preparation passed, the two original
+SDK commands returned, and source/handler/scratch/FD retirement was known.
+Both public evidence ZIPs were downloaded and service digests verified.
+Monitor13168 is terminal with failure. Do not retry this frozen source again.
+
+The pending independent candidate Python source workflow is reusable-only via
+the already registered desktop-macos-installed.yml dispatcher, operation
+candidate-python-source on verify/desktop-macos-candidate, ARM, hosted Mac26,
+exact source/workflow SHA. The new standalone filename is not registered (404);
+no default-branch change is needed. All other caller jobs remain closed for this
+operation and no signing secrets are inherited. Native admission uses the actual
+caller workflow identity; both caller and reusable YAML join the SOURCE snapshot.
+It retains the original source/SDK custody, linker/native probes, source POST,
+cleanup and publication gates. SDK27.0 is admitted explicitly; deployment stays
+26.0 and future27.1/28 remain refused. Its complete YAML joins the source snapshot.
+Original supplier workflows/branches are unchanged; supplier retention is90 days.
+This step does not sign or start either candidate. After its actual success,
+verify and pin its source/run/attempt/tar/receipt/artifact, then implement/run
+the separate signed Python derivation on the same authorized candidate branch.
+Only after complete signature/native verification, bind the actual new runtime
+and build both fresh signed candidates. Never reuse an old signed package to
+qualify changed runtime bytes or invent the missing signing receipt.
+
+Eight source-route/SDK/snapshot/caller-isolation checks pass on full local Python3.14.6 and
+3.11.16 under umask077; the three unchanged source-workflow checks pass.
+Actionlint syntax/action and diff checks pass. Full local builder13 tests retain
+two attribute errors and discovered preparation6 tests retain one attribute
+failure. The same three failures reproduce with frozen HEAD code: Mac27 adds
+com.apple.provenance to the fresh test directories. No attribute policy changed.
+The reduced copied app interpreter lacks_lzma, so its three attempted module
+imports failed; those are not executed suites or supplier passes. Directly
+running the preparation test file exits0 without invoking unittest; that attempt
+is not a pass. Preserve all logs. These are DATA tests, not native qualification.
+
+Working installation, credentials and original dirty checkout remain untouched.
+Commit this local recovery only to the two authorized branches with[skip ci],
+then dispatch only candidate-python-source through the existing installed workflow
+and monitor it before more work.
+The full goal and heartbeat remain ACTIVE; no production release or main change.
+
 ## Current continuation — 2026-10-27 checkpoint fixture permissions
+
+The fixture fix is committed/pushed as `2385c3d4bb17a76c6ee9d7b77944c8a6c3f1fc2e` to both
+authorized branches. Fresh candidate [40468939684](https://github.com/Apdelrahman1911/mobile-release-kit/actions/runs/40468939684)
+uses tree `e44dae003e77c3275d25cf58c17f18e38a0d09bf`. The previous run and monitor are
+terminal with failure; the new monitor is active. Check live state before any
+dispatch. No new signed checkpoint or independent group has succeeded yet.
 
 Run40467626387 failed in both producer jobs before expensive preparation.
 The captured logs now identify the same synthetic checkout HEAD refusal:
