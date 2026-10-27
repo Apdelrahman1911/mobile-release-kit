@@ -144,7 +144,7 @@ fn latch_bootstrap(first: &AtomicU8, failed: &AtomicBool, detail: &mut Option<Bo
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum GitReadCheck {
     MissingOperation, MissingFixture, MissingOriginal, OriginalMismatch,
-    TerminalPhase, TerminalOutcome, TerminalReason, ResultSchema, FixtureComparison, ReferenceRevision,
+    TerminalPhase, TerminalOutcome, TerminalReason, ResultSchema, FixtureComparison, ReferenceRevision, CliOriginalReturn,
 }
 impl GitReadCheck {
     fn label(self) -> &'static str {
@@ -154,6 +154,7 @@ impl GitReadCheck {
             Self::TerminalPhase => "terminal-phase", Self::TerminalOutcome => "terminal-outcome",
             Self::TerminalReason => "terminal-reason", Self::ResultSchema => "result-schema",
             Self::FixtureComparison => "fixture-comparison", Self::ReferenceRevision => "reference-revision",
+            Self::CliOriginalReturn => "cli-original-return",
         }
     }
 }
@@ -171,7 +172,7 @@ fn git_read_wait_terminal(p: &git_read::Projection) -> Result<bool, GitReadCheck
 }
 fn git_read_failure_reason(step: Step) -> Option<&'static str> {
     match step {
-        Step::GitCli(git_cli::Step::ReadWait) => Some("git-cli-original-contract"),
+        Step::GitCli(git_cli::Step::ReadWait|git_cli::Step::Prepared|git_cli::Step::Terminal) => Some("git-cli-original-contract"),
         Step::GitUpstream(git_upstream::Step::ReadWait) => Some("git-upstream-original-contract"),
         Step::GitFetch(git_fetch::Step::ReadWait) => Some("git-fetch-original-contract"),
         Step::GitPush(git_push::Step::ReadWait) => Some("git-push-original-contract"),
@@ -185,6 +186,7 @@ struct GitReadFailureSample {
     step: Step, check: GitReadCheck, phase: Option<git_read::Phase>, outcome: Option<git_read::Outcome>,
     reason: GitReadReason, result_valid: Option<bool>,
     provenance: Option<crate::error::GitReadFailureProvenance>,
+    cli_return:Option<crate::service_git_requests::InstalledCliReturnFacts>,
 }
 impl GitReadFailureSample {
     fn capture(step: Step, p: Option<&git_read::Projection>, check: GitReadCheck, result_valid: Option<bool>) -> Self {
@@ -200,7 +202,7 @@ impl GitReadFailureSample {
             GitReadCheck::MissingOperation | GitReadCheck::MissingFixture | GitReadCheck::MissingOriginal | GitReadCheck::OriginalMismatch => None,
             _ => p.and_then(|p| p.failure_provenance),
         };
-        Self { step, check, phase: p.map(|p| p.phase), outcome: p.and_then(|p| p.outcome), reason, result_valid, provenance }
+        Self { step, check, phase: p.map(|p| p.phase), outcome: p.and_then(|p| p.outcome), reason, result_valid, provenance,cli_return:None }
     }
     fn value(self) -> Value {
         let reason = match self.reason {
@@ -209,6 +211,7 @@ impl GitReadFailureSample {
             GitReadReason::Unrecognized => Some("unrecognized"),
         };
         let mut value = json!({"check":self.check.label(),"phase":self.phase,"outcome":self.outcome,"reason":reason,"resultValid":self.result_valid});
+        if let Some(facts)=self.cli_return {value["cliOriginalReturn"]=json!(facts);}
         if let Some(provenance) = self.provenance {
             value["provenance"] = json!({"origin":provenance.origin,"goClaimedAtBoundary":provenance.go_claimed_at_boundary});
             if provenance.origin == crate::error::GitReadFailureOrigin::ChildTerminal {
@@ -4689,7 +4692,8 @@ fn git_read_failure_data_checks() -> bool {
         (GitReadCheck::MissingOriginal,"missing-original"), (GitReadCheck::OriginalMismatch,"original-mismatch"),
         (GitReadCheck::TerminalPhase,"terminal-phase"), (GitReadCheck::TerminalOutcome,"terminal-outcome"),
         (GitReadCheck::TerminalReason,"terminal-reason"), (GitReadCheck::ResultSchema,"result-schema"),
-        (GitReadCheck::FixtureComparison,"fixture-comparison"), (GitReadCheck::ReferenceRevision,"reference-revision")] {
+        (GitReadCheck::FixtureComparison,"fixture-comparison"), (GitReadCheck::ReferenceRevision,"reference-revision"),
+        (GitReadCheck::CliOriginalReturn,"cli-original-return")] {
         for valid in [None, Some(false), Some(true)] {
             let sample = GitReadFailureSample::capture(snapshot.step, Some(&p), check, valid);
             if sample.value()["check"] != label || sample.value()["resultValid"] != json!(valid)

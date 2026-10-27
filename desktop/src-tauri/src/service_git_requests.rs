@@ -977,8 +977,16 @@ impl Entry {
     /// Nonshipping comparison of THIS retained original. It grants nothing and
     /// never substitutes public status/history for native or relay retirement.
     pub(crate) fn installed_cli_returned(&self, origin:&p::Query, family:Family, phase:Phase, revision:u32)->bool {
+        self.installed_cli_returned_observed(origin,family,phase,revision,&mut None)
+    }
+    pub(crate) fn installed_cli_returned_observed(&self, origin:&p::Query, family:Family, phase:Phase, revision:u32,
+        facts:&mut Option<InstalledCliReturnFacts>)->bool {
         if self.input.origin!=*origin || self.family!=family || !matches!(family,Family::Index|Family::Repository){return false;}
         let Ok(r)=self.lock() else{return false};
+        *facts=Some(InstalledCliReturnFacts {state:r.status.state,reason:r.status.reason,claimed:r.claimed.is_some(),
+            prepare_joined:r.prepare_joined,apply_joined:r.apply_joined,history_failed:r.history_failed,
+            history_claimed:r.history_claim.is_some(),history_acknowledged:r.history_ack==Some(revision),
+            stopped:r.stop.is_some(),review_present:r.review.is_some(),revision_matched:r.status.revision==revision});
         r.status.revision==revision && r.claimed.is_none() && r.prepare_joined
             && !r.history_failed && r.history_claim.is_none() && r.history_ack==Some(revision)
             && r.stop.is_none() && r.status.reason.is_none() && match phase {
@@ -989,4 +997,14 @@ impl Entry {
                     && r.review.is_none() && r.status.apply_operation_id.is_some(),
             }
     }
+}
+
+#[cfg(all(test, debug_assertions, feature="desktop-shell",feature="custom-protocol",feature="macos-installed-observation",
+    not(feature="development-runtime"),not(feature="ubuntu-runtime-publisher"),not(feature="macos-installed-installer"),
+    target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64")))]
+#[derive(Clone,Copy,Debug,PartialEq,Eq,serde::Serialize)]
+#[serde(rename_all="camelCase")]
+pub(crate) struct InstalledCliReturnFacts {
+    state:p::State,reason:Option<p::Reason>,claimed:bool,prepare_joined:bool,apply_joined:bool,
+    history_failed:bool,history_claimed:bool,history_acknowledged:bool,stopped:bool,review_present:bool,revision_matched:bool,
 }

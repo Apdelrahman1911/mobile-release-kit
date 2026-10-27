@@ -26,6 +26,62 @@ const REMOVE_DOMAIN:&[u8]=b"MobileReleaseKit-remove-producer-v1\0";
 const REMOVE_DESCRIPTOR_LIMIT:usize=16384;
 const REMOVE_FILENAME:&[u8]=b"/mrk-macos-remove";
 const _:()=assert!(REMOVE_DOMAIN.len()<=DOMAIN.len());
+/// Metadata observation for one newly created, still-held producer sidecar.
+/// It grants no input/installation authority. The caller must retain the exact
+/// observation through every POST; ordinary no-xattr checks remain unchanged.
+#[cfg(feature="package-producer-signing")]
+#[derive(Clone,Copy,Debug,PartialEq,Eq)]
+pub enum CreatedProvenance { Absent, Origin([u8;11]) }
+#[cfg(feature="package-producer-signing")]
+fn created_provenance_data(code:c_int,present:c_int,bytes:[u8;11])->std::io::Result<CreatedProvenance> {
+    if code!=0 {return Err(std::io::Error::from_raw_os_error(code));}
+    match present {
+        0 if bytes==[0;11]=>Ok(CreatedProvenance::Absent),
+        1 if bytes[..3]==[1,2,0]=>Ok(CreatedProvenance::Origin(bytes)),
+        _=>Err(std::io::ErrorKind::InvalidData.into()),
+    }
+}
+#[cfg(feature="package-producer-signing")]
+pub fn created_provenance(fd:BorrowedFd<'_>)->std::io::Result<CreatedProvenance> {
+    unsafe extern "C" {fn mrk_install_producer_created_provenance(fd:c_int,present:*mut c_int,bytes:*mut u8)->c_int;}
+    let mut present=0;let mut bytes=[0;11];
+    // SAFETY: live borrowed original, fixed writable scalar and eleven-byte
+    // record. The shim owns no FD and validates the same user's regular file.
+    let code=unsafe {mrk_install_producer_created_provenance(fd.as_raw_fd(),&mut present,bytes.as_mut_ptr())};
+    created_provenance_data(code,present,bytes)
+}
+#[cfg(all(test,feature="package-producer-signing"))]
+mod created_provenance_tests {
+    use super::*;
+    use std::{fs::{self,OpenOptions},os::{fd::AsFd,unix::fs::OpenOptionsExt}};
+    #[test]
+    fn malformed_or_failed_metadata_never_becomes_an_origin_record() {
+        assert_eq!(created_provenance_data(0,0,[0;11]).unwrap(),CreatedProvenance::Absent);
+        let mut bytes=[0;11];bytes[..3].copy_from_slice(&[1,2,0]);bytes[10]=19;
+        assert_eq!(created_provenance_data(0,1,bytes).unwrap(),CreatedProvenance::Origin(bytes));
+        assert!(created_provenance_data(nix::libc::EPERM,1,bytes).is_err());
+        assert!(created_provenance_data(0,0,bytes).is_err());
+        for present in [-1,2,3] {assert!(created_provenance_data(0,present,bytes).is_err());}
+        for index in 0..3 {let mut bad=bytes;bad[index]^=1;assert!(created_provenance_data(0,1,bad).is_err());}
+    }
+    #[test]
+    fn actual_created_file_rematches_origin_and_still_fails_ordinary_no_xattrs() {
+        let root=std::env::temp_dir().join(format!("mrk-producer-metadata-{}",std::process::id()));
+        fs::create_dir(&root).unwrap();let path=root.join("sidecar.json");
+        let file=OpenOptions::new().read(true).write(true).create_new(true).mode(0o600).open(&path).unwrap();
+        let first=created_provenance(file.as_fd()).unwrap();
+        assert_eq!(created_provenance(file.as_fd()).unwrap(),first);
+        if matches!(first,CreatedProvenance::Origin(_)) {assert!(crate::no_xattrs(file.as_fd()).is_err());}
+        else {crate::no_xattrs(file.as_fd()).unwrap();}
+        let name=b"com.mrk.disposable-test\0";
+        // SAFETY: the same live test FD and bounded fixed name/value. This adds
+        // one unrelated attribute only to this disposable test file.
+        assert_eq!(unsafe {nix::libc::fsetxattr(file.as_fd().as_raw_fd(),name.as_ptr().cast(),b"x".as_ptr().cast(),1,0,0)},0);
+        assert!(created_provenance(file.as_fd()).is_err());
+        assert!(crate::no_xattrs(file.as_fd()).is_err());
+        drop(file);fs::remove_file(path).unwrap();fs::remove_dir(root).unwrap();
+    }
+}
 #[cfg(any(test,feature="package-producer-signing"))]
 const SIGN_STEPS:u8=12;
 #[cfg(any(test,feature="package-producer-signing"))]

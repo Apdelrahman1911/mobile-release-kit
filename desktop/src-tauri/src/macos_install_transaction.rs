@@ -275,11 +275,20 @@ impl IntentData {
 }
 
 /// Directory identity is DATA, not a live ACL/mount/xattr/name observation.
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct AppIdentity {
     device: i64, inode: u64, mode: u32, uid: u32, gid: u32, flags: u32,
+    #[serde(default, rename="volumeUuid", skip_serializing_if="Option::is_none", deserialize_with="crate::macos_persistent_identity::present_uuid")]
+    volume_uuid: Option<crate::macos_persistent_identity::VolumeUuid>,
 }
+impl PartialEq for AppIdentity {
+    fn eq(&self, other: &Self) -> bool {
+        crate::macos_persistent_identity::same_volume_data((self.device,self.volume_uuid),(other.device,other.volume_uuid))
+            && (self.inode,self.mode,self.uid,self.gid,self.flags)==(other.inode,other.mode,other.uid,other.gid,other.flags)
+    }
+}
+impl Eq for AppIdentity {}
 impl AppIdentity {
     fn valid(&self) -> bool { self.device > 0 && self.inode > 0 && self.mode == 0o040555
         && self.uid == 0 && self.gid == 0 && self.flags == 0 }
@@ -302,7 +311,15 @@ fn generation_shape(value: &serde_json::Value) -> Result<()> {
 impl Generation {
     fn valid(&self, expected: &ReleaseSetData) -> bool {
         expected.contains_data(&self.release) && hex(&self.instance, 32) && self.release_directory.valid()
-            && self.app.identity().valid() && match &self.app {
+            && self.app.identity().valid()
+            && match (self.release_directory.volume_uuid,self.app.identity().volume_uuid) {
+                (Some(a),Some(b)) => a==b,
+                (None,None) => self.release_directory.device==self.app.identity().device,
+                // Restore may publish a durable app beside an immutable legacy
+                // runtime record. Native admission authenticates both originals.
+                (None,Some(_)) => true,
+                (Some(_),None) => false,
+            } && match &self.app {
                 AppSlot::Canonical { .. } => true,
                 AppSlot::Retained { invocation, .. } => hex(invocation, 32),
             }
@@ -318,8 +335,21 @@ impl Generation {
 pub struct AppIdentityData(AppIdentity);
 impl AppIdentityData {
     pub fn from_original_fields_data(device: i64, inode: u64, mode: u32, uid: u32, gid: u32, flags: u32) -> Result<Self> {
-        let value = AppIdentity { device, inode, mode, uid, gid, flags };
+        let value = AppIdentity { device, inode, mode, uid, gid, flags, volume_uuid: None };
         require(value.valid(), TransactionDataError::Binding)?; Ok(Self(value))
+    }
+    pub fn from_original_volume_fields_data(device: i64, inode: u64, mode: u32, uid: u32, gid: u32, flags: u32,
+        volume_uuid: crate::macos_persistent_identity::VolumeUuid) -> Result<Self> {
+        let value = AppIdentity { device, inode, mode, uid, gid, flags, volume_uuid: Some(volume_uuid) };
+        require(value.valid(), TransactionDataError::Binding)?; Ok(Self(value))
+    }
+    pub fn volume_uuid_data(&self) -> Option<crate::macos_persistent_identity::VolumeUuid> { self.0.volume_uuid }
+    pub fn matches_legacy_binding_data(&self, observed: &Self,
+        binding: crate::macos_persistent_identity::LegacyVolumeBindingData) -> bool {
+        self.0.valid() && observed.0.valid()
+            && (self.0.inode,self.0.mode,self.0.uid,self.0.gid,self.0.flags)
+                ==(observed.0.inode,observed.0.mode,observed.0.uid,observed.0.gid,observed.0.flags)
+            && binding.matches_data((self.0.device,self.0.volume_uuid),(observed.0.device,observed.0.volume_uuid))
     }
     pub fn fields_data(&self) -> (i64, u64, u32, u32, u32, u32) {
         (self.0.device, self.0.inode, self.0.mode, self.0.uid, self.0.gid, self.0.flags)
@@ -333,8 +363,9 @@ impl GenerationData {
         let value = Generation { release: release.clone(), instance: instance.into(), release_directory,
             app: AppSlot::Canonical { identity: app.0 } };
         require(value.valid(expected), TransactionDataError::Binding)?;
-        require((value.release_directory.device, value.release_directory.inode)
-            != (value.app.identity().device, value.app.identity().inode), TransactionDataError::ReusedIdentity)?;
+        // Every selected generation belongs to the one fixed installation
+        // volume. A boot-local device change cannot disguise an inode alias.
+        require(value.release_directory.inode != value.app.identity().inode, TransactionDataError::ReusedIdentity)?;
         Ok(Self(value))
     }
     pub fn release_data(&self) -> &ReleaseData { &self.0.release }
@@ -388,9 +419,15 @@ impl StateData {
         require(wire.capsule_invocation == wire.invocation && wire.intended_action != ActionData::Uninstall
             && wire.current.valid(expected) && matches!(wire.current.app, AppSlot::Canonical { .. }), TransactionDataError::Binding)?;
         let mut generations = vec![&wire.current];
+        let mut volume = None;
+        for generation in std::iter::once(&wire.current).chain(wire.retained.iter()) {
+            for uuid in [generation.release_directory.volume_uuid,generation.app.identity().volume_uuid].into_iter().flatten() {
+                require(volume.is_none_or(|observed|observed==uuid),TransactionDataError::Binding)?;
+                volume=Some(uuid);
+            }
+        }
         let mut identities = BTreeSet::new();
-        for identity in [(wire.current.release_directory.device, wire.current.release_directory.inode),
-            (wire.current.app.identity().device, wire.current.app.identity().inode)] {
+        for identity in [wire.current.release_directory.inode, wire.current.app.identity().inode] {
             require(identities.insert(identity), TransactionDataError::ReusedIdentity)?;
         }
         let mut names = BTreeSet::new();
@@ -401,8 +438,7 @@ impl StateData {
             require(!generations.iter().any(|old| old.release == item.release || old.instance == item.instance
                 || old.release_directory == item.release_directory || old.app.identity() == item.app.identity()),
                 TransactionDataError::ReusedIdentity)?;
-            for identity in [(item.release_directory.device, item.release_directory.inode),
-                (item.app.identity().device, item.app.identity().inode)] {
+            for identity in [item.release_directory.inode, item.app.identity().inode] {
                 require(identities.insert(identity), TransactionDataError::ReusedIdentity)?;
             }
             generations.push(item);
@@ -1419,7 +1455,7 @@ mod tests {
         let torn = IntentData::parse_data(&IntentData::encode_data(&id(9), &id(109), ActionData::RestoreFixedApp,
             Some((&old_state, &old_capsule)), &e).unwrap(), &e).unwrap();
         let data = RestorePrepublicationData::from_recorded_data(&torn, (&old_state, &old_capsule), &e).unwrap();
-        let original = I {device:1,inode:42,birth_seconds:10,birth_nanoseconds:20};
+        let original = I {device:1,inode:42,birth_seconds:10,birth_nanoseconds:20,volume_uuid:None};
         assert!(data.unchanged_state_data(&raw,None,None).is_ok());
         for pending in [b"".as_slice(),raw.as_slice(),b"unfinished".as_slice()] {
             assert!(data.unchanged_state_data(&raw,Some(pending),None).is_err());
@@ -1440,6 +1476,34 @@ mod tests {
         }
         let invalid = I {inode:0,..original};
         assert!(data.original_placement_data(invalid,Some(invalid),None).is_err());
+    }
+    #[test]
+    fn generation_volume_binding_rejects_mismatch_and_downgrade() {
+        let expected=expected();
+        let legacy=state(3,9);
+        let mut durable=legacy.clone();
+        durable["current"]["releaseDirectory"]["volumeUuid"]=json!("1".repeat(32));
+        durable["current"]["app"]["identity"]["volumeUuid"]=json!("1".repeat(32));
+        durable["current"]["app"]["identity"]["device"]=json!(2);
+        assert!(StateData::parse_data(&bytes(&durable),&expected).is_ok());
+        let mut restored=legacy.clone();
+        restored["current"]["app"]["identity"]=durable["current"]["app"]["identity"].clone();
+        assert!(StateData::parse_data(&bytes(&restored),&expected).is_ok());
+        for fault in 0..4 {
+            let mut bad=durable.clone();
+            match fault {
+                0=>bad["current"]["app"]["identity"]["volumeUuid"]=json!("2".repeat(32)),
+                1=>{bad["current"]["app"]["identity"].as_object_mut().unwrap().remove("volumeUuid");},
+                2=>{bad=legacy.clone();bad["current"]["app"]["identity"]["device"]=json!(2);},
+                _=>{bad["current"]["app"]["identity"]["inode"]=bad["current"]["releaseDirectory"]["inode"].clone();},
+            }
+            assert!(StateData::parse_data(&bytes(&bad),&expected).is_err(),"fault {fault}");
+        }
+        let mut retained_state=state(3,9);
+        retained_state["retained"]=json!([retained(generation(2),9)]);
+        retained_state["current"]=durable["current"].clone();
+        retained_state["retained"][0]["app"]["identity"]["volumeUuid"]=json!("2".repeat(32));
+        assert!(StateData::parse_data(&bytes(&retained_state),&expected).is_err());
     }
     #[test]
     fn retained_generations_and_inverse_never_adopt_partial_or_unrelated_state() {
@@ -1493,7 +1557,7 @@ mod tests {
         assert!(serde_json::from_slice::<Value>(&legacy_encoded).unwrap().get("launcher").is_none());
         assert!(CapsuleData::parse_data(&bytes(&legacy), &expected).unwrap().launcher_data().is_none());
         let observation = ObservationData { outcome:OutcomeData::Restored,
-            published_identity:Some(crate::macos_applications_launcher::OriginalIdentityData {device:1,inode:42,birth_seconds:1,birth_nanoseconds:0}),
+            published_identity:Some(crate::macos_applications_launcher::OriginalIdentityData {device:1,inode:42,birth_seconds:1,birth_nanoseconds:0, volume_uuid: None }),
             publication_phase:Some(crate::macos_applications_launcher::PhaseReferenceData {stage_instance:"1".repeat(32),sha256:"2".repeat(64)}),write_count:2,write_bytes:17,
             originals_closed:true,within_original_deadline:true,readback_verified:true,workspace_cleared:true };
         let encoded = CapsuleData::encode_with_launcher_data(&ip, previous, Some(&sp), Some(expected.current_data()),
@@ -1540,7 +1604,7 @@ mod tests {
         assert_eq!(roundtrip.current_data(), b.current_data());
         assert_eq!(roundtrip.predecessor_data(), b.predecessor_data());
         let app = |inode| AppIdentityData::from_original_fields_data(1,inode,0o040555,0,0,0).unwrap();
-        let directory = |inode| DirectoryIdentity { device:1,inode,mode:0o040755,uid:0,gid:0,flags:0 };
+        let directory = |inode| DirectoryIdentity { device:1,inode,mode:0o040755,uid:0,gid:0,flags:0, volume_uuid: None };
         let observed = |writes, code| WriterObservationData { returned:true,exit_code:Some(code),original_joined:true,
             result_eof:true,original_closes_known:true,within_original_deadline:true,
             payload_write_count:writes,payload_write_bytes:writes };

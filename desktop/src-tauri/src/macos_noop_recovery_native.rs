@@ -33,7 +33,7 @@ fn original(book:&Install,n:usize)->Result<OriginalIdentityData> {
         && s.st_gid==expected.gid,"noop-recovery-container-metadata")?;
     let row=&book.originals[n];let named=book.named(row.parent,&row.name).map_err(|_|"noop-recovery-original-name")?;
     let value=OriginalIdentityData{device:i64::from(s.st_dev),inode:s.st_ino,
-        birth_seconds:s.st_birthtime,birth_nanoseconds:s.st_birthtime_nsec};
+        birth_seconds:s.st_birthtime,birth_nanoseconds:s.st_birthtime_nsec, volume_uuid: None };
     check(value.valid_data() && Identity::of(&s)==Identity::of(&named)
         && s.st_birthtime==named.st_birthtime && s.st_birthtime_nsec==named.st_birthtime_nsec
         && s.st_flags==0 && named.st_flags==0,"noop-recovery-original-identity")?;Ok(value)
@@ -873,7 +873,7 @@ mod tests {
         use mobile_release_desktop::macos_remove_protocol::{BindingData,BindingInputData,TargetData};
         let (seed,selected,_,old_intent,seed_raw)=rehome_test_fixture_with_raw();
         let old_id=old_intent.invocation_data();let generation=GenerationData::from_original_fields_data(&selected,
-            selected.current_data(),old_id,installation_record::DirectoryIdentity{device:1,inode:90,mode:0o040755,uid:0,gid:0,flags:0},
+            selected.current_data(),old_id,installation_record::DirectoryIdentity{device:1,inode:90,mode:0o040755,uid:0,gid:0,flags:0, volume_uuid: None },
             AppIdentityData::from_original_fields_data(1,91,0o040555,0,0,0).unwrap()).unwrap();
         let old_raw=StateData::encode_applied_data(&old_intent,None,&generation,&selected).unwrap();
         let old=StateData::parse_data(&old_raw,&selected).unwrap();
@@ -883,7 +883,7 @@ mod tests {
         let torn_raw=IntentData::encode_data(&"e".repeat(32),&"f".repeat(32),ActionData::SamePackageNoop,
             Some((&old,&old_cap)),&selected).unwrap();
         let torn=IntentData::parse_data(&torn_raw,&selected).unwrap();
-        let original=|inode|OriginalIdentityData{device:1,inode,birth_seconds:1,birth_nanoseconds:0};
+        let original=|inode|OriginalIdentityData{device:1,inode,birth_seconds:1,birth_nanoseconds:0, volume_uuid: None };
         let receipt=Receipt{schema_version:1,kind:"mrk-noop-original-preservation-v1".into(),target:selected.target_data().target().into(),
             stage_invocation:old_id.into(),torn_intent:String::from_utf8(torn_raw.clone()).unwrap(),
             previous_state_sha256:old.digest_data().into(),previous_capsule_sha256:old_cap.digest_data().into(),

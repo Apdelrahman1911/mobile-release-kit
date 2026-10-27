@@ -19,6 +19,33 @@
 #include <stddef.h>
 #include <string.h>
 #include <stdio.h>
+
+// Volume UUID is durable across boot-local st_dev renumbering. This observation
+// alone grants neither stored-record migration nor file/installation authority.
+// It operates only on a caller-held original and owns no descriptor or heap.
+int mrk_filesystem_uuid_v1(int fd, uint8_t *bytes) {
+    if (!bytes) return EINVAL;
+    memset(bytes, 0, 16);
+    struct stat before, after;
+    if (fstat(fd, &before)) return errno ? errno : EIO;
+    if (!S_ISDIR(before.st_mode) && !S_ISREG(before.st_mode)) return ENOTSUP;
+    struct attrlist attributes = {0};
+    attributes.bitmapcount = ATTR_BIT_MAP_COUNT;
+    attributes.volattr = ATTR_VOL_INFO | ATTR_VOL_UUID;
+    struct uuid_result { uint32_t length; uint8_t uuid[16]; } first = {0}, second = {0};
+    _Static_assert(sizeof(struct uuid_result) == 20, "fixed Darwin volume UUID result ABI");
+    if (fgetattrlist(fd, &attributes, &first, sizeof(first), 0)) return errno ? errno : EIO;
+    if (first.length != sizeof(first)) return EIO;
+    if (fgetattrlist(fd, &attributes, &second, sizeof(second), 0)) return errno ? errno : EIO;
+    if (second.length != sizeof(second) || memcmp(first.uuid, second.uuid, 16)) return EIO;
+    if (fstat(fd, &after)) return errno ? errno : EIO;
+    if (before.st_dev != after.st_dev || before.st_ino != after.st_ino
+        || before.st_mode != after.st_mode || before.st_uid != after.st_uid
+        || before.st_gid != after.st_gid || before.st_flags != after.st_flags) return EIO;
+    uint8_t any = 0; for (size_t i = 0; i < 16; i++) any |= first.uuid[i];
+    if (!any) return ENOTSUP;
+    memcpy(bytes, first.uuid, 16); return 0;
+}
 #ifdef MRK_INSTALLED_OBSERVATION
 #import <ApplicationServices/ApplicationServices.h>
 #include <math.h>

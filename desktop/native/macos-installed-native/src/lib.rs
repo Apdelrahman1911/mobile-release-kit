@@ -1,6 +1,8 @@
 //! Small Darwin ABI boundary, not an operation owner or an execution permit.
 //! The application retains its original slots/tasks and supplies every deadline.
 #![cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+#[cfg(not(feature = "xcode-setup"))]
+pub mod filesystem_identity;
 #[cfg(all(feature = "installed-observation", not(debug_assertions)))]
 compile_error!("installed observation controls require debug assertions in an explicit instrumented build");
 #[cfg(all(feature="xcode-setup",any(feature="installed-observation",feature="vault-helper",

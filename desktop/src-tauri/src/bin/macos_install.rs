@@ -170,6 +170,10 @@ mod installer {
     }
     struct Install {
         originals: Vec<Original>, creations: Vec<Creation>, end: Instant, unknown: bool,
+        // Fixed bounded native-only mappings enrolled after complete generation
+        // audit. Never read from worker DATA or persisted as new authority.
+        legacy_volumes: [Option<mobile_release_desktop::macos_persistent_identity::LegacyVolumeBindingData>;
+            mobile_release_desktop::macos_install_maintenance::PREDECESSOR_LIMIT+1],
         // `end` remains the original legacy-entry clock. The private B2 path
         // never uses it: both processes receive this same absolute deadline.
         worker_deadline: Option<worker::Deadline>, worker_stderr_is_gate: bool, worker_go_eof: bool,
@@ -556,6 +560,7 @@ mod installer {
     impl Install {
         fn new() -> Self {
             Self { originals: Vec::new(), creations: Vec::new(), end: Instant::now()+Duration::from_secs(120), unknown:false,
+                legacy_volumes:[None;mobile_release_desktop::macos_install_maintenance::PREDECESSOR_LIMIT+1],
                 worker_deadline:None,worker_stderr_is_gate:false,worker_go_eof:false,payload_written:0,payload_write_calls:0,launcher_writes:applications::WriteCounts::default(),launcher_effects:None,
                 removal_live_reserved:0,removal_control_reserved:0,removal_original_storage_reserved:0,removal_snapshot_capture:None,removal_snapshot_work_reserved:false,archived_install_reserved:false,removal_payload_plan:None,removal_observation_control:None,removal_observation_reserved:0,removal_archive_scan:None,
                 #[cfg(feature = "macos-installed-removal-observer")]
@@ -575,6 +580,20 @@ mod installer {
         }
         fn fd(&self, n: usize) -> Result<&OwnedFd> { self.originals.get(n).and_then(|r| r.fd.as_ref()).ok_or("original-missing") }
         fn identity(&self, n: usize) -> Result<Identity> { self.originals.get(n).and_then(|r| r.identity).ok_or("identity-missing") }
+        fn enroll_legacy_volume(&mut self, binding: Option<mobile_release_desktop::macos_persistent_identity::LegacyVolumeBindingData>) -> Result<()> {
+            if let Some(binding)=binding {
+                if !self.legacy_volumes.contains(&Some(binding)) {
+                    let slot=self.legacy_volumes.iter_mut().find(|slot|slot.is_none()).ok_or("legacy-volume-bound")?;
+                    *slot=Some(binding);
+                }
+            }
+            self.clock()
+        }
+        fn matches_recorded_directory(&self,n:usize,recorded:installation_record::DirectoryIdentity)->Result<bool> {
+            let observed=self.recorded_directory(n)?;
+            Ok(recorded==observed || self.legacy_volumes.iter().flatten()
+                .any(|binding|recorded.matches_legacy_binding_data(observed,*binding)))
+        }
         fn reserve(&mut self, parent: Option<usize>, name: &str, role: Role) -> Result<usize> {
             self.clock()?;
             let extra = (if self.worker_deadline.is_some() { worker::EXTRA_LIVE } else { 0 })
@@ -1340,7 +1359,10 @@ mod installer {
             check(Identity::of(&actual) == Identity::of(&named) && actual.st_flags == 0 && named.st_flags == 0,
                 "installation-directory-correspondence")?;
             let data = installation_record::DirectoryIdentity { device:i64::from(actual.st_dev),inode:actual.st_ino,
-                mode:u32::from(actual.st_mode),uid:actual.st_uid,gid:actual.st_gid,flags:actual.st_flags };
+                mode:u32::from(actual.st_mode),uid:actual.st_uid,gid:actual.st_gid,flags:actual.st_flags,
+                volume_uuid:Some(mobile_release_desktop::macos_persistent_identity::observe_volume(self.fd(n)?.as_fd())
+                    .map_err(|_|"installation-directory-volume-uuid")?) };
+            self.check_name(n,false)?;
             check(data.valid(), "installation-directory-policy")?; Ok(data)
         }
         fn metadata_file(&mut self, release: usize, name: &str, bytes: &[u8]) -> Result<()> {
@@ -1759,7 +1781,10 @@ mod installer {
                 }
                 let metadata_parent=book.open(Some(versions),expected.binding_data().release,true)?;
                 self.metadata_parent=Some(metadata_parent);
-                check(book.recorded_directory(metadata_parent)?==self.generation()?.release_directory_data(),"complete-prefix-release-original")?;
+                // Metadata is read-only until its complete root/release pair
+                // is parsed below. A legacy generation has no UUID to compare
+                // with the current observation before that explicit admission.
+                book.recorded_directory(metadata_parent)?;
                 match book.named(Some(metadata_parent),"runtime") {
                     Err(Errno::ENOENT)=>return Ok(CompleteGenerationPrefixOutcome::OriginalInstallRequired),
                     Err(_)=>return Err("complete-prefix-runtime-name"),Ok(_)=>{},
@@ -1805,9 +1830,10 @@ mod installer {
                 check(hash(&raw[0])==binding.inventory_sha256,"complete-prefix-signed-inventory")?;
                 let record_expected=installation_record::Expected{kind:installation_record::Kind::Ordinary,
                     source_commit:binding.source_commit,runtime_manifest:binding.runtime_manifest_sha256,
-                    install_root:book.recorded_directory(root)?,release_directory:self.generation()?.release_directory_data()};
-                let record=installation_record::Record::parse_for_release_data(&raw[1],&raw[0],&record_expected,expected)?;
-                check(record.instance()==self.generation()?.instance_data(),"complete-prefix-instance")?;
+                    install_root:book.recorded_directory(root)?,release_directory:book.recorded_directory(metadata_parent)?};
+                let record=installation_record::Record::parse_observed_for_release_data(&raw[1],&raw[0],&record_expected,expected)?;
+                check(record.instance()==self.generation()?.instance_data()
+                    && record.recorded_release_directory_data()==self.generation()?.release_directory_data(),"complete-prefix-instance")?;
                 self.inventory=Some(Inventory::parse_for_release(&raw[0],binding.runtime_manifest_sha256,binding.release)?);
                 self.index=Some(worker::reinstall_index_quote_data(self.inventory.as_ref().ok_or("complete-prefix-inventory")?)?);
                 let (files,dirs,index)=self.index.ok_or("complete-prefix-index")?;
@@ -1861,8 +1887,8 @@ mod installer {
                 for n in [self.versions,self.metadata_parent,self.app,self.release] {
                     book.check_name(n.ok_or("complete-prefix-source-original")?,true)?;
                 }
-                check(app_identity(book,self.app.ok_or("complete-prefix-app")?)?==self.generation()?.app_identity_data()
-                    && book.recorded_directory(self.release.ok_or("complete-prefix-release")?)?==self.generation()?.release_directory_data(),
+                check(app_matches_recorded(book,self.app.ok_or("complete-prefix-app")?,&self.generation()?.app_identity_data())?
+                    && book.matches_recorded_directory(self.release.ok_or("complete-prefix-release")?,self.generation()?.release_directory_data())?,
                     "complete-prefix-source-original")?;
                 context.post(book,read)
             }
@@ -2099,7 +2125,7 @@ mod installer {
             let update=IntentData::parse_data(&update_raw,&c).unwrap();
             assert!(complete_prefix_intent_data(&update_raw,update.invocation_data(),&c).is_err());
             let generation_c=GenerationData::from_original_fields_data(&c,c.current_data(),&"a".repeat(32),
-                installation_record::DirectoryIdentity{device:1,inode:92,mode:0o040755,uid:0,gid:0,flags:0},
+                installation_record::DirectoryIdentity{device:1,inode:92,mode:0o040755,uid:0,gid:0,flags:0, volume_uuid: None },
                 AppIdentityData::from_original_fields_data(1,93,0o040555,0,0,0).unwrap()).unwrap();
             let state_c_raw=StateData::encode_applied_data(&update,Some((&state_b,&capsule)),&generation_c,&c).unwrap();
             let state_c=StateData::parse_data(&state_c_raw,&c).unwrap();
@@ -5519,7 +5545,7 @@ mod installer {
                 ActionData::FreshInstall,None,&selected).unwrap();
             let intent=IntentData::parse_data(&intent_raw,&selected).unwrap();
             let generation=GenerationData::from_original_fields_data(&selected,selected.current_data(),&"d".repeat(32),
-                installation_record::DirectoryIdentity{device:1,inode:90,mode:0o040755,uid:0,gid:0,flags:0},
+                installation_record::DirectoryIdentity{device:1,inode:90,mode:0o040755,uid:0,gid:0,flags:0, volume_uuid: None },
                 AppIdentityData::from_original_fields_data(1,91,0o040555,0,0,0).unwrap()).unwrap();
             let state_raw=StateData::encode_applied_data(&intent,None,&generation,&selected).unwrap();
             let state=StateData::parse_data(&state_raw,&selected).unwrap();
@@ -6397,7 +6423,7 @@ mod installer {
                 // authenticated-intent DATA from the existing fixture. No FS,
                 // process, simulated receipt or execution grant is involved.
                 use mobile_release_desktop::macos_applications_launcher::OriginalIdentityData;
-                let identity=|inode|OriginalIdentityData{device:1,inode,birth_seconds:17,birth_nanoseconds:9};
+                let identity=|inode|OriginalIdentityData{device:1,inode,birth_seconds:17,birth_nanoseconds:9, volume_uuid: None };
                 let binding=intent.next_data().binding_data();
                 let phase=serde_json::json!({"schemaVersion":1,"phase":"launcher-prepublication",
                     "invocation":invocation,"intentSha256":intent.digest_data(),"instance":invocation,
@@ -10021,8 +10047,16 @@ mod installer {
             book.check_name(original, true)?; book.protected(original, true, Some(0o555))?;
             native::no_xattrs(book.fd(original)?.as_fd()).map_err(|_| "maintenance-app-attributes")?;
             let stat = stat::fstat(book.fd(original)?).map_err(|_| "maintenance-app-stat")?;
-            data(AppIdentityData::from_original_fields_data(i64::from(stat.st_dev), stat.st_ino,
-                u32::from(stat.st_mode), stat.st_uid, stat.st_gid, stat.st_flags))
+            let uuid=mobile_release_desktop::macos_persistent_identity::observe_volume(book.fd(original)?.as_fd())
+                .map_err(|_|"maintenance-app-volume-uuid")?;
+            book.check_name(original,true)?;
+            data(AppIdentityData::from_original_volume_fields_data(i64::from(stat.st_dev), stat.st_ino,
+                u32::from(stat.st_mode), stat.st_uid, stat.st_gid, stat.st_flags,uuid))
+        }
+        fn app_matches_recorded(book:&Install,original:usize,recorded:&AppIdentityData)->Result<bool> {
+            let observed=app_identity(book,original)?;
+            Ok(*recorded==observed || book.legacy_volumes.iter().flatten()
+                .any(|binding|recorded.matches_legacy_binding_data(&observed,*binding)))
         }
         pub(super) fn audit_tree(book: &mut Install, root: usize, prefix: &str, index: &installation_record::InventoryIndex<'_>, depth: usize) -> Result<()> {
             audit_tree_mode(book,root,prefix,index,depth,None)
@@ -10094,7 +10128,6 @@ mod installer {
             selected_current_history:bool) ->Result<(Option<usize>,usize,GenerationCostData,u64)> {
             let binding = generation.release_data().binding_data();
             let release = book.open(Some(versions), binding.release, true)?;
-            check(book.recorded_directory(release)? == generation.release_directory_data(), "maintenance-release-original")?;
             let (raw,descriptor)=if let Some((source,_))=resume.as_ref() {
                 // Bound the actual read by the already authenticated span,
                 // BEFORE allocation; a replaced oversized control cannot spend
@@ -10119,8 +10152,13 @@ mod installer {
             };
             let expected = installation_record::Expected { kind:installation_record::Kind::Ordinary,
                 source_commit:binding.source_commit, runtime_manifest:binding.runtime_manifest_sha256,
-                install_root:book.recorded_directory(destination)?, release_directory:generation.release_directory_data() };
-            let record = installation_record::Record::parse_for_release_data(&descriptor, &raw, &expected, generation.release_data())?;
+                install_root:book.recorded_directory(destination)?, release_directory:book.recorded_directory(release)? };
+            let record = installation_record::Record::parse_observed_for_release_data(&descriptor, &raw, &expected, generation.release_data())?;
+            let legacy=record.legacy_volume_binding_data(expected.install_root);
+            check(generation.release_directory_data()==record.recorded_release_directory_data()
+                && (generation.release_directory_data()==expected.release_directory
+                    || legacy.is_some_and(|legacy|generation.release_directory_data().matches_legacy_binding_data(expected.release_directory,legacy))),
+                "maintenance-release-original")?;
             check(record.instance() == generation.instance_data(), "maintenance-generation-instance")?;
             let inventory = Inventory::parse_for_release(&raw, binding.runtime_manifest_sha256, binding.release)?;
             let index = inventory.index()?;
@@ -10161,7 +10199,10 @@ mod installer {
                 Err(_) => return Err("maintenance-app-missing-or-refused"),
                 Ok(_) => {
                     let original = book.open(Some(app_parent), app_leaf, true)?;
-                    check(app_identity(book, original)? == generation.app_identity_data(), "maintenance-app-original")?;
+                    let observed_app=app_identity(book,original)?;
+                    let recorded_app=generation.app_identity_data();
+                    check(recorded_app==observed_app || legacy.is_some_and(|legacy|
+                        recorded_app.matches_legacy_binding_data(&observed_app,legacy)),"maintenance-app-original")?;
                     if let Some((_,plan))=resume.as_mut(){
                         if generation.retained_invocation_data().is_none(){plan.current_app=Some(book.identity(original)?);}
                         audit_tree_mode(book,original,"app",&index,0,Some(&mut **plan))?;
@@ -10188,6 +10229,9 @@ mod installer {
                 #[cfg(feature = "macos-installed-removal-observer")]
                 if let Some(projection) = book.removal_observer_projection.as_mut() { projection.record(generation, &index)?; }
             }
+            // The local compatibility witness is not reusable until the exact
+            // record/history binding and complete payload audit above returned.
+            book.enroll_legacy_volume(legacy)?;
             Ok((app, release, cost, (raw.len() + descriptor.len()) as u64))
         }
         // Strict known-control prelude, still DATA. It may not select a payload
@@ -10437,7 +10481,7 @@ mod installer {
             let release=book.open(Some(versions),binding.release,true)?;book.protected(release,true,Some(0o755))?;
             native::no_xattrs(book.fd(release)?.as_fd()).map_err(|_|"removal-resume-current-attributes")?;
             check(snapshot_stat(book,release)?==(expected_release,expected_flags) && expected_flags==0
-                && book.recorded_directory(release)?==generation.release_directory_data(),"removal-resume-current-release")?;
+                && book.matches_recorded_directory(release,generation.release_directory_data())?,"removal-resume-current-release")?;
             let (inventory_original,inventory)=metadata_original(book,release,installation_record::INVENTORY_NAME,inventory_len)?;
             let (record_original,record)=metadata_original(book,release,installation_record::RECORD_NAME,record_len)?;
             check(inventory.len()==inventory_len && record.len()==record_len
@@ -11266,7 +11310,7 @@ mod installer {
             let expected=installation_record::Expected { kind:installation_record::Kind::Ordinary,
                 source_commit:binding.source_commit,runtime_manifest:binding.runtime_manifest_sha256,
                 install_root:book.recorded_directory(root)?,release_directory:book.recorded_directory(release)? };
-            let record=installation_record::Record::parse_for_release_data(&record_bytes,&raw,&expected,selected.current_data())?;
+            let record=installation_record::Record::parse_observed_for_release_data(&record_bytes,&raw,&expected,selected.current_data())?;
             let inventory=Inventory::parse_for_release(&raw,binding.runtime_manifest_sha256,binding.release)?;
             let prepared=PreparedFresh { input:root,inventory,inventory_bytes:raw,destination:root,versions };
             let observed=observe_admitted_archives(book,prepared,selected,None,None,None,Some(holder),Some(source))?;
@@ -11348,7 +11392,7 @@ mod installer {
             let expected=installation_record::Expected { kind:installation_record::Kind::Ordinary,
                 source_commit:binding.source_commit,runtime_manifest:binding.runtime_manifest_sha256,
                 install_root:book.recorded_directory(observed.prepared.destination)?,release_directory:book.recorded_directory(release)? };
-            let record=installation_record::Record::parse_for_release_data(&record_bytes,&observed.prepared.inventory_bytes,
+            let record=installation_record::Record::parse_observed_for_release_data(&record_bytes,&observed.prepared.inventory_bytes,
                 &expected,observed.selected.current_data())?;
             check(observed.history.as_ref().is_some_and(|h|h.current.state.current_data().instance_data()==record.instance()),
                 "removal-current-record")?;
@@ -12005,8 +12049,22 @@ mod installer {
             step(book,if inverse { StepData::StateRestored } else { StepData::StatePublished },returned,result,inverse)
         }
         fn generation(book: &Install, observed: &Observed, release: usize, app: usize, instance: &str) -> Result<GenerationData> {
+            let mut directory=book.recorded_directory(release)?;
+            if let Some(history)=&observed.history {
+                let old=history.current.state.current_data();
+                if matches!(observed.action,ActionData::SamePackageNoop|ActionData::RestoreFixedApp) {
+                    check(book.matches_recorded_directory(release,old.release_directory_data())?,"maintenance-kept-runtime-original")?;
+                    if observed.action==ActionData::SamePackageNoop {
+                        check(app_matches_recorded(book,app,&old.app_identity_data())?,"maintenance-kept-app-original")?;
+                        return Ok(old);
+                    }
+                    // Restore retains the original immutable runtime record;
+                    // only the newly published app obtains a new UUID binding.
+                    directory=old.release_directory_data();
+                }
+            }
             data(GenerationData::from_original_fields_data(&observed.selected,observed.selected.current_data(),instance,
-                book.recorded_directory(release)?,app_identity(book,app)?))
+                directory,app_identity(book,app)?))
         }
         // Fail before the request reservation/Intent on any other action.
         // These binaries may not install Fresh, Noop, Update or archived roots.
@@ -12209,8 +12267,8 @@ mod installer {
                 let old = observed.old_app.ok_or("maintenance-app-missing-or-refused")?;
                 let name = if inverse { paths::APP_NAME.to_owned() } else { data(transaction::retained_app_name_data(invocation))? };
                 rebind_renamed(book,old,observed.prepared.destination,&name)?;
-                check(app_identity(book,old)? == observed.history.as_ref().ok_or("maintenance-history-missing")?
-                    .current.state.current_data().app_identity_data(),"maintenance-parent-old-app")?;
+                check(app_matches_recorded(book,old,&observed.history.as_ref().ok_or("maintenance-history-missing")?
+                    .current.state.current_data().app_identity_data())?,"maintenance-parent-old-app")?;
             }
             // Fresh originals, exact descriptor and complete current payload;
             // never make a worker-selected tuple the parent's expected release.
@@ -12751,6 +12809,7 @@ mod installer {
                 // The legacy-only Instant field is an inert marker here and
                 // cannot select a worker clock or its private result transport.
                 Self { originals: Vec::new(), creations: Vec::new(), end: Instant::now(), unknown:false,
+                    legacy_volumes:[None;mobile_release_desktop::macos_install_maintenance::PREDECESSOR_LIMIT+1],
                     worker_deadline:Some(deadline),worker_stderr_is_gate:stderr_is_gate,worker_go_eof:false,
                     removal_live_reserved:0,removal_control_reserved:0,removal_original_storage_reserved:0,removal_snapshot_capture:None,removal_snapshot_work_reserved:false,archived_install_reserved:false,removal_payload_plan:None,removal_observation_control:None,removal_observation_reserved:0,removal_archive_scan:None,
                 #[cfg(feature = "macos-installed-removal-observer")]

@@ -514,12 +514,17 @@ impl InstallationSlots {
         let at = Instant::now();
         match returned { Ok(()) => Ok(()), Err(failure) => self.reject(native_problem(failure), at, publish) }
     }
-    fn directory_identity(&self, index: usize) -> InspectResult<data::DirectoryIdentity> {
-        let id = self.book.as_ref().and_then(|book| book.records.get(index)).and_then(|r| r.identity)
-            .ok_or(Problem::CleanupUnknown)?;
-        let stable = data::DirectoryIdentity { device: i64::from(id.dev), inode: id.ino,
-            mode: u32::from(id.mode), uid: id.uid, gid: id.gid, flags: id.flags };
-        stable.valid().then_some(stable).ok_or(Problem::Protection)
+    fn directory_identity(&mut self, index: usize, end: Instant, stop: &watch::Receiver<bool>,
+        publish: &mut dyn FnMut(Problem, Instant)) -> InspectResult<data::DirectoryIdentity> {
+        self.attempt(Problem::PayloadMismatch,end,stop,publish,|book| {
+            book.check_name(index,end,stop)?;
+            let id=book.records.get(index).and_then(|r|r.identity).ok_or(AdmissionFailure::Identity)?;
+            let uuid=crate::macos_persistent_identity::observe_volume(book.fd(index)?.as_fd()).map_err(native_error)?;
+            book.check_name(index,end,stop)?;
+            let stable=data::DirectoryIdentity {device:i64::from(id.dev),inode:id.ino,mode:u32::from(id.mode),
+                uid:id.uid,gid:id.gid,flags:id.flags,volume_uuid:Some(uuid)};
+            stable.valid().then_some(stable).ok_or(AdmissionFailure::Ownership)
+        })
     }
     fn protected(&mut self, index: usize, mode: u16, end: Instant, stop: &watch::Receiver<bool>,
         publish: &mut dyn FnMut(Problem, Instant)) -> InspectResult<()> {
@@ -767,11 +772,16 @@ impl InstallationSlots {
         }
         Ok(HistoricalRecord { intent,state,capsule })
     }
-    fn app_identity(&self, index: usize) -> InspectResult<AppIdentityData> {
-        let value = self.book.as_ref().and_then(|book| book.records.get(index)).and_then(|r| r.identity)
-            .ok_or(Problem::CleanupUnknown)?;
-        AppIdentityData::from_original_fields_data(i64::from(value.dev),value.ino,u32::from(value.mode),
-            value.uid,value.gid,value.flags).map_err(|_| Problem::Protection)
+    fn app_identity(&mut self, index: usize, end: Instant, stop: &watch::Receiver<bool>,
+        publish: &mut dyn FnMut(Problem, Instant)) -> InspectResult<AppIdentityData> {
+        self.attempt(Problem::PayloadMismatch,end,stop,publish,|book| {
+            book.check_name(index,end,stop)?;
+            let value=book.records.get(index).and_then(|r|r.identity).ok_or(AdmissionFailure::Identity)?;
+            let uuid=crate::macos_persistent_identity::observe_volume(book.fd(index)?.as_fd()).map_err(native_error)?;
+            book.check_name(index,end,stop)?;
+            AppIdentityData::from_original_volume_fields_data(i64::from(value.dev),value.ino,u32::from(value.mode),
+                value.uid,value.gid,value.flags,uuid).map_err(|_|AdmissionFailure::Ownership)
+        })
     }
     fn private_stage(&mut self, install: usize, name: &str, inode: u64, end: Instant,
         stop: &watch::Receiver<bool>, publish: &mut dyn FnMut(Problem, Instant)) -> InspectResult<()> {
@@ -854,8 +864,11 @@ impl InstallationSlots {
             }
         }
         let generation = current.state.current_data();
+        let current_legacy=current_record.legacy_volume_binding_data(install_root);
         if generation.release_data() != selected.current_data() || generation.instance_data() != current_record.instance()
-            || generation.release_directory_data() != release_directory {
+            || generation.release_directory_data()!=current_record.recorded_release_directory_data()
+            || !(generation.release_directory_data()==release_directory || current_legacy.is_some_and(|legacy|
+                generation.release_directory_data().matches_legacy_binding_data(release_directory,legacy))) {
             return self.reject(Problem::RecordMismatch,Instant::now(),publish);
         }
         let mut version_names = BTreeSet::from([paths::RELEASE.to_owned()]);
@@ -873,10 +886,8 @@ impl InstallationSlots {
             }
             let old_app = self.open(Some(install),&name,true,end,stop,publish)?;
             self.protected(old_app,0o555,end,stop,publish)?;
-            if self.app_identity(old_app)? != old.app_identity_data() { return self.reject(Problem::RecordMismatch,Instant::now(),publish); }
             let old_release = self.open(Some(versions),binding.release,true,end,stop,publish)?;
             self.protected(old_release,0o755,end,stop,publish)?;
-            if self.directory_identity(old_release)? != old.release_directory_data() { return self.reject(Problem::RecordMismatch,Instant::now(),publish); }
             self.match_fixed_roster(old_release,&["runtime",data::INVENTORY_NAME,data::RECORD_NAME],None,end,stop,publish)?;
             // These two temporary originals are charged then released before
             // the next predecessor. They are never retained as a second core.
@@ -898,11 +909,20 @@ impl InstallationSlots {
             let descriptor = self.history_read(old_release,data::RECORD_NAME,data::RECORD_LIMIT,&mut retained,base,end,stop,publish)?;
             let inventory = self.history_read(old_release,data::INVENTORY_NAME,data::INVENTORY_LIMIT,&mut retained,base,end,stop,publish)?;
             let expected = data::Expected { kind:data::Kind::Ordinary,source_commit:binding.source_commit,
-                runtime_manifest:binding.runtime_manifest_sha256,install_root,release_directory:old.release_directory_data() };
-            let record = match data::Record::parse_for_release_data(&descriptor,&inventory,&expected,old.release_data()) {
+                runtime_manifest:binding.runtime_manifest_sha256,install_root,release_directory:self.directory_identity(old_release,end,stop,publish)? };
+            let record = match data::Record::parse_observed_for_release_data(&descriptor,&inventory,&expected,old.release_data()) {
                 Ok(value) => value, Err(_) => return self.reject(Problem::RecordMismatch,Instant::now(),publish),
             };
-            if record.instance() != old.instance_data() { return self.reject(Problem::RecordMismatch,Instant::now(),publish); }
+            let legacy=record.legacy_volume_binding_data(install_root);
+            let observed_app=self.app_identity(old_app,end,stop,publish)?;
+            let recorded_app=old.app_identity_data();
+            if record.instance()!=old.instance_data() || record.recorded_release_directory_data()!=old.release_directory_data()
+                || !(old.release_directory_data()==expected.release_directory || legacy.is_some_and(|legacy|
+                    old.release_directory_data().matches_legacy_binding_data(expected.release_directory,legacy)))
+                || !(recorded_app==observed_app || legacy.is_some_and(|legacy|
+                    recorded_app.matches_legacy_binding_data(&observed_app,legacy))) {
+                return self.reject(Problem::RecordMismatch,Instant::now(),publish);
+            }
             let old_runtime = self.open(Some(old_release),"runtime",true,end,stop,publish)?;
             self.protected(old_runtime,0o555,end,stop,publish)?;
             self.close(old_runtime,end,stop,publish)?; self.close(old_release,end,stop,publish)?; self.close(old_app,end,stop,publish)?;
@@ -1055,10 +1075,10 @@ impl InstallationSlots {
             (self.read_record(release,data::RECORD_NAME,data::RECORD_LIMIT,end,stop,publish)?,
                 self.read_record(release,data::INVENTORY_NAME,data::INVENTORY_LIMIT,end,stop,publish)?)
         };
-        let install_root = match self.directory_identity(install) {
+        let install_root = match self.directory_identity(install,end,stop,publish) {
             Ok(value) => value, Err(why) => return self.reject(why, Instant::now(), publish),
         };
-        let release_directory = match self.directory_identity(release) {
+        let release_directory = match self.directory_identity(release,end,stop,publish) {
             Ok(value) => value, Err(why) => return self.reject(why, Instant::now(), publish),
         };
         let source = option_env!("MRK_MACOS_INSTALL_SOURCE_COMMIT").unwrap_or("");
@@ -1066,8 +1086,8 @@ impl InstallationSlots {
         let expected = data::Expected { kind: data::Kind::Ordinary, source_commit: source, runtime_manifest: manifest,
             install_root, release_directory };
         let parsed_record = match selected {
-            Some(selected) => data::Record::parse_for_release_data(&descriptor,&inventory_bytes,&expected,selected.current_data()),
-            None => data::Record::parse_data(&descriptor,&inventory_bytes,&expected),
+            Some(selected) => data::Record::parse_observed_for_release_data(&descriptor,&inventory_bytes,&expected,selected.current_data()),
+            None => data::Record::parse_observed_data(&descriptor,&inventory_bytes,&expected),
         };
         let record = match parsed_record {
             Ok(record) => record, Err(_) => return self.reject(Problem::RecordMismatch, Instant::now(), publish),
@@ -1105,7 +1125,12 @@ impl InstallationSlots {
         let app = self.open(Some(install), paths::APP_NAME, true, end, stop, publish)?;
         self.protected(app, 0o555, end, stop, publish)?;
         if let Some(generation) = generation {
-            if self.app_identity(app)? != generation.app_identity_data() { return self.reject(Problem::RecordMismatch,Instant::now(),publish); }
+            let observed_app=self.app_identity(app,end,stop,publish)?;
+            let recorded_app=generation.app_identity_data();
+            if !(recorded_app==observed_app || record.legacy_volume_binding_data(install_root).is_some_and(|legacy|
+                recorded_app.matches_legacy_binding_data(&observed_app,legacy))) {
+                return self.reject(Problem::RecordMismatch,Instant::now(),publish);
+            }
         }
         let runtime = self.open(Some(release), "runtime", true, end, stop, publish)?;
         self.protected(runtime, 0o555, end, stop, publish)?;

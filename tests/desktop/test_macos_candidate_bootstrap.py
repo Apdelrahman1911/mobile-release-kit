@@ -134,6 +134,18 @@ class CandidateBootstrapTests(unittest.TestCase):
             (('package','Install.pkg',preview['packageSize']),('descriptor','producer.json',100),('signature','producer.sig',70))}
         mounted_result.update(inventory=dict(name='install-inventory.json',bytes=100,sha256=preview['installerInventorySha256']),
                               release=dict(runtimeManifestSha256=preview['runtimeManifestSha256']))
+        # Complete public metadata returned by the inert mounted-input boundary.
+        # These values exercise the real closed parser; they are not native evidence.
+        mounted_result.update(members=[dict(name=name,bytes=len(body),sha256=R.sha(body))
+            for name,body in sorted([('MobileReleaseKit.dmg',b'DATA'),
+                ('PREVIEW.json',R.canonical(preview)+b'\n'),('README.md',b'Inert guide\n')])],
+            inventoryFiles=1,inventoryPayloadBytes=100)
+        architecture='arm64' if target=='aarch64-apple-darwin' else 'x86_64'
+        mounted_result['release'].update(profile='fixed-macos26-'+architecture+'-maintenance-v2',
+            packageIdentifier='dev.mobile-release-kit.desktop.installed',bundleIdentifier='dev.mobile-release-kit.desktop',
+            packageVersion='0.1.9',release='macos26-'+architecture+'-inert',sourceCommit=selected['source'],
+            protocolSha256='1'*64,signingPolicySha256='2'*64,
+            packageSha256=preview['packageSha256'],inventorySha256=preview['installerInventorySha256'])
         if purpose == 'restore-install':
             acquisition, problem, *_ = self.exercise(target, purpose='acquire', transport=(zip_body,selected))
             self.assertIsNone(problem, repr(problem))
@@ -402,6 +414,8 @@ class CandidateBootstrapTests(unittest.TestCase):
             with mock.patch.object(F,'baseline_log',side_effect=lambda owner,**kwargs: native('app-absence-log-cursor',[])), \
                  mock.patch.object(F,'image_prepare',side_effect=image), mock.patch.object(F,'detach',side_effect=detach), \
                  mock.patch.object(F,'mounted_post'),mock.patch.object(F,'baseline_read',return_value=original), \
+                 mock.patch.object(F,'completion_read',return_value=R.canonical(observed)+b'\n'), \
+                 mock.patch.object(F.os,'fstatvfs',return_value=SimpleNamespace(f_bavail=1<<30,f_frsize=4096)), \
                  mock.patch.object(op,'close',side_effect=closing):
                 try: result=op.candidate_baseline(entry,status,None,acquisition['nomination'],'e'*40)
                 except Exception as error:
@@ -521,7 +535,8 @@ class CandidateBootstrapTests(unittest.TestCase):
         self.assertNotEqual(os.getuid(), 0)
         with tempfile.TemporaryDirectory() as temporary:
             host, base, context, base_value = self.host_fixture(Path(temporary))
-            before = len(os.listdir('/proc/self/fd'))
+            fd_directory = '/dev/fd' if sys.platform == 'darwin' else '/proc/self/fd'
+            before = len(os.listdir(fd_directory))
             with mock.patch.object(C, 'entry_context', return_value=context), \
                  mock.patch.object(sys, 'executable', str(host / 'bin/python3')), \
                  mock.patch.object(sys, '_base_executable', str(base)), mock.patch.object(sys, 'prefix', str(host)), \
@@ -529,7 +544,7 @@ class CandidateBootstrapTests(unittest.TestCase):
                  mock.patch.dict(os.environ, {'MRK_HOST_BASE_CONTEXT': R.canonical(base_value).decode()}, clear=True):
                 result = C.bind_host()
             self.assertTrue(result['hostPrepared'])
-            self.assertEqual(len(os.listdir('/proc/self/fd')), before)
+            self.assertEqual(len(os.listdir(fd_directory)), before)
             original = (host / 'host-binding.json').read_bytes()
             self.assertEqual(R.decode(original)['source'], context['helperSource'])
             self.assertEqual((host / 'host-binding.json').stat().st_mode & 0o777, 0o600)
@@ -539,17 +554,21 @@ class CandidateBootstrapTests(unittest.TestCase):
             with tempfile.TemporaryDirectory() as temporary:
                 host, base, context, base_value = self.host_fixture(Path(temporary))
                 if fault == 'collision': (host / 'host-binding.json').write_bytes(b'foreign')
-                before = len(os.listdir('/proc/self/fd')); close = os.close
+                fd_directory = '/dev/fd' if sys.platform == 'darwin' else '/proc/self/fd'
+                before = len(os.listdir(fd_directory)); close = os.close
                 def consume(fd):
-                    name = os.readlink('/proc/self/fd/' + str(fd))
+                    original = os.fstat(fd)
+                    binding = host / 'host-binding.json'
+                    named = binding.stat() if binding.exists() else None
+                    is_binding = named is not None and (original.st_dev,original.st_ino)==(named.st_dev,named.st_ino)
                     close(fd)
-                    if fault == 'close' and name.endswith('/host-binding.json'): raise OSError('inert consuming close unknown')
+                    if fault == 'close' and is_binding: raise OSError('inert consuming close unknown')
                 with mock.patch.object(C, 'entry_context', return_value=context), \
                      mock.patch.object(sys, 'executable', str(host / 'bin/python3')), \
                      mock.patch.object(sys, '_base_executable', str(base)), mock.patch.object(sys, 'prefix', str(host)), \
                      mock.patch.object(sys, 'base_prefix', str(base.parent.parent)), mock.patch.object(os, 'close', side_effect=consume), \
                      mock.patch.dict(os.environ, {'MRK_HOST_BASE_CONTEXT': R.canonical(base_value).decode()}, clear=True):
                     with self.assertRaises(ValueError): C.bind_host()
-                self.assertEqual(len(os.listdir('/proc/self/fd')), before)
+                self.assertEqual(len(os.listdir(fd_directory)), before)
                 self.assertTrue((host / 'host-binding.json').exists())
                 if fault == 'collision': self.assertEqual((host / 'host-binding.json').read_bytes(), b'foreign')

@@ -64,8 +64,8 @@ impl ReceiptData {
         // body contains this receipt's digest and is written only afterwards.
         let mut identities=BTreeSet::new();
         for identity in [wire.root,wire.stage,wire.old_state,wire.own_attempt.identity] {
-            check(identity.valid_data() && identity.device==wire.root.device && identity.device>0
-                && identities.insert((identity.device,identity.inode)),"restore-recovery-original-alias")?;
+            check(identity.valid_data() && identity.same_volume_data(wire.root) && identity.device>0
+                && identities.insert(identity.inode),"restore-recovery-original-alias")?;
         }
         let mut invocations=BTreeSet::new();let mut requests=BTreeSet::new();
         invocations.insert(wire.own_attempt.invocation.as_str());requests.insert(wire.own_attempt.request_id.as_str());
@@ -74,8 +74,8 @@ impl ReceiptData {
             check(id_data(&row.invocation) && id_data(&row.request_id) && sha(&row.intent_sha256)
                 && previous.is_none_or(|old|old<row.invocation.as_str())
                 && invocations.insert(&row.invocation) && requests.insert(&row.request_id)
-                && row.identity.valid_data() && row.identity.device==wire.root.device
-                && identities.insert((row.identity.device,row.identity.inode)),"restore-recovery-attempt-binding")?;
+                && row.identity.valid_data() && row.identity.same_volume_data(wire.root)
+                && identities.insert(row.identity.inode),"restore-recovery-attempt-binding")?;
             previous=Some(&row.invocation);
         }
         check(wire.attempts.iter().any(|row|row.invocation==torn && row.request_id==torn_request
@@ -144,7 +144,7 @@ fn chain_refs_data(receipts:&[&ReceiptData],base:&IntentData,base_raw:&[u8],
         }
         let (intent,body)=receipt.canonical_intent(base,previous,selected)?;
         check(expected.iter().all(|old|old.invocation!=intent.invocation_data() && old.request!=intent.request_id_data()
-            && (old.identity.device,old.identity.inode)!=(receipt.wire.own_attempt.identity.device,receipt.wire.own_attempt.identity.inode)),
+            && old.identity.inode!=receipt.wire.own_attempt.identity.inode),
             "restore-recovery-chain-identity")?;
         expected.push(ExpectedAttempt{invocation:intent.invocation_data().into(),request:intent.request_id_data().into(),
             body,identity:receipt.wire.own_attempt.identity,
@@ -712,7 +712,7 @@ fn with_recorded_index<T>(book:&mut Install,budget:&mut CaptureBudget,root:usize
         check(generation.release_data()==base.next_data(),"restore-recovery-inventory-generation")?;
         let versions=book.open(Some(root),"versions",true)?;book.protected(versions,true,Some(0o755))?;
         let release=book.open(Some(versions),binding.release,true)?;
-        check(book.recorded_directory(release)?==generation.release_directory_data(),"restore-recovery-release-original")?;
+        check(book.matches_recorded_directory(release,generation.release_directory_data())?,"restore-recovery-release-original")?;
         book.protected(release,true,Some(0o755))?;
         let stat=book.named(Some(release),installation_record::INVENTORY_NAME).map_err(|_|"restore-recovery-inventory-name")?;
         let len=usize::try_from(stat.st_size).map_err(|_|"restore-recovery-inventory-size")?;
@@ -725,8 +725,8 @@ fn with_recorded_index<T>(book:&mut Install,budget:&mut CaptureBudget,root:usize
         let descriptor=metadata_bytes(book,release,installation_record::RECORD_NAME,installation_record::RECORD_LIMIT)?;
         let expected=installation_record::Expected{kind:installation_record::Kind::Ordinary,source_commit:binding.source_commit,
             runtime_manifest:binding.runtime_manifest_sha256,install_root:book.recorded_directory(root)?,
-            release_directory:generation.release_directory_data()};
-        let record=installation_record::Record::parse_for_release_data(&descriptor,&raw,&expected,base.next_data())?;
+            release_directory:book.recorded_directory(release)?};
+        let record=installation_record::Record::parse_observed_for_release_data(&descriptor,&raw,&expected,base.next_data())?;
         check(record.instance()==generation.instance_data(),"restore-recovery-runtime-instance")?;
         let inventory=Inventory::parse_for_release(&raw,binding.runtime_manifest_sha256,binding.release)?;
         let quote=worker::reinstall_index_quote_data(&inventory)?;
@@ -901,9 +901,9 @@ impl Namespace {
         // child-base edge, is counted once. Other duplicate IDs/originals are
         // refused even when signed content happens to be byte-identical.
         let mut seen:BTreeMap<String,(OriginalIdentityData,Option<String>)>=BTreeMap::new();
-        let mut original_owner:BTreeMap<(i64,u64),String>=BTreeMap::new();
+        let mut original_owner:BTreeMap<u64,String>=BTreeMap::new();
         for group in &groups {
-            check(original_owner.insert((group.stage_identity.device,group.stage_identity.inode),
+            check(original_owner.insert(group.stage_identity.inode,
                 format!("stage:{}",group.base.invocation_data())).is_none(),"restore-recovery-group-original-alias")?;
             for row in &group.attempts {
                 let parsed=data(IntentData::parse_recorded_data(&row.body,selected))?;
@@ -915,7 +915,7 @@ impl Namespace {
                     check(*identity==row.identity&&((edge.as_deref()==Some(row.invocation.as_str())&&holders.contains_key(&row.invocation))
                         ||is_holder&&old_edge.as_deref()==Some(row.invocation.as_str())),"restore-recovery-cross-group-duplicate")?;
                 }else {
-                    check(original_owner.insert((row.identity.device,row.identity.inode),row.invocation.clone()).is_none(),
+                    check(original_owner.insert(row.identity.inode,row.invocation.clone()).is_none(),
                         "restore-recovery-group-original-alias")?;
                     seen.insert(row.invocation.clone(),(row.identity,edge));
                 }
@@ -1272,10 +1272,10 @@ mod tests {
             }).unwrap();
             let selected=ReleaseSetData::parse_for_target_data(spans.selected_bytes_data(),header.target).unwrap();
             let id=|n:u32|format!("{n:032x}");
-            let identity=|n:u64|OriginalIdentityData{device:1,inode:n,birth_seconds:10,birth_nanoseconds:1};
+            let identity=|n:u64|OriginalIdentityData{device:1,inode:n,birth_seconds:10,birth_nanoseconds:1, volume_uuid: None };
             let initial=data(IntentData::parse_data(&IntentData::encode_data(&id(1),&id(101),ActionData::FreshInstall,None,&selected).unwrap(),&selected)).unwrap();
             let generation=transaction::GenerationData::from_original_fields_data(&selected,selected.current_data(),&id(1),
-                installation_record::DirectoryIdentity{device:1,inode:10,mode:0o040755,uid:0,gid:0,flags:0},
+                installation_record::DirectoryIdentity{device:1,inode:10,mode:0o040755,uid:0,gid:0,flags:0, volume_uuid: None },
                 transaction::AppIdentityData::from_original_fields_data(1,11,0o040555,0,0,0).unwrap()).unwrap();
             let state=StateData::parse_data(&StateData::encode_applied_data(&initial,None,&generation,&selected).unwrap(),&selected).unwrap();
             let capsule=CapsuleData::parse_data(&CapsuleData::encode_data(&initial,None,Some(&state),Some(selected.current_data()),
@@ -1330,6 +1330,26 @@ mod tests {
             let mut cycle=next.clone();cycle.attempts[1].invocation=id(4);assert!(parse(&cycle).is_err());
             let mut alias=next.clone();alias.own_attempt.identity=first.root;assert!(parse(&alias).is_err());
             let mut duplicate=next.clone();duplicate.attempts.push(duplicate.attempts[0].clone());assert!(parse(&duplicate).is_err());
+            // A genuine recorded chain can span boot device renumbering. UUID,
+            // inode and birth time still bind every old and newly created row.
+            let volume=mobile_release_desktop::macos_persistent_identity::VolumeUuid::from_bytes_data([1;16]).unwrap();
+            let mut stable=first.clone();
+            for original in [&mut stable.root,&mut stable.stage,&mut stable.old_state,&mut stable.own_attempt.identity,
+                &mut stable.attempts[0].identity] {original.volume_uuid=Some(volume);}
+            let stable_expected=chain_data(&[parse(&stable).unwrap()],&base,&base_raw,previous,&selected).unwrap();
+            let mut rebooted=stable.clone();
+            for original in [&mut rebooted.root,&mut rebooted.stage,&mut rebooted.old_state] {original.device=2;}
+            rebooted.own_attempt=OwnAttempt{invocation:id(4),request_id:id(104),
+                identity:OriginalIdentityData{device:2,volume_uuid:Some(volume),..identity(25)}};
+            rebooted.attempts.push(AttemptBinding{invocation:id(3),request_id:id(103),
+                intent_sha256:hash(&stable_expected[1].body),identity:stable.own_attempt.identity});
+            assert_eq!(chain_data(&[parse(&stable).unwrap(),parse(&rebooted).unwrap()],&base,&base_raw,previous,&selected).unwrap().len(),3);
+            let mut wrong=rebooted.clone();wrong.own_attempt.identity.volume_uuid=
+                mobile_release_desktop::macos_persistent_identity::VolumeUuid::from_bytes_data([2;16]);
+            assert!(parse(&wrong).is_err());
+            wrong=rebooted.clone();wrong.own_attempt.identity.inode=stable.root.inode;wrong.own_attempt.identity.device=3;
+            assert!(parse(&wrong).is_err());
+            wrong=rebooted.clone();wrong.own_attempt.identity.volume_uuid=None;assert!(parse(&wrong).is_err());
         }
     }
     #[test]
@@ -1456,7 +1476,7 @@ impl RestoreStageSpanData {
         check(self.torn.iter().any(|b|*b!=0)&&self.holder.iter().any(|b|*b!=0)&&self.torn!=self.holder
             && self.receipt.iter().any(|b|*b!=0)&&self.commitment.iter().any(|b|*b!=0)
             && self.root.valid_data()&&self.stage.valid_data()&&self.root.device>0
-            && self.stage.device==self.root.device&&self.stage.inode!=self.root.inode
+            && self.stage.same_volume_data(self.root)&&self.stage.inode!=self.root.inode
             && self.top.dev==self.stage.device&&self.top.ino==self.stage.inode
             && archive_directory_data(self.top,0,true)
             && self.app_files as usize<=installation_record::FILE_LIMIT
@@ -1491,7 +1511,7 @@ impl RestoreStageSpanData {
     pub(super) fn parse<F:FnMut(u64,&mut[u8])->Result<usize>>(cursor:&mut ArchiveCursor<F>)->ArchiveParse<Self> {
         let torn=cursor.array()?;let holder=cursor.array()?;let receipt=cursor.array()?;
         fn original<F:FnMut(u64,&mut[u8])->Result<usize>>(cursor:&mut ArchiveCursor<F>)->ArchiveParse<OriginalIdentityData> {
-            Ok(OriginalIdentityData{device:cursor.i64()?,inode:cursor.u64()?,birth_seconds:cursor.i64()?,birth_nanoseconds:cursor.i64()?})
+            Ok(OriginalIdentityData{device:cursor.i64()?,inode:cursor.u64()?,birth_seconds:cursor.i64()?,birth_nanoseconds:cursor.i64()?, volume_uuid: None })
         }
         let root=original(cursor)?;let stage=original(cursor)?;let (top,_flags)=cursor.identity(&[0o040700])?;
         let value=Self{torn,holder,receipt,root,stage,top,commitment:cursor.array()?,app_files:cursor.u32()?,
@@ -1503,7 +1523,7 @@ pub(super) fn stage_rows(rows:&[RestoreStageSpanData])->Result<()> {
     check(rows.len()<=transaction::INVOCATION_LIMIT&&rows.windows(2).all(|w|w[0].torn<w[1].torn),"restore-transport-order")?;
     let mut bytes=0u64;
     for (i,row) in rows.iter().enumerate() {row.validate()?;
-        check(rows[..i].iter().all(|old|old.holder!=row.holder&&(old.stage.device,old.stage.inode)!=(row.stage.device,row.stage.inode)&&old.root==row.root),
+        check(rows[..i].iter().all(|old|old.holder!=row.holder&&old.stage.inode!=row.stage.inode&&old.root==row.root),
             "restore-transport-alias")?;
         bytes=removal_archive_storage_sum_data(bytes,row.storage_bytes())?;
     }Ok(())
@@ -1663,8 +1683,8 @@ pub(super) fn snapshot_census<F:FnMut(u64,&mut[u8])->Result<usize>>(genesis:&Rem
             if row.invocation==state.invocation_data()||state.evidence_data().any(|e|e.invocation==row.invocation) {
                 check(holder&&is_complete,"restore-transport-history-reuse")?;
             }
-            check(descriptors.iter().all(|d|(d.stage.device,d.stage.inode)!=(row.identity.device,row.identity.inode)
-                && (d.root.device,d.root.inode)!=(row.identity.device,row.identity.inode)),"restore-transport-original-alias")?;
+            check(descriptors.iter().all(|d|d.stage.inode!=row.identity.inode
+                && d.root.inode!=row.identity.inode),"restore-transport-original-alias")?;
             let key=(row.identity.device,row.identity.inode);
             if let Some((id,identity,old_base,old_holder))=originals.get_mut(&key) {
                 check(*id==fact.invocation&&*identity==row.identity&&((holder&&*old_base&&! *old_holder)
@@ -1733,9 +1753,9 @@ fn with_transport_index<T>(book:&mut Install,descriptor:&RestoreStageSpanData,sn
         let record_raw=snapshot_bytes(genesis,&record_path,installation_record::RECORD_LIMIT,&mut |at,out|snapshot.read_at(book,at,out))?;
         let expected=installation_record::Expected {kind:installation_record::Kind::Ordinary,source_commit:binding.source_commit,
             runtime_manifest:binding.runtime_manifest_sha256,install_root:installation_record::DirectoryIdentity {
-                device:descriptor.root.device,inode:descriptor.root.inode,mode:0o040755,uid:0,gid:0,flags:0},
+                device:descriptor.root.device,inode:descriptor.root.inode,mode:0o040755,uid:0,gid:0,flags:0, volume_uuid: None },
             release_directory:release.release_directory_data()};
-        let record=installation_record::Record::parse_for_release_data(&record_raw,&raw,&expected,group.base.next_data())?;
+        let record=installation_record::Record::parse_observed_for_release_data(&record_raw,&raw,&expected,group.base.next_data())?;
         check(record.instance()==release.instance_data(),"restore-transport-runtime-instance")?;
         let inventory=Inventory::parse_for_release(&raw,binding.runtime_manifest_sha256,binding.release)?;
         let quote=worker::reinstall_index_quote_data(&inventory)?;budget.reserve(book,1,quote.2,inventory_quote)?;
@@ -1803,7 +1823,7 @@ fn snapshot_completed_reference_coverage_refuses_omitted_group() {
 #[cfg(test)]
 #[test]
 fn snapshot_v3_descriptor_wire_and_completed_prefix_data() {
-    let root=OriginalIdentityData{device:1,inode:2,birth_seconds:1,birth_nanoseconds:2};
+    let root=OriginalIdentityData{device:1,inode:2,birth_seconds:1,birth_nanoseconds:2, volume_uuid: None };
     let descriptor=RestoreStageSpanData{torn:[1;16],holder:[2;16],receipt:[3;32],root,
         stage:OriginalIdentityData{inode:91,..root},
         top:Identity{dev:1,ino:91,mode:0o040700,uid:0,gid:0,links:2,size:64,

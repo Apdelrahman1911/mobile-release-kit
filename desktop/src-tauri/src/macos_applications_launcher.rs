@@ -132,12 +132,30 @@ pub enum OutcomeData { VerifiedExisting, Published, Restored, InverseRestored, R
 // Persistent enrollment identifies the original, not merely matching signed
 // bytes. Birth time supplements device/inode against later inode reuse; ctime
 // is deliberately excluded because our exclusive rename legitimately changes it.
-#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
+#[derive(Clone, Copy, Debug, serde::Deserialize, serde::Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 pub struct OriginalIdentityData {
     pub device: i64, pub inode: u64, pub birth_seconds: i64, pub birth_nanoseconds: i64,
+    #[serde(default, skip_serializing_if="Option::is_none", deserialize_with="crate::macos_persistent_identity::present_uuid")]
+    pub volume_uuid: Option<crate::macos_persistent_identity::VolumeUuid>,
 }
+impl PartialEq for OriginalIdentityData {
+    fn eq(&self, other: &Self) -> bool {
+        crate::macos_persistent_identity::same_volume_data((self.device,self.volume_uuid),(other.device,other.volume_uuid))
+            && (self.inode,self.birth_seconds,self.birth_nanoseconds)==(other.inode,other.birth_seconds,other.birth_nanoseconds)
+    }
+}
+impl Eq for OriginalIdentityData {}
 impl OriginalIdentityData {
+    pub fn same_volume_data(self, other: Self) -> bool {
+        crate::macos_persistent_identity::same_volume_data((self.device,self.volume_uuid),(other.device,other.volume_uuid))
+    }
+    pub fn matches_legacy_binding_data(self, observed: Self,
+        binding: crate::macos_persistent_identity::LegacyVolumeBindingData) -> bool {
+        self.valid_data() && observed.valid_data()
+            && (self.inode,self.birth_seconds,self.birth_nanoseconds)==(observed.inode,observed.birth_seconds,observed.birth_nanoseconds)
+            && binding.matches_data((self.device,self.volume_uuid),(observed.device,observed.volume_uuid))
+    }
     pub fn valid_data(self) -> bool {
         self.device >= 0 && self.inode != 0 && self.birth_seconds > 0
             && (0..1_000_000_000).contains(&self.birth_nanoseconds)
@@ -305,7 +323,7 @@ mod tests {
         use OutcomeData::*;
         for outcome in [VerifiedExisting, Published, Restored, InverseRestored, Refused, Unknown] {
             let writes = u64::from(matches!(outcome, Published | Restored));
-            let base = ObservationData { outcome, published_identity:Some(OriginalIdentityData {device:1,inode:42,birth_seconds:1,birth_nanoseconds:0}),
+            let base = ObservationData { outcome, published_identity:Some(OriginalIdentityData {device:1,inode:42,birth_seconds:1,birth_nanoseconds:0, volume_uuid: None }),
                 publication_phase:matches!(outcome,Published|Restored).then(||PhaseReferenceData {stage_instance:"1".repeat(32),sha256:"2".repeat(64)}), write_count: writes, write_bytes: writes,
                 originals_closed: true, within_original_deadline: true, readback_verified: true, workspace_cleared: true };
             assert!(base.valid_data());

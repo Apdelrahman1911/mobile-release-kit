@@ -579,7 +579,10 @@ class CandidateWorkflowTests(unittest.TestCase):
         singles,initial=map(json.loads,literals)
         self.assertEqual(set(singles),{'git-local','git-fetch','git-push','git-create','git-upstream',
             'service-cli','public-acquisition','sdk-registration','upload-keys','cold-restart','backup'})
-        self.assertEqual(initial,[singles['git-local'][0],singles['service-cli'][0]])
+        self.assertEqual(initial,[singles['git-local'][0]])
+        # Service lifecycle is qualified separately on the owner's Mac, where
+        # its actual administrator approval can be given. The saved singleton
+        # remains available; skipping it here never records a service success.
         self.assertTrue(all(len(rows)==1 and rows[0]['group']==name for name,rows in singles.items()))
         rows=[r[0] for r in singles.values()]
         steps=job['steps'];commands='\n'.join(r.get('run','') for r in steps)

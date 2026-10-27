@@ -6187,11 +6187,86 @@ def maintenance_pair_data(action, previous, next_release, producer, *, current):
 
 
 def maintenance_identity_data(value, mode):
-    maintenance_map(value, ("device", "inode", "mode", "uid", "gid", "flags"), "maintenance-directory-identity")
-    need(all(type(item) is int for item in value.values()) and 0 < value["device"] < (1 << 63)
+    persistent_identity_shape(value, ("device", "inode", "mode", "uid", "gid", "flags"), "maintenance-directory-identity")
+    need(all(type(item) is int for key, item in value.items() if key != "volumeUuid") and 0 < value["device"] < (1 << 63)
          and 0 < value["inode"] < (1 << 64) and value["mode"] == stat.S_IFDIR | mode
          and value["uid"] == value["gid"] == value["flags"] == 0, "maintenance-directory-identity")
     return value
+
+
+def persistent_identity_shape(value, fields, reason):
+    """Closed legacy or UUID shape; a present invalid UUID never means legacy."""
+    need(type(value) is dict, reason)
+    keys = (*fields, "volumeUuid") if "volumeUuid" in value else fields
+    maintenance_map(value, keys, reason)
+    if "volumeUuid" in value:
+        need(maintenance_hex(value["volumeUuid"], 32) and value["volumeUuid"] != "0" * 32, reason)
+    return value
+
+
+def persistent_identity_equal(left, right):
+    """Persisted DATA equality only. Legacy migration requires separate admission."""
+    if type(left) is not dict or type(right) is not dict or set(left) != set(right):
+        return False
+    if "volumeUuid" not in left:
+        return left == right
+    if not (maintenance_hex(left["volumeUuid"], 32) and maintenance_hex(right["volumeUuid"], 32)
+            and left["volumeUuid"] != "0" * 32 and right["volumeUuid"] != "0" * 32):
+        return False
+    return {key: value for key, value in left.items() if key != "device"} == {
+        key: value for key, value in right.items() if key != "device"}
+
+
+def persistent_volume_equal(left, right):
+    if "volumeUuid" in left and "volumeUuid" in right:
+        return maintenance_hex(left["volumeUuid"], 32) and left["volumeUuid"] != "0" * 32 \
+            and left["volumeUuid"] == right["volumeUuid"]
+    return "volumeUuid" not in left and "volumeUuid" not in right and left["device"] == right["device"]
+
+
+def legacy_volume_binding_data(recorded_root, observed_root):
+    """Comparison witness only; no unavailable historical UUID is inferred."""
+    maintenance_identity_data(recorded_root, 0o755)
+    maintenance_identity_data(observed_root, 0o755)
+    if "volumeUuid" in recorded_root or "volumeUuid" not in observed_root:
+        return None
+    if {key: value for key, value in recorded_root.items() if key != "device"} != {
+            key: value for key, value in observed_root.items() if key not in ("device", "volumeUuid")}:
+        return None
+    return recorded_root["device"], observed_root["device"], observed_root["volumeUuid"]
+
+
+def legacy_identity_matches_data(recorded, observed, binding):
+    return binding is not None and "volumeUuid" not in recorded and observed.get("volumeUuid") == binding[2] \
+        and recorded.get("device") == binding[0] and observed.get("device") == binding[1] \
+        and {key: value for key, value in recorded.items() if key != "device"} == {
+            key: value for key, value in observed.items() if key not in ("device", "volumeUuid")}
+
+
+def observed_volume_uuid(fd):
+    """Bounded, read-only Darwin UUID query on the caller's held descriptor."""
+    import ctypes
+    need(sys.platform == "darwin" and type(fd) is int and fd >= 0, "volume-uuid-platform")
+    before = os.fstat(fd)
+    need(stat.S_ISDIR(before.st_mode) or stat.S_ISREG(before.st_mode), "volume-uuid-object")
+    class AttrList(ctypes.Structure):
+        _fields_ = [("bitmapcount", ctypes.c_uint16), ("reserved", ctypes.c_uint16),
+                    ("commonattr", ctypes.c_uint32), ("volattr", ctypes.c_uint32),
+                    ("dirattr", ctypes.c_uint32), ("fileattr", ctypes.c_uint32), ("forkattr", ctypes.c_uint32)]
+    need(ctypes.sizeof(AttrList) == 24, "volume-uuid-abi")
+    attributes = AttrList(5, 0, 0, 0x80040000, 0, 0, 0)
+    call = ctypes.CDLL("/usr/lib/libSystem.B.dylib", use_errno=True).fgetattrlist
+    call.argtypes = [ctypes.c_int, ctypes.POINTER(AttrList), ctypes.c_void_p, ctypes.c_size_t, ctypes.c_ulong]
+    call.restype = ctypes.c_int
+    results = []
+    for _ in range(2):
+        result = ctypes.create_string_buffer(20)
+        need(call(fd, ctypes.byref(attributes), result, 20, 0) == 0, "volume-uuid-query")
+        need(struct.unpack("=I", result.raw[:4])[0] == 20, "volume-uuid-result-size")
+        results.append(result.raw[4:])
+    need(results[0] == results[1] and results[0] != b"\0" * 16
+         and signature(os.fstat(fd)) == signature(before), "volume-uuid-rematch")
+    return results[0].hex()
 
 
 def maintenance_generation_data(value, producer, *, retained):
@@ -6205,6 +6280,10 @@ def maintenance_generation_data(value, producer, *, retained):
     need(app["location"] == ("retained" if retained else "canonical")
          and (not retained or maintenance_hex(app["invocation"], 32)), "maintenance-generation-app")
     maintenance_identity_data(app["identity"], 0o555)
+    directory, app_identity = value["releaseDirectory"], app["identity"]
+    need(persistent_volume_equal(directory, app_identity)
+         or "volumeUuid" not in directory and "volumeUuid" in app_identity,
+         "maintenance-generation-volume")
     return value
 
 
@@ -6235,8 +6314,8 @@ def maintenance_restore_recovery_data(value, action):
 
 
 def maintenance_restore_identity_data(value):
-    maintenance_map(value, ("device", "inode", "birthSeconds", "birthNanoseconds"), "maintenance-restore-identity")
-    need(all(type(v) is int for v in value.values()) and 0 < value["device"] < 1 << 63
+    persistent_identity_shape(value, ("device", "inode", "birthSeconds", "birthNanoseconds"), "maintenance-restore-identity")
+    need(all(type(v) is int for key, v in value.items() if key != "volumeUuid") and 0 < value["device"] < 1 << 63
          and 0 < value["inode"] < 1 << 64 and 0 < value["birthSeconds"] < 1 << 63
          and 0 <= value["birthNanoseconds"] < 1_000_000_000, "maintenance-restore-identity")
     return value
@@ -6260,10 +6339,10 @@ def maintenance_restore_receipt_data(body, reference, base, base_body, previous,
     identities, invocations, requests = set(), {own["invocation"]}, {own["requestId"]}
     def identity(raw):
         raw = maintenance_restore_identity_data(raw)
-        pair = (raw["device"], raw["inode"])
-        need(raw["device"] == value["root"]["device"] and pair not in identities, "maintenance-restore-original-alias")
+        pair = raw["inode"]
+        need(persistent_volume_equal(raw, value["root"]) and pair not in identities, "maintenance-restore-original-alias")
         identities.add(pair)
-        return {key: raw[key] for key in ("device", "inode", "birthSeconds", "birthNanoseconds")}
+        return {key: raw[key] for key in ("device", "inode", "birthSeconds", "birthNanoseconds", "volumeUuid") if key in raw}
     ordered = {key: value[key] for key in keys}
     for key in ("root", "stage", "oldState"):
         ordered[key] = identity(value[key])
@@ -6331,7 +6410,8 @@ def maintenance_restore_namespace(root_fd, root_identity, current, parsed, recor
                  and (directory or info.st_nlink == 1 and 0 <= info.st_size <= limit), "maintenance-restore-original-policy")
             # Exact birth identity and private content commitments remain native checks.
             if identity is not None:
-                need((info.st_dev, info.st_ino) == (identity["device"], identity["inode"]), "maintenance-restore-original-identity")
+                need(info.st_ino == identity["inode"] and persistent_volume_equal(identity, root_identity),
+                     "maintenance-restore-original-identity")
             observed = signature(info) + (getattr(info, "st_flags", None),)
         need(name not in originals or originals[name] == observed, "maintenance-restore-original-changed")
         originals[name] = observed
@@ -6360,6 +6440,8 @@ def maintenance_restore_namespace(root_fd, root_identity, current, parsed, recor
              and base["previous"] == parsed[link["invocation"]][1]["current"]["release"], "maintenance-restore-base-history")
         previous = records[link["invocation"]]
         latest = maintenance_restore_receipt_data(latest_body, reference, base, base_body, previous, producer)
+        need(latest["root"]["inode"] == root_identity["inode"]
+             and persistent_volume_equal(latest["root"], root_identity), "maintenance-restore-root-identity")
         retain_id(holder_id)
         for row in latest["attempts"]: retain_id(row["invocation"])
         receipts = [(latest, latest_body)]
@@ -6378,11 +6460,12 @@ def maintenance_restore_namespace(root_fd, root_identity, current, parsed, recor
              and base_row["intentSha256"] == digest(base_body), "maintenance-restore-chain-base")
         expected = {torn: {"intent": base, "body": base_body, "identity": base_row["identity"]}}
         for receipt, raw in receipts:
-            need(all(receipt[key] == first[key] for key in ("root", "stage", "oldState", "stageSha256", "tornInvocation"))
+            need(all(persistent_identity_equal(receipt[key], first[key]) for key in ("root", "stage", "oldState"))
+                 and all(receipt[key] == first[key] for key in ("stageSha256", "tornInvocation"))
                  and len(receipt["attempts"]) == len(expected), "maintenance-restore-chain-prefix")
             for row in receipt["attempts"]:
                 old = expected.get(row["invocation"])
-                need(old is not None and row["identity"] == old["identity"] and row["requestId"] == old["intent"]["requestId"]
+                need(old is not None and persistent_identity_equal(row["identity"], old["identity"]) and row["requestId"] == old["intent"]["requestId"]
                      and row["intentSha256"] == digest(old["body"]), "maintenance-restore-chain-attempt")
             own_id = receipt["ownAttempt"]["invocation"]
             need(own_id not in generated_ids and len(generated_ids) < 64, "maintenance-restore-generated-bound")
@@ -6390,12 +6473,12 @@ def maintenance_restore_namespace(root_fd, root_identity, current, parsed, recor
             retain_id(own_id)
             intent, body = maintenance_restore_retry_body(base, receipt, raw, producer)
             need(intent["invocation"] not in expected and len(expected) < 64
-                 and all(intent["requestId"] != old["intent"]["requestId"] and receipt["ownAttempt"]["identity"] != old["identity"]
+                 and all(intent["requestId"] != old["intent"]["requestId"] and receipt["ownAttempt"]["identity"]["inode"] != old["identity"]["inode"]
                          for old in expected.values()), "maintenance-restore-chain-own")
             expected[intent["invocation"]] = {"intent": intent, "body": body, "identity": receipt["ownAttempt"]["identity"]}
         need(next(reversed(expected)) == holder_id and expected[holder_id]["body"] == holder_body,
              "maintenance-restore-holder-body")
-        need((latest["root"]["device"], latest["root"]["inode"]) == (root_identity["device"], root_identity["inode"]),
+        need(latest["root"]["inode"] == root_identity["inode"] and persistent_volume_equal(latest["root"], root_identity),
              "maintenance-restore-root-identity")
         prior_name = (MAINTENANCE_STATE_NAME if link["invocation"] == current["invocation"] else
                       ".maintenance-" + link["invocation"] + ".state.json")
@@ -6435,7 +6518,7 @@ def maintenance_restore_namespace(root_fd, root_identity, current, parsed, recor
             prior = groups.get(parent_id)
             need(prior is not None and parent_id not in linked and prior["holder"]["restoreRecovery"] == reference
                  and prior["holderBody"] == group["baseBody"]
-                 and prior["attempts"][parent_id]["identity"] == group["attempts"][base["invocation"]]["identity"]
+                 and persistent_identity_equal(prior["attempts"][parent_id]["identity"], group["attempts"][base["invocation"]]["identity"])
                  and prior["base"]["previousState"] == base["previousState"] and prior["base"]["next"] == base["next"],
                  "maintenance-restore-group-link")
             linked.add(parent_id)
@@ -6445,15 +6528,15 @@ def maintenance_restore_namespace(root_fd, root_identity, current, parsed, recor
             need(key not in visited, "maintenance-restore-group-cycle")
             visited.add(key)
             cursor = groups[cursor["base"]["restoreRecovery"]["receiptInvocation"]]
-        pair = (group["stage"]["device"], group["stage"]["inode"])
+        pair = group["stage"]["inode"]
         need(pair not in owners, "maintenance-restore-cross-original")
         owners[pair] = "stage:" + base["invocation"]
         for invocation, row in group["attempts"].items():
-            pair = (row["identity"]["device"], row["identity"]["inode"])
+            pair = row["identity"]["inode"]
             edge = invocation == base["invocation"] and "restoreRecovery" in base
             if invocation in seen:
                 old = seen[invocation]
-                need(old[0] == row["identity"] and ((edge and invocation in groups) or invocation == holder_id and old[1]),
+                need(persistent_identity_equal(old[0], row["identity"]) and ((edge and invocation in groups) or invocation == holder_id and old[1]),
                      "maintenance-restore-cross-attempt")
             else:
                 need(pair not in owners, "maintenance-restore-cross-original")
@@ -6494,7 +6577,7 @@ def maintenance_state_data(body, producer):
          and type(value["previousEvidence"]) is list and len(value["previousEvidence"]) < 64,
          "maintenance-state-success-bound")
     maintenance_generation_data(value["current"], producer, retained=False)
-    generations, identities, retained_names = [], set(), set()
+    generations, identities, retained_names, volumes = [], set(), set(), set()
     for index, generation in enumerate((value["current"], *value["retained"])):
         if index:
             maintenance_generation_data(generation, producer, retained=True)
@@ -6504,9 +6587,12 @@ def maintenance_state_data(body, producer):
         need(not any(old["release"] == generation["release"] or old["instance"] == generation["instance"] for old in generations),
              "maintenance-reused-generation")
         for identity in (generation["releaseDirectory"], generation["app"]["identity"]):
-            key = (identity["device"], identity["inode"])
+            key = identity["inode"]
             need(key not in identities, "maintenance-reused-generation")
             identities.add(key)
+            if "volumeUuid" in identity:
+                volumes.add(identity["volumeUuid"])
+                need(len(volumes) == 1, "maintenance-generation-volume")
         generations.append(generation)
     previous, links = "", set()
     for row in value["previousEvidence"]:
@@ -6554,9 +6640,9 @@ def maintenance_launcher_data(value, writer_bytes):
     need(type(value["outcome"]) is str and value["outcome"] in ("verified-existing", "published", "restored")
          and all(value[key] is True for key in ("originalsClosed", "withinOriginalDeadline", "readbackVerified", "workspaceCleared")),
          "maintenance-launcher-not-complete")
-    identity = maintenance_map(value["publishedIdentity"], ("device", "inode", "birthSeconds", "birthNanoseconds"),
+    identity = persistent_identity_shape(value["publishedIdentity"], ("device", "inode", "birthSeconds", "birthNanoseconds"),
                                "maintenance-launcher-identity")
-    need(all(type(item) is int for item in identity.values())
+    need(all(type(item) is int for key, item in identity.items() if key != "volumeUuid")
          and 0 <= identity["device"] < (1 << 63) and 0 < identity["inode"] < (1 << 64)
          and 0 < identity["birthSeconds"] < (1 << 63) and 0 <= identity["birthNanoseconds"] < 1_000_000_000,
          "maintenance-launcher-identity")
@@ -6851,18 +6937,22 @@ def byte_correspondence(actual, expected):
         need(len(body) == row["size"] and digest(body) == row["sha256"] and mode == (0o555 if row["executable"] else 0o444), "installed-byte-mode-correspondence")
 
 
-def installation_directory_data(info):
+def installation_directory_data(info, *, fd=None):
     """Stable DATA only; caller separately retains/checks full named originals."""
     need(stat.S_ISDIR(info.st_mode) and info.st_mode == stat.S_IFDIR | 0o755
          and info.st_uid == info.st_gid == 0 and getattr(info, "st_flags", None) == 0
          and type(info.st_dev) is int and 0 < info.st_dev <= (1 << 63) - 1
          and type(info.st_ino) is int and 0 < info.st_ino <= (1 << 64) - 1, "installation-directory-policy")
-    return {"device": info.st_dev, "inode": info.st_ino, "mode": info.st_mode,
-            "uid": info.st_uid, "gid": info.st_gid, "flags": info.st_flags}
+    value = {"device": info.st_dev, "inode": info.st_ino, "mode": info.st_mode,
+             "uid": info.st_uid, "gid": info.st_gid, "flags": info.st_flags}
+    if fd is not None:
+        need(signature(os.fstat(fd)) == signature(info), "installation-directory-held")
+        value["volumeUuid"] = observed_volume_uuid(fd)
+    return value
 
 
 def installation_record_data(body, inventory_body, source, manifest, root, release, instance, *, fixture=False, selection=None,
-                             expected_protocol=CURRENT_PROTOCOL):
+                             expected_protocol=CURRENT_PROTOCOL, observed_legacy=False):
     """Closed DATA comparison, never permission or native/old finality evidence."""
     selection = selected_build(selection)
     need(type(body) is bytes and 0 < len(body) <= INSTALLATION_RECORD_LIMIT
@@ -6872,9 +6962,10 @@ def installation_record_data(body, inventory_body, source, manifest, root, relea
          and (not fixture or expected_protocol == CURRENT_PROTOCOL)
          and type(instance) is str and re.fullmatch(r"[0-9a-f]{32}", instance) and instance != "0" * 32,
          "installation-record-input")
+    need(type(observed_legacy) is bool, "installation-record-observation-mode")
     for identity in (root, release):
-        need(type(identity) is dict and set(identity) == {"device", "inode", "mode", "uid", "gid", "flags"}
-             and all(type(value) is int for value in identity.values())
+        persistent_identity_shape(identity, ("device", "inode", "mode", "uid", "gid", "flags"), "installation-record-expected-directory")
+        need(all(type(value) is int for key, value in identity.items() if key != "volumeUuid")
              and 0 < identity["device"] <= (1 << 63) - 1 and 0 < identity["inode"] <= (1 << 64) - 1
              and identity["mode"] == stat.S_IFDIR | 0o755 and identity["uid"] == identity["gid"] == identity["flags"] == 0,
              "installation-record-expected-directory")
@@ -6892,9 +6983,18 @@ def installation_record_data(body, inventory_body, source, manifest, root, relea
          and record["bundleIdentifier"] == BUNDLE_ID and record["release"] == selection.release and record["sourceCommit"] == source
          and record["protocolSha256"] == expected_protocol and record["runtimeManifestSha256"] == manifest
          and record["policy"] == "fixed-root-wheel-readonly-v1", "installation-record-binding")
+    for key in ("installRoot", "releaseDirectory"):
+        persistent_identity_shape(record[key], ("device", "inode", "mode", "uid", "gid", "flags"), "installation-record-directory")
+        maintenance_identity_data(record[key], 0o755)
+    need(persistent_volume_equal(record["installRoot"], record["releaseDirectory"]),
+         "installation-record-volume-pair")
+    legacy = legacy_volume_binding_data(record["installRoot"], root) if observed_legacy and not fixture else None
+    legacy = legacy if legacy is not None and "volumeUuid" not in record["releaseDirectory"] \
+        and record["installRoot"]["device"] == record["releaseDirectory"]["device"] \
+        and root["device"] == release["device"] and root.get("volumeUuid") == release.get("volumeUuid") else None
     for key, expected in (("installRoot", root), ("releaseDirectory", release)):
-        need(type(record[key]) is dict and set(record[key]) == set(expected)
-             and all(type(value) is int for value in record[key].values()) and record[key] == expected,
+        need(all(type(value) is int for name, value in record[key].items() if name != "volumeUuid")
+             and (persistent_identity_equal(record[key], expected) or legacy_identity_matches_data(record[key], expected, legacy)),
              "installation-record-directory")
     inventory = record["inventory"]
     need(type(inventory) is dict and set(inventory) == {"name", "bytes", "sha256"}
@@ -7011,6 +7111,7 @@ def installation_metadata_directory(root, names, *, selection=None):
                 originals.append((opened, outer, entry, signature(before), data))
                 need(signature(os.fstat(opened)) == signature(before)
                      and installation_directory_data(os.fstat(opened)) == data, "installation-directory-changed")
+                data["volumeUuid"] = observed_volume_uuid(opened)
                 no_xattrs(opened)
                 outer = opened
             need(set(os.listdir(outer)) == names, "installation-release-roster")
@@ -7020,7 +7121,7 @@ def installation_metadata_directory(root, names, *, selection=None):
                 current = os.fstat(opened)
                 named = os.stat(entry, dir_fd=outer, follow_symlinks=False)
                 need(signature(current) == signature(named) == before
-                     and installation_directory_data(current) == installation_directory_data(named) == data,
+                     and installation_directory_data(current, fd=opened) == installation_directory_data(named, fd=opened) == data,
                      "installation-directory-changed")
         finally:
             active = sys.exc_info()[0] is not None
@@ -7083,10 +7184,14 @@ def maintenance_control_names(target, release):
     return (".producer-" + release + ".json", ".producer-" + release + ".sig")
 
 
-def maintenance_directory_identity(info, mode):
+def maintenance_directory_identity(info, mode, *, fd=None):
     need(mode in (0o755, 0o555, 0o700), "maintenance-directory-policy")
-    return maintenance_identity_data({"device": info.st_dev, "inode": info.st_ino, "mode": info.st_mode,
-                                      "uid": info.st_uid, "gid": info.st_gid, "flags": getattr(info, "st_flags", None)}, mode)
+    value = {"device": info.st_dev, "inode": info.st_ino, "mode": info.st_mode,
+             "uid": info.st_uid, "gid": info.st_gid, "flags": getattr(info, "st_flags", None)}
+    if fd is not None:
+        need(signature(os.fstat(fd)) == signature(info), "maintenance-directory-held")
+        value["volumeUuid"] = observed_volume_uuid(fd)
+    return maintenance_identity_data(value, mode)
 
 
 @contextlib.contextmanager
@@ -7099,11 +7204,12 @@ def maintenance_directory(parent_fd, name, mode):
     try:
         need(signature(os.fstat(original)) == signature(before), "maintenance-directory-changed")
         no_xattrs(original)
+        identity["volumeUuid"] = observed_volume_uuid(original)
         yield original, identity
         current = os.fstat(original)
         named = os.stat(name, dir_fd=parent_fd, follow_symlinks=False)
         need(signature(current) == signature(named) == signature(before)
-             and maintenance_directory_identity(current, mode) == maintenance_directory_identity(named, mode) == identity,
+             and maintenance_directory_identity(current, mode, fd=original) == maintenance_directory_identity(named, mode, fd=original) == identity,
              "maintenance-directory-changed")
     finally:
         close_once(original)
@@ -7155,17 +7261,22 @@ def maintenance_generation_readback(root_fd, versions_fd, root_identity, generat
     # outer-Installer attestation. Only the current payload receives the full walk.
     app_name = APP_NAME if current else ".retained-app-" + generation["app"]["invocation"]
     with maintenance_directory(root_fd, app_name, 0o555) as (_app_fd, app_identity):
-        need(app_identity == generation["app"]["identity"], "maintenance-app-object")
         with maintenance_directory(versions_fd, selection.release, 0o755) as (release_fd, release_identity):
-            need(release_identity == generation["releaseDirectory"], "maintenance-runtime-object")
             names = {"runtime", INSTALLATION_INVENTORY_NAME, INSTALLATION_RECORD_NAME}
             need(set(os.listdir(release_fd)) == names, "installation-release-roster")
             inventory = maintenance_metadata_leaf(release_fd, INSTALLATION_INVENTORY_NAME, INVENTORY_BYTES, budget)
             record = maintenance_metadata_leaf(release_fd, INSTALLATION_RECORD_NAME, INSTALLATION_RECORD_LIMIT, budget)
             need(digest(inventory) == release["inventorySha256"] and (not current or inventory == source_inventory),
                  "installation-inventory-exact-bytes")
-            installation_record_data(record, inventory, release["sourceCommit"], release["runtimeManifestSha256"], root_identity,
-                                     release_identity, generation["instance"], selection=selection, expected_protocol=release["protocolSha256"])
+            parsed_record = installation_record_data(record, inventory, release["sourceCommit"], release["runtimeManifestSha256"], root_identity,
+                                     release_identity, generation["instance"], selection=selection, expected_protocol=release["protocolSha256"],
+                                     observed_legacy=True)
+            legacy = legacy_volume_binding_data(parsed_record["installRoot"], root_identity)
+            need(persistent_identity_equal(parsed_record["releaseDirectory"], generation["releaseDirectory"])
+                 and (persistent_identity_equal(generation["releaseDirectory"], release_identity)
+                      or legacy_identity_matches_data(generation["releaseDirectory"], release_identity, legacy)), "maintenance-runtime-object")
+            need(persistent_identity_equal(generation["app"]["identity"], app_identity)
+                 or legacy_identity_matches_data(generation["app"]["identity"], app_identity, legacy), "maintenance-app-object")
             rows = observation_inventory_bytes(inventory, release["inventorySha256"], release["runtimeManifestSha256"], selection=selection)
             verified_files = 0
             if current:

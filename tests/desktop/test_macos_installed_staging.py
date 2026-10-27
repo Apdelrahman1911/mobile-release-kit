@@ -16666,7 +16666,7 @@ class MacInstallationMetadataData(unittest.TestCase):
                     self.assertEqual(result["originalFinality"], "separate-Installer-status")
                     self.assertEqual(closed, [installed_root])
                     self.assertIs(record_read.call_args.kwargs["selection"], selection)
-                    source_read.assert_called_once_with(args.input / TOOL.INSTALLATION_INVENTORY_NAME, 1024 * 1024)
+                    source_read.assert_called_once_with(args.input / TOOL.INSTALLATION_INVENTORY_NAME, 12 * 1024 * 1024)
                     fail_close[0] = True
                     with self.assertRaisesRegex(TOOL.Refused, "synthetic-installation-parent-close"):
                         TOOL.installation_metadata_readback(args, installed_root, original, fixture=fixture, selection=selection)
@@ -16803,6 +16803,7 @@ class MacInstallationMetadataData(unittest.TestCase):
                       mock.patch.object(TOOL.os, "fstat", side_effect=lambda fd: info[entries[fd - 101]]),
                       mock.patch.object(TOOL.os, "listdir", return_value=list(names)),
                       mock.patch.object(TOOL, "no_xattrs"),
+                      mock.patch.object(TOOL, "observed_volume_uuid", return_value="1" * 32) as uuid_query,
                       mock.patch.object(TOOL, "close_once", side_effect=[TOOL.Refused("synthetic-close-unknown"), None, None] if cause == "close" else None) as close):
                     def observe():
                         with TOOL.installation_metadata_directory(TOOL.INSTALL_ROOT, names, selection=selection) as (_root, _release, fd):
@@ -16815,6 +16816,7 @@ class MacInstallationMetadataData(unittest.TestCase):
                             observe()
                     self.assertEqual([call.args[0] for call in named.call_args_list[:3]], list(entries))
                     self.assertEqual(close.call_args_list, [mock.call(103), mock.call(102), mock.call(101)])
+                    self.assertEqual([call.args[0] for call in uuid_query.call_args_list[:3]], [101,102,103])
 
     def test_record_identifiers_match_existing_package_and_bundle_source(self):
         source = Path(__file__).absolute().parents[2]
@@ -16856,7 +16858,13 @@ class MacInstallationMetadataData(unittest.TestCase):
             self.assertEqual(roots[0]["version"], "0.1.3")
             self.assertNotIn("source", roots[0])
             self.assertNotIn("checksum", roots[0])
-        entry_info = TOOL.plistlib.loads(TOOL.source_entry_info())
+        # This is bounded SOURCE metadata comparison, not native xattr/input
+        # admission. The original parser consumes these exact regular bytes;
+        # separate native/input tests retain the complete attribute policy.
+        def source_metadata_read(path, limit):
+            return source_data(Path(path).relative_to(source), limit)
+        with mock.patch.object(TOOL, "read", side_effect=source_metadata_read):
+            entry_info = TOOL.plistlib.loads(TOOL.source_entry_info())
         self.assertEqual(entry_info, dict(info, CFBundleIdentifier=TOOL.ENTRY_BUNDLE_ID, CFBundleExecutable="mrk-macos-entry"))
         self.assertEqual(TOOL.ANDROID_HELPER_BUNDLE_PROGRAM, "Contents/Helpers/mrk-android-register")
         self.assertEqual(TOOL.ANDROID_HELPER, TOOL.PAYLOAD_RELATIVE + "/" + TOOL.ANDROID_HELPER_BUNDLE_PROGRAM)
@@ -16916,7 +16924,7 @@ class MacInstallationMetadataData(unittest.TestCase):
         # selects only the fixed outer app, with no engineering environment.
         request = ui.split("        func requestAndAwait() throws {", 1)[1].split("        func observeNormalTermination(", 1)[0]
         ordinary_request = request.split("            case .ordinary:\n", 1)[1].split("            case .engineeringMain(", 1)[0]
-        self.assertEqual(ui.count("NSWorkspace.shared.openApplication("), 1)
+        self.assertEqual(request.count("NSWorkspace.shared.openApplication("), 1)
         self.assertIn("NSWorkspace.shared.openApplication(at: requestURL, configuration: configuration)", request)
         self.assertEqual(ordinary_request.count("requestURL = Self.outerURL"), 1)
         self.assertNotIn("configuration.environment", ordinary_request)
@@ -20932,6 +20940,109 @@ class MacNormalPreviewData(unittest.TestCase):
         for phrase in ("The original user DMG is retained unchanged", "no fallback", "Accepted notary result alone",
                        "scoped native verification/mount observations"):
             self.assertIn(phrase, guide)
+
+
+class PersistentVolumeIdentityTests(unittest.TestCase):
+    def test_generation_volume_matching_keeps_restore_and_rejects_downgrades(self):
+        producer, records, result = maintenance_documents(('fresh-install',))
+        selected = TOOL.maintenance_producer_data(TOOL.canonical(producer), target=TOOL.ARM_TARGET)
+        state = TOOL.decode(records[result['invocation']][1])
+        current = state['current']
+        current['releaseDirectory']['volumeUuid'] = '1' * 32
+        current['app']['identity'].update(volumeUuid='1' * 32, device=2)
+        self.assertEqual(TOOL.maintenance_state_data(TOOL.canonical(state), selected), state)
+        restored = copy.deepcopy(state)
+        del restored['current']['releaseDirectory']['volumeUuid']
+        self.assertEqual(TOOL.maintenance_state_data(TOOL.canonical(restored), selected), restored)
+        for fault in ('volume', 'downgrade', 'alias'):
+            bad = copy.deepcopy(state)
+            identity = bad['current']['app']['identity']
+            if fault == 'volume': identity['volumeUuid'] = '2' * 32
+            elif fault == 'downgrade': del identity['volumeUuid']
+            else: identity['inode'] = bad['current']['releaseDirectory']['inode']
+            with self.subTest(fault=fault), self.assertRaises(TOOL.Refused):
+                TOOL.maintenance_state_data(TOOL.canonical(bad), selected)
+
+    def test_legacy_record_compatibility_is_explicit_and_keeps_original_bytes(self):
+        record, inventory, root, release = installation_record_fixture()
+        record=copy.deepcopy(record)
+        root={**root,"device":16777229}
+        release={**release,"device":16777229,"inode":111608441}
+        record["installRoot"]=root
+        record["releaseDirectory"]=release
+        body=TOOL.canonical(record)
+        live_root={**root,"device":16777232,"volumeUuid":"1"*32}
+        live_release={**release,"device":16777232,"volumeUuid":"1"*32}
+        args=(body,inventory,"a"*40,"c"*64,live_root,live_release,"d"*32)
+        with self.assertRaises(TOOL.Refused):
+            TOOL.installation_record_data(*args)
+        parsed=TOOL.installation_record_data(*args,observed_legacy=True)
+        self.assertEqual(TOOL.canonical(parsed),body)
+        binding=TOOL.legacy_volume_binding_data(root,live_root)
+        self.assertTrue(TOOL.legacy_identity_matches_data(release,live_release,binding))
+        for key,value in (("inode",111608442),("uid",501),("gid",20),("mode",stat.S_IFDIR|0o777),
+                          ("flags",1),("volumeUuid","2"*32)):
+            wrong={**live_release,key:value}
+            with self.assertRaises(TOOL.Refused):
+                TOOL.installation_record_data(body,inventory,"a"*40,"c"*64,live_root,wrong,"d"*32,observed_legacy=True)
+            self.assertFalse(TOOL.legacy_identity_matches_data(release,wrong,binding))
+        wrong=copy.deepcopy(record);wrong["releaseDirectory"]["device"]=16777230
+        with self.assertRaises(TOOL.Refused):
+            TOOL.installation_record_data(TOOL.canonical(wrong),inventory,"a"*40,"c"*64,live_root,live_release,"d"*32,observed_legacy=True)
+        wrong=copy.deepcopy(record);wrong["installRoot"]["volumeUuid"]=None
+        with self.assertRaises(TOOL.Refused):
+            TOOL.installation_record_data(TOOL.canonical(wrong),inventory,"a"*40,"c"*64,live_root,live_release,"d"*32,observed_legacy=True)
+
+    def test_closed_uuid_shape_and_device_renumbering(self):
+        legacy = {"device": 16777229, "inode": 111608441, "mode": stat.S_IFDIR | 0o755,
+                  "uid": 0, "gid": 0, "flags": 0}
+        durable = {**legacy, "volumeUuid": "1" * 32}
+        live = {**durable, "device": 16777232}
+        self.assertEqual(TOOL.maintenance_identity_data(legacy, 0o755), legacy)
+        self.assertEqual(TOOL.maintenance_identity_data(durable, 0o755), durable)
+        self.assertTrue(TOOL.persistent_identity_equal(durable, live))
+        self.assertFalse(TOOL.persistent_identity_equal(legacy, {**legacy, "device": 16777232}))
+        self.assertFalse(TOOL.persistent_identity_equal(legacy, durable))
+        for key, value in (("volumeUuid", "2" * 32), ("inode", 111608442), ("uid", 501),
+                           ("gid", 20), ("mode", stat.S_IFDIR | 0o777), ("flags", 1)):
+            self.assertFalse(TOOL.persistent_identity_equal(durable, {**live, key: value}))
+        for invalid in (None, 0, [], {}, "", "0" * 32, "A" * 32, "1" * 31, "1" * 33):
+            with self.assertRaises(TOOL.Refused):
+                TOOL.maintenance_identity_data({**legacy, "volumeUuid": invalid}, 0o755)
+        with self.assertRaises(TOOL.Refused):
+            TOOL.maintenance_identity_data({**durable, "unknown": 1}, 0o755)
+
+    def test_launcher_birth_time_and_volume_are_retained(self):
+        identity = {"device": 16777229, "inode": 7, "birthSeconds": 17, "birthNanoseconds": 42,
+                    "volumeUuid": "1" * 32}
+        self.assertEqual(TOOL.maintenance_restore_identity_data(identity), identity)
+        self.assertTrue(TOOL.persistent_identity_equal(identity, {**identity, "device": 16777232}))
+        for key, value in (("volumeUuid", "2" * 32), ("inode", 8), ("birthSeconds", 18), ("birthNanoseconds", 43)):
+            self.assertFalse(TOOL.persistent_identity_equal(identity, {**identity, key: value}))
+
+    @unittest.skipUnless(sys.platform == "darwin", "actual Darwin descriptor metadata")
+    def test_actual_uuid_queries_preserve_original_descriptor_ownership(self):
+        with tempfile.TemporaryDirectory(prefix="mrk-volume-metadata-") as directory:
+            child = Path(directory) / "child"
+            child.mkdir()
+            with contextlib.ExitStack() as stack:
+                parent = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
+                stack.callback(os.close, parent)
+                nested = os.open(child, os.O_RDONLY | os.O_DIRECTORY)
+                stack.callback(os.close, nested)
+                first = TOOL.observed_volume_uuid(parent)
+                self.assertRegex(first, r"^[0-9a-f]{32}$")
+                self.assertNotEqual(first, "0" * 32)
+                self.assertEqual(first, TOOL.observed_volume_uuid(parent))
+                self.assertEqual(first, TOOL.observed_volume_uuid(nested))
+                self.assertTrue(stat.S_ISDIR(os.fstat(parent).st_mode))
+                reader, writer = os.pipe()
+                stack.callback(os.close, reader)
+                stack.callback(os.close, writer)
+                with self.assertRaises(TOOL.Refused):
+                    TOOL.observed_volume_uuid(reader)
+                self.assertEqual(os.write(writer, b"x"), 1)
+                self.assertEqual(os.read(reader, 1), b"x")
 
 
 if __name__ == "__main__":

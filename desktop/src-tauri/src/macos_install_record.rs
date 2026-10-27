@@ -57,18 +57,35 @@ impl Kind {
     }
 }
 
-/// Stable inode identity, NOT a snapshot of a mutable directory's contents.
+/// Persisted inode identity, NOT a snapshot of a mutable directory's contents.
 /// Native callers independently retain full original/name observations, ACL,
 /// mount, xattr and current roster checks. Directory times/size/links are not
 /// generation identity: creating these very records changes them.
-#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct DirectoryIdentity {
     pub device: i64, pub inode: u64, pub mode: u32, pub uid: u32, pub gid: u32, pub flags: u32,
+    #[serde(default, rename="volumeUuid", skip_serializing_if="Option::is_none", deserialize_with="crate::macos_persistent_identity::present_uuid")]
+    pub volume_uuid: Option<crate::macos_persistent_identity::VolumeUuid>,
 }
+impl PartialEq for DirectoryIdentity {
+    fn eq(&self, other: &Self) -> bool {
+        crate::macos_persistent_identity::same_volume_data((self.device,self.volume_uuid),(other.device,other.volume_uuid))
+            && (self.inode,self.mode,self.uid,self.gid,self.flags)==(other.inode,other.mode,other.uid,other.gid,other.flags)
+    }
+}
+impl Eq for DirectoryIdentity {}
 impl DirectoryIdentity {
     pub fn valid(self) -> bool {
         self.device > 0 && self.inode > 0 && self.mode == 0o040755 && self.uid == 0 && self.gid == 0 && self.flags == 0
+    }
+    pub(crate) fn same_fields_except_volume_data(self, other: Self) -> bool {
+        (self.inode,self.mode,self.uid,self.gid,self.flags)==(other.inode,other.mode,other.uid,other.gid,other.flags)
+    }
+    pub fn matches_legacy_binding_data(self, observed: Self,
+        binding: crate::macos_persistent_identity::LegacyVolumeBindingData) -> bool {
+        self.valid() && observed.valid() && self.same_fields_except_volume_data(observed)
+            && binding.matches_data((self.device,self.volume_uuid),(observed.device,observed.volume_uuid))
     }
 }
 
@@ -233,7 +250,14 @@ impl Record {
         Ok(bytes)
     }
     pub fn parse_data(bytes: &[u8], inventory: &[u8], expected: &Expected<'_>) -> Result<Self> {
-        Self::parse_bound_data(bytes, inventory, expected, paths::PACKAGE_VERSION, paths::RELEASE, paths::PROTOCOL_SHA)
+        Self::parse_bound_data(bytes, inventory, expected, paths::PACKAGE_VERSION, paths::RELEASE, paths::PROTOCOL_SHA,false)
+    }
+    /// Explicit native fixed-root readback compatibility. This accepts only a
+    /// complete legacy pair on one recorded device with both exact inodes and
+    /// protection fields, reobserved together on one UUID-bearing live volume.
+    /// It does not modify the old record or certify native trust/finality.
+    pub fn parse_observed_data(bytes: &[u8], inventory: &[u8], expected: &Expected<'_>) -> Result<Self> {
+        Self::parse_bound_data(bytes, inventory, expected, paths::PACKAGE_VERSION, paths::RELEASE, paths::PROTOCOL_SHA,true)
     }
     /// Historical DATA remains inventory-recorded, not an old completion
     /// receipt. The caller independently selected this exact release tuple and
@@ -244,10 +268,17 @@ impl Record {
             && binding.package_identifier == paths::PACKAGE_ID
             && binding.bundle_identifier == paths::BUNDLE_ID && digest(inventory) == binding.inventory_sha256,
             "installation-record-selected-release")?;
-        Self::parse_bound_data(bytes, inventory, expected, binding.package_version, binding.release, binding.protocol_sha256)
+        Self::parse_bound_data(bytes, inventory, expected, binding.package_version, binding.release, binding.protocol_sha256,false)
+    }
+    pub fn parse_observed_for_release_data(bytes: &[u8], inventory: &[u8], expected: &Expected<'_>, release: &ReleaseData) -> Result<Self> {
+        let binding=release.binding_data();
+        check(expected.source_commit==binding.source_commit && expected.runtime_manifest==binding.runtime_manifest_sha256
+            && binding.package_identifier==paths::PACKAGE_ID && binding.bundle_identifier==paths::BUNDLE_ID
+            && digest(inventory)==binding.inventory_sha256,"installation-record-selected-release")?;
+        Self::parse_bound_data(bytes,inventory,expected,binding.package_version,binding.release,binding.protocol_sha256,true)
     }
     fn parse_bound_data(bytes: &[u8], inventory: &[u8], expected: &Expected<'_>, package_version: &str,
-        release: &str, protocol_sha256: &str) -> Result<Self> {
+        release: &str, protocol_sha256: &str, observed_legacy: bool) -> Result<Self> {
         check(!bytes.is_empty() && bytes.len() <= RECORD_LIMIT, "installation-record-size")?;
         let value = strict_json(bytes).map_err(|_| "installation-record-json")?;
         check(value.is_object() && ["inventory", "installRoot", "releaseDirectory"].iter()
@@ -256,6 +287,20 @@ impl Record {
             .map_err(|_| "installation-record-shape")?;
         check(hex(expected.source_commit, 40) && hex(expected.runtime_manifest, 64)
             && expected.install_root.valid() && expected.release_directory.valid(), "installation-record-expected")?;
+        check(crate::macos_persistent_identity::same_volume_data(
+            (record.install_root.device,record.install_root.volume_uuid),
+            (record.release_directory.device,record.release_directory.volume_uuid)),
+            "installation-record-volume-pair")?;
+        let exact = record.install_root==expected.install_root && record.release_directory==expected.release_directory;
+        let legacy=observed_legacy && expected.kind==Kind::Ordinary
+            && record.install_root.volume_uuid.is_none() && record.release_directory.volume_uuid.is_none()
+            && record.install_root.device==record.release_directory.device
+            && expected.install_root.device==expected.release_directory.device
+            && expected.install_root.volume_uuid.is_some()
+            && expected.install_root.volume_uuid==expected.release_directory.volume_uuid
+            && record.install_root.valid() && record.release_directory.valid()
+            && record.install_root.same_fields_except_volume_data(expected.install_root)
+            && record.release_directory.same_fields_except_volume_data(expected.release_directory);
         check(record.schema_version == 1 && record.basis == "protected-recorded-installation-inventory"
             && record.phase == "inventory-recorded" && record.kind == expected.kind
             && hex(&record.instance, 32) && record.instance.bytes().any(|b| b != b'0')
@@ -263,7 +308,7 @@ impl Record {
             && record.bundle_identifier == paths::BUNDLE_ID && record.release == release
             && record.source_commit == expected.source_commit && record.protocol_sha256 == protocol_sha256
             && record.runtime_manifest_sha256 == expected.runtime_manifest && record.policy == "fixed-root-wheel-readonly-v1"
-            && record.install_root == expected.install_root && record.release_directory == expected.release_directory,
+            && (exact || legacy),
             "installation-record-binding")?;
         check(!inventory.is_empty() && inventory.len() <= INVENTORY_LIMIT && record.inventory.name == INVENTORY_NAME
             && record.inventory.bytes == inventory.len() as u64 && record.inventory.sha256 == digest(inventory),
@@ -275,6 +320,11 @@ impl Record {
             .is_some_and(|n| n <= PAYLOAD_LIMIT), "installation-record-total-bound")?;
         Ok(record)
     }
+    pub fn legacy_volume_binding_data(&self, observed_root: DirectoryIdentity)
+        -> Option<crate::macos_persistent_identity::LegacyVolumeBindingData> {
+        crate::macos_persistent_identity::LegacyVolumeBindingData::root_data(self.install_root,observed_root)
+    }
+    pub fn recorded_release_directory_data(&self) -> DirectoryIdentity { self.release_directory }
     pub fn instance(&self) -> &str { &self.instance }
 }
 
@@ -363,9 +413,60 @@ mod tests {
             .collect::<Vec<_>>();
         serde_json::to_vec(&json!({"schemaVersion":1,"release":paths::RELEASE,"runtimeManifestSha256":"c".repeat(64),"files":rows})).unwrap()
     }
-    fn identity(inode: u64) -> DirectoryIdentity { DirectoryIdentity { device:1,inode,mode:0o040755,uid:0,gid:0,flags:0 } }
+    fn identity(inode: u64) -> DirectoryIdentity { DirectoryIdentity { device:1,inode,mode:0o040755,uid:0,gid:0,flags:0, volume_uuid: None } }
     fn expected<'a>(source: &'a str, manifest: &'a str) -> Expected<'a> {
         Expected { kind:Kind::Ordinary,source_commit:source,runtime_manifest:manifest,install_root:identity(11),release_directory:identity(12) }
+    }
+    #[test]
+    fn explicit_observed_legacy_pair_preserves_bytes_and_rejects_substitution() {
+        use crate::macos_persistent_identity::VolumeUuid;
+        let source="a".repeat(40);let manifest="c".repeat(64);let input=inventory();
+        let mut old=expected(&source,&manifest);
+        old.install_root.device=16777229;
+        old.release_directory.device=16777229;
+        old.release_directory.inode=111608441;
+        let bytes=Record::encode(&"d".repeat(32),&input,&old).unwrap();
+        let uuid=VolumeUuid::from_bytes_data([1;16]).unwrap();
+        let live=Expected {install_root:DirectoryIdentity {device:16777232,volume_uuid:Some(uuid),..old.install_root},
+            release_directory:DirectoryIdentity {device:16777232,volume_uuid:Some(uuid),..old.release_directory},..old};
+        assert!(Record::parse_data(&bytes,&input,&live).is_err());
+        let parsed=Record::parse_observed_data(&bytes,&input,&live).unwrap();
+        let binding=parsed.legacy_volume_binding_data(live.install_root).unwrap();
+        assert!(old.release_directory.matches_legacy_binding_data(live.release_directory,binding));
+        let mut reproduced=serde_json::to_vec(&parsed).unwrap();reproduced.push(b'\n');
+        assert_eq!(reproduced,bytes);
+        for wrong in [DirectoryIdentity {inode:live.release_directory.inode+1,..live.release_directory},
+            DirectoryIdentity {uid:501,..live.release_directory},DirectoryIdentity {gid:20,..live.release_directory},
+            DirectoryIdentity {mode:0o040777,..live.release_directory},DirectoryIdentity {flags:1,..live.release_directory},
+            DirectoryIdentity {volume_uuid:VolumeUuid::from_bytes_data([2;16]),..live.release_directory},
+            DirectoryIdentity {volume_uuid:None,..live.release_directory}] {
+            assert!(Record::parse_observed_data(&bytes,&input,&Expected {release_directory:wrong,..live}).is_err());
+            assert!(!old.release_directory.matches_legacy_binding_data(wrong,binding));
+        }
+        assert!(Record::parse_observed_data(&bytes,&input,&Expected {install_root:DirectoryIdentity {inode:99,..live.install_root},..live}).is_err());
+        let mut bad:serde_json::Value=serde_json::from_slice(&bytes).unwrap();
+        bad["releaseDirectory"]["device"]=json!(16777230);
+        assert!(Record::parse_observed_data(&serde_json::to_vec(&bad).unwrap(),&input,&live).is_err());
+        bad=serde_json::from_slice(&bytes).unwrap();bad["installRoot"]["volumeUuid"]=serde_json::Value::Null;
+        assert!(Record::parse_observed_data(&serde_json::to_vec(&bad).unwrap(),&input,&live).is_err());
+    }
+    #[test]
+    fn new_record_keeps_uuid_across_reboot_and_refuses_another_volume() {
+        use crate::macos_persistent_identity::VolumeUuid;
+        let source="a".repeat(40);let manifest="c".repeat(64);let input=inventory();
+        let mut original=expected(&source,&manifest);
+        original.install_root.volume_uuid=VolumeUuid::from_bytes_data([1;16]);
+        original.release_directory.volume_uuid=original.install_root.volume_uuid;
+        let bytes=Record::encode(&"d".repeat(32),&input,&original).unwrap();
+        let value:serde_json::Value=serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(value["installRoot"]["volumeUuid"],json!("01".repeat(16)));
+        let rebooted=Expected {install_root:DirectoryIdentity {device:2,..original.install_root},
+            release_directory:DirectoryIdentity {device:2,..original.release_directory},..original};
+        assert!(Record::parse_data(&bytes,&input,&rebooted).is_ok());
+        assert!(Record::parse_observed_data(&bytes,&input,&rebooted).unwrap().legacy_volume_binding_data(rebooted.install_root).is_none());
+        let other=Expected {install_root:DirectoryIdentity {volume_uuid:VolumeUuid::from_bytes_data([2;16]),..rebooted.install_root},
+            release_directory:DirectoryIdentity {volume_uuid:VolumeUuid::from_bytes_data([2;16]),..rebooted.release_directory},..rebooted};
+        assert!(Record::parse_observed_data(&bytes,&input,&other).is_err());
     }
     fn closed_record_tuple_inventory_and_nonfinality_data() {
         let source = "a".repeat(40); let manifest = "c".repeat(64); let input = inventory();

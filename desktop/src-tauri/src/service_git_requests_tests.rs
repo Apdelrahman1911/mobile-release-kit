@@ -1,5 +1,33 @@
 use super::*;
 use std::time::Duration;
+
+#[cfg(all(debug_assertions,feature="desktop-shell",feature="custom-protocol",feature="macos-installed-observation",
+    not(feature="development-runtime"),not(feature="ubuntu-runtime-publisher"),not(feature="macos-installed-installer"),
+    target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64")))]
+#[test]
+fn installed_return_diagnostics_keep_exact_history_and_caller_requirements() {
+    // Inert request DATA and synthetic native-link returns, no installed result.
+    let (_doc,inbox,input)=setup();
+    let link=prepared(&inbox,&input);
+    let entry=link.entry();
+    let revision=entry.status().unwrap().revision;
+    let mut facts=None;
+    assert!(!entry.installed_cli_returned_observed(&input.origin,Family::Index,Phase::Prepare,revision,&mut facts));
+    let first=facts.unwrap();
+    assert!(first.prepare_joined && !first.claimed && !first.history_acknowledged && first.review_present);
+    let raw=serde_json::to_string(&first).unwrap();
+    assert!(raw.len()<1024 && !raw.contains("git-index") && !raw.contains("requestId") && !raw.contains("projectId"));
+    let (_,history_revision,_,_)=entry.claim_history().unwrap().unwrap();
+    assert!(!entry.installed_cli_returned_observed(&input.origin,Family::Index,Phase::Prepare,revision,&mut facts));
+    assert!(facts.unwrap().history_claimed);
+    entry.history_returned(history_revision,Ok(())).unwrap();
+    assert!(entry.installed_cli_returned_observed(&input.origin,Family::Index,Phase::Prepare,revision,&mut facts));
+    let mut foreign=input.origin.clone();foreign.request_id=id('d');facts=None;
+    assert!(!entry.installed_cli_returned_observed(&foreign,Family::Index,Phase::Prepare,revision,&mut facts));
+    assert!(facts.is_none());
+    assert!(!entry.installed_cli_returned_observed(&input.origin,Family::Index,Phase::Prepare,revision+1,&mut facts));
+    assert!(!facts.unwrap().revision_matched);
+}
 fn id(v: char) -> Id {
     Id::parse(&v.to_string().repeat(32)).unwrap()
 }

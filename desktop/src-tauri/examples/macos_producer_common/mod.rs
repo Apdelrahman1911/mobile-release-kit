@@ -72,7 +72,8 @@ pub(super) fn final_ready_data(unknown:bool,pending:bool,within:bool,states:&[St
     !unknown&&!pending&&within&&states.iter().all(|state|matches!(state,State::Closed|State::Absent))
 }
 struct Original {fd:Option<ManuallyDrop<OwnedFd>>,state:State,parent:Option<usize>,name:String,
-    identity:Option<Identity>,exact:bool}
+    identity:Option<Identity>,exact:bool,
+    created_provenance:Option<native::install_producer::CreatedProvenance>}
 impl Original {
     fn handle(&self)->Result<&OwnedFd> {
         need(self.state==State::Owned,"original-not-owned")?;
@@ -110,7 +111,9 @@ impl Book {
     pub(super) fn check(&self,n:usize)->Result<()> {
         let row=&self.originals[n];let (parent,name,exact)=(row.parent,row.name.clone(),row.exact);
         let expected=self.id(n)?;let held=self.observed(n)?;let named=self.named(parent,&name)?;
-        need(held==named&&if exact {held==expected} else {expected.ancestor(held)},"original-post")
+        need(held==named&&if exact {held==expected} else {expected.ancestor(held)},"original-post")?;
+        if row.created_provenance.is_some() {self.attributes(n)?;}
+        Ok(())
     }
     pub(super) fn all(&self)->Result<()> {
         self.tick()?;
@@ -122,7 +125,7 @@ impl Book {
     }
     pub(super) fn reserve(&mut self,parent:Option<usize>,name:&str,exact:bool)->Result<usize> {
         self.tick()?;need(self.originals.len()<ORIGINAL_LIMIT,"original-limit")?;
-        let n=self.originals.len();self.originals.push(Original{fd:None,state:State::Reserved,parent,name:name.to_owned(),identity:None,exact});Ok(n)
+        let n=self.originals.len();self.originals.push(Original{fd:None,state:State::Reserved,parent,name:name.to_owned(),identity:None,exact,created_provenance:None});Ok(n)
     }
     pub(super) fn adopt(&mut self,n:usize,result:nix::Result<OwnedFd>)->Result<()> {
         match result {
@@ -176,8 +179,12 @@ impl Book {
             if error.free_result!=0||error.refusal_code.is_none() {self.unknown.set(true);}
             return Err("private-acl");
         }
-        self.tick()?;self.pending.set(true);let result=native::no_xattrs(fd.as_fd());self.pending.set(false);
-        result.map_err(|_|"private-attributes")?;self.tick()
+        self.tick()?;self.pending.set(true);
+        let result=if let Some(expected)=self.originals[n].created_provenance {
+            native::install_producer::created_provenance(fd.as_fd()).and_then(|actual|
+                if actual==expected {Ok(())} else {Err(std::io::ErrorKind::InvalidData.into())})
+        }else{native::no_xattrs(fd.as_fd())};
+        self.pending.set(false);result.map_err(|_|"private-attributes")?;self.tick()
     }
     pub(super) fn file_policy(&mut self,n:usize,limit:u64)->Result<()> {
         let id=self.id(n)?;
@@ -284,6 +291,13 @@ impl Book {
         let initial=self.observed(n)?;need(initial.uid==self.uid&&initial.mode&0o177777==0o100600
             &&initial.links==1&&initial.size==0&&initial.flags==0,"sidecar-created")?;
         self.originals[n].identity=Some(initial);self.check(n)?;
+        // Snapshot only this O_EXCL-created original. The eleven opaque OS
+        // bytes are rematched through every later check, write, seal and close.
+        // No existing package/input/parent gains this metadata exception.
+        self.tick()?;let fd=self.fd(n)?;self.pending.set(true);
+        let provenance=native::install_producer::created_provenance(fd.as_fd());self.pending.set(false);
+        let provenance=provenance.map_err(|_|"private-attributes")?;self.tick()?;
+        self.originals[n].created_provenance=Some(provenance);self.check(n)?;
         let now=self.observed(root)?;
         let row=&self.originals[root];let(parent,root_name)=(row.parent,row.name.clone());
         let named=self.named(parent,&root_name)?;

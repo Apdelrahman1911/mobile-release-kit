@@ -1,5 +1,232 @@
 # Continue Mobile Release Kit on the owner's Mac
 
+## Current continuation — 2026-10-27 durable volume integration and final local checks
+
+This checkpoint extends d8495030ddc042c4e1fa02e34b02b85e2c1f0d37 on `codex/macos-git-read-continuation` with durable volume handling and bounded Git diagnostics. The exact fresh candidate source, tree, dispatch/run state and results must be read from the private ledger and live GitHub API; no signed or installed qualification is inferred from this document. All eleven independent installed groups remain incomplete. The owner authorizes replacement of the current installation, local service lifecycle tests, manual approval, and a coordinated reboot. Credentials and unrelated files stay protected. No agents, VM, large downloads, main changes or production release.
+
+The installer refusal `maintenance-release-original` is traced to a persisted boot-local device number changing from 16777229 to 16777232 while exact app/release inode and protection fields still match. The pending implementation adds a bounded held-FD volume UUID observer, strict optional UUID DATA, stable persisted equality, and explicit legacy-root/release readback. Missing UUID means legacy; present null/zero/malformed UUID fails. Legacy admission requires unchanged root/release inodes, one old device cohort, the current shared UUID/device, full record/inventory/source/signature/payload checks and ordinary fixed-root policy. Old protected bytes remain unchanged. Live FD/name observations stay exact.
+
+The complete-prefix reader now parses the actual observed root/release pair before comparing historical identities; its post checks use only the binding enrolled by the full generation auditor. Noop retains immutable old generation DATA; Restore retains the runtime record and binds the newly published app. App/runtime and retained UUID cohorts are checked, and alias checks retain inode identity across device renumbering. Installer, runtime, launcher, native receipt and Python consumers are integrated. Private recovery snapshots and transport identities retain their separate strict live/recorded commitments: this does not claim qualification of every legacy torn-recovery route across reboot.
+
+The Git Prepared failure remains unresolved. A pending NONSHIPPING diagnostic records scalar same-original Entry facts from the actual rejected caller/native/history predicate, retaining first-failure latching and the existing frame cap. It introduces no reconciliation, retry, IO, identifier export or changed finality. No speculative Git fix is claimed. New pushes build both signed candidates and run git-local first. The known approval-dependent service-cli lifecycle is verified locally on the owner's Mac; all eleven saved singleton selectors remain available. Remaining nine groups must wait for actual Git and local service successes on the same signed source/run.
+
+Local evidence: 40 installation/transaction DATA tests, three UUID DATA tests, two actual native UUID tests, and 14 focused Python metadata/restore tests passed. Installer tests passed21 with one ignored; that actual mounted-reader case then passed separately through a real tiny DMG fixture, including host-copy rejection and ordinary ejection. Remover, isolated setup, ordinary app, resident helper and copied observer graphs compile. The13 Git request/finality tests and one bounded failure-frame test passed. Corrected bootstrap fixtures and staged-dispatch tests passed41 together; actionlint and diff whitespace checks pass. The actual current observer data-contracts binary compiled offline and returned0 with MRK_MACOS_DATA_CONTRACTS=passed. Its first attempt failed the pre-native profile DATA check because the required compiled manifest/protocol anchors were absent. The passing rerun supplies the unchanged cached Tool26 manifest and fixed source protocol ONLY as inert compiled-profile DATA, without fixture/native/UI entry or changed-source qualification. Both original attempt logs and the explicit anchor scope are recorded in persistent-volume-current-observer-data-attempts.json. The first expanded installer compile and initial helper/diagnostic graph mistakes remain in their original logs. Three disposable current-check incremental caches were removed, freeing roughly8GiB; no unrelated cache/package was deleted. See private persistent-volume-final*, persistent-volume-actual-mounted-reader.log, persistent-volume-dispatch-fixtures-final.log and persistent-volume-cache-cleanup.json.
+
+The existing follow-up finish-mac-workflow-checks is ACTIVE after the owner requested continuation; its prompt now follows the current integration, fresh-build policy and local service requirement. The tool-reported old goal remains PAUSED (only the owner/runtime can resume that status); this does not declare the repairs complete. No duplicate workflow has been dispatched.
+
+The broader package/consumer attempt is NOT green: prepared-package tests encounter automatic com.apple.provenance on source inputs under the unchanged strict policy, and one obsolete UI test expects a workflow anchor that no longer exists. Canonical TMPDIR fixed the /var ancestor issue. Bootstrap fixtures were corrected for Darwin FD census/consuming-close targeting, complete public predecessor metadata and the current inert protected completion boundary; their ten tests now pass. These test DATA fixes neither relax production attributes nor claim installed service/Git qualification. The discarded disposable source projection was removed with recorded cleanup; original source attributes were preserved.
+
+The actual predecessor metadata readback passed without mutation, matching the authenticated producer-selected predecessor and current held volume UUID. This is metadata diagnosis, not installed qualification. Both application/native changes require TWO FRESH signed candidates. Cached 0153/run40479109070 packages cannot qualify these changed bytes. Temporary signing ACL/name cleanup is already complete; do not rerun the obsolete Keychain approval script.
+
+Next: recheck current GitHub runs and monitor, commit/push only the authorized branches, then follow both fresh signed candidate builds and the independent Git group. Install the valid fresh signed Tool package locally and finish actual activation/startup/restart/manual approval and coordinated reboot persistence. Keep every original failure and unknown-finality result.
+
+## Previous checkpoint — authenticated carrier and original persistence diagnosis
+
+The corrected producer ACTUALLY returned0 with its complete final summary. The
+native verifier and independent OpenSSL check passed. Package b24e3dcf… is
+unchanged; descriptor e1130847…/2045 bytes and signature521b8f90…/256 bytes were
+verified. The owner completed the Terminal approval step. Original partitions
+apple:,apple: are restored, the sole temporary producer app entry was removed,
+and the exact key's original name Abdelrhaman Fahmy was restored. Five original
+apps remain. Native readback matched the remaining ACL baseline before the name
+change and reproduced it during a name-only roundtrip; final original-name
+fingerprint was rematched. Do NOT run the permission script again: its temporary
+name/entry guards now deliberately refuse. No credentials were exported or saved.
+See completed-keychain-cleanup.json and terminal-prepared-result.json.
+
+The read-only HFS three-file carrier's complete hashes and mounted signature
+passed. hdiutil adds origin attributes while copying: the existing completed
+read-only input policy preserves these; no product policy or mounted attributes
+were changed. Early private preflight attempts failed on Python3.9 file_digest,
+that mistaken no-xattr assumption, and a nonexistent diskutil ReadOnlyVolume
+field. Verification resumed on the SAME original mount using cached Python3.11,
+actual WritableVolume/Writable fields and the original read-only native policy.
+No repeated image/attach command. These early preflights are not passes.
+
+Apple Installer then ACTUALLY failed: PackageKit scripts failure112; original
+native completed refusal maintenance-release-original, SHA4cb07503758dddc7ba1feff796b733bcf95a80ed6d82038d704a1de8431c6bf3.
+Originals1/native1/timely1/unknown0. The installed record, Info.plist and entry
+hashes remain equal to the preservation baseline. No new installation or service
+success is claimed. Exact local logs/facts: local-authenticated-installer-failure.
+
+The failed predicate compares a PERSISTED st_dev with the current boot's st_dev:
+recorded releaseDirectory.device16777229 versus actual16777232. Inode111608441,
+mode16877, uid0/gid0 and flags0 all match. The canonical app shows the same device
+change with its original inode/type/owner/mode/flags. st_dev is not durable across
+system/boot device renumbering; the exact historical event causing this change
+has not been inferred. Do not edit the old protected record or discard this
+failure to obtain a fresh-install pass. Fix durable identity handling and verify
+legacy records, maintenance, app startup and reboot persistence correctly.
+
+A pending native metadata primitive now reads a full volume UUID from the SAME
+held FD via bounded fgetattrlist, rematches it, rejects unsupported/zero/malformed
+results and owns no FD/heap. Native tests2 pass; two actual original directory
+queries match independent diskutil UUIDac4b6b80b0a7470cae0d6fb06621d592, and both
+original descriptors closed. Files: native.m, lib.rs, new filesystem_identity.rs.
+This primitive is NOT yet wired into persisted record constructors/comparisons.
+No persistent-format/application repair is implemented or qualified yet. Plan a
+bounded compatibility solution retaining named/held, inode, owner/mode/flags,
+volume, signature, full inventory, source and finality checks. New records must
+bind a durable volume identifier; old records cannot silently authorize arbitrary
+cross-volume or replaced objects. Review all native/launcher/restore and Python
+readback consumers. Keep live FD identity comparisons exact within an operation.
+Application/native source changes require both FRESH signed candidates; do not
+broaden HARNESS_FILES or reuse old packages as changed-source qualification.
+
+The failed Installer was closed. The single normal non-force detach returned0
+and its mount namespace disappeared. Only the verified disposable image was
+removed; cached packages, complete authenticated sidecars and logs remain.
+No job/monitor/build is running; no workflow dispatched. All eleven groups remain
+incomplete; goal active, heartbeat PAUSED. No further owner input is pending.
+Direct Git preparations passed in git-prepared-core-local-2; installed
+GitCli(Prepared)'s failed predicate is still unproven. No agents, large downloads,
+main changes or production publication. Credentials/unrelated files protected.
+
+## Current continuation — 2026-10-27 created-file metadata correction
+
+The owner ran the scoped Terminal signing script. Its exact temporary partition
+permission succeeded; the first original signer and native verifier reached
+sidecar creation, then refused private-attributes. macOS automatically creates
+com.apple.provenance on the producer's own O_EXCL output. Clearing the executable
+attribute did not prevent that output attribute. The next attempt refused
+root-roster-member because the incomplete producer.json remained. Neither attempt
+is a completed emitter, installation or group pass. Both attempts' original
+partition and nonpartition ACL readbacks match the saved baseline. Attempt2's
+exact2045-byte descriptor was verified/preserved, then removed with same-inode/
+bytes checks. Install.pkg remains unchanged. See private attempt-2-preserved.
+
+The pending correction observes only the producer's newly created sidecars'
+bounded eleven-byte OS-origin record; every later held/name/write/seal/close POST
+rematches that captured value. Other attributes and every existing input still
+fail strict no-xattr checks. The shipping preprocessed native code is identical
+with signing disabled. Three native custody, two actual/malformed metadata and
+one producer contract tests passed. The producer built offline with cached
+Rust1.98.1 for ARM64/macOS26. No app/package bytes were replaced or re-signed.
+Native source changed: do not broaden HARNESS_FILES or claim that this qualifies
+a changed source. Packaged application/native/runtime changes need fresh candidates.
+
+The corrected temporary producer is deployed at the same private wrapper path.
+Its SHA is0e234b0c5f9f34d19effa73396a2210e099964c3ad0d4e2bc9af941ca2275950;
+CDHash isb00834cc160d2564c4cbdd2d10821ee4dce8866d. Its signature is ad-hoc and
+applies ONLY to this nonshipping test executable. The existing temporary Keychain
+app entry was refreshed through Keychain Access and saved; six signing apps,
+one temporary entry, original partition baseline and other ACL hash remain equal.
+Do not ask the owner to refresh that entry again for this exact executable.
+
+Updated approve-and-prepare-carrier.sh pins the new executable and verifies the
+exact cached package/descriptor hashes and one-file roster BEFORE key permission
+mutation. It runs the original emitter once, verifies its original0/full final
+summary and an independent OpenSSL signature, restores the original partition
+restriction, then obtains scoped administrator approval to clear ONLY the two
+verified output files' origin attributes for the unchanged Installer input policy.
+The script is syntax checked and its input preflight passed. The owner is asked
+to run it; this corrected attempt has NOT yet returned. Never request or save
+passwords. After success remove only the temporary allowed-app entry and restore
+that exact key's original display name Abdelrhaman Fahmy.
+
+Direct signed-Python/current-core local Git preparations actually passed: stage
+untracked17 commands/14.83s and local branch22 commands/20.14s. The index was
+unchanged, no branch created, all original sessions settled, and the second
+fixture was cleaned. Parent original0/39.36s. Scope excludes native app/relay/
+history/installed qualification. No credentials or network. See git-prepared-core-local-2.
+The initial wrapper diagnostic failed before its fifth command; it is not a pass.
+Installed GitCli(Prepared)'s actual failed predicate remains unproven.
+
+Both saved signed builds remain successful on0153/run40479109070. All eleven
+installed groups remain incomplete. No new workflow or monitor is running;
+heartbeat remains PAUSED, goal active. No installation yet, no agents/downloads,
+main changes or production publication. Credentials and unrelated files protected.
+
+## Current continuation — 2026-10-27 local producer authentication repair
+
+The owner cleared the protected attributes from the four disposable wrapper
+inputs through the reviewed script; subsequent native attribute checks passed.
+They also explicitly added the temporary producer to the pinned Developer ID
+private key's Access Control list and requested its removal after testing.
+Do not forget that cleanup. Never remove another allowed application or key.
+
+The exact original emitter still failed at public-key export. A finite debugger
+run observed SecKeyCopyExternalRepresentation return NULL, error-25293 /
+CSSMERR_CSP_OPERATION_AUTH_DENIED, then original child78. No private key was
+exported. A separate fixed-source public control returned270 bytes with no error
+using SecCertificateCopyKey; the key derived from the stored identity remained
+non-exportable. The first debugger attempt timed out; its debuggee disappeared
+and its one leftover debugserver was terminated. That failed attempt is not a
+qualification result. All diagnostic logs are in local-authenticated-tool-install.
+
+The pending source fix changes ONLY signer phase7 inside the nonshipping
+MRK_INSTALL_PRODUCER_SIGNING block to use the original matched identity
+certificate's independent public key. Phase12 still verifies the signature from
+the original private key. Source PRE/POST and native/file custody are unchanged.
+The shipping preprocessed code is byte-identical with signing disabled. Three
+native custody tests and the producer contract test pass; fixed producer built
+offline with the pinned cached compiler. The cached signed app/package remain
+unchanged. Native source did change: do not broaden HARNESS_FILES or claim a
+new hosted same-package continuation is authorized. Review provenance and build
+fresh candidates for a changed application/native/runtime qualification.
+
+The rebuilt exact producer passes public-key validation and reaches original
+SecKeyCreateSignature, which returns NULL/-25293 operation-auth-denied; original
+child78 and finality are known. The owner refreshed the rebuilt executable's
+exact allowed-application entry successfully. Do not ask them to repeat this.
+Read-only exact-key inspection found a separate partition restriction containing
+only apple:,apple:. Public SecKeychainItemSetAccess refused with-25293 and made
+no change. A label-only query initially matched two private keys, so no such
+partition mutation was attempted. The exact certificate-paired key now has the
+temporary display name MRK temporary signer 5EFFA7D19BBE. Native label-only guard
+and Apple's find-key each match one key; its public application-label fingerprint
+is476b6088f4f221f557cf8adad246e05ecd39cd26. The original display name is
+Abdelrhaman Fahmy. Restore it after signing, and remove only the temporary
+producer application permission. Other keys and allowed applications are protected.
+
+The owner is asked to run private approve-and-prepare-carrier.sh in Terminal.
+It uses Apple's documented set-key-partition-list with its own hidden password
+prompt, without password argv/environment/files or private key export. It grants
+only cdhash:f6078c2294e1e9d702bed497f2f3123d653962a9 on the uniquely guarded key,
+checks the nonpartition ACL fingerprint, runs the original fixed producer once,
+independently verifies the signature with the pinned public certificate, then
+restores apple:,apple: and checks exact original ACL readback. Its EXIT trap
+attempts that same scoped restoration on failure. This script is syntax checked;
+the owner has NOT yet run it, and no partition permission was changed by Codex.
+The key's temporary name and UI application permission still need cleanup.
+Do not claim installation or group success before actual original receipts.
+Current executable SHA:e83d524cf76e7c5c583b22897921b6f104b0c9a1421b6262e2f774b8f03b488a.
+No authenticated sidecars or successful local installation exist yet. The
+existing installation is an accepted predecessor of the saved Tool candidate.
+The small failed HFS carrier probe was detached normally and deleted. Reuse the
+saved package and caches; no downloads, VM, agents, main or production changes.
+
+Git Prepared's failed predicate remains unproven. No Git patch or new workflow
+was dispatched; both prior builds succeeded, all11 installed groups remain
+incomplete, the goal is active, and the heartbeat remains PAUSED.
+
+## Current continuation — 2026-10-27 authorized direct replacement
+
+The owner explicitly authorizes replacing their existing MRK installation and
+performing the signed service lifecycle tests directly on their personal Mac.
+Do not create a VM or download macOS images, large SDKs or large dependencies.
+Reuse the saved signed source0153/run40479109070 packages, cached dependencies
+and existing tools. Credentials and unrelated files remain protected. No agents.
+Explain actual administrator approval; coordinate reboot with the owner.
+
+The first local Apple Installer attempt on the unwrapped cached Tool package
+failed before mutation/native entry with producer-package-name (reason SHA
+6176c5acaf0beba673c53c85ecd779fbf97a160ec0a3ea854953106f12ccd69b).
+The five-member checkpoint does not contain the authenticated installation
+sidecars. Prepare the existing native producer's exact Install.pkg/producer.json/
+producer.sig carrier; renaming alone is insufficient. Use the existing pinned
+Developer ID identity and original signer/verifier, preserving package bytes.
+Private evidence: local-saved-tool-install. Existing installation hashes are
+unchanged after that failed attempt. No successful installation is claimed.
+
+Live GitHub read confirms both candidate builds succeeded and the initial
+Git/service groups failed; no job or monitor is running. Service retry40496904558
+remains terminal failure; do not blindly retry unchanged hosted approval checks.
+Git Prepared's underlying failure remains unresolved. All11 installed groups
+remain incomplete. The existing heartbeat is PAUSED; preserve that status.
+The earlier VM/storage and preserve-working-installation instructions below are
+superseded by the owner's latest direct replacement authorization.
+
 ## Current continuation — 2026-10-27 service approval / owner-authorized local tests
 
 The harness correction is already committed/pushed as129accf840758b4c21d42b4f32cd57ddcbeb33b4.

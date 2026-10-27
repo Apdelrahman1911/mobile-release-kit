@@ -704,7 +704,22 @@ impl Observation {
                     let origin=self.record().and_then(|r|r.git_cli.as_ref()?.origin.clone()).ok_or_else(bad)?;
                     // Positive private retirement + Claim::returned + matching
                     // history ACK, not phase data or the public Row alone.
-                    let Some(status)=document.installed_git_cli_returned(&project,&origin,apply)? else{return Ok(None)};
+                    let mut facts=None;
+                    let returned=document.installed_git_cli_returned_observed(&project,&origin,apply,&mut facts);
+                    let status=match returned {
+                        Ok(Some(status))=>status,Ok(None)=>return Ok(None),
+                        Err(_)=>{
+                            // Same-origin scalar facts from the actual rejected
+                            // predicate. No retry, reconciliation, IO or private
+                            // identifier is introduced to collect diagnostics.
+                            if let Ok(mut r)=self.record.try_lock() {
+                                let mut sample=GitReadFailureSample::capture(OuterStep::GitCli(step),None,ReadCheck::CliOriginalReturn,None);
+                                sample.cli_return=facts;
+                                self.fail_git_read_wait(&mut r,"git-cli-original-contract",sample);
+                            }else{self.fail_with("git-cli-original-contract");}
+                            return Err(bad());
+                        },
+                    };
                     let current=document.git_local_status();
                     let consumed=if !apply {Some(self.git_cli_access(document,c.case)?)}else{None};
                     let p=current.operation.ok_or_else(bad)?;

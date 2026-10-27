@@ -181,14 +181,20 @@ impl AndroidServiceIdentitySlots {
         };
         let descriptor=read_data(data::RECORD_NAME,data::RECORD_LIMIT)?;
         let inventory_bytes=read_data(data::INVENTORY_NAME,data::INVENTORY_LIMIT)?;
-        let identity=|index:usize|->Result<data::DirectoryIdentity> {
-            let id=self.original.records[index].identity.ok_or(AdmissionFailure::Identity)?;
-            Ok(data::DirectoryIdentity {device:i64::from(id.dev),inode:id.ino,mode:u32::from(id.mode),uid:id.uid,gid:id.gid,flags:id.flags})
+        let mut identity=|index:usize|->Result<data::DirectoryIdentity> {
+            self.attempt(|book| {
+                book.check_name(index,end,stop)?;
+                let id=book.records[index].identity.ok_or(AdmissionFailure::Identity)?;
+                let uuid=crate::macos_persistent_identity::observe_volume(book.fd(index)?.as_fd()).map_err(native_error)?;
+                book.check_name(index,end,stop)?;
+                Ok(data::DirectoryIdentity {device:i64::from(id.dev),inode:id.ino,mode:u32::from(id.mode),uid:id.uid,gid:id.gid,
+                    flags:id.flags,volume_uuid:Some(uuid)})
+            })
         };
         let manifest=option_env!("MRK_BUNDLED_RUNTIME_MANIFEST_SHA256").unwrap_or("");
         let expected=data::Expected {kind:data::Kind::Ordinary,source_commit:option_env!("MRK_MACOS_INSTALL_SOURCE_COMMIT").unwrap_or(""),
             runtime_manifest:manifest,install_root:identity(install)?,release_directory:identity(release)?};
-        data::Record::parse_data(&descriptor,&inventory_bytes,&expected).map_err(|_|AdmissionFailure::Inventory)?;
+        data::Record::parse_observed_data(&descriptor,&inventory_bytes,&expected).map_err(|_|AdmissionFailure::Inventory)?;
         let inventory=data::Inventory::parse(&inventory_bytes,manifest).map_err(|_|AdmissionFailure::Inventory)?;
         let layout=installed_code_layout()?;
         let index=inventory.index().map_err(|_|AdmissionFailure::Inventory)?;

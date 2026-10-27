@@ -86,7 +86,9 @@ fn original_identity(book: &Install, original: usize) -> Result<launcher::Origin
     let row=&book.originals[original];
     let named=book.named(row.parent,&row.name).map_err(|_|"launcher-identity-name")?;
     let data=launcher::OriginalIdentityData {device:i64::from(held.st_dev),inode:held.st_ino,
-        birth_seconds:held.st_birthtime,birth_nanoseconds:held.st_birthtime_nsec};
+        birth_seconds:held.st_birthtime,birth_nanoseconds:held.st_birthtime_nsec,
+        volume_uuid:Some(mobile_release_desktop::macos_persistent_identity::observe_volume(book.fd(original)?.as_fd())
+            .map_err(|_|"launcher-volume-uuid")?) };
     check(data.valid_data() && Identity::of(&held)==Identity::of(&named)
         && held.st_birthtime==named.st_birthtime && held.st_birthtime_nsec==named.st_birthtime_nsec
         && held.st_flags==0 && named.st_flags==0,"launcher-original-identity")?;
@@ -94,8 +96,10 @@ fn original_identity(book: &Install, original: usize) -> Result<launcher::Origin
     Ok(data)
 }
 fn require_enrolled(book:&Install,original:usize,expected:Option<launcher::OriginalIdentityData>)->Result<()> {
-    check(expected.is_some_and(|value|value.valid_data())
-        && Some(original_identity(book,original)?)==expected,"launcher-enrolled-original")
+    let observed=original_identity(book,original)?;
+    check(expected.is_some_and(|value|value.valid_data() && (value==observed
+        || book.legacy_volumes.iter().flatten().any(|binding|value.matches_legacy_binding_data(observed,*binding)))),
+        "launcher-enrolled-original")
 }
 
 fn occupied_decision(action: mobile_release_desktop::macos_install_maintenance::ActionData,
@@ -132,7 +136,7 @@ impl Observation {
             let generation = history.current.state.current_data();
             let binding = generation.release_data().binding_data();
             let release = old_release.ok_or("launcher-generation-missing")?;
-            check(book.recorded_directory(release)? == generation.release_directory_data(), "launcher-generation-original")?;
+            check(book.matches_recorded_directory(release,generation.release_directory_data())?, "launcher-generation-original")?;
             let (reader, bytes) = maintenance::metadata_original(book,release,
                 installation_record::INVENTORY_NAME,installation_record::INVENTORY_LIMIT)?;
             check(format!("{:x}",Sha256::digest(&bytes)) == binding.inventory_sha256, "launcher-generation-inventory")?;
@@ -612,10 +616,10 @@ impl PublicationPhaseData {
             && sha(&self.intent_sha256) && sha(&self.inventory_sha256) && sha(&self.runtime_manifest_sha256)
             && self.source_commit.len()==40 && self.source_commit.bytes().all(|b|b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
             && self.stage.valid_data() && self.workspace.valid_data() && self.staged.valid_data()
-            && self.stage.device==self.workspace.device && self.workspace.device==self.staged.device
-            && self.stage!=self.workspace && self.stage!=self.staged && self.workspace!=self.staged
-            && self.previous.is_none_or(|row|row.valid_data() && row.device==self.stage.device
-                && row!=self.stage && row!=self.workspace && row!=self.staged)
+            && self.stage.same_volume_data(self.workspace) && self.workspace.same_volume_data(self.staged)
+            && self.stage.inode!=self.workspace.inode && self.stage.inode!=self.staged.inode && self.workspace.inode!=self.staged.inode
+            && self.previous.is_none_or(|row|row.valid_data() && row.same_volume_data(self.stage)
+                && row.inode!=self.stage.inode && row.inode!=self.workspace.inode && row.inode!=self.staged.inode)
     }
     fn check(&self,intent:&transaction::IntentData,instance:&str)->Result<()> {
         let binding=intent.next_data().binding_data();
@@ -706,7 +710,9 @@ fn container_identity(book:&Install,original:usize)->Result<launcher::OriginalId
     let row=&book.originals[original];
     let named=book.named(row.parent,&row.name).map_err(|_|"launcher-phase-original-name")?;
     let result=launcher::OriginalIdentityData {device:i64::from(held.st_dev),inode:held.st_ino,
-        birth_seconds:held.st_birthtime,birth_nanoseconds:held.st_birthtime_nsec};
+        birth_seconds:held.st_birthtime,birth_nanoseconds:held.st_birthtime_nsec,
+        volume_uuid:Some(mobile_release_desktop::macos_persistent_identity::observe_volume(book.fd(original)?.as_fd())
+            .map_err(|_|"launcher-volume-uuid")?) };
     check(result.valid_data() && Identity::of(&held)==Identity::of(&named)
         && held.st_birthtime==named.st_birthtime && held.st_birthtime_nsec==named.st_birthtime_nsec
         && held.st_flags==0 && named.st_flags==0,"launcher-phase-original-identity")?;
@@ -1903,7 +1909,7 @@ mod tests {
         assert!(phase_admission_data(records,usize::MAX).is_err());
         assert!(PHASE_CONTROL_QUOTE>=16*PHASE_LIMIT as u64);
 
-        let identity=|inode|launcher::OriginalIdentityData {device:1,inode,birth_seconds:17,birth_nanoseconds:3};
+        let identity=|inode|launcher::OriginalIdentityData {device:1,inode,birth_seconds:17,birth_nanoseconds:3, volume_uuid: None };
         let phase=PublicationPhaseData {schema_version:1,phase:"launcher-prepublication".into(),
             invocation:"1".repeat(32),intent_sha256:"2".repeat(64),instance:"3".repeat(32),
             inventory_sha256:"4".repeat(64),source_commit:"5".repeat(40),runtime_manifest_sha256:"6".repeat(64),
