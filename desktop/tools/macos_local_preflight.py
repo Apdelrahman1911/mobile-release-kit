@@ -40,6 +40,13 @@ def main():
         results.append({'check': name, 'returncode': result.returncode, 'expectedOutputMatched': matched})
         (output / 'results.json').write_text(json.dumps({'checks': results}, indent=2) + '\n')
         if result.returncode or not matched:
+            # These logs belong only to this disposable preflight. Preserve a
+            # bounded tail in CI even when the runner is retired after failure.
+            with (output / (name + '.log')).open('rb') as failure:
+                failure.seek(0, os.SEEK_END)
+                failure.seek(max(0, failure.tell() - 16384))
+                sys.stderr.buffer.write(failure.read(16384))
+                sys.stderr.buffer.flush()
             print(f'{name} failed; see {output / (name + ".log")}', file=sys.stderr)
             raise SystemExit(result.returncode or 1)
 

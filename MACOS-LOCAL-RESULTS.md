@@ -2,6 +2,33 @@
 
 ## Current continuation — 2026-10-27 fresh service Check
 
+The first fresh candidate40466561510 failed in Git27's fast candidate-checkpoints
+step before expensive preparation; no signed checkpoint was created. The job log
+only retained the group name and lost its captured unittest error. Do not invent
+that missing cause. The same30 tests pass locally using both the saved exact
+Python3.14.7 and local3.11; all10 preflight steps also pass under local3.14.6.
+The disposable native ACL-cost projection performed21591 actual observations
+across7197 copied files in0.151047 seconds and its adapter settled. It is not
+protected/native installed admission and cannot explain the hosted timeout.
+
+A harness-only correction now emits the last16384 bytes of a returned failed
+preflight log before the disposable runner retires. Its actual negative child
+check retained the expected ImportError and nonzero exit; no native step entered
+and no preflight qualification is claimed by that negative test. Existing local
+passing preflights and syntax/diff checks pass. An earlier ACL probe compile
+missed the Darwin metadata trait and failed; corrected compilation/execution
+passed. No native/app byte changed after the ddb correction. The failed run was
+cancelled while Tool26 remained queued to prevent needless preparation; its
+existing monitor must confirm terminal cancellation before a new candidate push.
+Keep source/attempt/host bindings and all signing/finality gates intact.
+
+
+The correction is committed/pushed as `ddb59436a78a6d74bd0820dc03902bdf0b6df88c` to both authorized
+branches. Fresh candidate [40466561510](https://github.com/Apdelrahman1911/mobile-release-kit/actions/runs/40466561510)
+has started; its candidate source tree is `16ddced51de53a20d41515d55db59808b896623d`.
+Check its existing monitor/ledger before dispatch. Both builds and every new-source
+independent group are still incomplete. Source660 results remain historical.
+
 The source-bound correction now preserves the original failed Request and admits
 exactly one new read-only Check only after its entered/returned mutation is known
 settled, accepted=false, outcome Error, and its native owner has retired. Each
