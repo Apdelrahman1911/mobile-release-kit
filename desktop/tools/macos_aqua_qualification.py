@@ -7224,6 +7224,47 @@ def _owner_exception_diagnostic(error, owner):
             "ownerFinality": list(observed) if valid else None}
 
 
+def _preparation_exception_diagnostic(error, fixtures):
+    """Same rejected preparation exception; finite public sites, never text."""
+    if (fixtures is None or fixtures.stage != "prepare" or fixtures.inflight
+            or fixtures.last_returned):
+        return None
+    folder = Path(__file__).absolute().parent
+    sources = {
+        str(folder / "macos_identity_current_runtime.py"): "current-runtime",
+        str(folder / "macos_aqua_qualification.py"): "aqua-fixture",
+        str(folder / "macos_git_cli_observation.py"): "git-cli-fixture",
+        str(folder / "macos_git_push_qualification.py"): "git-fixture",
+        str(folder / "macos_git_upstream_qualification.py"): "git-upstream-fixture",
+        str(folder / "macos_git_push_create_qualification.py"): "git-create-fixture",
+        str(folder / "stage_macos_installed.py"): "installed-data",
+    }
+    os_types = (OSError, PermissionError, FileNotFoundError, FileExistsError,
+                NotADirectoryError, IsADirectoryError)
+    kind = "os-error" if type(error) in os_types else {
+        ValueError: "value-error", KeyError: "key-error", AttributeError: "attribute-error",
+        TypeError: "type-error", AssertionError: "assertion-error",
+    }.get(type(error), "typed-refusal" if type(error) in (
+        Refused, GIT_CLI.shared.Refused, UPSTREAM.shared.Refused, PUSH.Refused) else "unknown")
+    number = OSError.errno.__get__(error) if type(error) in os_types else None
+    number = number if type(number) is int and 0 <= number <= 4095 else None
+    sites, links, unmapped = [], 0, 0
+    frame = error.__traceback__
+    while frame is not None and links < 32:
+        links += 1
+        role = sources.get(frame.tb_frame.f_code.co_filename)
+        line = frame.tb_lineno
+        if role is not None and type(line) is int and 0 < line <= 1_000_000:
+            if len(sites) < 8:
+                sites.append(dict(role=role, line=line))
+        else:
+            unmapped += 1
+        frame = frame.tb_next
+    return dict(exceptionCategory=kind, errno=number, sites=sites,
+                tracebackLinksSeen=links, tracebackComplete=frame is None,
+                sitesTruncated=links - unmapped > len(sites), unmappedFrames=unmapped)
+
+
 def diagnostic(error, owner, fixtures):
     # Preserve individual typed public lifetime facts, not a synthesized pass
     # from a later exception. Missing fields remain unknown (JSON null).
@@ -7263,6 +7304,9 @@ def diagnostic(error, owner, fixtures):
             "fixtureCloseErrors": fixtures.close_errors if fixtures else 0,
             "fixturesPreserved": True, "laterCasesStopped": True}
     try:
+        preparation = _preparation_exception_diagnostic(error, fixtures)
+        if preparation is not None:
+            result["preparationDiagnostic"] = preparation
         setup = getattr(fixtures, "git_cli", None)
         if (fixtures and fixtures.stage == "git-cli-local-setup"
                 and fixtures.case in GIT_CLI.CASES and type(setup) is dict):

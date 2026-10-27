@@ -337,6 +337,47 @@ class CandidateCheckpointTests(unittest.TestCase):
         self.assertEqual(P.failure_data(ValueError('prepared-resource-insufficient'),'hydrate',None)['reason'],
                          'prepared-resource-insufficient')
 
+    def test_preparation_diagnostic_maps_same_exception_without_private_text(self):
+        namespace = {}
+        exec(compile("def fail():\n raise PermissionError(13, 'CANARY_PRIVATE_PATH')\n",
+                     str(A.M.__file__), 'exec'), namespace)
+        fixtures = SimpleNamespace(stage='prepare', inflight=False, last_returned=False)
+        try:
+            namespace['fail']()
+        except PermissionError as caught:
+            result = A.M._preparation_exception_diagnostic(caught, fixtures)
+            self.assertEqual(result['exceptionCategory'], 'os-error')
+            self.assertEqual(result['errno'], 13)
+            self.assertEqual(result['sites'], [dict(role='aqua-fixture', line=2)])
+            self.assertTrue(result['tracebackComplete'])
+            self.assertNotIn('CANARY', json.dumps(result))
+            self.assertNotIn(str(ROOT), json.dumps(result))
+            fixtures.inflight = True
+            self.assertIsNone(A.M._preparation_exception_diagnostic(caught, fixtures))
+        class PrivateError(Exception):
+            def __str__(self): raise AssertionError('private exception must not be formatted')
+        fixtures.inflight = False
+        self.assertEqual(A.M._preparation_exception_diagnostic(PrivateError(), fixtures)['exceptionCategory'], 'unknown')
+
+    def test_preparation_diagnostic_bounds_traceback_and_has_no_success_authority(self):
+        namespace = {}
+        path = ROOT / 'desktop/tools/macos_identity_current_runtime.py'
+        exec(compile("def fail(n):\n if n: return fail(n-1)\n raise KeyError('CANARY_PRIVATE_KEY')\n",
+                     str(path), 'exec'), namespace)
+        fixtures = SimpleNamespace(stage='prepare', inflight=False, last_returned=False)
+        try:
+            namespace['fail'](40)
+        except KeyError as caught:
+            result = A.M._preparation_exception_diagnostic(caught, fixtures)
+            self.assertEqual(result['tracebackLinksSeen'], 32)
+            self.assertEqual(len(result['sites']), 8)
+            self.assertFalse(result['tracebackComplete'])
+            self.assertTrue(result['sitesTruncated'])
+            self.assertNotIn('CANARY', json.dumps(result))
+            self.assertFalse(set(result) & {'passed', 'originalCallReturned', 'productReady'})
+            fixtures.last_returned = True
+            self.assertIsNone(A.M._preparation_exception_diagnostic(caught, fixtures))
+
     def test_native_saved_package_keeps_build_attempt_and_current_consumer_separate(self):
         for scope in P.NATIVE_HOSTS:
             values, manifest, service, consumer = native_fixture(scope)
