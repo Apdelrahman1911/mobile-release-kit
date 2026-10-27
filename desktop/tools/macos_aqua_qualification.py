@@ -4182,7 +4182,7 @@ def _git_read_failure_context(value, source, step, reason, case):
         facts = value["cliOriginalReturn"]
         flags = {"claimed", "prepareJoined", "applyJoined", "historyFailed", "historyClaimed",
                  "historyAcknowledged", "stopped", "reviewPresent", "revisionMatched"}
-        need(cli_return and type(facts) is dict and set(facts) == flags | {"state", "reason"}
+        need(cli_return and type(facts) is dict and set(facts) - {"prepareRejection"} == flags | {"state", "reason"}
              and all(type(facts[key]) is bool for key in flags)
              and type(facts["state"]) is str and facts["state"] in (
                  "queued", "preparing", "prepared", "start-queued", "applying", "stopping",
@@ -4191,6 +4191,13 @@ def _git_read_failure_context(value, source, step, reason, case):
                  "user-cancelled", "permission-revoked", "expired", "context-changed", "document-lost",
                  "shutdown", "busy", "unavailable", "native-refused", "recovery-required", "cleanup-unknown")),
              "failure-context")
+        if "prepareRejection" in facts:
+            need(step == "GitCli(Prepared)" and type(facts["prepareRejection"]) is str
+                 and facts["prepareRejection"] in (
+                     "edit-guard", "original-gate", "fetch-gate", "push-gate", "request-gate",
+                     "publisher-lock", "publisher-finished", "publisher-missing", "epoch-read",
+                     "epoch-mismatch", "edit-stamp", "native-project", "post-project", "native-state",
+                     "review-clock", "review-decode", "selection-review", "entry-ready"), "failure-context")
         # Inconsistent/partial scalars are the diagnostic, not finality proof.
     if "provenance" in value:
         provenance = value["provenance"]

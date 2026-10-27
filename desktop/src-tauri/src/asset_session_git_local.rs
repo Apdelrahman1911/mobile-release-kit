@@ -48,6 +48,11 @@ struct Selection {
 }
 #[derive(Clone)]
 pub(crate) struct GitLocalGate(Arc<Selection>);
+// Reduce only the result of the existing original predicate. Never call it twice.
+fn prepare_check<T>(result:Result<T,BridgeError>,rejected:&mut Option<crate::service_git_requests::PrepareRejection>,
+    check:crate::service_git_requests::PrepareRejection)->Result<T,BridgeError> {
+    result.map_err(|original| {*rejected=Some(check);original})
+}
 fn changed()->BridgeError {BridgeError::new("git_stale_observation","The reviewed project or Git action changed. Refresh and review it again.")}
 fn state_error(error:crate::service_protocol::Error)->BridgeError {
     use crate::service_protocol::Error;
@@ -117,25 +122,35 @@ impl GitLocalGate {
         Ok(NativeProject {runtime_id:self.0.context.project_id.clone(),canonical_root:self.0.root.path.clone(),device,inode,
             registration_generation:self.0.context.generation,document_identity:document.session_identity.clone(),input_revision:epoch})
     }
-    fn current_locked(&self,document:&Arc<Inner>,state:&DocumentState,id:&str)->Result<(),BridgeError> {
-        let edit=document.bridge.edits.saved_registration_guard(&document.session_identity)?;
-        self.current_with_edit_locked(document,state,id,&edit)
+    fn current_locked(&self,document:&Arc<Inner>,state:&DocumentState,id:&str,
+        rejected:&mut Option<crate::service_git_requests::PrepareRejection>)->Result<(),BridgeError> {
+        use crate::service_git_requests::PrepareRejection as R;
+        let edit=prepare_check(document.bridge.edits.saved_registration_guard(&document.session_identity),rejected,R::EditGuard)?;
+        self.current_with_edit_locked_observed(document,state,id,&edit,rejected)
     }
     fn current_with_edit_locked(&self,document:&Arc<Inner>,state:&DocumentState,id:&str,edit:&crate::edit_owner::SavedEditGuard<'_>)->Result<(),BridgeError> {
-        if !self.original_locked(document,state,id) {return Err(changed())}
-        self.fetch_current_locked(state,id)?;self.push_current_locked(state,id)?;
-        if let Some(agent)=&self.0.agent {agent.current(id).map_err(state_error)?;}
+        self.current_with_edit_locked_observed(document,state,id,edit,&mut None)
+    }
+    fn current_with_edit_locked_observed(&self,document:&Arc<Inner>,state:&DocumentState,id:&str,edit:&crate::edit_owner::SavedEditGuard<'_>,
+        rejected:&mut Option<crate::service_git_requests::PrepareRejection>)->Result<(),BridgeError> {
+        use crate::service_git_requests::PrepareRejection as R;
+        if !self.original_locked(document,state,id) {*rejected=Some(R::OriginalGate);return Err(changed())}
+        prepare_check(self.fetch_current_locked(state,id),rejected,R::FetchGate)?;
+        prepare_check(self.push_current_locked(state,id),rejected,R::PushGate)?;
+        if let Some(agent)=&self.0.agent {prepare_check(agent.current(id).map_err(state_error),rejected,R::RequestGate)?;}
         let epoch=if let Some(publisher)=&self.0.publisher {
-            let publisher=publisher.try_lock().map_err(|_|BridgeError::cleanup_unknown())?;
-            if publisher.finished {return Err(changed())}
-            publisher.value.as_ref().ok_or_else(BridgeError::cleanup_unknown)?.git_local_epoch()?
-        }else{document.android_registration_control.epoch()?};
+            let publisher=prepare_check(publisher.try_lock().map_err(|_|BridgeError::cleanup_unknown()),rejected,R::PublisherLock)?;
+            if publisher.finished {*rejected=Some(R::PublisherFinished);return Err(changed())}
+            let original=prepare_check(publisher.value.as_ref().ok_or_else(BridgeError::cleanup_unknown),rejected,R::PublisherMissing)?;
+            prepare_check(original.git_local_epoch(),rejected,R::EpochRead)?
+        }else{prepare_check(document.android_registration_control.epoch(),rejected,R::EpochRead)?};
         let (stamp,expected)=self.0.post.get().map_or((&self.0.stamp,self.0.epoch),|p|(&p.stamp,p.project.input_revision));
-        if epoch!=expected||!edit.matches(stamp) {return Err(changed())}
+        if epoch!=expected {*rejected=Some(R::EpochMismatch);return Err(changed())}
+        if !edit.matches(stamp) {*rejected=Some(R::EditStamp);return Err(changed())}
         if let Some(ready)=self.0.ready.get() {
-            let current=self.project(document,epoch)?;
-            if self.0.post.get().is_none_or(|p|!same_native(&p.project,&current)) {return Err(changed())}
-            document.bridge.application_service.native_state_current(ready,&current).map_err(state_error)?;
+            let current=prepare_check(self.project(document,epoch),rejected,R::NativeProject)?;
+            if self.0.post.get().is_none_or(|p|!same_native(&p.project,&current)) {*rejected=Some(R::PostProject);return Err(changed())}
+            prepare_check(document.bridge.application_service.native_state_current(ready,&current).map_err(state_error),rejected,R::NativeState)?;
         }
         Ok(())
     }
@@ -344,18 +359,26 @@ pub(super) fn reconcile(document:&Arc<Inner>,state:&mut DocumentState) {
     if !ticket.settled() {return}
     let view=projection(state.git_local.as_ref().expect("same original"));
     let remote=gate.0.agent.as_ref().filter(|a|a.is_remote()).cloned();
+    let mut prepare_rejection=None;
     let mut prepared=if gate.0.phase==wire::Phase::Prepare {
         match ticket.receipt() {
             GitLocalReceipt::Settled {outcome:Ok(terminal),was_unknown:false} if terminal.status==read::Outcome::Ok=>{
                 (|| {
-                    gate.current_locked(document,state,ticket.operation_id()).ok()?;
-                    let expires=gate.0.admitted.checked_add(REVIEW)?;
-                    if Instant::now()>=expires {return None}
-                    let review=terminal.review().ok()?;
+                    use crate::service_git_requests::PrepareRejection as R;
+                    gate.current_locked(document,state,ticket.operation_id(),&mut prepare_rejection).ok()?;
+                    let expires=match gate.0.admitted.checked_add(REVIEW) {
+                        Some(expires)=>expires,None=>{prepare_rejection=Some(R::ReviewClock);return None},
+                    };
+                    if Instant::now()>=expires {prepare_rejection=Some(R::ReviewClock);return None}
+                    let review=prepare_check(terminal.review(),&mut prepare_rejection,R::ReviewDecode).ok()?;
                     if let Some(agent)=gate.0.agent.as_ref().filter(|a|!a.is_remote()) {
-                        let summary=agent_git_index::agent_git_review(agent.scope(),&review,
-                            format!("{}-review",ticket.operation_id()),gate.0.document_revision,gate.0.context.generation)?;
-                        if !agent.ready(summary,expires).ok()? {return None}
+                        let summary=match agent_git_index::agent_git_review(agent.scope(),&review,
+                            format!("{}-review",ticket.operation_id()),gate.0.document_revision,gate.0.context.generation) {
+                            Some(summary)=>summary,None=>{prepare_rejection=Some(R::SelectionReview);return None},
+                        };
+                        match agent.ready(summary,expires) {
+                            Ok(true)=>{},_=>{prepare_rejection=Some(R::EntryReady);return None},
+                        }
                     }
                     Some(ReadyReview {public:wire::Prepared {review_id:format!("{}-review",ticket.operation_id()),
                         context:gate.context(),action:gate.0.action.public(),review,diff:terminal.result.get("diff").cloned()},
@@ -364,7 +387,13 @@ pub(super) fn reconcile(document:&Arc<Inner>,state:&mut DocumentState) {
             },_=>None,
         }
     }else{None};
-    if prepared.is_none() {if let Some(agent)=&gate.0.agent {agent.no_review();}}
+    if prepared.is_none() {if let Some(agent)=&gate.0.agent {
+        #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation",
+            not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"),
+            target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+        if let Some(rejection)=prepare_rejection {agent.installed_prepare_rejected(rejection);}
+        agent.no_review();
+    }}
     if fetch::finish(state).is_err() || push::finish(state).is_err() {
         // Original IO may have returned, but contradictory/missing private
         // Connection retirement evidence cannot free admission or mint a

@@ -215,6 +215,25 @@ class CandidateCheckpointTests(unittest.TestCase):
         refused(detail, reason='observer-deadline')
         wrong = copy.deepcopy(detail); wrong['snapshotSource'] = 'prearm-open-progress'; refused(wrong)
 
+    def test_prepare_rejection_is_closed_optional_data_from_the_same_prepared_failure(self):
+        checks = ('edit-guard original-gate fetch-gate push-gate request-gate publisher-lock '
+                  'publisher-finished publisher-missing epoch-read epoch-mismatch edit-stamp '
+                  'native-project post-project native-state review-clock review-decode selection-review entry-ready').split()
+        for check in checks:
+            detail = self._cli_return_failure()
+            detail['gitReadFailure']['cliOriginalReturn']['prepareRejection'] = check
+            row = A.project_selection_row(detail, 'git-cli-original-contract', 'GitCli(Prepared)')
+            self.assertEqual(A.M.failure_context(b'', row, A.M.GIT_CLI.INDEX), detail)
+            with self.assertRaises(A.M.Refused):
+                A.M.parse_result(b'', row, A.BINDING, A.M.GIT_CLI.INDEX)
+            terminal = A.project_selection_row(detail, 'git-cli-original-contract', 'GitCli(Terminal)')
+            self.assertIsNone(A.M.failure_context(b'', terminal, A.M.GIT_CLI.INDEX))
+        for invalid in (None, 1, True, [], {}, 'CANARY_PRIVATE', 'epoch-read\n'):
+            detail = self._cli_return_failure()
+            detail['gitReadFailure']['cliOriginalReturn']['prepareRejection'] = invalid
+            row = A.project_selection_row(detail, 'git-cli-original-contract', 'GitCli(Prepared)')
+            self.assertIsNone(A.M.failure_context(b'', row, A.M.GIT_CLI.INDEX))
+
     def _durable_runtime_record_boundary(self, fault=None):
         # Inert protected-record DATA plus the real runtime admission method.
         # Stop after its record/inventory join, before runtime/app execution.

@@ -97,6 +97,16 @@ pub(crate) enum Phase {
     Prepare,
     Apply,
 }
+/// Closed diagnostic DATA from the one original Prepare reconciliation.
+/// No error text, identifiers, IO, admission or replacement review is retained.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum PrepareRejection {
+    EditGuard, OriginalGate, FetchGate, PushGate, RequestGate,
+    PublisherLock, PublisherFinished, PublisherMissing, EpochRead,
+    EpochMismatch, EditStamp, NativeProject, PostProject, NativeState,
+    ReviewClock, ReviewDecode, SelectionReview, EntryReady,
+}
 struct Row {
     lease: Option<Arc<Lease>>,
     status: shared::Status,
@@ -112,6 +122,10 @@ struct Row {
     history_claim: Option<(u32, OperationState, Settlement)>,
     history_ack: Option<u32>,
     history_failed: bool,
+    #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation",
+        not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"),
+        target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+    prepare_rejection: Option<PrepareRejection>,
 }
 pub(crate) struct Entry {
     input: p::Prepare,
@@ -870,6 +884,10 @@ impl Inbox {
                 history_claim: None,
                 history_ack: None,
                 history_failed: false,
+                #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation",
+                    not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"),
+                    target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+                prepare_rejection: None,
             }),
         });
         lease.used.store(true, Ordering::Release);
@@ -986,7 +1004,8 @@ impl Entry {
         *facts=Some(InstalledCliReturnFacts {state:r.status.state,reason:r.status.reason,claimed:r.claimed.is_some(),
             prepare_joined:r.prepare_joined,apply_joined:r.apply_joined,history_failed:r.history_failed,
             history_claimed:r.history_claim.is_some(),history_acknowledged:r.history_ack==Some(revision),
-            stopped:r.stop.is_some(),review_present:r.review.is_some(),revision_matched:r.status.revision==revision});
+            stopped:r.stop.is_some(),review_present:r.review.is_some(),revision_matched:r.status.revision==revision,
+            prepare_rejection:r.prepare_rejection});
         r.status.revision==revision && r.claimed.is_none() && r.prepare_joined
             && !r.history_failed && r.history_claim.is_none() && r.history_ack==Some(revision)
             && r.stop.is_none() && r.status.reason.is_none() && match phase {
@@ -1007,4 +1026,20 @@ impl Entry {
 pub(crate) struct InstalledCliReturnFacts {
     state:p::State,reason:Option<p::Reason>,claimed:bool,prepare_joined:bool,apply_joined:bool,
     history_failed:bool,history_claimed:bool,history_acknowledged:bool,stopped:bool,review_present:bool,revision_matched:bool,
+    #[serde(skip_serializing_if="Option::is_none")]
+    prepare_rejection:Option<PrepareRejection>,
+}
+
+#[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation",
+    not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"),
+    target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+impl NativeLink {
+    /// First failure from THIS original reconcile, before its existing no_review.
+    /// Capturing it never changes the public status, stop, review or finality.
+    pub(crate) fn installed_prepare_rejected(&self, rejection:PrepareRejection) {
+        if self.phase != Phase::Prepare || self.is_remote() { return; }
+        if let Ok(mut row)=self.entry.lock() {
+            row.prepare_rejection.get_or_insert(rejection);
+        }
+    }
 }

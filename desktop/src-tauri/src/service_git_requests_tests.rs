@@ -28,6 +28,39 @@ fn installed_return_diagnostics_keep_exact_history_and_caller_requirements() {
     assert!(!entry.installed_cli_returned_observed(&input.origin,Family::Index,Phase::Prepare,revision+1,&mut facts));
     assert!(!facts.unwrap().revision_matched);
 }
+#[cfg(all(debug_assertions,feature="desktop-shell",feature="custom-protocol",feature="macos-installed-observation",
+    not(feature="development-runtime"),not(feature="ubuntu-runtime-publisher"),not(feature="macos-installed-installer"),
+    target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64")))]
+#[test]
+fn installed_prepare_rejection_is_first_original_data_and_never_a_review_or_return() {
+    for rejection in [PrepareRejection::EditGuard, PrepareRejection::OriginalGate, PrepareRejection::FetchGate,
+        PrepareRejection::PushGate, PrepareRejection::RequestGate, PrepareRejection::PublisherLock,
+        PrepareRejection::PublisherFinished, PrepareRejection::PublisherMissing, PrepareRejection::EpochRead,
+        PrepareRejection::EpochMismatch, PrepareRejection::EditStamp, PrepareRejection::NativeProject,
+        PrepareRejection::PostProject, PrepareRejection::NativeState, PrepareRejection::ReviewClock,
+        PrepareRejection::ReviewDecode, PrepareRejection::SelectionReview, PrepareRejection::EntryReady] {
+        let (_doc,inbox,input)=setup();
+        inbox.prepare(input.clone()).unwrap();
+        let mut claim=inbox.claim().unwrap().unwrap();
+        let link=claim.link().unwrap();link.arm("git-local-1").unwrap();
+        claim.returned(Ok(()));link.retired(OperationState::Succeeded);
+        let entry=link.entry();let before=entry.status().unwrap();
+        link.installed_prepare_rejected(rejection);
+        link.installed_prepare_rejected(PrepareRejection::EntryReady);
+        assert_eq!(entry.status().unwrap(),before);
+        link.no_review();
+        let status=entry.status().unwrap();
+        assert_eq!(status.state,p::State::Cancelled);
+        assert_eq!(status.reason,Some(p::Reason::ContextChanged));
+        let mut facts=None;
+        assert!(!entry.installed_cli_returned_observed(&input.origin,Family::Index,Phase::Prepare,status.revision,&mut facts));
+        let actual=facts.unwrap();
+        assert_eq!(actual.prepare_rejection,Some(rejection));
+        assert!(actual.prepare_joined && !actual.review_present && !actual.stopped);
+        let raw=serde_json::to_string(&actual).unwrap();
+        assert!(raw.len()<1024 && !raw.contains("requestId") && !raw.contains("projectId"));
+    }
+}
 fn id(v: char) -> Id {
     Id::parse(&v.to_string().repeat(32)).unwrap()
 }
