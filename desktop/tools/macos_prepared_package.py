@@ -176,6 +176,82 @@ def cohort_data(values):
     return manifest
 
 
+LOCAL_CARRIER_FILES = {
+    'producer-root/producer.json': 65536,
+    'producer-root/producer.sig': 512,
+    'prepared-input/PREPARED.json': MANIFEST_LIMIT,
+    'android-helper-package-install.json': 4 * MIB,
+    'package-install.status': 2,
+}
+
+
+def local_carrier_transport_data(values, consumer):
+    """Correlate already signed output DATA; grant no local/native authority."""
+    from desktop.tools import stage_macos_installed as stager
+    need(type(values) is dict and set(values) == set(LOCAL_CARRIER_FILES)
+         and all(type(values[n]) is bytes and 0 < len(values[n]) <= limit
+                 for n, limit in LOCAL_CARRIER_FILES.items()), 'local-carrier-roster')
+    need(values['package-install.status'] == b'0\n', 'local-carrier-original-status')
+    manifest = manifest_data(decode(values['prepared-input/PREPARED.json'], MANIFEST_LIMIT))
+    need(manifest['origin'].get('nativeScope') == 'tool-setup'
+         and manifest['origin'].get('hostProfile') == 'macos-26', 'local-carrier-tool-source')
+    need(type(consumer) is dict and set(consumer) == {
+        'source', 'tree', 'target', 'runId', 'runAttempt', 'nativeScope', 'hostProfile'}
+         and all(hex_data(consumer[k], 40) for k in ('source', 'tree'))
+         and all(decimal(consumer[k]) for k in ('runId', 'runAttempt'))
+         and consumer['target'] == manifest['origin']['target']
+         and (consumer['source'] != manifest['origin']['source'] or consumer['tree'] == manifest['origin']['tree'])
+         and consumer['nativeScope'] == 'tool-setup' and consumer['hostProfile'] == 'macos-26',
+         'local-carrier-consumer')
+    descriptor, signed = values['producer-root/producer.json'], values['producer-root/producer.sig']
+    current = stager.maintenance_producer_data(descriptor, target=consumer['target'])['releaseSet']['current']
+    package = next(row for row in manifest['members'] if row['name'] == 'MobileReleaseKit.pkg')
+    for key, expected in {'sourceCommit': manifest['origin']['source'], 'packageSha256': package['sha256'],
+            'inventorySha256': manifest['inventorySha256'], 'runtimeManifestSha256': manifest['runtimeManifestSha256'],
+            'release': manifest['release'], 'packageVersion': manifest['packageVersion']}.items():
+        need(current[key] == expected, 'local-carrier-package-binding')
+    receipt = decode(values['android-helper-package-install.json'], 4 * MIB)
+    need(type(receipt) is dict and all(k in receipt and type(receipt[k]) is type(v) and receipt[k] == v for k, v in {
+        'schemaVersion': 1, 'phase': 'package-install', 'target': consumer['target'],
+        'source': consumer['source'], 'workflowSource': consumer['source'],
+        'runId': consumer['runId'], 'runAttempt': consumer['runAttempt'],
+        'packageRole': 'installed-shell-observation', 'passed': True,
+        'originalClosesKnown': True, 'targetRetired': True,
+        'directStagerIOPending': None, 'cleanupErrors': []}.items()), 'local-carrier-owner')
+    calls = receipt.get('originalCalls')
+    need(type(calls) is list and len(calls) == len(stager.PACKAGING_CALL_ROLES), 'local-carrier-owner-calls')
+    for call, role in zip(calls, stager.PACKAGING_CALL_ROLES):
+        need(type(call) is dict and call.get('role') == role
+             and all(call.get(k) is True for k in ('entered', 'returned', 'capturesSettled'))
+             and type(call.get('returncode')) is int
+             and all(hex_data(call.get(k)) for k in ('stdoutSha256', 'stderrSha256'))
+             and call['returncode'] in ((0, 1) if role in ('installer-log-cursor', 'installer-log-capture') else (0,)),
+             'local-carrier-owner-calls')
+    distribution = receipt.get('distribution')
+    need(type(distribution) is dict and all(k in distribution and type(distribution[k]) is type(v) and distribution[k] == v for k, v in {
+        'packageSha256': package['sha256'], 'packageBytes': package['bytes'],
+        'descriptorSha256': sha(descriptor), 'signatureSha256': sha(signed),
+        'originalInstallerReturnedZero': True, 'sameRequestV2Readback': True,
+        'originalMountDetached': True, 'groupEndpointMet': True}.items()), 'local-carrier-distribution')
+    summary = distribution.get('producerSummary')
+    need(type(summary) is dict and all(type(summary.get(k)) is int for k in ('schemaVersion', 'descriptorBytes', 'signatureBytes'))
+         and summary == {
+        'schemaVersion': 1, 'kind': 'mrk-package-producer-emitted',
+        'packageSha256': package['sha256'], 'descriptorSha256': sha(descriptor),
+        'signatureSha256': sha(signed), 'descriptorBytes': len(descriptor), 'signatureBytes': len(signed)},
+        'local-carrier-emission')
+    return {'schemaVersion': 1, 'scope': 'authenticated-package-transport-not-local-installation',
+            'producer': dict(manifest['origin']), 'consumer': dict(consumer),
+            'packageSha256': package['sha256'], 'packageBytes': package['bytes'],
+            'inventorySha256': manifest['inventorySha256'], 'runtimeManifestSha256': manifest['runtimeManifestSha256'],
+            'members': [{'name': n, 'bytes': len(values[n]), 'sha256': sha(values[n])} for n in sorted(values)],
+            'originalPackageOwnerReturnedZero': True, 'originalClosesKnown': True,
+            'independentDownloadedSignatureVerificationRequired': True,
+            'independentSourceAndAttemptVerificationRequired': True,
+            'localInstallationQualified': False, 'localServiceQualified': False,
+            'allElevenGroupsQualified': False}
+
+
 HARNESS_FILES = frozenset({
     '.github/workflows/desktop-macos-installed.yml',
     '.github/workflows/desktop-macos-candidate-tests.yml', '.github/actionlint.yaml',

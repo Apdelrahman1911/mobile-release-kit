@@ -16,9 +16,9 @@ jobs:
   candidate-tests:
     # On a rerun, select the successful producer attempt from the all-attempts
     # API. Never substitute the consumer's attempt or rebuild its signed app.
-    if: ${{ !cancelled() && github.ref == 'refs/heads/verify/desktop-macos-candidate' && (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && github.event.inputs.operation == 'candidate-tests')) }}
+    if: ${{ !cancelled() && github.ref == 'refs/heads/verify/desktop-macos-candidate' && (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && (github.event.inputs.operation == 'candidate-tests' || github.event.inputs.operation == 'local-carrier'))) }}
     environment: macos-developer-id
-    name: Test saved candidate (${{ matrix.group }})
+    name: ${{ matrix.group == 'local-carrier' && 'Prepare authenticated Tool26 carrier for the owner Mac' || format('Test saved candidate ({0})', matrix.group) }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: ${{ matrix.timeout }}
     strategy:
@@ -26,8 +26,10 @@ jobs:
       max-parallel: 4
       # The owner qualifies service-cli locally with actual macOS approval.
       # A new push runs Git first; all saved singleton groups remain selectable.
+      # local-carrier only retains the successful Tool package owner's signed
+      # files. It does not request a service or qualify any of the eleven groups.
       matrix:
-        include: ${{ github.event_name == 'workflow_dispatch' && fromJSON('{"git-local":[{"target":"aarch64-apple-darwin","group":"git-local","native_scope":"git-native","runner":"xcode-27","hosted_job":"github-hosted-xcode27-arm64","timeout":65}],"git-fetch":[{"target":"aarch64-apple-darwin","group":"git-fetch","native_scope":"git-native","runner":"xcode-27","hosted_job":"github-hosted-xcode27-arm64","timeout":65}],"git-push":[{"target":"aarch64-apple-darwin","group":"git-push","native_scope":"git-native","runner":"xcode-27","hosted_job":"github-hosted-xcode27-arm64","timeout":65}],"git-create":[{"target":"aarch64-apple-darwin","group":"git-create","native_scope":"git-native","runner":"xcode-27","hosted_job":"github-hosted-xcode27-arm64","timeout":65}],"git-upstream":[{"target":"aarch64-apple-darwin","group":"git-upstream","native_scope":"git-native","runner":"xcode-27","hosted_job":"github-hosted-xcode27-arm64","timeout":65}],"service-cli":[{"target":"aarch64-apple-darwin","group":"service-cli","native_scope":"tool-setup","runner":"macos-26","hosted_job":"github-hosted-macos26-arm64","timeout":65}],"public-acquisition":[{"target":"aarch64-apple-darwin","group":"public-acquisition","native_scope":"tool-setup","runner":"macos-26","hosted_job":"github-hosted-macos26-arm64","timeout":160}],"sdk-registration":[{"target":"aarch64-apple-darwin","group":"sdk-registration","native_scope":"tool-setup","runner":"macos-26","hosted_job":"github-hosted-macos26-arm64","timeout":165}],"upload-keys":[{"target":"aarch64-apple-darwin","group":"upload-keys","native_scope":"tool-setup","runner":"macos-26","hosted_job":"github-hosted-macos26-arm64","timeout":190}],"cold-restart":[{"target":"aarch64-apple-darwin","group":"cold-restart","native_scope":"tool-setup","runner":"macos-26","hosted_job":"github-hosted-macos26-arm64","timeout":190}],"backup":[{"target":"aarch64-apple-darwin","group":"backup","native_scope":"tool-setup","runner":"macos-26","hosted_job":"github-hosted-macos26-arm64","timeout":190}]}')[github.event.inputs.test_group] || fromJSON('[{"target":"aarch64-apple-darwin","group":"git-local","native_scope":"git-native","runner":"xcode-27","hosted_job":"github-hosted-xcode27-arm64","timeout":65}]') }}
+        include: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.operation == 'local-carrier' && fromJSON('[{"target":"aarch64-apple-darwin","group":"local-carrier","native_scope":"tool-setup","runner":"macos-26","hosted_job":"github-hosted-macos26-arm64","timeout":65}]') || github.event_name == 'workflow_dispatch' && fromJSON('{"git-local":[{"target":"aarch64-apple-darwin","group":"git-local","native_scope":"git-native","runner":"xcode-27","hosted_job":"github-hosted-xcode27-arm64","timeout":65}],"git-fetch":[{"target":"aarch64-apple-darwin","group":"git-fetch","native_scope":"git-native","runner":"xcode-27","hosted_job":"github-hosted-xcode27-arm64","timeout":65}],"git-push":[{"target":"aarch64-apple-darwin","group":"git-push","native_scope":"git-native","runner":"xcode-27","hosted_job":"github-hosted-xcode27-arm64","timeout":65}],"git-create":[{"target":"aarch64-apple-darwin","group":"git-create","native_scope":"git-native","runner":"xcode-27","hosted_job":"github-hosted-xcode27-arm64","timeout":65}],"git-upstream":[{"target":"aarch64-apple-darwin","group":"git-upstream","native_scope":"git-native","runner":"xcode-27","hosted_job":"github-hosted-xcode27-arm64","timeout":65}],"service-cli":[{"target":"aarch64-apple-darwin","group":"service-cli","native_scope":"tool-setup","runner":"macos-26","hosted_job":"github-hosted-macos26-arm64","timeout":65}],"public-acquisition":[{"target":"aarch64-apple-darwin","group":"public-acquisition","native_scope":"tool-setup","runner":"macos-26","hosted_job":"github-hosted-macos26-arm64","timeout":160}],"sdk-registration":[{"target":"aarch64-apple-darwin","group":"sdk-registration","native_scope":"tool-setup","runner":"macos-26","hosted_job":"github-hosted-macos26-arm64","timeout":165}],"upload-keys":[{"target":"aarch64-apple-darwin","group":"upload-keys","native_scope":"tool-setup","runner":"macos-26","hosted_job":"github-hosted-macos26-arm64","timeout":190}],"cold-restart":[{"target":"aarch64-apple-darwin","group":"cold-restart","native_scope":"tool-setup","runner":"macos-26","hosted_job":"github-hosted-macos26-arm64","timeout":190}],"backup":[{"target":"aarch64-apple-darwin","group":"backup","native_scope":"tool-setup","runner":"macos-26","hosted_job":"github-hosted-macos26-arm64","timeout":190}]}')[github.event.inputs.test_group] || fromJSON('[{"target":"aarch64-apple-darwin","group":"git-local","native_scope":"git-native","runner":"xcode-27","hosted_job":"github-hosted-xcode27-arm64","timeout":65}]') }}
     env:
       RUSTUP_TOOLCHAIN: '1.98.1'
       MRK_MACOS_TARGET: aarch64-apple-darwin
@@ -249,6 +251,88 @@ jobs:
             ${{ steps.work.outputs.root }}/android-helper-distribution-detach.status
           if-no-files-found: ignore
           retention-days: 14
+      - name: Bind the closed Tool owner output for local transport
+        id: local_carrier_export
+        if: matrix.group == 'local-carrier' && steps.package_install.outcome == 'success'
+        timeout-minutes: 1
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          "$MRK_PYTHON" -I -S -B - <<'PY'
+          import os, stat, sys
+          from pathlib import Path
+          root = Path('/Users/runner/work/mobile-release-kit/mobile-release-kit')
+          sys.path.insert(0, str(root))
+          from desktop.tools import macos_prepared_package as P
+          work = Path(os.environ['MRK_MACOS_WORK'])
+          assert work.parent == Path('/Users/runner/work/_temp')
+          fields = ('st_dev','st_ino','st_mode','st_uid','st_gid','st_nlink','st_size','st_mtime_ns','st_ctime_ns','st_flags')
+          def identity(info): return tuple(getattr(info,k) for k in fields)
+          held, parents, values = [], {}, {}
+          try:
+              work_fd = os.open(work, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+              held.append(work_fd)
+              work_pre = identity(os.fstat(work_fd))
+              assert work_pre == identity(work.lstat())
+              assert os.fstat(work_fd).st_uid == os.getuid() and stat.S_IMODE(os.fstat(work_fd).st_mode) == 0o700
+              for name, wanted in (('producer-root', {'Install.pkg','producer.json','producer.sig'}), ('prepared-input', set(P.NAMES))):
+                  before = os.stat(name, dir_fd=work_fd, follow_symlinks=False)
+                  fd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=work_fd)
+                  held.append(fd)
+                  assert identity(os.fstat(fd)) == identity(before)
+                  assert before.st_uid == os.getuid() and before.st_flags == 0 and set(os.listdir(fd)) == wanted
+                  parents[name] = (fd, identity(before))
+              for name, limit in P.LOCAL_CARRIER_FILES.items():
+                  parent, leaf = name.rsplit('/',1) if '/' in name else ('',name)
+                  parent_fd = parents[parent][0] if parent else work_fd
+                  before = os.stat(leaf, dir_fd=parent_fd, follow_symlinks=False)
+                  assert stat.S_ISREG(before.st_mode) and before.st_uid == os.getuid() and before.st_nlink == 1
+                  assert before.st_flags == 0 and not stat.S_IMODE(before.st_mode) & 0o7022 and 0 < before.st_size <= limit
+                  fd = os.open(leaf, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=parent_fd)
+                  held.append(fd)
+                  assert identity(os.fstat(fd)) == identity(before)
+                  body = os.pread(fd, before.st_size, 0)
+                  assert len(body) == before.st_size and not os.pread(fd, 1, before.st_size)
+                  assert identity(os.fstat(fd)) == identity(os.stat(leaf, dir_fd=parent_fd, follow_symlinks=False)) == identity(before)
+                  values[name] = body
+              consumer = P.consumer_data(os.environ, os.environ['MRK_CONSUMER_TREE'], os.environ['MRK_MACOS_TARGET'])
+              record = P.canonical(P.local_carrier_transport_data(values, consumer))
+              for name, (fd, before) in parents.items():
+                  assert identity(os.fstat(fd)) == identity(os.stat(name, dir_fd=work_fd, follow_symlinks=False)) == before
+              assert identity(os.fstat(work_fd)) == identity(work.lstat()) == work_pre
+              fd = os.open('LOCAL-CARRIER.json', os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600, dir_fd=work_fd)
+              held.append(fd)
+              offset = 0
+              while offset < len(record):
+                  count = os.write(fd, record[offset:]); assert count > 0; offset += count
+              os.fchmod(fd, 0o444); os.fsync(fd)
+              assert os.pread(fd, len(record)+1, 0) == record
+              assert identity(os.fstat(fd)) == identity(os.stat('LOCAL-CARRIER.json', dir_fd=work_fd, follow_symlinks=False))
+          finally:
+              for fd in reversed(held): os.close(fd)
+          print('Closed Tool package files bound for transport; local installation and service remain unqualified.')
+          PY
+      - name: Retain only authenticated files for the owner local installation
+        if: matrix.group == 'local-carrier' && steps.local_carrier_export.outcome == 'success'
+        timeout-minutes: 2
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: candidate-local-carrier-${{ steps.prepared.outputs.producer-source }}-${{ steps.prepared.outputs.producer-attempt }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          # The standard owner has already joined signature verification,
+          # Installer/readback/detach and all original closes. Transport these
+          # two signed files and their exact build/owner/status records only.
+          # No key, signer binary, SDK, package duplicate or service result.
+          path: |
+            ${{ steps.work.outputs.root }}/producer-root/producer.json
+            ${{ steps.work.outputs.root }}/producer-root/producer.sig
+            ${{ steps.work.outputs.root }}/prepared-input/PREPARED.json
+            ${{ steps.work.outputs.root }}/android-helper-package-install.json
+            ${{ steps.work.outputs.root }}/package-install.status
+            ${{ steps.work.outputs.root }}/LOCAL-CARRIER.json
+          if-no-files-found: error
+          retention-days: 14
+          overwrite: false
       - name: Run only this independent Git group
         if: matrix.native_scope == 'git-native' && steps.package_install.outcome == 'success'
         timeout-minutes: 25
@@ -271,7 +355,7 @@ jobs:
           esac
       - name: Request the fixed native service once and confirm its joined readiness
         id: tool_service
-        if: matrix.native_scope == 'tool-setup' && steps.package_install.outcome == 'success'
+        if: matrix.native_scope == 'tool-setup' && matrix.group != 'local-carrier' && steps.package_install.outcome == 'success'
         timeout-minutes: 13
         shell: bash
         env:

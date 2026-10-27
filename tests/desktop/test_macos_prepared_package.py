@@ -55,6 +55,83 @@ def real_modules():
 
 
 class PreparedPackageData(unittest.TestCase):
+
+    def local_carrier_fixture(self):
+        from desktop.tools import stage_macos_installed as S
+        _, manifest, _, consumer = fixture()
+        selection = S.source_build_selection(P.TARGETS[0])
+        # Public source bytes are inert DATA here; no installed input or
+        # no-attribute filesystem qualification is inferred from this fixture.
+        source = S.packaging_signing_data(Path(S.PRODUCER_PROFILE).read_bytes(), Path(S.SERVICE_PROFILE).read_bytes())
+        manifest.update(schemaVersion=2, packageRole='installed-shell-observation',
+            packageVersion=selection.package_version, release=selection.release,
+            observerBuild={'appBinarySha256BeforeSigning':'a'*64,'entryBinarySha256BeforeSigning':'b'*64})
+        manifest.pop('normalBuild')
+        manifest['origin'].update(nativeScope='tool-setup',hostProfile='macos-26')
+        consumer.update(nativeScope='tool-setup',hostProfile='macos-26')
+        package = next(m for m in manifest['members'] if m['name']=='MobileReleaseKit.pkg')
+        descriptor = S.packaging_descriptor_data((ROOT/'desktop/macos-installed-inputs/producer-history.json').read_bytes(),
+            source, selection, source_commit=manifest['origin']['source'], manifest=manifest['runtimeManifestSha256'],
+            inventory=manifest['inventorySha256'], package=package['sha256'])
+        # Inert bytes: this DATA test cannot establish a cryptographic signature.
+        signed = b'\x01'*256
+        summary = dict(schemaVersion=1,kind='mrk-package-producer-emitted',packageSha256=package['sha256'],
+            descriptorSha256=P.sha(descriptor),signatureSha256=P.sha(signed),descriptorBytes=len(descriptor),signatureBytes=len(signed))
+        receipt = dict(schemaVersion=1,phase='package-install',target=consumer['target'],
+            source=consumer['source'],workflowSource=consumer['source'],runId=consumer['runId'],runAttempt=consumer['runAttempt'],
+            packageRole='installed-shell-observation',passed=True,originalClosesKnown=True,targetRetired=True,
+            directStagerIOPending=None,cleanupErrors=[],
+            originalCalls=[dict(role=n,entered=True,returned=True,capturesSettled=True,returncode=0,
+                                stdoutSha256='a'*64,stderrSha256='b'*64) for n in S.PACKAGING_CALL_ROLES],
+            distribution=dict(packageSha256=package['sha256'],packageBytes=package['bytes'],
+                descriptorSha256=P.sha(descriptor),signatureSha256=P.sha(signed),originalInstallerReturnedZero=True,
+                sameRequestV2Readback=True,originalMountDetached=True,groupEndpointMet=True,producerSummary=summary))
+        values = {'producer-root/producer.json':descriptor,'producer-root/producer.sig':signed,
+            'prepared-input/PREPARED.json':P.canonical(manifest),
+            'android-helper-package-install.json':P.canonical(receipt),'package-install.status':b'0\n'}
+        return values, consumer, manifest, receipt
+
+    def test_local_carrier_transport_requires_independent_verification_and_never_qualifies_local_groups(self):
+        values, consumer, manifest, _ = self.local_carrier_fixture()
+        record = P.local_carrier_transport_data(values,consumer)
+        self.assertEqual(record['producer'],manifest['origin'])
+        self.assertEqual({r['name'] for r in record['members']},set(P.LOCAL_CARRIER_FILES))
+        self.assertTrue(record['independentDownloadedSignatureVerificationRequired'])
+        self.assertTrue(record['independentSourceAndAttemptVerificationRequired'])
+        for field in ('localInstallationQualified','localServiceQualified','allElevenGroupsQualified'):
+            self.assertIs(record[field],False)
+        self.assertNotIn('Install.pkg',P.LOCAL_CARRIER_FILES)
+
+    def test_local_carrier_transport_refuses_partial_roster_changed_signature_and_nonzero_original(self):
+        values, consumer, _, _ = self.local_carrier_fixture()
+        for name in values:
+            bad=dict(values);bad.pop(name)
+            with self.subTest(missing=name),self.assertRaises(ValueError):P.local_carrier_transport_data(bad,consumer)
+        for name,body in (('unexpected-private-file',b'x'),('producer-root/producer.sig',b'changed'),
+                          ('package-install.status',b'1\n'),('package-install.status',b'')):
+            bad=dict(values);bad[name]=body
+            with self.subTest(name=name,body=body),self.assertRaises(ValueError):P.local_carrier_transport_data(bad,consumer)
+
+    def test_local_carrier_transport_refuses_unknown_finality_malformed_types_and_source_mismatch(self):
+        values, consumer, manifest, receipt = self.local_carrier_fixture()
+        for field,value in (('passed',False),('passed',1),('originalClosesKnown',False),
+                ('targetRetired',False),('directStagerIOPending','unknown'),('cleanupErrors',[{}]),
+                ('source','6'*40),('runAttempt','3')):
+            changed=copy.deepcopy(receipt);changed[field]=value;bad=dict(values)
+            bad['android-helper-package-install.json']=P.canonical(changed)
+            with self.subTest(field=field,value=value),self.assertRaises(ValueError):P.local_carrier_transport_data(bad,consumer)
+        for field,value in (('returned',False),('capturesSettled',False),('returncode',True),('returncode',78)):
+            changed=copy.deepcopy(receipt);changed['originalCalls'][0][field]=value;bad=dict(values)
+            bad['android-helper-package-install.json']=P.canonical(changed)
+            with self.subTest(call=field,value=value),self.assertRaises(ValueError):P.local_carrier_transport_data(bad,consumer)
+        for field in ('sameRequestV2Readback','originalMountDetached','originalInstallerReturnedZero'):
+            changed=copy.deepcopy(receipt);changed['distribution'][field]=False;bad=dict(values)
+            bad['android-helper-package-install.json']=P.canonical(changed)
+            with self.subTest(distribution=field),self.assertRaises(ValueError):P.local_carrier_transport_data(bad,consumer)
+        bad=dict(values);changed=copy.deepcopy(manifest);changed['origin']['nativeScope']='git-native';changed['origin']['hostProfile']='xcode-27'
+        bad['prepared-input/PREPARED.json']=P.canonical(changed)
+        with self.assertRaisesRegex(ValueError,'local-carrier-tool-source'):P.local_carrier_transport_data(bad,consumer)
+        with self.assertRaisesRegex(ValueError,'local-carrier-consumer'):P.local_carrier_transport_data(values,dict(consumer,tree='7'*40))
     def test_exact_cohort_and_real_producer_attempt_are_distinct_from_new_consumer(self):
         for target in P.TARGETS:
             values, manifest, service, consumer = fixture(target)

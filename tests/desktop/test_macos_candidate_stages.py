@@ -757,8 +757,10 @@ class CandidateWorkflowTests(unittest.TestCase):
         self.assertIs(job['strategy']['fail-fast'],False)
         expression=job['strategy']['matrix']['include']
         literals=re.findall(r"fromJSON\('([^']+)'\)",expression)
-        self.assertEqual(len(literals),2)
-        singles,initial=map(json.loads,literals)
+        self.assertEqual(len(literals),3)
+        carrier,singles,initial=map(json.loads,literals)
+        self.assertEqual(carrier,[dict(target='aarch64-apple-darwin',group='local-carrier',native_scope='tool-setup',
+            runner='macos-26',hosted_job='github-hosted-macos26-arm64',timeout=65)])
         self.assertEqual(set(singles),{'git-local','git-fetch','git-push','git-create','git-upstream',
             'service-cli','public-acquisition','sdk-registration','upload-keys','cold-restart','backup'})
         self.assertEqual(initial,[singles['git-local'][0]])
@@ -780,6 +782,24 @@ class CandidateWorkflowTests(unittest.TestCase):
         self.assertIn('artifact-id',download['with']['artifact-ids'])
         self.assertEqual(job['env']['MRK_MACOS_PREPARED_TEST'],'true')
         for row in rows:self.assertEqual(row['runner'],P.NATIVE_HOSTS[row['native_scope']])
+
+    def test_local_carrier_dispatch_reuses_signed_tool_owner_and_skips_service_and_all_functional_groups(self):
+        job=self.saved_test_job();steps=job['steps']
+        triggers=self.workflow.get('on',self.workflow.get('true'))
+        self.assertIn('local-carrier',triggers['workflow_dispatch']['inputs']['operation']['options'])
+        self.assertIn("inputs.operation == 'local-carrier'",self.workflow['jobs']['candidate-tests']['if'])
+        self.assertIn("github.event.inputs.operation == 'local-carrier'",job['if'])
+        selected=next(r for r in steps if r.get('id')=='local_carrier_export')
+        self.assertIn("steps.package_install.outcome == 'success'",selected['if'])
+        self.assertIn('local_carrier_transport_data(values, consumer)',selected['run'])
+        service=next(r for r in steps if r.get('id')=='tool_service')
+        self.assertIn("matrix.group != 'local-carrier'",service['if'])
+        upload=next(r for r in steps if r['name']=='Retain only authenticated files for the owner local installation')
+        self.assertIn("steps.local_carrier_export.outcome == 'success'",upload['if'])
+        paths=upload['with']['path']
+        self.assertEqual(len(paths.splitlines()),6)
+        for forbidden in ('Install.pkg','macos-package-producer','identity.p12','keychain','password'):
+            self.assertNotIn(forbidden,paths)
 
     def test_dispatch_uses_selected_origin_and_checks_credentials_before_download(self):
         job=self.saved_test_job();steps=job['steps']
@@ -836,8 +856,16 @@ class CandidateWorkflowTests(unittest.TestCase):
             self.assertNotIn('git push',script)
             if step.get('uses','').startswith('actions/upload-artifact'):
                 paths=step['with']['path'].splitlines()
-                self.assertEqual(len(paths),8)
-                self.assertTrue(all('/android-helper-' in p and p.endswith(('.stderr','.stdout','.status')) for p in paths))
+                if step['name']=='Retain bounded image signing and detach diagnostics':
+                    self.assertEqual(len(paths),8)
+                    self.assertTrue(all('/android-helper-' in p and p.endswith(('.stderr','.stdout','.status')) for p in paths))
+                else:
+                    self.assertEqual(step['name'],'Retain only authenticated files for the owner local installation')
+                    self.assertEqual(len(paths),6)
+                    self.assertEqual({p.rsplit('/',1)[1] for p in paths},
+                        {'producer.json','producer.sig','PREPARED.json','android-helper-package-install.json',
+                         'package-install.status','LOCAL-CARRIER.json'})
+                    self.assertTrue(all(p.startswith('${{ steps.work.outputs.root }}/') for p in paths))
 
 
 if __name__=='__main__': unittest.main()
