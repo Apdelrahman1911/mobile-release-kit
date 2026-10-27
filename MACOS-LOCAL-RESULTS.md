@@ -1,5 +1,39 @@
 # Mac continuation results — 2026-10-24
 
+## Current continuation — 2026-10-27 saved candidates / independent failures
+
+Both current candidate builds40479109070/1 actually succeeded on0153ab2e73241c202e9026e9ae4856f3e3ff1f68.
+Git artifact12730570219 and Tool12728048505 were service-size/digest verified,
+with exact source/tree/run/attempt/job and checkpoint cuts, complete five-member
+cohorts and parsed finalization receipts. Actual local Mac27 pkgutil trust/chain,
+stapler validation and Gatekeeper install assessments returned0 for both unchanged
+packages. No Installer or app was executed locally and no owner credentials entered
+payloads. Actual new signed Python/current core direct checks passed for both
+isolated roles,14 methods/20 actions, zero stderr. Full hosted runtime S/M were
+recorded from completed job logs; M matches each actual verified package.
+
+The first Tool artifact download timed out at180s and its153583616-byte partial
+is retained. The same exact artifact's second local download passed size/hash
+with a900s transport budget. No workflow retry or product deadline changed.
+
+Initial service-cli failed after actual Installer0/V2 readback because first
+hdiutil detach returned16, Resource busy. Nonroot holder visibility does not prove
+which system process retained the image or its exit. Mac26 now receives the same
+bounded60-second pre-eject Installer cleanup grace already used on Mac27; original
+endpoint, full reserve, FD closes, single ordinary eject and zero/absence gates stay.
+13 detach custody and31 checkpoint checks pass on both Python3.14.6 and3.11.16
+under umask077. A broader prepared-package attempt retains eight fixture attribute/
+import errors across24 tests and is not qualified. No original attributes cleared.
+
+Initial Git-local passed installation/readback/eject and reached the real Open
+Project directory-ready panel, then failed GitCli(Prepared)/git-cli-original-contract.
+The original outer deadline expired with app return/finality unknown. Its underlying
+Git CLI phase is not yet proven. The producer run is terminal failure; monitor78462
+completed/exit1. Both successful builds remain reusable for compatible harness fixes;
+all11 installed groups remain incomplete. Next retry only service-cli on the new
+harness, using saved source0153/run40479109070, while diagnosing the Git failure.
+Working installation, credentials and original checkout remain untouched.
+
 ## Current continuation — 2026-10-27 verified signed Python enrollment
 
 Independent signing40476254849/1 is an actual hosted success, with capsule12720049992

@@ -1,5 +1,57 @@
 # Continue Mobile Release Kit on the owner's Mac
 
+## Current continuation — 2026-10-27 saved candidates / independent failures
+
+Both candidate builds in run40479109070/attempt1 actually succeeded on
+0153ab2e73241c202e9026e9ae4856f3e3ff1f68, tree54f4d61cfad27d4353eff42a1882971e1aa68e5c.
+Git27 job122104639694 retained artifact12730570219; Tool26 job122104640344
+retained artifact12728048505. Both exact service ZIP sizes/digests, five-member
+cohorts, source/tree/run/attempt/job, successful checkpoint cuts and finalization
+receipts were independently verified locally. Both packages passed actual Mac27
+pkgutil trust/complete certificate-chain checks, stapler validation and Gatekeeper
+install assessment without installation or app execution. The actual full runtime
+S/M were harvested from completed build logs, separating initial legacy nomination
+values; M matches each verified package. Private evidence/ledger holds exact values.
+Both new signed Python/current core copies also passed isolated direct Mac27 checks.
+These checks do not qualify any installed group or the owner's daily app.
+
+The initial independent groups both failed; run40479109070 is terminal failure
+and monitor78462 completed/exit1. Service-cli job122153267334 actually returned
+Installer0 and passed V2 readback, then its first hdiutil detach returned16:
+could not unmount disk7, Resource busy. Nonroot lsof reported no visible matching
+holder with warnings; the responsible process and its exit are unproven. Mount
+retirement is incomplete. Original failed status and diagnostics remain preserved.
+The harness now gives Mac26 the same single bounded60-second Installer cleanup
+grace already used on Mac27 before the first ordinary eject. It retains the
+original endpoint, full90-second admission/reserve, consuming FD closes, one
+non-force eject and mandatory eject0/namespace absence. No failed call becomes
+success, no forced detach, new retry command or passive-query budget change.
+
+Thirteen detach custody checks and31 candidate/checkpoint checks pass on full
+Python3.14.6 and3.11.16 under umask077. They cover both hosts, interrupted/late/
+changed-mount refusals, unchanged endpoint and exact single eject, plus restricted
+same-package harness continuation. The additional explicit test-file allowlist
+entry authorizes only the detach regression file. A broader prepared-package
+attempt ran24 tests with eight attribute/import fixture errors; it is not a pass.
+No original source attributes were cleared or product policy relaxed.
+
+Git-local job122153267366 passed installation/readback/eject and reached the
+actual Open Project panel, directory ready and native handler returned. Its later
+GitCli(Prepared) failed git-cli-original-contract; the outer owner hit its original
+deadline with app return/finality unknown. This is a later failure than the old
+bootstrap query wait; its underlying Git CLI cause still needs diagnosis from
+the new actual log. Do not claim native Git success or increase its deadline.
+
+Commit the harness-only detach correction with[skip ci] and atomically push only
+the two authorized branches. Check current runs first; dispatch only service-cli
+with prepared_source0153ab2e73241c202e9026e9ae4856f3e3ff1f68 and prepared_run40479109070
+on the new harness source. Follow it to actual completion while diagnosing the
+separate Git failure. Reuse these exact valid saved signed packages only for
+compatible harness changes; app/native/runtime changes still require fresh builds.
+No remaining nine groups may start until git-local and service-cli actually pass.
+All11 groups remain incomplete. Goal/heartbeat remain ACTIVE. Preserve owner
+installation, credentials and original dirty checkout; never main or production.
+
 ## Current continuation — 2026-10-27 verified signed Python enrollment
 
 Independent signing run40476254849/attempt1, job122095117924, completed with

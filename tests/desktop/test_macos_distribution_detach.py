@@ -173,9 +173,10 @@ class DistributionDetachData(unittest.TestCase):
 
 class DistributionDetachCustody(unittest.TestCase):
     def test_cleanup_grace_requires_full_budget_and_never_reenters_or_ejects_after_interruption(self):
-        for fault in ('budget', 'interrupted', 'overrun', 'changed-mount'):
-            with self.subTest(fault=fault), operation() as op:
-                op.environment['MRK_MACOS_RUNNER'] = 'xcode-27'
+        for runner, fault in ((runner, fault) for runner in ('macos-26', 'xcode-27')
+                              for fault in ('budget', 'interrupted', 'overrun', 'changed-mount')):
+            with self.subTest(runner=runner, fault=fault), operation() as op:
+                op.environment['MRK_MACOS_RUNNER'] = runner
                 op.installation_readback = True
                 if fault == 'budget': op.package_endpoint = NOW + 92_000_000_000
                 def grace(seconds):
@@ -233,10 +234,19 @@ class DistributionDetachCustody(unittest.TestCase):
                     self.assertEqual(argv, expected)
                     self.assertEqual(options, {'timeout': 60 if phase == H.UPDATE_PHASE else 30})
                     return subprocess.CompletedProcess(argv, 0, b'', b'')
-                with (mock.patch.object(op, 'package_call', side_effect=original) as call,
+                endpoint = op.package_endpoint
+                with (mock.patch.object(H.time, 'sleep') as grace,
+                      mock.patch.object(op, 'package_call', side_effect=original) as call,
                       mock.patch.object(op, 'transport_mount_detached') as absent,
                       mock.patch.object(op, 'package_clock', return_value=NOW)):
                     op.detach_package_mount()
+                if phase == 'package-install':
+                    grace.assert_called_once_with(60)
+                    self.assertTrue(op.installer_cleanup_grace_entered)
+                else:
+                    grace.assert_not_called()
+                    self.assertFalse(op.installer_cleanup_grace_entered)
+                self.assertEqual(op.package_endpoint, endpoint)
                 call.assert_called_once()
                 absent.assert_called_once_with()
                 self.assertTrue(op.mount_detached)

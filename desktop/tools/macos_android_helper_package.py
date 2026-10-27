@@ -9119,7 +9119,7 @@ class Operation:
              and (not self.installer_entered or self.installer_zero and self.installation_readback), "package-mount-retention-required")
         need(self.package_settled(), "package-mount-finality-unknown")
         self.recheck_mount()
-        if (self.phase == "package-install" and self.environment.get("MRK_MACOS_RUNNER") == "xcode-27"
+        if (self.phase == "package-install" and self.environment.get("MRK_MACOS_RUNNER") in ("macos-26", "xcode-27")
                 and self.installer_entered):
             # Installer0 does not mean PackageKit has released its source image.
             # Give its asynchronous cleanup one bounded grace BEFORE the first

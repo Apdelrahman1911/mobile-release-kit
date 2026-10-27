@@ -307,6 +307,13 @@ class CandidateCheckpointTests(unittest.TestCase):
         self.assertFalse(bound.same_source)
         self.assertTrue(bound.native_compatible)
         self.assertEqual(bound.source,origin['source'])
+        for name in ('desktop/tools/macos_android_helper_package.py',
+                     'tests/desktop/test_macos_distribution_detach.py'):
+            current=copy.deepcopy(comparison);current['files'][0]['filename']=name
+            with self.subTest(harness=name):
+                continued=P.admit_data(values,dict(service,compatibility=current),consumer)
+                self.assertTrue(continued.native_compatible)
+                self.assertEqual(continued.source,origin['source'])
         for name in ('desktop/src-tauri/src/main.rs','desktop/native/macos-installed-native/src/native.m',
                      'desktop/packaging/macos-android-service-signing.profile','desktop/tools/stage_macos_installed.py',
                      'mobile_release/core.py'):

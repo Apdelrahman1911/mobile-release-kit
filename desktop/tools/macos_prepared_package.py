@@ -184,6 +184,7 @@ HARNESS_FILES = frozenset({
     'desktop/tools/macos_tool_setup_inputs.py', 'desktop/tools/macos_local_preflight.py',
     'desktop/tools/macos_tool_service_diagnostic.py',
     'tests/desktop/test_macos_candidate_stages.py', 'tests/desktop/test_macos_prepared_package.py',
+    'tests/desktop/test_macos_distribution_detach.py',
     'MACOS-CONTINUATION.md', 'MACOS-LOCAL-RESULTS.md', 'docs/macos-ci-retries.md',
 })
 
