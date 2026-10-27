@@ -183,6 +183,52 @@ class PreparedPackageData(unittest.TestCase):
                         self.assertIsNone(finish.call_args.args[1])
                     finish.assert_called_once()
 
+    @unittest.skipUnless(sys.platform == 'darwin', 'actual Darwin temporary-copy FD policy')
+    def test_prepared_copy_cache_control_keeps_actual_original_and_refuses_error(self):
+        import fcntl
+        from desktop.tools import macos_android_helper_package as H
+        for prepared, refused in ((True, False), (False, False), (True, True)):
+            with self.subTest(prepared=prepared, refused=refused), tempfile.TemporaryDirectory() as directory:
+                root = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
+                entries, outputs, controls = [], [], []
+                body = b'inert prepared copy\n' * 500
+                def register(fd, role, kind, parent, name):
+                    entry = dict(fd=fd, role=role, kind=kind, parent=parent, name=name)
+                    entries.append(entry)
+                    return entry
+                def read(entry):
+                    self.assertEqual(os.fstat(entry['fd']), os.stat(entry['name'], dir_fd=entry['parent'], follow_symlinks=False))
+                    return os.pread(entry['fd'], len(body), 0)
+                native = fcntl.fcntl
+                def control(fd, command, value):
+                    self.assertEqual(len(entries), 1)
+                    self.assertEqual(entries[0]['fd'], fd)
+                    self.assertEqual(os.fstat(fd).st_size, 0)
+                    controls.append((command, value))
+                    if refused:
+                        raise OSError('actual original policy call refused')
+                    return native(fd, command, value)
+                op = SimpleNamespace(prepared_staging=prepared, package_clock=lambda: None,
+                    stager=SimpleNamespace(MAX_BYTES=P.PACKAGE_LIMIT), recheck_directory=lambda _: None,
+                    register=register, read=read, package_outputs=outputs)
+                try:
+                    with mock.patch.object(fcntl, 'fcntl', side_effect=control):
+                        if refused:
+                            with self.assertRaisesRegex(OSError, 'original policy call refused'):
+                                H.Operation.package_file(op, {'fd': root}, 'copy.pkg', body)
+                            self.assertEqual(os.fstat(entries[0]['fd']).st_size, 0)
+                            self.assertFalse(outputs)
+                        else:
+                            entry = H.Operation.package_file(op, {'fd': root}, 'copy.pkg', body)
+                            self.assertEqual(read(entry), body)
+                            self.assertEqual(stat.S_IMODE(os.fstat(entry['fd']).st_mode), 0o444)
+                            self.assertEqual(outputs, [(entry, P.sha(body))])
+                        self.assertEqual(controls, [(fcntl.F_NOCACHE, 1)] if prepared else [])
+                finally:
+                    for entry in entries:
+                        os.close(entry['fd'])
+                    os.close(root)
+
     def test_real_original_cpio_materialization_and_final_product_audit_both_targets(self):
         base=Path(os.environ.get('MRK_TEST_REPO',ROOT))
         sys.path.insert(0,str(base/'tests/desktop'))

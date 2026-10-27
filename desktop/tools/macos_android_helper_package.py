@@ -8711,6 +8711,13 @@ class Operation:
                      0o600, dir_fd=parent["fd"])
         entry = self.register(fd, "package-output-" + name, "file", parent["fd"], name)
         entry["parent_entry"] = parent
+        if self.prepared_staging:
+            # The prepared owner already admitted this exact Darwin ABI. These
+            # temporary copies need no second whole-file cache alongside their
+            # admitted Python vectors. This same original FD retains write,
+            # fsync, complete readback, digest, name POST and consuming close.
+            import fcntl
+            fcntl.fcntl(fd, fcntl.F_NOCACHE, 1)
         offset = 0
         while offset < len(body):
             self.package_clock()
