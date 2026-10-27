@@ -1,5 +1,53 @@
 # Continue Mobile Release Kit on the owner's Mac
 
+## Current continuation — 2026-10-27 service approval / owner-authorized local tests
+
+The harness correction is already committed/pushed as129accf840758b4c21d42b4f32cd57ddcbeb33b4.
+Service-only retry40496904558/attempt1, job122164537980, is terminal failure;
+monitor46719 completed/exit1. Do not redispatch that unchanged hosted test.
+Installer, V2 readback and the single ordinary detach actually passed. The
+original registration returned false/service-error-code-1 with not-found status;
+the subsequent original Check returned requires-approval. App, Document, native
+operations and normal quit settled. CLI was skipped. The finite Apple log call
+returned six matching events; readonly BTM timed out, so no BTM records are proven.
+Install diagnostic artifact12732085817 was service-size/digest verified. Exact
+original reports and logs are in private service-cli-40496904558-failure evidence.
+Code1 is not mapped to a named public SDK error; Check's approval state is the
+actual barrier and does not prove the cause of that earlier registration error.
+
+The owner now explicitly authorizes service lifecycle tests on their personal
+Mac, requests installation/activation/startup/restart/reboot-persistence evidence,
+and requires preservation of the working installation and credentials. No agents.
+Keep GitHub Actions for checks that do not need manual approval. Explain the exact
+human approval when a concrete verifiable test setup is ready; coordinate any
+reboot with the owner. Never automate or bypass administrator approval.
+
+Read-only inventory found the working installation in the ordinary candidate's
+fixed protected path and its /Applications launcher. Its source isbf9d397bde641aae4b4cd205f3c962e899557650,
+runtime4b45dc85aac03b7b5883045d89e8bd6f8ea642d5368d715a45ec84e807509c1c;
+it is not the saved0153 candidate. Installing the new ordinary package there
+would replace this working app. The native fixed paths prevent relocating a
+signed candidate or substituting an E2 fixture as exact application qualification.
+No installation, registration, launch, removal, working-app credential read or reboot
+was performed. Preservation hashes are in owner-installation-preservation-inventory.
+No virtualization app/CLI is installed; this16GiB Mac has only18GiB disk space
+available. An external drive or space for an isolated macOS test VM is requested
+from the owner. Do not delete unrelated files or install over the working app.
+
+The independent Git failure still needs diagnosis at GitCli(Prepared), in
+installed_shell_observation_macos_git_cli.rs after original service-return and
+local Prepare checks. Its actual failed predicate remains unproven. Ten late
+Git modules imported successfully from the exact current core ZIP using its
+verified signed Python, isolated HOME/TMPDIR,0 stderr,0.613s. This excludes that
+specific missing-import failure locally; no Git command or native app was run,
+and it does not qualify Prepare. Evidence:git-prepared-import-local/result.json.
+No application/native/runtime bytes were changed in this continuation.
+
+Both saved candidate builds still passed; all11 installed groups remain
+incomplete. Goal remains active. The saved heartbeat was already PAUSED when
+read; its prompt now reflects the owner's local-test instruction and that status
+was preserved. The private ledger's old ACTIVE heartbeat label was stale.
+
 ## Current continuation — 2026-10-27 saved candidates / independent failures
 
 Both candidate builds in run40479109070/attempt1 actually succeeded on

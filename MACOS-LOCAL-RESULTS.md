@@ -1,5 +1,32 @@
 # Mac continuation results — 2026-10-24
 
+## Current continuation — 2026-10-27 service approval / working-app preservation
+
+Service-only retry40496904558/1 on harness129accf840758b4c21d42b4f32cd57ddcbeb33b4
+ended failure. Installer, V2 readback and single ordinary eject actually passed.
+Original register returned false/service-error-code-1; original Check settled
+requires-approval. App/Document/quit settled; installed CLI was skipped. Apple
+log projection returned six matching events; BTM's readonly call timed out.
+Artifact12732085817 is size/digest verified. The register code's cause is not
+inferred from the subsequent approval state. No unchanged hosted retry is useful.
+
+The owner authorizes personal-Mac lifecycle testing with explicit manual approval
+as needed and preservation of their working app, credentials and normal use;
+no agents. Read-only inventory confirms the workingbf9d397b app occupies the
+ordinary candidate's fixed protected location. Its runtime hash differs from
+saved0153. Installing that package would replace it; relocating the signed app
+or substituting the separate E2 identity cannot qualify this exact candidate.
+The Mac has16GiB RAM,18GiB free disk, and no installed virtualization app/CLI.
+An external drive or space for an isolated test VM is requested. No installation,
+registration, launch, removal, reboot or working-app credential read occurred.
+
+Ten Git-local modules loaded from the exact core ZIP under its verified signed
+Python in an isolated local HOME/TMPDIR:0.613s, exit0, stderr0. No Git command or
+native app was entered. The actual GitCli(Prepared) failure and unknown original
+app finality remain unresolved. No application/native/runtime bytes changed.
+Both builds remain successful; all11 installed groups remain incomplete.
+The already-paused heartbeat's prompt was updated and its pause preserved.
+
 ## Current continuation — 2026-10-27 saved candidates / independent failures
 
 Both current candidate builds40479109070/1 actually succeeded on0153ab2e73241c202e9026e9ae4856f3e3ff1f68.
