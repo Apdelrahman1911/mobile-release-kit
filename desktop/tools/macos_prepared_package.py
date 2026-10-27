@@ -794,7 +794,7 @@ def acquire_checkpoint(op, consumer):
                               originals['MobileReleaseKit-original.pkg']['identity'][6], 1, 1))
         values = {'PREPARED.json': marker_body}
         for name, entry in originals.items():
-            values[name] = op.read(entry)
+            values[name] = read_prepared_member(op, name, entry)
             op.package_outputs.append((entry, sha(values[name])))
         binding = admit_data(values, service, consumer)
         op.package_outputs.append((marker, sha(marker_body)))
@@ -803,6 +803,17 @@ def acquire_checkpoint(op, consumer):
     finally:
         finish_staging(op, sys.exception())
     return values, binding
+
+
+def read_prepared_member(op, name, entry):
+    """Same original read; avoid retaining a second package-sized file cache."""
+    need(name in FILES, 'prepared-cohort-roster')
+    if name in ('MobileReleaseKit.pkg', 'MobileReleaseKit-original.pkg'):
+        # ResourceGuard has already admitted the actual Darwin SOURCE/ABI.
+        # The flag is per-FD and changes no file bytes or filesystem metadata.
+        import fcntl
+        fcntl.fcntl(entry['fd'], fcntl.F_NOCACHE, 1)
+    return op.read(entry)
 
 
 def source_head(op, source):

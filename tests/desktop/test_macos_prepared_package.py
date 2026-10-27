@@ -239,6 +239,40 @@ class PreparedPackageData(unittest.TestCase):
                         os.close(entry['fd'])
                     os.close(root)
 
+    @unittest.skipUnless(sys.platform == 'darwin', 'actual Darwin source FD policy')
+    def test_prepared_input_cache_control_uses_same_readonly_original(self):
+        import fcntl
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / 'source'
+            body = b'inert original package bytes\n'
+            path.write_bytes(body)
+            fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW)
+            entry = {'fd': fd}
+            reads, controls = [], []
+            native = fcntl.fcntl
+            def read(actual):
+                self.assertIs(actual, entry)
+                self.assertEqual(os.fstat(fd), path.stat())
+                reads.append(actual)
+                return os.pread(fd, len(body), 0)
+            def control(actual, command, value):
+                self.assertEqual((actual, command, value), (fd, fcntl.F_NOCACHE, 1))
+                controls.append(actual)
+                return native(actual, command, value)
+            try:
+                with mock.patch.object(fcntl, 'fcntl', side_effect=control):
+                    self.assertEqual(P.read_prepared_member(SimpleNamespace(read=read), 'MobileReleaseKit.pkg', entry), body)
+                    self.assertEqual(P.read_prepared_member(SimpleNamespace(read=read), 'package-finalization.status', entry), body)
+                self.assertEqual(controls, [fd])
+                self.assertEqual(len(reads), 2)
+                with mock.patch.object(fcntl, 'fcntl', side_effect=OSError('source cache-control refused')):
+                    with self.assertRaisesRegex(OSError, 'source cache-control refused'):
+                        P.read_prepared_member(SimpleNamespace(read=read), 'MobileReleaseKit-original.pkg', entry)
+                self.assertEqual(len(reads), 2)
+                self.assertEqual(os.fstat(fd), path.stat())
+            finally:
+                os.close(fd)
+
     def test_real_original_cpio_materialization_and_final_product_audit_both_targets(self):
         base=Path(os.environ.get('MRK_TEST_REPO',ROOT))
         sys.path.insert(0,str(base/'tests/desktop'))
