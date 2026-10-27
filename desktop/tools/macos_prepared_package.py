@@ -521,6 +521,13 @@ def hydrate_checkpoint(op, values, binding):
         # First admit only the retained packages plus the small bounded index/
         # streaming windows. Count expansion before allocating its full vector.
         guard.check(quote_data(package_size, original_size, 1, 1))
+        # Publish and positively read back the already admitted final package
+        # before retaining expanded Scripts. package_file keeps its original
+        # and digest, not this whole byte vector. Consume the vector only after
+        # that write/readback returns; the full allocation quote stays unchanged.
+        root = op.package_directory('package-final')
+        op.package_file(root, 'MobileReleaseKit.pkg', values['MobileReleaseKit.pkg'])
+        del values['MobileReleaseKit.pkg']
         expanded = original_expansion_bytes(op.stager, values['MobileReleaseKit-original.pkg'], check=op.package_clock)
         quote = quote_data(package_size, original_size, expanded, 12 * MIB)
         guard.check(quote)
@@ -535,15 +542,22 @@ def hydrate_checkpoint(op, values, binding):
         # The independent full audit rereads the fresh tree. Retaining this
         # extra whole-payload dictionary would overlap another501MiB with it.
         del files
-        root = op.package_directory('package-final')
-        op.package_file(root, 'MobileReleaseKit.pkg', values['MobileReleaseKit.pkg'])
         op.package_file(op.work_entry, 'MobileReleaseKit-original.pkg', values['MobileReleaseKit-original.pkg'])
+        del values['MobileReleaseKit-original.pkg']
         for name in ('android-helper-finalize-package.json', 'package-finalization.status'):
             op.publish(name, values[name])  # Fresh600 original, not old mode/custody.
         input_root = op.package_directory('input')
         op.package_file(input_root, op.stager.INSTALLATION_INVENTORY_NAME, inventory)
+        # Admit the same complete quote again before the independent rereads.
+        # Neither retained package vector overlaps this later full DATA audit.
+        guard.check(quote)
         original = op.original(root, 'MobileReleaseKit.pkg', 'prepared-hydrated-final', PACKAGE_LIMIT, (0o444,))
-        record = op.package_finalization_input(original, values['MobileReleaseKit.pkg'])
+        package = op.read(original)
+        need(len(package) == package_size and sha(package) == next(
+            row['sha256'] for row in manifest['members'] if row['name'] == 'MobileReleaseKit.pkg'),
+            'prepared-hydrated-audit')
+        record = op.package_finalization_input(original, package)
+        del package
         audit = op.package_stager_io('final-audit', SimpleNamespace(target=op.target, fixture=False, store_runtime=True,
             scripts=op.work / 'scripts', package=op.work / 'package-final/MobileReleaseKit.pkg',
             original_package=op.work / 'MobileReleaseKit-original.pkg'))

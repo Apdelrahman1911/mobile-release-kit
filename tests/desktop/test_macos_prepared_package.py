@@ -115,6 +115,74 @@ class PreparedPackageData(unittest.TestCase):
         for args in ((True,20,30,40),(10,20,0,40),(10,20,30,12*P.MIB+1)):
             with self.assertRaises(ValueError): P.quote_data(*args)
 
+    def test_hydration_retires_vectors_after_readback_and_keeps_full_admission(self):
+        for failure in (None, 'write', 'reread'):
+            with self.subTest(failure=failure):
+                values, manifest, service, consumer = fixture()
+                binding = P.admit_data(values, service, consumer)
+                final = values['MobileReleaseKit.pkg']
+                original = values['MobileReleaseKit-original.pkg']
+                checks, events, published = [], [], {}
+                expected_quote = P.quote_data(len(final), len(original), 33, 12 * P.MIB)
+                audit = dict(packageSha256=P.sha(final), packageSize=len(final),
+                             originalPackageSha256=P.sha(original), packageInfoSha256='a'*64, scriptFileCount=1)
+
+                def check(quote):
+                    checks.append(dict(quote))
+                    if len(checks) == 2:
+                        self.assertNotIn('MobileReleaseKit.pkg', values)
+                        self.assertEqual(values['MobileReleaseKit-original.pkg'], original)
+                    elif len(checks) == 3:
+                        self.assertNotIn('MobileReleaseKit.pkg', values)
+                        self.assertNotIn('MobileReleaseKit-original.pkg', values)
+
+                def write(parent, name, body):
+                    events.append(('write', name))
+                    if name == 'MobileReleaseKit.pkg':
+                        self.assertEqual(body, final)
+                        self.assertIn(name, values)
+                        if failure == 'write':
+                            raise ValueError('known-output-readback-refusal')
+                    published[name] = body
+
+                def scripts(*args, **kwargs):
+                    self.assertNotIn('MobileReleaseKit.pkg', values)
+                    self.assertEqual(args[1], original)
+                    return {'input/inventory': (b'inert inventory', 0o444)}
+
+                def independent_audit(*args):
+                    self.assertNotIn('MobileReleaseKit.pkg', values)
+                    self.assertNotIn('MobileReleaseKit-original.pkg', values)
+                    self.assertEqual(checks[-1], expected_quote)
+                    events.append(('audit', 'entered'))
+                    return audit
+
+                op = SimpleNamespace(prepared_binding=binding, work=Path('/inert'), target=consumer['target'],
+                    work_entry='work', stager=SimpleNamespace(INSTALLATION_INVENTORY_NAME='inventory', write_tree=lambda *a, **k: None),
+                    package_directory=lambda name: name, package_file=write, package_clock=lambda: None,
+                    publish=lambda name, body: published.__setitem__(name, body),
+                    original=lambda *a: 'final-original', read=lambda _: b'tampered' if failure == 'reread' else published['MobileReleaseKit.pkg'],
+                    package_finalization_input=lambda *a: audit, package_stager_io=independent_audit, package_post=lambda: None)
+                guard = SimpleNamespace(check=check, allocation=lambda *a: None)
+                with mock.patch.object(P, 'initialize_staging'), mock.patch.object(P, 'ResourceGuard', return_value=guard), \
+                        mock.patch.object(P, 'original_expansion_bytes', return_value=33), \
+                        mock.patch.object(P, 'original_scripts_data', side_effect=scripts), \
+                        mock.patch.object(P, 'finish_staging') as finish:
+                    if failure:
+                        with self.assertRaisesRegex(ValueError, 'known-output-readback-refusal' if failure == 'write' else 'prepared-hydrated-audit'):
+                            P.hydrate_checkpoint(op, values, binding)
+                        self.assertIsNotNone(finish.call_args.args[1])
+                        self.assertNotIn(('audit', 'entered'), events)
+                        if failure == 'write':
+                            self.assertIn('MobileReleaseKit.pkg', values)
+                            self.assertIn('MobileReleaseKit-original.pkg', values)
+                    else:
+                        self.assertIs(P.hydrate_checkpoint(op, values, binding), binding)
+                        self.assertEqual(checks, [P.quote_data(len(final), len(original), 1, 1), expected_quote, expected_quote])
+                        self.assertEqual(events[-1], ('audit', 'entered'))
+                        self.assertIsNone(finish.call_args.args[1])
+                    finish.assert_called_once()
+
     def test_real_original_cpio_materialization_and_final_product_audit_both_targets(self):
         base=Path(os.environ.get('MRK_TEST_REPO',ROOT))
         sys.path.insert(0,str(base/'tests/desktop'))
