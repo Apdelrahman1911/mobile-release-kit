@@ -322,6 +322,35 @@ class PreparedPackageData(unittest.TestCase):
                     os.close(fd)
                     os.close(root)
 
+    def test_prepared_reclamation_targets_only_current_task_and_keeps_refusals(self):
+        import ctypes
+        for status in (0, 4):
+            current = mock.Mock(return_value=123)
+            def native(task, count, reclaimed, deadline):
+                self.assertEqual((task, count), (123, 16384))
+                ctypes.cast(reclaimed, ctypes.POINTER(ctypes.c_uint64))[0] = 42
+                return status
+            flush = mock.Mock(side_effect=native)
+            op = SimpleNamespace(prepared_staging=True, phase='package-install',
+                environment={'MRK_MACOS_RUNNER': 'xcode-27'}, package_clock=mock.Mock(),
+                mount_api=SimpleNamespace(library=SimpleNamespace(mach_task_self=current,
+                    mach_vm_deferred_reclamation_buffer_flush=flush)))
+            with mock.patch.object(P.sys, 'platform', 'darwin'):
+                if status:
+                    with self.assertRaisesRegex(ValueError, 'prepared-allocator-reclaim'):
+                        P.reclaim_prepared_allocator(op)
+                    self.assertEqual(op.prepared_allocator_facts['status'], 4)
+                else:
+                    P.reclaim_prepared_allocator(op)
+                    self.assertEqual(op.prepared_allocator_facts,
+                        dict(requestedEntries=16384, bytesReclaimed=42, status=0, currentProcessOnly=True))
+                current.assert_called_once_with()
+                flush.assert_called_once()
+                op.environment['MRK_MACOS_RUNNER'] = 'macos-26'
+                with self.assertRaisesRegex(ValueError, 'prepared-allocator-host'):
+                    P.reclaim_prepared_allocator(op)
+                self.assertEqual(flush.call_count, 1)
+
     def test_real_original_cpio_materialization_and_final_product_audit_both_targets(self):
         base=Path(os.environ.get('MRK_TEST_REPO',ROOT))
         sys.path.insert(0,str(base/'tests/desktop'))
@@ -866,6 +895,31 @@ class PreparedPackageData(unittest.TestCase):
                         previous=op.work/('android-helper-prepared-resource-memory'+suffix)
                         if owner_number==1:previous.write_bytes(b'prior original')
                         self.assertEqual(previous.read_bytes(),b'prior original')
+
+    def test_resource_reclamation_precedes_real_sample_and_cannot_override_full_quote(self):
+        _, tool, helper = real_modules()
+        for refused in (False, True):
+            with self.subTest(refused=refused), tempfile.TemporaryDirectory() as directory:
+                op, guard, dispatch, body = self.resource_original(helper, tool, Path(directory))
+                op.environment['MRK_MACOS_RUNNER'] = 'xcode-27'
+                quote = dict(memoryBytes=8 << 30, diskBytes=1)
+                def reclaim(actual):
+                    self.assertIs(actual, op)
+                    self.assertEqual(dispatch.call_count, 0)
+                    if refused: raise ValueError('prepared-allocator-reclaim')
+                    op.prepared_allocator_facts = dict(bytesReclaimed=1 << 40)
+                try:
+                    with mock.patch.object(P, 'reclaim_prepared_allocator', side_effect=reclaim) as called, \
+                            mock.patch.object(guard.data, 'host_memory_data', return_value=(4096, 16 << 30)):
+                        reason = 'prepared-allocator-reclaim' if refused else 'prepared-resource-insufficient'
+                        with self.assertRaisesRegex(ValueError, reason): guard.check(quote)
+                        called.assert_called_once_with(op)
+                        self.assertEqual(dispatch.call_count, 0 if refused else 1)
+                        if not refused:
+                            self.assertEqual(op.prepared_resource_facts['requiredMemoryBytes'], 8 << 30)
+                            self.assertFalse(op.prepared_resource_facts['memorySufficient'])
+                finally:
+                    P.finish_staging(op, sys.exception())
 
     def test_occupied_resource_capture_refuses_and_never_reuses_failed_slot(self):
         _,tool,helper=real_modules()

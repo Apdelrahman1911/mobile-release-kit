@@ -658,6 +658,8 @@ class ResourceGuard:
              'prepared-original-resource-bound')
         self.samples += 1
         need(self.samples <= 16, 'prepared-resource-sample-bound')
+        if op.environment.get('MRK_MACOS_RUNNER') == 'xcode-27':
+            reclaim_prepared_allocator(op)
         result = op.call('prepared-resource-memory', ['/usr/bin/vm_stat'], op.native_environment(),
                          cwd=op.work, timeout=10, limit=65536)
         class Clock:
@@ -682,6 +684,37 @@ class ResourceGuard:
         # copy windows; no logical-size-only accounting or cap rise.
         need(required <= self.quote['memoryBytes'], 'prepared-codec-window')
         self.op.package_clock()
+
+
+def reclaim_prepared_allocator(op):
+    """Flush bounded retired allocations of THIS admitted macOS27 process.
+
+    SDK27 mach_vm.defs declares this synchronous current-task operation. It
+    releases already freed regions in the deferred reclamation buffer; it does
+    not purge other processes or release live DATA. Admission still uses only
+    the subsequent real vm_stat sample against the unchanged full quote.
+    """
+    import ctypes
+    need(sys.platform == 'darwin' and op.prepared_staging and op.phase == 'package-install'
+         and op.environment.get('MRK_MACOS_RUNNER') == 'xcode-27', 'prepared-allocator-host')
+    op.package_clock()
+    library = op.mount_api.library  # SAME libSystem instance admitted by normal_mount_host.
+    current = library.mach_task_self
+    current.argtypes, current.restype = [], ctypes.c_uint32
+    flush = library.mach_vm_deferred_reclamation_buffer_flush
+    flush.argtypes = [ctypes.c_uint32, ctypes.c_uint32, ctypes.POINTER(ctypes.c_uint64),
+                     ctypes.POINTER(ctypes.c_uint64)]
+    flush.restype = ctypes.c_int
+    task = current()
+    need(type(task) is int and 0 < task < 2**32, 'prepared-allocator-host')
+    reclaimed, deadline = ctypes.c_uint64(), ctypes.c_uint64()
+    status = flush(task, 16384, ctypes.byref(reclaimed), ctypes.byref(deadline))
+    op.package_clock()
+    need(type(status) is int and -2**31 <= status < 2**31 and reclaimed.value < 1 << 53,
+         'prepared-allocator-reclaim')
+    op.prepared_allocator_facts = dict(requestedEntries=16384, bytesReclaimed=reclaimed.value,
+                                      status=status, currentProcessOnly=True)
+    need(status == 0, 'prepared-allocator-reclaim')
 
 
 def selected_job_data(body, source, run, target, *, completed, native_scope=None, artifacts=None):
@@ -844,6 +877,8 @@ def native_binding(environment):
 
 # Only fixed public refusal codes are logged; arbitrary exception text is private.
 PREPARED_FAILURE_CODES = frozenset({
+    'prepared-allocator-host',
+    'prepared-allocator-reclaim',
     'prepared-streamed-expansion-bound',
     'prepared-streamed-expansion-complete',
     'prepared-expansion-header',
@@ -955,7 +990,8 @@ def failure_data(error, phase, operation):
     known = type(reason) is str and reason in PREPARED_FAILURE_CODES
     return dict(kind='prepared-checkpoint-failure', phase=phase,
         reason=reason if known else 'unclassified', diagnosticOnly=True,
-        resourceAdmission=getattr(operation, 'prepared_resource_facts', None))
+        resourceAdmission=getattr(operation, 'prepared_resource_facts', None),
+        allocatorReclamation=getattr(operation, 'prepared_allocator_facts', None))
 
 
 def main():
