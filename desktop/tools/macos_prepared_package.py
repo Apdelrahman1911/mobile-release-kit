@@ -530,8 +530,23 @@ def hydrate_checkpoint(op, values, binding):
         del values['MobileReleaseKit.pkg']
         expanded = original_expansion_bytes(op.stager, values['MobileReleaseKit-original.pkg'], check=op.package_clock)
         quote = quote_data(package_size, original_size, expanded, 12 * MIB)
+        # Acquire a NEW original from the unchanged complete transport cohort.
+        # Its earlier acquisition already consumed every handle. Retain only
+        # this fresh FD and expected digest, not the old full byte vector, while
+        # admitting the complete peak before allocating its replacement.
+        transport = op.directory(op.work_entry, 'prepared-input', 'prepared-reopened-root')
+        need(set(os.listdir(transport['fd'])) == NAMES, 'prepared-transport-original-roster')
+        source_original = op.original(transport, 'MobileReleaseKit-original.pkg', 'prepared-reopened-package-original',
+                                      PACKAGE_LIMIT, (0o400, 0o444, 0o600, 0o644))
+        original_sha = next(row['sha256'] for row in manifest['members'] if row['name'] == 'MobileReleaseKit-original.pkg')
+        need(source_original['identity'][6] == original_size, 'prepared-member-original-size')
+        op.package_outputs.append((source_original, original_sha))
+        op.package_roots.append((transport, NAMES))
+        del values['MobileReleaseKit-original.pkg']
         guard.check(quote)
-        files = original_scripts_data(op.stager, values['MobileReleaseKit-original.pkg'], manifest,
+        original_body = op.read(source_original)
+        need(len(original_body) == original_size and sha(original_body) == original_sha, 'prepared-hydrated-audit')
+        files = original_scripts_data(op.stager, original_body, manifest,
                                       allocation_budget=guard.allocation, expanded_limit=expanded)
         inventory = files['input/' + op.stager.INSTALLATION_INVENTORY_NAME][0]
         # Existing finite writer performs positive leaf closes and full readback;
@@ -542,8 +557,8 @@ def hydrate_checkpoint(op, values, binding):
         # The independent full audit rereads the fresh tree. Retaining this
         # extra whole-payload dictionary would overlap another501MiB with it.
         del files
-        op.package_file(op.work_entry, 'MobileReleaseKit-original.pkg', values['MobileReleaseKit-original.pkg'])
-        del values['MobileReleaseKit-original.pkg']
+        op.package_file(op.work_entry, 'MobileReleaseKit-original.pkg', original_body)
+        del original_body
         for name in ('android-helper-finalize-package.json', 'package-finalization.status'):
             op.publish(name, values[name])  # Fresh600 original, not old mode/custody.
         input_root = op.package_directory('input')

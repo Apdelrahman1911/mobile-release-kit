@@ -116,7 +116,7 @@ class PreparedPackageData(unittest.TestCase):
             with self.assertRaises(ValueError): P.quote_data(*args)
 
     def test_hydration_retires_vectors_after_readback_and_keeps_full_admission(self):
-        for failure in (None, 'write', 'reread'):
+        for failure in (None, 'write', 'reread', 'source-reread', 'transport'):
             with self.subTest(failure=failure):
                 values, manifest, service, consumer = fixture()
                 binding = P.admit_data(values, service, consumer)
@@ -131,7 +131,7 @@ class PreparedPackageData(unittest.TestCase):
                     checks.append(dict(quote))
                     if len(checks) == 2:
                         self.assertNotIn('MobileReleaseKit.pkg', values)
-                        self.assertEqual(values['MobileReleaseKit-original.pkg'], original)
+                        self.assertNotIn('MobileReleaseKit-original.pkg', values)
                     elif len(checks) == 3:
                         self.assertNotIn('MobileReleaseKit.pkg', values)
                         self.assertNotIn('MobileReleaseKit-original.pkg', values)
@@ -147,6 +147,7 @@ class PreparedPackageData(unittest.TestCase):
 
                 def scripts(*args, **kwargs):
                     self.assertNotIn('MobileReleaseKit.pkg', values)
+                    self.assertNotIn('MobileReleaseKit-original.pkg', values)
                     self.assertEqual(args[1], original)
                     return {'input/inventory': (b'inert inventory', 0o444)}
 
@@ -157,19 +158,28 @@ class PreparedPackageData(unittest.TestCase):
                     events.append(('audit', 'entered'))
                     return audit
 
+                def read(entry):
+                    if entry['name'] == 'MobileReleaseKit-original.pkg':
+                        return b'tampered' if failure == 'source-reread' else original
+                    return b'tampered' if failure == 'reread' else published['MobileReleaseKit.pkg']
+
                 op = SimpleNamespace(prepared_binding=binding, work=Path('/inert'), target=consumer['target'],
                     work_entry='work', stager=SimpleNamespace(INSTALLATION_INVENTORY_NAME='inventory', write_tree=lambda *a, **k: None),
                     package_directory=lambda name: name, package_file=write, package_clock=lambda: None,
+                    directory=lambda *a: {'fd': -1}, package_outputs=[], package_roots=[],
                     publish=lambda name, body: published.__setitem__(name, body),
-                    original=lambda *a: 'final-original', read=lambda _: b'tampered' if failure == 'reread' else published['MobileReleaseKit.pkg'],
+                    original=lambda parent, name, *a: dict(name=name, identity=(0,0,0,0,0,0,len(original) if name=='MobileReleaseKit-original.pkg' else len(final))), read=read,
                     package_finalization_input=lambda *a: audit, package_stager_io=independent_audit, package_post=lambda: None)
                 guard = SimpleNamespace(check=check, allocation=lambda *a: None)
                 with mock.patch.object(P, 'initialize_staging'), mock.patch.object(P, 'ResourceGuard', return_value=guard), \
+                        mock.patch.object(P.os, 'listdir', return_value=list(P.NAMES) + (['extra'] if failure == 'transport' else [])), \
                         mock.patch.object(P, 'original_expansion_bytes', return_value=33), \
                         mock.patch.object(P, 'original_scripts_data', side_effect=scripts), \
                         mock.patch.object(P, 'finish_staging') as finish:
                     if failure:
-                        with self.assertRaisesRegex(ValueError, 'known-output-readback-refusal' if failure == 'write' else 'prepared-hydrated-audit'):
+                        reason = ('known-output-readback-refusal' if failure == 'write' else
+                                  'prepared-transport-original-roster' if failure == 'transport' else 'prepared-hydrated-audit')
+                        with self.assertRaisesRegex(ValueError, reason):
                             P.hydrate_checkpoint(op, values, binding)
                         self.assertIsNotNone(finish.call_args.args[1])
                         self.assertNotIn(('audit', 'entered'), events)
