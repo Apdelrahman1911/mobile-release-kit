@@ -218,9 +218,10 @@ class PreparedPackageData(unittest.TestCase):
                     if refused:
                         raise OSError('actual original policy call refused')
                     return native(fd, command, value)
-                op = SimpleNamespace(prepared_staging=prepared, package_clock=lambda: None,
+                op = SimpleNamespace(prepared_staging=prepared, phase='package-install', package_clock=lambda: None,
                     stager=SimpleNamespace(MAX_BYTES=P.PACKAGE_LIMIT), recheck_directory=lambda _: None,
                     register=register, read=read, package_outputs=outputs)
+                op.prepared_file_post = lambda entry, **kw: H.Operation.prepared_file_post(op, entry, **kw)
                 try:
                     with mock.patch.object(fcntl, 'fcntl', side_effect=control):
                         if refused:
@@ -272,6 +273,54 @@ class PreparedPackageData(unittest.TestCase):
                 self.assertEqual(os.fstat(fd), path.stat())
             finally:
                 os.close(fd)
+
+    def test_prepared_bounded_post_rematches_all_bytes_and_original_namespace(self):
+        from desktop.tools import macos_android_helper_package as H
+        for failure in (None, 'bytes', 'short', 'extra', 'name'):
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / 'input.pkg'
+                body = b'original chunk\n' * 15000
+                path.write_bytes(body)
+                root = os.open(directory, os.O_RDONLY | os.O_DIRECTORY)
+                fd = os.open('input.pkg', os.O_RDONLY | os.O_NOFOLLOW, dir_fd=root)
+                entry = dict(fd=fd, parent=root, parent_entry={'fd': root}, name='input.pkg',
+                             identity=H.signature(os.fstat(fd)))
+                reads, clocks = [], []
+                op = SimpleNamespace(prepared_staging=True, phase='package-install',
+                    stager=SimpleNamespace(MAX_BYTES=P.PACKAGE_LIMIT),
+                    package_clock=lambda: clocks.append(True), recheck_directory=lambda _: None)
+                native = os.pread
+                def read(actual, size, offset):
+                    self.assertEqual(actual, fd)
+                    self.assertLessEqual(size, 65536)
+                    reads.append((size, offset))
+                    chunk = native(actual, size, offset)
+                    if offset == 65536:
+                        if failure == 'bytes': return bytes([chunk[0] ^ 1]) + chunk[1:]
+                        if failure == 'short': return chunk[:-1]
+                        if failure == 'name':
+                            path.rename(path.with_suffix('.retired'))
+                            path.write_bytes(body)
+                    if offset == len(body) and failure == 'extra': return b'!'
+                    return chunk
+                try:
+                    with mock.patch.object(H.os, 'pread', side_effect=read):
+                        if failure:
+                            reason = 'package-output-readback' if failure == 'bytes' else 'file-original-read-changed'
+                            with self.assertRaisesRegex(ValueError, reason):
+                                H.Operation.prepared_file_post(op, entry, body=body)
+                        else:
+                            self.assertEqual(H.Operation.prepared_file_post(op, entry, body=body), P.sha(body))
+                            self.assertEqual(H.Operation.prepared_file_post(op, entry), P.sha(body))
+                            self.assertEqual(reads[-1], (1, len(body)))
+                            self.assertEqual(native(fd, len(body), 0), body)
+                            self.assertGreater(len(clocks), len(reads))
+                    op.prepared_staging = False
+                    with self.assertRaisesRegex(ValueError, 'prepared-staging-owner'):
+                        H.Operation.prepared_file_post(op, entry)
+                finally:
+                    os.close(fd)
+                    os.close(root)
 
     def test_real_original_cpio_materialization_and_final_product_audit_both_targets(self):
         base=Path(os.environ.get('MRK_TEST_REPO',ROOT))

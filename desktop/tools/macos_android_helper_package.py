@@ -8730,10 +8730,41 @@ class Operation:
         os.fchmod(fd, 0o444)
         os.fsync(fd)
         entry["identity"] = signature(os.fstat(fd))
-        need(self.read(entry) == body, "package-output-readback")
+        if self.prepared_staging:
+            self.prepared_file_post(entry, body=body)
+        else:
+            need(self.read(entry) == body, "package-output-readback")
         self.package_outputs.append((entry, digest(body)))
         self.package_clock()
         return entry
+
+    def prepared_file_post(self, entry, *, body=None):
+        """Complete same-FD/name POST without a second whole-package allocation."""
+        need(self.prepared_staging and self.phase == "package-install", "prepared-staging-owner")
+        size = entry["identity"][6]
+        need(type(size) is int and 0 < size <= self.stager.MAX_BYTES, "package-output-bound")
+        if body is not None:
+            need(type(body) is bytes and len(body) == size, "package-output-readback")
+        def recheck():
+            self.package_clock()
+            self.recheck_directory(entry["parent_entry"])
+            need(signature(os.fstat(entry["fd"])) == entry["identity"]
+                 and signature(os.stat(entry["name"], dir_fd=entry["parent"], follow_symlinks=False))
+                     == entry["identity"], "file-original-read-changed")
+        recheck()
+        hashed = hashlib.sha256()
+        for offset in range(0, size, 65536):
+            recheck()
+            count = min(65536, size - offset)
+            chunk = os.pread(entry["fd"], count, offset)
+            need(len(chunk) == count, "file-original-read-changed")
+            if body is not None:
+                need(chunk == body[offset:offset + count], "package-output-readback")
+            hashed.update(chunk)
+            recheck()
+        need(os.pread(entry["fd"], 1, size) == b"", "file-original-read-changed")
+        recheck()
+        return hashed.hexdigest()
 
     def package_post(self):
         self.package_clock()
@@ -8743,7 +8774,8 @@ class Operation:
             observed_names = self.removal_names(root, len(names)) if self.phase in REMOVAL_OWNER_PHASES else os.listdir(root["fd"])
             need(set(observed_names) == names, "package-source-layout-roster")
         for entry, expected in self.package_outputs:
-            sha = (self.notary_stream(entry) if self.phase == "prepare-removal-observers" else
+            sha = (self.prepared_file_post(entry) if self.prepared_staging else
+                   self.notary_stream(entry) if self.phase == "prepare-removal-observers" else
                    self.removal_stream(entry, limit=self.stager.MAX_BYTES)[0][1] if self.phase == "package-removal-fixture" else
                    self.update_module.image_post(self, entry, expected) if self.phase == UPDATE_PHASE
                    and self.update is not None and entry is self.update.get("imageOriginal")
