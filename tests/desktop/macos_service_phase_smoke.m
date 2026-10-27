@@ -71,8 +71,9 @@ int main(void) {
             run(NO,error,(unsigned)(code-kSMErrorInternalFailure+1),outcome,1);
         }
         run(NO,[NSError errorWithDomain:SMAppServiceErrorDomain code:999 userInfo:nil],12,7,1);
+        run(NO,[NSError errorWithDomain:SMAppServiceErrorDomain code:1 userInfo:nil],14,7,1);
         run(NO,[NSError errorWithDomain:NSPOSIXErrorDomain code:1 userInfo:nil],13,7,1);
     }
-    puts("16 actual Objective-C phase cases passed; service and gate edges inert");
+    puts("17 actual Objective-C phase cases passed; service and gate edges inert");
     return 0;
 }

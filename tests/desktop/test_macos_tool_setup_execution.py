@@ -54,6 +54,45 @@ class PassiveOnly(unittest.TestCase):
 
 
 class ServiceReports(PassiveOnly):
+    def test_failed_registration_and_fresh_read_only_check_preserve_both_originals(self):
+        value = service(False)
+        value.update(checkCalls=1, checkAdmitted=True, checkSettled=True)
+        value['requestTerminal'] = {'validation': 'terminal', 'statusValid': True, 'phase': 'refused',
+            'reason': 'service-unavailable', 'prerequisite': 'service-unavailable',
+            'observation': {'state': 'not-found', 'outcome': 'error', 'mutationEntered': True,
+                'mutationReturned': True, 'mutationUncertain': False, 'nativeSettled': True},
+            'registrationReturn': {'accepted': False, 'error': 'service-error-code-1'}}
+        value['terminal'] = {'validation': 'terminal', 'statusValid': True, 'phase': 'refused',
+            'reason': 'approval-required', 'prerequisite': 'approval-required',
+            'observation': {'state': 'requires-approval', 'outcome': 'observed', 'mutationEntered': False,
+                'mutationReturned': False, 'mutationUncertain': False, 'nativeSettled': True}}
+        self.assertIs(T.service_report(value, OBS.need), value)
+        for change in ({'nativeSettled': False}, {'mutationReturned': False}, {'mutationUncertain': True}):
+            changed = copy.deepcopy(value)
+            changed['requestTerminal']['observation'].update(change)
+            with self.subTest(change=change), self.assertRaises(OBS.Refused):
+                T.service_report(changed, OBS.need)
+        changed = copy.deepcopy(value)
+        changed['requestTerminal']['registrationReturn']['accepted'] = True
+        with self.assertRaises(OBS.Refused):
+            T.service_report(changed, OBS.need)
+        for change in ({'mutationEntered': True, 'mutationReturned': True}, {'nativeSettled': False}):
+            changed = copy.deepcopy(value)
+            changed['terminal']['observation'].update(change)
+            with self.subTest(check=change), self.assertRaises(OBS.Refused):
+                T.service_report(changed, OBS.need)
+        changed = copy.deepcopy(value)
+        changed['terminal'].update(phase='complete', reason='none', prerequisite='ready')
+        changed['terminal']['observation']['state'] = 'enabled'
+        changed['finding'] = 'service-unavailable'
+        self.assertIs(T.service_report(changed, OBS.need), changed)
+        changed = copy.deepcopy(value)
+        changed.update(execution='ready', finding='ready')
+        changed['terminal'].update(phase='complete', reason='none', prerequisite='ready')
+        changed['terminal']['observation']['state'] = 'enabled'
+        with self.assertRaises(OBS.Refused):
+            T.service_report(changed, OBS.need)
+
     def test_original_registration_error_is_visible_without_claiming_readiness(self):
         value = service(False)
         value['finding'] = 'service-not-found'
@@ -423,7 +462,9 @@ class FixturePreparation(PassiveOnly):
                 INPUTS.source_root("a" * 40, "2", "1", home, A.need)
         # Real ordinary ancestry refusal, not a pretend successful Mac source.
         if Path("/tmp").is_dir() and Path("/tmp").stat().st_mode & 0o022:
-            with self.assertRaises(A.Refused):
+            # Darwin's /tmp is a symlink: O_NOFOLLOW refuses it at open,
+            # before the writable-ancestry policy can produce A.Refused.
+            with self.assertRaises((A.Refused, NotADirectoryError)):
                 A.chain(Path("/tmp"), retained=True)
         self.assertEqual(INPUTS.CASES, T.RUN_ORDER)
 

@@ -99,7 +99,7 @@ fn registration_return(raw:Report)->Option<(bool,&'static str)> {
     let labels=["none","internal-failure","invalid-signature","authorization-failure",
         "tool-not-valid","job-not-found","service-unavailable","job-plist-not-found",
         "job-must-be-enabled","invalid-plist","launch-denied-by-user","already-registered",
-        "other-service-error","other-error-domain"];
+        "other-service-error","other-error-domain","service-error-code-1"];
     if category>=labels.len() as u32 || (category!=0)!=(raw.reserved&4!=0) {return None;}
     Some((raw.reserved&2!=0,labels[category as usize]))
 }
@@ -792,14 +792,15 @@ mod tests {
         let original=Report{version:4,action:1,status:3,outcome:7,entered:1,returned:1,
             phase:4,service_state:2,called:1,reserved:5|(7<<8),..Report::default()};
         assert_eq!(registration_return(original),Some((false,"job-plist-not-found")));
+        assert_eq!(registration_return(Report{reserved:5|(14<<8),..original}),Some((false,"service-error-code-1")));
         assert_eq!(decode(original,Action::RequestRegistration,Phase::Mutate).is_some(),cfg!(feature="installed-observation"));
         for bad in [Report{version:2,..original},Report{returned:0,..original},
-            Report{reserved:5|(14<<8),..original},Report{reserved:1|(7<<8),..original},
+            Report{reserved:5|(15<<8),..original},Report{reserved:1|(7<<8),..original},
             Report{reserved:original.reserved|8,..original},Report{outcome:2,..original},
             Report{action:0,..original}] {
             assert!(decode(bad,Action::RequestRegistration,Phase::Mutate).is_none());
         }
-        for category in 0..=13 {
+        for category in 0..=14 {
             let outcome=match category{10=>9,11=>3,_=>7};
             let raw=Report{outcome,reserved:1|if category>0{4|(category<<8)}else{0},..original};
             assert!(registration_return(raw).is_some());

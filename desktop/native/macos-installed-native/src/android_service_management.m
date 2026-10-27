@@ -154,7 +154,7 @@ static uint32_t registration_return_data(BOOL accepted,NSError *error) {
         category=13; // other domain
         if ([[error domain] isEqualToString:SMAppServiceErrorDomain]) {
             const NSInteger code=[error code];
-            category=code>=kSMErrorInternalFailure && code<=kSMErrorAlreadyRegistered
+            category=code==1 ? 14 : code>=kSMErrorInternalFailure && code<=kSMErrorAlreadyRegistered
                 ? (uint32_t)(code-kSMErrorInternalFailure+1) : 12;
         }
     }

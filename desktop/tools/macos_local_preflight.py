@@ -56,7 +56,7 @@ def main():
             '-framework', 'Foundation', '-framework', 'ServiceManagement', '-framework', 'Security',
             'tests/desktop/macos_service_phase_smoke.m', '-o', str(service)])
         run('native-service-phases-' + profile, [str(service)],
-            expected_output=b'16 actual Objective-C phase cases passed; service and gate edges inert')
+            expected_output=b'17 actual Objective-C phase cases passed; service and gate edges inert')
     executable = output / 'macos-dialog-smoke'
     run('native-dialog-compile', ['/usr/bin/xcrun', 'clang', '-fno-objc-arc', '-fblocks',
         '-framework', 'AppKit', '-framework', 'ApplicationServices',

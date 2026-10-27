@@ -147,6 +147,16 @@ impl FailureSample {
         }
         value
     }
+    fn permits_fresh_check(self) -> bool {
+        matches!(self.validation, Validation::Terminal) && self.status_valid
+            && self.phase == wire::ServicePhase::Refused
+            && self.reason == wire::Reason::ServiceUnavailable
+            && self.prerequisite == wire::Prerequisite::ServiceUnavailable
+            && self.observation.is_some_and(|observed| observed.outcome == wire::ServiceOutcome::Error
+                && observed.mutation_entered && observed.mutation_returned
+                && !observed.mutation_uncertain && observed.native_settled
+                && observed.registration_return.is_some_and(|(accepted, _)| !accepted))
+    }
 }
 
 #[derive(Default)]
@@ -161,8 +171,32 @@ pub(super) struct Record {
     nonentry: bool,
     pub(super) failure: Option<FailureSample>,
     terminal: Option<FailureSample>,
+    request_terminal: Option<FailureSample>,
 }
 impl Record {
+    fn check_allowed(&self) -> bool {
+        self.request_called && self.request_settled && self.request.is_some() && !self.nonentry
+            && !self.check_called && self.check.is_none()
+            && (self.finding == Some(Finding::Ready)
+                || self.request_terminal.is_some_and(FailureSample::permits_fresh_check))
+    }
+    fn settle(&mut self, check: bool, sample: FailureSample, finding: Finding) -> Option<Step> {
+        if check {
+            if !self.check_called || self.check.is_none() || self.check_settled || !self.request_settled {return None;}
+            self.check_settled=true;
+        } else {
+            if !self.request_called || self.request.is_none() || self.request_settled || self.check_called {return None;}
+            self.request_settled=true;
+        }
+        // A separately admitted read-only Check can describe current state,
+        // but cannot turn the failed Request into a Ready witness.
+        self.finding=Some(if check && self.request_terminal.is_some() && finding==Finding::Ready {
+            Finding::Unavailable
+        } else {finding});
+        self.terminal=Some(sample);
+        if !check && sample.permits_fresh_check() {self.request_terminal=Some(sample);}
+        Some(if !check && self.check_allowed() {Step::Check}else{Step::Finish})
+    }
     pub(super) fn retained_bytes(&self) -> Option<usize> {
         self.request.iter().chain(self.check.iter()).try_fold(0usize, |n, value| n.checked_add(value.bytes()?))
     }
@@ -172,16 +206,16 @@ impl Record {
                 && self.request.is_none() && self.check.is_none() && self.finding.is_none() && !self.nonentry => {
                 self.request_called = true; true
             },
-            wire::ServiceAction::Check if self.request_called && self.request_settled
-                && self.request.is_some() && self.finding == Some(Finding::Ready) && !self.nonentry
-                && !self.check_called && self.check.is_none() => {self.check_called = true; true},
+            wire::ServiceAction::Check if self.check_allowed() => {self.check_called = true; true},
             _ => false,
         }
     }
     fn complete(&self) -> bool {
         if !self.request_called || self.finding.is_none()
             || self.request_settled != self.request.is_some() || self.check_settled != self.check.is_some()
-            || (self.check_called && !self.request_settled) || (self.check.is_some() && !self.check_called) {
+            || (self.check_called && !self.request_settled) || (self.check.is_some() && !self.check_called)
+            || self.request_terminal.is_some_and(|sample| !sample.permits_fresh_check()
+                || !self.request_settled || !self.check_called || self.finding == Some(Finding::Ready)) {
             return false;
         }
         if self.nonentry {
@@ -195,7 +229,7 @@ impl Record {
     }
     pub(super) fn ready(&self) -> bool {
         self.complete() && !self.nonentry && self.finding == Some(Finding::Ready)
-            && self.check_called && self.check_settled
+            && self.check_called && self.check_settled && self.request_terminal.is_none()
     }
     pub(super) fn report(&self, control: &Control, normal_quit: bool) -> Option<Value> {
         if !normal_quit || !control.completed() || !self.complete()
@@ -211,6 +245,9 @@ impl Record {
             "settingsOpened":false,"serviceUnregistered":false,"productionQualified":false});
         if let Some(sample)=self.terminal {
             value["terminal"]=sample.terminal_value();
+        }
+        if let Some(sample)=self.request_terminal {
+            value["requestTerminal"]=sample.terminal_value();
         }
         Some(value)
     }
@@ -284,24 +321,22 @@ pub(super) async fn tick(q: &Arc<Observation>, document: &DocumentBinding, step:
             if pending(status.phase) { None } else {
                 let finding = terminal(&status,binding.action)
                     .ok_or_else(|| status_failure(q, Validation::Terminal, &status))?;
-                record(q, |r| {
-                    if check {if r.check_settled{return Err(invalid());} r.check_settled=true;}
-                    else {if r.request_settled{return Err(invalid());} r.request_settled=true;}
-                    r.finding=Some(finding);
-                    r.terminal=Some(FailureSample::capture(Validation::Terminal,&status)); Ok(())
-                })?;
-                Some(super::Step::Prerequisite(if !check && finding==Finding::Ready {Step::Check}else{Step::Finish}))
+                let sample = FailureSample::capture(Validation::Terminal,&status);
+                let next = record(q, |r| r.settle(check,sample,finding).ok_or_else(invalid))?;
+                Some(super::Step::Prerequisite(next))
             }
         },
         Step::Check => {
             let prior = record(q, |r| {
-                if !r.request_settled || r.check_called || r.finding != Some(Finding::Ready) {return Err(invalid());}
+                if !r.check_allowed() {return Err(invalid());}
                 r.request.clone().ok_or_else(invalid)
             })?;
             let fresh = document.installed_tool_setup_saved(&prior.context.project_id).await?;
             if !q.timely() {return Err(invalid());}
             let before = document.android_tool_service_status()?;
-            if !prior.matches(&before) || pending(before.phase) {
+            let current = FailureSample::capture(Validation::Terminal,&before);
+            if !prior.matches(&before) || pending(before.phase)
+                || record(q, |r| Ok(r.request_terminal.is_some() && !current.permits_fresh_check()))? {
                 return Err(status_failure(q, Validation::BeforeCheck, &before));
             }
             let request = wire::ServiceRequest::check(&serde_json::to_vec(&json!({
@@ -455,4 +490,53 @@ pub(super) fn data_checks() -> bool {
                 "mutationReturned":true,"mutationUncertain":false,"nativeSettled":true},
             "registrationReturn":{"accepted":false,"error":"job-plist-not-found"}})
         && sample.value().get("registrationReturn").is_none()
+        && failed_request_check_data_checks(&status,&binding)
+}
+
+fn failed_request_check_data_checks(failed: &wire::ServiceStatus, binding: &Binding) -> bool {
+    let sample=FailureSample::capture(Validation::Terminal,failed);
+    if !sample.permits_fresh_check() {return false;}
+    for (entered,returned,uncertain,settled,accepted) in [
+        (false,false,false,true,false),(true,false,false,true,false),(true,true,true,true,false),
+        (true,true,false,false,false),(true,true,false,true,true),
+    ] {
+        let mut bad=*sample.observation.as_ref().unwrap();
+        bad.mutation_entered=entered;bad.mutation_returned=returned;
+        bad.mutation_uncertain=uncertain;bad.native_settled=settled;
+        bad.registration_return=Some((accepted,"service-error-code-1"));
+        if (FailureSample{observation:Some(bad),..sample}).permits_fresh_check() {return false;}
+    }
+    for phase in [wire::ServicePhase::Stopping,wire::ServicePhase::Unknown,wire::ServicePhase::Complete] {
+        if (FailureSample{phase,..sample}).permits_fresh_check() {return false;}
+    }
+    if (FailureSample{status_valid:false,..sample}).permits_fresh_check()
+        || (FailureSample{validation:Validation::WaitBinding,..sample}).permits_fresh_check() {return false;}
+    for enabled in [false,true] {
+        let mut record=Record{request_called:true,request:Some(binding.clone()),..Record::default()};
+        if record.settle(false,sample,Finding::Missing)!=Some(Step::Check)
+            || record.complete() || !record.claim(wire::ServiceAction::Check)
+            || record.claim(wire::ServiceAction::Check) || record.claim(wire::ServiceAction::RequestRegistration) {return false;}
+        let mut check=failed.clone();
+        let operation=check.operation.as_mut().unwrap();
+        operation.operation_id="d".repeat(32);operation.action=wire::ServiceAction::Check;
+        operation.setup_generation+=1;check.setup_generation+=1;
+        check.phase=if enabled{wire::ServicePhase::Complete}else{wire::ServicePhase::Refused};
+        check.reason=if enabled{wire::Reason::None}else{wire::Reason::ApprovalRequired};
+        check.prerequisite=if enabled{wire::Prerequisite::Ready}else{wire::Prerequisite::ApprovalRequired};
+        check.observation=Some(wire::ServiceObservation{state:if enabled{wire::ServiceState::Enabled}else{wire::ServiceState::RequiresApproval},
+            outcome:wire::ServiceOutcome::Observed,mutation_entered:false,mutation_returned:false,
+            mutation_uncertain:false,native_settled:true,registration_return:None});
+        let request=wire::ServiceRequest{setup_generation:failed.setup_generation,context:binding.context.clone(),action:wire::ServiceAction::Check};
+        let Some(next)=Binding::capture(&check,&request)else{return false;};
+        if next.id==binding.id || binding.matches(&check) {return false;}
+        record.check=Some(next);
+        let Some(finding)=terminal(&check,wire::ServiceAction::Check)else{return false;};
+        if record.settle(true,FailureSample::capture(Validation::Terminal,&check),finding)!=Some(Step::Finish)
+            || !record.complete() || record.ready() || record.request_terminal.unwrap().terminal_value()!=sample.terminal_value()
+            || record.finding!=Some(if enabled{Finding::Unavailable}else{Finding::Approval})
+            || record.settle(true,sample,Finding::Missing).is_some() {return false;}
+        record.finding=Some(Finding::Ready);
+        if record.complete() || record.ready() {return false;}
+    }
+    true
 }

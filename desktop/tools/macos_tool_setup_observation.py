@@ -57,7 +57,7 @@ def fixture_data(config, version, keep, ignore):
     return files, directories
 
 
-def service_terminal(value, report, need):
+def service_terminal(value, report, need, *, request=False):
     """Returned finite status, never a substitute for the existing Ready gates."""
     need(type(value) is dict and set(value) - {"registrationReturn"} == {
         "validation", "statusValid", "phase", "reason", "prerequisite", "observation"}
@@ -81,10 +81,15 @@ def service_terminal(value, report, need):
             and type(returned["accepted"]) is bool
             and returned["error"] in ("none", "internal-failure", "invalid-signature", "authorization-failure",
                 "tool-not-valid", "job-not-found", "service-unavailable", "job-plist-not-found", "job-must-be-enabled",
-                "invalid-plist", "launch-denied-by-user", "already-registered", "other-service-error", "other-error-domain")
+                "invalid-plist", "launch-denied-by-user", "already-registered", "other-service-error", "other-error-domain",
+                "service-error-code-1")
             and observed["mutationEntered"] and observed["mutationReturned"]
-            and not report["checkSettled"], "tool-service-registration-return")
-    if report["execution"] == "ready":
+            and (request or not report["checkSettled"]), "tool-service-registration-return")
+    if not request and report["checkSettled"]:
+        need(observed["outcome"] in ("observed", "not-entered", "stopped", "refused", "error")
+            and not observed["mutationEntered"]
+            and not observed["mutationReturned"], "tool-service-read-only-check")
+    if not request and report["execution"] == "ready":
         need(value["phase"] == "complete" and value["reason"] == "none" and value["prerequisite"] == "ready"
             and observed["state"] == "enabled" and observed["outcome"] == "observed"
             and not observed["mutationEntered"] and not observed["mutationReturned"], "tool-service-terminal-ready")
@@ -101,7 +106,7 @@ def service_report(value, need):
              "sameOriginalBindings", "allOriginalsSettled", "projectSentinelPreserved", "sourceInputsRead",
              "toolAcquisitionEntered", "settingsOpened", "serviceUnregistered", "productionQualified")
     keys = frozenset(("mechanism", "execution", "finding", "requestCalls", "checkCalls", "normalQuitOriginal", *flags))
-    need(type(value) is dict and set(value) - {"terminal"} == keys
+    need(type(value) is dict and set(value) - {"terminal", "requestTerminal"} == keys
          and value["mechanism"] == "same-original-tool-service-prerequisite-v1"
          and all(type(value[k]) is bool for k in flags), "tool-service-report")
     need(type(value["requestCalls"]) is int and value["requestCalls"] == 1
@@ -129,6 +134,17 @@ def service_report(value, need):
         need(value["execution"] == "not-executed-prerequisite" and value["finding"] in (
             "approval-required", "approval-denied", "service-not-found", "service-unavailable"),
             "tool-service-unexecuted")
+    if "requestTerminal" in value:
+        original = value["requestTerminal"]
+        service_terminal(original, value, need, request=True)
+        need(value["requestSettled"] and value["checkCalls"] == 1
+            and value["execution"] == "not-executed-prerequisite"
+            and original["phase"] == "refused" and original["reason"] == "service-unavailable"
+            and original["prerequisite"] == "service-unavailable"
+            and original["observation"]["outcome"] == "error"
+            and "registrationReturn" in original and original["registrationReturn"]["accepted"] is False,
+            "tool-service-failed-request")
+        need("terminal" in value, "tool-service-fresh-check-terminal")
     if "terminal" in value:
         service_terminal(value["terminal"], value, need)
     return value

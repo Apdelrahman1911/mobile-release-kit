@@ -1,6 +1,84 @@
 # Mac continuation results — 2026-10-24
 
-## Current continuation — 2026-10-27
+## Current continuation — 2026-10-27 fresh service Check
+
+The source-bound correction now preserves the original failed Request and admits
+exactly one new read-only Check only after its entered/returned mutation is known
+settled, accepted=false, outcome Error, and its native owner has retired. Each
+Check gets a new operation/generation/context binding. Unknown or unsettled
+originals cannot reach it. A failed Request cannot become Ready even if that
+fresh Check reports Enabled; RequiresApproval remains an unmet prerequisite.
+The report includes both requestTerminal and the independently returned terminal.
+Native v4 additionally exposes only the fixed SMAppService-domain code1 category;
+ordinary v2 outcomes, the48-byte ABI and native first-failure/cleanup gates stay
+unchanged. This diagnoses actual live state; it does not approve a service.
+
+Local validation:56 parser/checkpoint tests pass;13 native Rust service tests
+pass in each ordinary/observed profile;17 actual Objective-C phase cases pass
+in each profile using inert service/gate edges. The full observed executable
+compiles and its actual DATA contracts pass with zero stderr. The exact early
+CI DATA check also passes against its recorded compiler-artifact digest.
+Ten local preflight steps pass, including actual disposable DMG transport.
+Darwin's no-follow /tmp refusal is now correctly recognized by the fixture test;
+product ancestry checks were not relaxed. Initial import-path/OS-exception/test
+invocations failed and remain recorded. A Mac restart interrupted the first
+observer build and transport invocation; those incomplete attempts are not passes.
+The repeated build/preflight passed. Actionlint syntax/action checks pass with
+ShellCheck disabled; existing shell warnings remain unaddressed. Two earlier
+lint invocations named nonexistent workflow files and failed.
+
+Hashing all7197 files/173406566 bytes from the saved source769 runtime copy
+with the actual pinned debug SHA library took1.267350 seconds. This is only
+copied-byte/hash-cost evidence, not protected installed/native admission, and
+it does not establish the hosted Git timeout's phase. Preserve its10-second
+original budget and integrity checks until the actual blocking phase is proven.
+
+The changed observer/native source needs both fresh signed candidate builds.
+Old source660 packages cannot qualify it. No independent group has passed.
+Push this correction only to the two authorized branches, monitor the new
+candidate and run git-local/service-cli first. Only after those actually pass,
+dispatch the other nine using that same source/run and saved signed packages.
+Do not duplicate active jobs, retry BTM unchanged, modify main or publish.
+The ACTIVE follow-up remains necessary; preserve all earlier failed evidence.
+
+## Previous continuation — 2026-10-27
+
+Service retry40415640636 has finished with failure; monitor33519 has completed.
+Installer/readback/detach and actual Open Project passed. The original service
+register again returned false/other-service-error and reported its pre-mutation
+NotFound state. All originals settled; Check/CLI were not entered. The new BTM
+diagnostic did not return: it reported call-unknown after its20-second budget.
+A real local call through the actual owned-process owner reproduced that timeout
+with dispatched/contained/cleanupComplete true and finality DATA[1,1,0,0,52].
+A later direct inherited-environment control also timed out. Different sanitized
+environments did not resolve it. The earlier local BTM DATA read remains a real
+passing read; it does not establish current service state or hosted success.
+Do not reset BTM, retry the unchanged service group, or call the diagnostic a fix.
+
+The saved Tool26 interpreter/core were copied to a private evidence directory,
+all615 copied file hashes and its one native signature verified. Its actual
+read-only capabilities response passed in1.410594 seconds with zero stderr,
+14 methods and20 actions. No app, service, installed runtime, credentials or
+working installation was entered. This isolates the Tool26 copied-core response;
+it does not prove the installed Mac27 native query or its finality.
+
+Next investigate the original passive admission/inspection deadline from the Git
+bootstrap failure. The source walks/hashes the full runtime for each passive
+query, but no exact timed-out native phase is yet proven. Preserve all audits.
+For service, a finite original error-code1 diagnostic and a separately admitted
+fresh Check after a KNOWN settled failed Request could distinguish live pending
+approval without bypassing that Request's failure/cleanup cut. Preserve its
+failed returned BOOL/error and never promote it to Ready. Any application,
+observer or native change needs a fresh signed candidate. No native/application
+change was made in this turn. Both builds passed; no independent group passed.
+No run/monitor is active. The ACTIVE follow-up continues this unfinished task.
+
+### Previous targeted service dispatch
+
+Service-only retry [40415640636](https://github.com/Apdelrahman1911/mobile-release-kit/actions/runs/40415640636)
+is dispatched on harness `b2d65b47877e6ad922cfe57731c5eefe61a708bf` against the same
+saved source660/run40394195932 package. Complete ancestor/harness admission passed.
+Monitor33519 tracks it. No candidate rebuild or duplicate group was started.
 
 The Git-only retry40412633220 finished with failure before Open Project or any
 Git operation. Signing, Installer, readback and detach passed. Bootstrap then
