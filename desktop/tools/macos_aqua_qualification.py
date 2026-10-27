@@ -5759,9 +5759,11 @@ class Fixtures:
         # these held directories. Its instance is DATA, never old finality proof.
         raw_record = stager.decode(record_body)
         need(type(raw_record) is dict, "normal-account-runtime-record")
+        # Persisted UUID DATA must come from these same held originals. A stat
+        # projection alone has no UUID and cannot match a durable record.
         stager.installation_record_data(record_body, inventory_body, application_source, manifest_sha,
-            stager.installation_directory_data(os.fstat(root_fd)),
-            stager.installation_directory_data(os.fstat(release_fd)), raw_record.get("instance"), selection=release)
+            stager.installation_directory_data(os.fstat(root_fd), fd=root_fd),
+            stager.installation_directory_data(os.fstat(release_fd), fd=release_fd), raw_record.get("instance"), selection=release)
         inventory = stager.observation_inventory_bytes(inventory_body, inventory_sha, manifest_sha, selection=release)
         manifest, entries = stager.manifest_files(manifest_body, manifest_sha, current=True, target=self.binding.target)
         need(inventory["runtime/manifest.json"]["size"] == len(manifest_body), "normal-account-runtime-manifest-size")

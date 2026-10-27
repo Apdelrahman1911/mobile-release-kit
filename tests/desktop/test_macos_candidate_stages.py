@@ -4,6 +4,7 @@ import importlib.util
 import json
 import os
 import re
+import stat
 import gzip
 import struct
 import zlib
@@ -157,6 +158,70 @@ def native_fixture(scope='git-native'):
 
 
 class CandidateCheckpointTests(unittest.TestCase):
+    def _durable_runtime_record_boundary(self, fault=None):
+        # Inert protected-record DATA plus the real runtime admission method.
+        # Stop after its record/inventory join, before runtime/app execution.
+        T, stage, _ = real_modules()
+        selection = stage.selected_build(None)
+        record, inventory, root, release = T.installation_record_fixture()
+        record['installRoot'] = dict(root, volumeUuid='1' * 32)
+        record['releaseDirectory'] = dict(release, volumeUuid='1' * 32)
+        live = {11: dict(root, device=16777232), 13: dict(release, device=16777232)}
+        if fault in ('inode', 'uid', 'gid', 'mode', 'flags'):
+            live[13][fault] = {'inode': release['inode'] + 1, 'uid': 501, 'gid': 20,
+                              'mode': stat.S_IFDIR | 0o777, 'flags': 1}[fault]
+        if fault == 'source': record['sourceCommit'] = 'b' * 40
+        if fault == 'inventory': record['inventory']['sha256'] = 'e' * 64
+        installed = stage.INSTALL_ROOT / 'versions' / selection.release / 'runtime'
+        paths = (stage.INSTALL_ROOT, stage.INSTALL_ROOT / 'versions', installed.parent,
+                 installed, installed / 'python', installed / 'python/bin')
+        parents = {str(path): fd for path, fd in zip(paths, range(11, 17))}
+        fixtures = A.M.Fixtures(A.BINDING, A.UID, A.GID, A.M.GIT_CLI.SCOPES[0])
+        def held(fd):
+            value = live.get(fd, dict(root, inode=100 + fd))
+            return SimpleNamespace(st_dev=value['device'], st_ino=value['inode'], st_mode=value['mode'],
+                st_uid=value['uid'], st_gid=value['gid'], st_flags=value['flags'], st_nlink=1,
+                st_size=4096, st_mtime_ns=17, st_ctime_ns=18)
+        def read(parent, name, *_args, **_kwargs):
+            body, hashed = {stage.INSTALLATION_INVENTORY_NAME: (inventory, stage.digest(inventory)),
+                stage.INSTALLATION_RECORD_NAME: (stage.canonical(record), stage.digest(stage.canonical(record))),
+                'manifest.json': (b'x', 'c' * 64)}[name]
+            fixtures.recovery_runtime_originals.append((parent, name, 21, ()))
+            return (), hashed, body
+        def uuid(fd):
+            if fault == 'uuid-query': raise stage.Refused('volume-uuid-query')
+            return '2' * 32 if fault == 'volume' and fd == 13 else '1' * 32
+        class RecordJoined(Exception): pass
+        original_inventory = stage.observation_inventory_bytes
+        inventory_calls = []
+        def check_inventory(*args, **kwargs):
+            result = original_inventory(*args, **kwargs)
+            inventory_calls.append(result)
+            if len(inventory_calls) == 2: raise RecordJoined()
+            return result
+        with mock.patch.object(A.M, '_gate_load_stager', return_value=(stage, selection)), \
+             mock.patch.object(fixtures, '_recovery_runtime_directories', return_value=(installed, parents)), \
+             mock.patch.object(fixtures, '_normal_runtime_post'), \
+             mock.patch.object(fixtures, '_recovery_read', side_effect=read), \
+             mock.patch.object(stage.os, 'fstat', side_effect=held), \
+             mock.patch.object(stage, 'observed_volume_uuid', side_effect=uuid), \
+             mock.patch.object(stage, 'observation_inventory_bytes', side_effect=check_inventory):
+            expected = RecordJoined if fault is None else stage.Refused
+            with self.assertRaises(expected):
+                fixtures.admit_normal_account_runtime(Path('/Users/runner/work/mobile-release-kit/mobile-release-kit'),
+                    Path('/Users/runner/work/_temp/mrk-macos-installed.abcdefgh'), application_source='a' * 40)
+        self.assertEqual(len(inventory_calls), 2 if fault is None else 0)
+        self.assertIsNone(fixtures.recovery_runtime)
+        self.assertFalse(fixtures.inflight)
+
+    def test_runtime_admission_joins_durable_record_to_same_held_volume_after_device_renumber(self):
+        self._durable_runtime_record_boundary()
+
+    def test_runtime_admission_still_refuses_changed_volume_object_policy_source_inventory_or_query(self):
+        for fault in ('volume', 'inode', 'uid', 'gid', 'mode', 'flags', 'source', 'inventory', 'uuid-query'):
+            with self.subTest(fault=fault):
+                self._durable_runtime_record_boundary(fault)
+
     def test_dispatch_originals_distinguish_same_source_from_changed_harness(self):
         _, stage, helper = real_modules()
         for scope in P.NATIVE_HOSTS:
