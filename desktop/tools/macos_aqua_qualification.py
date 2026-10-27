@@ -4144,9 +4144,11 @@ def _vault_failure_context(value, source, step, reason, case):
 
 
 def _git_read_failure_context(value, source, step, reason, case):
-    """Already-observed, finite ReadWait failure facts; never an operation result."""
+    """Already-observed, finite original failure facts; never an operation result."""
     bindings = (
         (GIT_CLI.CASES, "GitCli(ReadWait)", "git-cli-original-contract"),
+        (GIT_CLI.CASES, "GitCli(Prepared)", "git-cli-original-contract"),
+        (GIT_CLI.CASES, "GitCli(Terminal)", "git-cli-original-contract"),
         (UPSTREAM.CASES, "GitUpstream(ReadWait)", "git-upstream-original-contract"),
         (FETCH.CASES, "GitFetch(ReadWait)", "git-fetch-original-contract"),
         (PUSH.ALL_CASES, "GitPush(ReadWait)", "git-push-original-contract"),
@@ -4154,12 +4156,14 @@ def _git_read_failure_context(value, source, step, reason, case):
     need(source == "record" and type(case) is str
          and any(case in cases and step == selected_step and reason == selected_reason
                  for cases, selected_step, selected_reason in bindings)
-         and type(value) is dict and set(value) - {"provenance"} == {"check", "phase", "outcome", "reason", "resultValid"},
+         and type(value) is dict and set(value) - {"provenance", "cliOriginalReturn"} == {"check", "phase", "outcome", "reason", "resultValid"},
          "failure-context")
+    cli_return = step in ("GitCli(Prepared)", "GitCli(Terminal)")
     need(type(value["check"]) is str and value["check"] in (
         "missing-operation", "missing-fixture", "missing-original", "original-mismatch",
         "terminal-phase", "terminal-outcome", "terminal-reason", "result-schema",
-        "fixture-comparison", "reference-revision"), "failure-context")
+        "fixture-comparison", "reference-revision", "cli-original-return")
+         and (value["check"] == "cli-original-return") == cli_return, "failure-context")
     for key, vocabulary in (
             ("phase", "starting running stopping settled cleanup-unknown"),
             ("outcome", "ok refused cancelled timed-out cleanup-unknown"),
@@ -4169,6 +4173,25 @@ def _git_read_failure_context(value, source, step, reason, case):
                        "already-used operation-in-progress unrecognized")):
         need(value[key] is None or type(value[key]) is str and value[key] in vocabulary.split(), "failure-context")
     need(value["resultValid"] is None or type(value["resultValid"]) is bool, "failure-context")
+    if cli_return:
+        # The source captures no read Projection at this rejected Entry return.
+        # Do not fill its absent fields from later status or history.
+        need(all(value[key] is None for key in ("phase", "outcome", "reason", "resultValid"))
+             and "provenance" not in value, "failure-context")
+    if "cliOriginalReturn" in value:
+        facts = value["cliOriginalReturn"]
+        flags = {"claimed", "prepareJoined", "applyJoined", "historyFailed", "historyClaimed",
+                 "historyAcknowledged", "stopped", "reviewPresent", "revisionMatched"}
+        need(cli_return and type(facts) is dict and set(facts) == flags | {"state", "reason"}
+             and all(type(facts[key]) is bool for key in flags)
+             and type(facts["state"]) is str and facts["state"] in (
+                 "queued", "preparing", "prepared", "start-queued", "applying", "stopping",
+                 "refused", "cancelled", "expired", "finished", "unknown")
+             and (facts["reason"] is None or type(facts["reason"]) is str and facts["reason"] in (
+                 "user-cancelled", "permission-revoked", "expired", "context-changed", "document-lost",
+                 "shutdown", "busy", "unavailable", "native-refused", "recovery-required", "cleanup-unknown")),
+             "failure-context")
+        # Inconsistent/partial scalars are the diagnostic, not finality proof.
     if "provenance" in value:
         provenance = value["provenance"]
         need(value["check"] not in ("missing-operation", "missing-fixture", "missing-original", "original-mismatch")

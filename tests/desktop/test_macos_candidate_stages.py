@@ -158,6 +158,63 @@ def native_fixture(scope='git-native'):
 
 
 class CandidateCheckpointTests(unittest.TestCase):
+    @staticmethod
+    def _cli_return_failure():
+        detail = A.GitReadFailureDataTests.detail()
+        detail['gitReadFailure'] = dict(check='cli-original-return', phase=None, outcome=None,
+            reason=None, resultValid=None, cliOriginalReturn=dict(state='unknown', reason='cleanup-unknown',
+                claimed=False, prepareJoined=True, applyJoined=False, historyFailed=True,
+                historyClaimed=False, historyAcknowledged=False, stopped=False,
+                reviewPresent=False, revisionMatched=True))
+        return detail
+
+    def test_rejected_cli_return_facts_survive_original_failure_buffer_without_granting_finality(self):
+        for step in ('GitCli(Prepared)', 'GitCli(Terminal)'):
+            for case in A.M.GIT_CLI.CASES:
+                detail = self._cli_return_failure()
+                row = A.project_selection_row(detail, 'git-cli-original-contract', step)
+                self.assertEqual(A.M.failure_context(b'', row, case), detail)
+                with self.assertRaises(A.M.Refused):
+                    A.M.parse_result(b'', row, A.BINDING, case)
+                fixtures = A.InertFixtures()
+                fixtures.case, fixtures.stage, fixtures.inflight = case, 'invocation', True
+                fixtures.inner_failure_context = A.M.failure_context(b'', row, case)
+                fixtures.inner_diagnostic_source = 'original-exception-buffer'
+                report = A.M.diagnostic(A.M.Refused('original-deadline'), None, fixtures)
+                self.assertEqual(report['innerFailureContext'], detail)
+                self.assertEqual((report['originalCallReturned'], report['appReturncode'],
+                    report['invocationFinality'], report['innerDiagnosticCompleteness']),
+                    (False, None, 'unknown', 'unknown'))
+                omitted = copy.deepcopy(detail)
+                del omitted['gitReadFailure']['cliOriginalReturn']
+                self.assertEqual(A.M.failure_context(b'', A.project_selection_row(
+                    omitted, 'git-cli-original-contract', step), case), omitted)
+
+    def test_rejected_cli_return_parser_keeps_closed_scalars_and_exact_original_scope(self):
+        detail = self._cli_return_failure()
+        def refused(value, step='GitCli(Prepared)', case=A.M.GIT_CLI.INDEX, reason='git-cli-original-contract'):
+            self.assertIsNone(A.M.failure_context(b'', A.project_selection_row(value, reason, step), case))
+        facts = detail['gitReadFailure']['cliOriginalReturn']
+        for field in facts:
+            missing = copy.deepcopy(detail); del missing['gitReadFailure']['cliOriginalReturn'][field]
+            refused(missing)
+            wrong = copy.deepcopy(detail)
+            wrong['gitReadFailure']['cliOriginalReturn'][field] = 'CANARY_PRIVATE' if field in ('state', 'reason') else 1
+            refused(wrong)
+        for field, value in (('extra', True), ('operationId', 'CANARY_PRIVATE'), ('reason', 0)):
+            wrong = copy.deepcopy(detail); wrong['gitReadFailure']['cliOriginalReturn'][field] = value
+            refused(wrong)
+        for field, value in (('phase', 'settled'), ('outcome', 'ok'), ('reason', 'unknown'),
+                             ('resultValid', True), ('provenance', {'origin': 'child-terminal'}),
+                             ('check', 'terminal-outcome')):
+            wrong = copy.deepcopy(detail); wrong['gitReadFailure'][field] = value; refused(wrong)
+        for step in ('GitCli(ReadWait)', 'GitCli(Allow)', 'GitFetch(ReadWait)'):
+            refused(detail, step=step)
+        for case in (None, A.M.FETCH.CASES[0], 'first-save'):
+            refused(detail, case=case)
+        refused(detail, reason='observer-deadline')
+        wrong = copy.deepcopy(detail); wrong['snapshotSource'] = 'prearm-open-progress'; refused(wrong)
+
     def _durable_runtime_record_boundary(self, fault=None):
         # Inert protected-record DATA plus the real runtime admission method.
         # Stop after its record/inventory join, before runtime/app execution.
