@@ -35,6 +35,7 @@ WORKFLOW = ".github/workflows/desktop-macos-cpython-source-build.yml"
 CANDIDATE_REFERENCE = "refs/heads/verify/desktop-macos-candidate"
 CANDIDATE_WORKFLOW = ".github/workflows/desktop-macos-installed.yml"
 CANDIDATE_SOURCE_WORKFLOW = ".github/workflows/desktop-macos-candidate-python-source.yml"
+CANDIDATE_SIGNING_WORKFLOW = ".github/workflows/desktop-macos-candidate-python-sign.yml"
 ARM_TARGET = "aarch64-apple-darwin"
 INTEL_TARGET = "x86_64-apple-darwin"
 _TARGET_PROFILES = {
@@ -1532,11 +1533,13 @@ def supplier_tar(root, output, files, *, deadline):
             "files": len(files), "directories": len(directories), "modePreservation": True}
 
 
-def source_snapshot(root, target=ARM_TARGET, *, workflow=None):
+def source_snapshot(root, target=ARM_TARGET, *, workflow=None, signing=False):
     profile = target_profile(target)
     workflow = profile["workflow"] if workflow is None else workflow
     need(workflow == profile["workflow"] or (target == ARM_TARGET and workflow == CANDIDATE_WORKFLOW),
          "producer-source-workflow")
+    need(type(signing) is bool and (not signing or (target == ARM_TARGET and workflow == CANDIDATE_WORKFLOW)),
+         "producer-source-signing-workflow")
     fixed = {workflow, "desktop/tools/macos_cpython_source_build.py", "desktop/tools/macos_cpython_source_probe.py",
              "desktop/tools/macos_cpython_orchestrator.py",
              "desktop/tools/macos_cpython_source_setup.local", "desktop/tools/macos_cpython_source_recipe.py",
@@ -1545,6 +1548,8 @@ def source_snapshot(root, target=ARM_TARGET, *, workflow=None):
     fixed.update("desktop/cpython-source-inputs/" + name + "-source-inventory.json" for name in ("cpython", "libffi", "openssl", "zlib"))
     if workflow == CANDIDATE_WORKFLOW:
         fixed.add(CANDIDATE_SOURCE_WORKFLOW)
+        if signing:
+            fixed.add(CANDIDATE_SIGNING_WORKFLOW)
     fixed.update((directory / name).relative_to(root).as_posix()
                  for directory, _, names in walk_tree(root / "src/mobile_release") for name in names if name.endswith(".py"))
     fixed.update("desktop/src-tauri/tests/fixtures/github_tls/" + name for name in (

@@ -156,7 +156,7 @@ def signed_fixture_data(target="aarch64-apple-darwin"):
         "originalInventorySha256": receipt["inventorySha256"], "originalPython": row(files[TOOL.SIGNED_PYTHON_PATH]),
         "signedPython": row(signed),
         "signer": {"sourceCommit": "a" * 40,
-            "workflow": "Apdelrahman1911/mobile-release-kit/.github/workflows/desktop-macos-python-runtime-signing.yml@refs/heads/verify/desktop-macos-python-runtime-signing-shipping",
+            "workflow": TOOL.signed_python_workflow(target),
             "runId": "123", "runAttempt": "1", "identifier": "dev.mobile-release-kit.desktop.python",
             "teamIdentifier": "TEST000001", "leafCertificateSha1": "1" * 40,
             "producerProfileSha256": TOOL.digest(producer), "serviceProfileSha256": TOOL.digest(service),

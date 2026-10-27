@@ -6946,16 +6946,25 @@ sys.exit(status)
         pins = dict(module.PYTHON_SUPPLIERS[target], receiptSha256=module.digest(receipt), tarSha256=module.digest(archive))
         environment = {"GITHUB_SHA": "a" * 40, "GITHUB_WORKFLOW_SHA": "a" * 40, "GITHUB_RUN_ID": "123", "GITHUB_RUN_ATTEMPT": "1",
             "GITHUB_WORKFLOW_REF": "Apdelrahman1911/mobile-release-kit/.github/workflows/desktop-macos-python-runtime-signing.yml@refs/heads/verify/desktop-macos-python-runtime-signing-" + phase[7:]}
+        candidate_signing = target == TOOL.ARM_TARGET and phase == "python-shipping"
+        if candidate_signing:
+            environment.update(GITHUB_WORKFLOW_REF=TOOL.signed_python_workflow(target),
+                GITHUB_REF=module.CANDIDATE_REF, GITHUB_EVENT_NAME="workflow_dispatch",
+                GITHUB_JOB="signed-python", MRK_MACOS_PYTHON_SIGNING_SCOPE="candidate-only")
         clock, observations, snapshots = [10_000_000_000], [], []
         state = SimpleNamespace(known=True)
-        def snapshot(path, triple):
+        def snapshot(path, triple, **selection):
             self.assertEqual((path, triple), (checkout, target))
+            self.assertEqual(selection, {"workflow": ".github/workflows/desktop-macos-installed.yml", "signing": True}
+                             if candidate_signing else {})
             snapshots.append(True)
             if failure == "source-close" or failure == "source-post-close" and len(snapshots) == 2:
                 state.known = False
             body = (checkout / "desktop/tools/macos_cpython_source_probe.py").read_bytes()
             return {"desktop/tools/macos_cpython_source_probe.py": {"size": len(body), "sha256": module.digest(body)}}
-        builder = SimpleNamespace(DATA=state, source_snapshot=snapshot, BOOTSTRAP=["inert_%02d" % n for n in range(61)],
+        builder = SimpleNamespace(DATA=state, source_snapshot=snapshot,
+                                  CANDIDATE_WORKFLOW=".github/workflows/desktop-macos-installed.yml",
+                                  BOOTSTRAP=["inert_%02d" % n for n in range(61)],
                                   INTRINSIC=[], OPTIONAL=[], probe_result=parsed.probe_result)
         # Native host behavior is a DATA double, never a fake Mac qualification.
         probe = SimpleNamespace(native_host_data=lambda triple, **host: triple == target and host == {
@@ -8119,7 +8128,7 @@ sys.exit(status)
             self.assertEqual([row[0][1] for row in observations], ["fetch", "build"])
             self.assertFalse((work / module.RESIDENT_IMAGE).exists())
 
-    def test_python_copy_and_producer_paths_retire_their_owned_targets(self):
+    def test_python_copy_paths_retire_their_owned_targets(self):
         module = ANDROID_HELPER
         # Same actual filesystem copy/POST/retirement path, with only original
         # native return values doubled. No signature/kernel behavior is claimed.
@@ -8164,6 +8173,8 @@ sys.exit(status)
                         operation.python_call("python-modules", ["never", "executed"])
 
 
+    def test_producer_paths_retire_their_owned_targets(self):
+        module = ANDROID_HELPER
         _transport, matcher, _parser = self.python_data_functions()
 
         # The producer receives -T/CDHash only after its same compiler-derived

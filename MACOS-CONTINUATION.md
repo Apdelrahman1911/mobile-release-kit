@@ -1,5 +1,57 @@
 # Continue Mobile Release Kit on the owner's Mac
 
+## Current continuation — 2026-10-27 verified Python supplier / independent signing
+
+The source-only recovery is committed/pushed as c6551aa07d0673436aa9587b3a039889d22449c3,
+tree b11efe512321b719c587d9e2f95395b3304f473f. Run40473858216/attempt1,
+job122087185389, completed with actual success; monitor17472 completed/exit0.
+Every producer gate passed and every app/install/test job was skipped. The three
+artifact ZIPs were service-digest/size verified. Supplier12719943283 expires
+2027-01-25. Receipt e6b23316078020c513ab1b05b3b55e4f87b8d15908a8dee022ad5ee03b8f763e
+and tar ead75b364118139561a34da6aa48e3c54791e152154ab32c46196b0223962359
+are the actual new ARM nominations; helper, stager and current workflow agree.
+All613 payload files were checked with the original tar inverse;408 SOURCE files
+match the exact commit. Seven original/relocated probe results and all seven native
+receipt evidence references were checked. All30 original commands returned zero;
+handlers, scratch, FD lifetime and orchestration retirement are KNOWN. Actual host
+was26.6.2 with SDK27.0, deployment26.0. This is a source supplier, not signed or
+installed application qualification.
+
+The local signing recovery is a separate reusable workflow through the registered
+installed dispatcher, operation candidate-python-sign, ARM candidate branch only.
+It uses the configured macos-developer-id environment, unchanged original signing
+command/credential scope and six signature/native probes. Native admission binds
+the actual caller/job/source and the finite candidate-only scope. Installer/notary,
+prepared-resume, application/native and companion scopes remain refused. Both
+caller and signing YAML join SOURCE PRE/POST. The signed receipt accepts the exact
+current ARM caller identity and preserves Intel's existing supplier/route. All
+other app/build/install/test jobs are closed for this operation. Signed capsule
+retention is90 days, after original zero exit and clean source POST.
+
+Local checks: nine new signing DATA checks pass on full Python3.14.6 and3.11.16
+under umask077; eight source checks and actionlint/diff checks pass. The existing
+four ARM/Intel engineering/configured Python copy/POST/retirement cases pass with
+inert native/credential ports on canonical private TMPDIR. Their old combined
+method then failed in its unrelated producer fixture at source-plist attributes;
+that method is now split, preserving every producer assertion. The producer part
+remains unqualified. The full fresh-consumer7 suite retains one old mock-call
+failure and ten missing history/packaging fixture errors on canonical TMPDIR;
+all counts/cause reproduce with frozen c655 test/stager code. Its first default
+TMPDIR attempt had ancestry errors; the nine signing tests' first parser call used
+a missing fixture helper and was corrected. The older parent-workflow regression
+fails the same two-slot SOURCE assertion with frozen2385 workflow. None of these
+failed attempts is a pass; no product ancestry, attribute or history gate changed.
+
+Commit this independent signing recovery with[skip ci] and atomically push only
+the two authorized branches. Check existing runs, dispatch only candidate-python-sign
+and monitor to actual completion. After success, verify exact source/run/attempt,
+capsule transport, receipt, public signer identity, native results and finality.
+Then compose and pin the actual signed runtime before both fresh candidate builds.
+The old Python signed capsule remains unavailable and cannot qualify new bytes.
+All11 installed groups and both new candidates remain incomplete. Preserve all
+prior failures, working installation, credentials and original checkout; never
+change main or publish. Goal and heartbeat remain ACTIVE.
+
 ## Current continuation — 2026-10-27 Python dependency recovery
 
 Candidate40468939684 is terminal with failure; monitor74541 has completed.

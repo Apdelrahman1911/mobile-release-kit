@@ -1111,8 +1111,18 @@ SIGNED_RUNTIME_BINDING = "macos-installed-inputs/python-signed-runtime-binding.j
 SIGNED_RUNTIME_BINDING_LIMIT = 4096
 
 
+def signed_python_workflow(target):
+    """The exact signing route of each currently pinned original supplier."""
+    target = mac_target(target)
+    if target == ARM_TARGET:
+        return ("Apdelrahman1911/mobile-release-kit/.github/workflows/desktop-macos-installed.yml"
+                "@refs/heads/verify/desktop-macos-candidate")
+    return ("Apdelrahman1911/mobile-release-kit/.github/workflows/desktop-macos-python-runtime-signing.yml"
+            "@refs/heads/verify/desktop-macos-python-runtime-signing-shipping")
+
+
 SIGNED_ORIGINAL_SUPPLIERS = {
-    ARM_TARGET: {'receiptSha256': '1e7a28664e9234660fe8377a7a7b3bee5438faf09d40224d2db81ba2d9358809', 'tarSha256': '2835fd45d443c429c2a9f12e9cdbcff109f35a15207ca5a086da24c0b6e338a5', 'sourceCommit': '52485f9fd837f0dacb8dc9621e5a1bee30803506', 'runId': '38343324660', 'runAttempt': '1', 'artifactId': '11788410124'},
+    ARM_TARGET: {'receiptSha256': 'e6b23316078020c513ab1b05b3b55e4f87b8d15908a8dee022ad5ee03b8f763e', 'tarSha256': 'ead75b364118139561a34da6aa48e3c54791e152154ab32c46196b0223962359', 'sourceCommit': 'c6551aa07d0673436aa9587b3a039889d22449c3', 'runId': '40473858216', 'runAttempt': '1', 'artifactId': '12719943283'},
     INTEL_TARGET: {'receiptSha256': 'afba303207b19692b73fb1288b56afcd73378fc29b0b0ede4ff10eb2e0f949b8', 'tarSha256': 'ff976626b48e95abc414d46ff91f1ebb183416356bb4706b8e673b7c9018ca9c', 'sourceCommit': 'a2f7a10b4c86305f5ee65c6779ceaf6b128cd8fa', 'runId': '38343340695', 'runAttempt': '1', 'artifactId': '11787588635'},
 }
 
@@ -1170,8 +1180,7 @@ def signed_python_receipt(body, signed, args, original, original_receipt, produc
     signer_keys = {"sourceCommit", "workflow", "runId", "runAttempt", "identifier", "teamIdentifier",
                    "leafCertificateSha1", "producerProfileSha256", "serviceProfileSha256", "entitlementsSha256",
                    "codeDirectoryFlags", "timestampRequested"}
-    workflow = ("Apdelrahman1911/mobile-release-kit/.github/workflows/desktop-macos-python-runtime-signing.yml"
-                "@refs/heads/verify/desktop-macos-python-runtime-signing-shipping")
+    workflow = signed_python_workflow(command_target(args))
     need(type(signer) is dict and set(signer) == signer_keys
          and (signer["sourceCommit"], signer["runId"], signer["runAttempt"])
              == (args.expected_signing_source, args.expected_signing_run, args.expected_signing_attempt)

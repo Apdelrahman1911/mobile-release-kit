@@ -98,7 +98,7 @@ PYTHON_PHASES = ("python-engineering", "python-shipping")
 PYTHON_IDENTIFIER = "dev.mobile-release-kit.desktop.python"
 PYTHON_ROLES = ("python-sign", "python-verify", "python-modules", "python-loader", "python-tls", "python-cancellation")
 PYTHON_SUPPLIERS = {
-    ARM_TARGET: {'receiptSha256': '1e7a28664e9234660fe8377a7a7b3bee5438faf09d40224d2db81ba2d9358809', 'tarSha256': '2835fd45d443c429c2a9f12e9cdbcff109f35a15207ca5a086da24c0b6e338a5', 'sourceCommit': '52485f9fd837f0dacb8dc9621e5a1bee30803506', 'runId': '38343324660', 'runAttempt': '1', 'artifactId': '11788410124'},
+    ARM_TARGET: {'receiptSha256': 'e6b23316078020c513ab1b05b3b55e4f87b8d15908a8dee022ad5ee03b8f763e', 'tarSha256': 'ead75b364118139561a34da6aa48e3c54791e152154ab32c46196b0223962359', 'sourceCommit': 'c6551aa07d0673436aa9587b3a039889d22449c3', 'runId': '40473858216', 'runAttempt': '1', 'artifactId': '12719943283'},
     INTEL_TARGET: {'receiptSha256': 'afba303207b19692b73fb1288b56afcd73378fc29b0b0ede4ff10eb2e0f949b8', 'tarSha256': 'ff976626b48e95abc414d46ff91f1ebb183416356bb4706b8e673b7c9018ca9c', 'sourceCommit': 'a2f7a10b4c86305f5ee65c6779ceaf6b128cd8fa', 'runId': '38343340695', 'runAttempt': '1', 'artifactId': '11787588635'},
 }
 
@@ -6805,7 +6805,9 @@ class Operation:
              "python-copy-storage-reserve")
         def source_snapshot():
             need(builder.DATA.known, "python-source-data-finality")
-            result = builder.source_snapshot(self.checkout, self.target)
+            candidate_signing = candidate_python_signing_context(self.environment, self.phase, self.target)
+            result = (builder.source_snapshot(self.checkout, self.target, workflow=builder.CANDIDATE_WORKFLOW, signing=True)
+                      if candidate_signing else builder.source_snapshot(self.checkout, self.target))
             need(builder.DATA.known, "python-source-data-finality")
             return result
         self.python_source_snapshot = self.python_io("python-source-snapshot", source_snapshot)
@@ -10458,7 +10460,18 @@ def load_data(checkout, filename, name):
     return module
 
 
-def xcode_setup_event(environment, phase):
+def candidate_python_signing_context(environment, phase, target):
+    """One exact candidate-only Python derivation; never an install or release."""
+    return (target == ARM_TARGET and phase == "python-shipping"
+            and environment.get("MRK_MACOS_PYTHON_SIGNING_SCOPE") == "candidate-only"
+            and environment.get("GITHUB_REF") == CANDIDATE_REF
+            and environment.get("GITHUB_EVENT_NAME") == "workflow_dispatch"
+            and environment.get("GITHUB_JOB") == "signed-python"
+            and environment.get("GITHUB_WORKFLOW_REF") ==
+                "Apdelrahman1911/mobile-release-kit/.github/workflows/desktop-macos-installed.yml@" + CANDIDATE_REF)
+
+
+def xcode_setup_event(environment, phase, *, target=ARM_TARGET):
     """Closed event choice only; all ordinary host/source admission still applies."""
     scope = environment.get("MRK_MACOS_XCODE_SETUP_SCOPE", "disabled")
     if environment.get("MRK_MACOS_PREPARED_RESUME") == "true":
@@ -10471,7 +10484,8 @@ def xcode_setup_event(environment, phase):
         return (scope == "companion-only"
                 and environment.get("GITHUB_EVENT_NAME") == "workflow_dispatch"
                 and phase in ("sign-xcode-setup", "finalize-xcode-setup-package", XCODE_SETUP_VERIFY))
-    return scope == "disabled" and environment.get("GITHUB_EVENT_NAME") == "push"
+    return scope == "disabled" and (environment.get("GITHUB_EVENT_NAME") == "push"
+                                    or candidate_python_signing_context(environment, phase, target))
 
 
 def admit(environment, *, target=ARM_TARGET, phase=None):
@@ -10482,11 +10496,19 @@ def admit(environment, *, target=ARM_TARGET, phase=None):
          and os.getuid() == os.geteuid() and os.getgid() == os.getegid(), "hosted-native-platform")
     need(Path(__file__).absolute() == CHECKOUT / "desktop/tools/macos_android_helper_package.py", "fixed-source-driver")
     ref = environment.get("GITHUB_REF")
+    candidate_python = candidate_python_signing_context(environment, phase, target)
+    need(environment.get("MRK_MACOS_PYTHON_SIGNING_SCOPE", "disabled") == "disabled" or candidate_python,
+         "closed-python-candidate-scope")
+    if candidate_python:
+        need(environment.get("MRK_MACOS_NATIVE_SCOPE", "disabled") == "disabled"
+             and environment.get("MRK_MACOS_PREPARED_RESUME") is None
+             and not any(k in environment for k in INSTALLER_CREDENTIAL_VARIABLES + (NOTARY_KEY_VARIABLE,)),
+             "python-candidate-only-derivation")
     native_role = None
     if environment.get("MRK_MACOS_NATIVE_SCOPE", "disabled") != "disabled":
         native_role = load_data(CHECKOUT, "macos_identity_current_runtime.py",
             "_mrk_identity_current_package_scope").package_role(environment, phase, target)
-    need(xcode_setup_event(environment, phase), "candidate-companion-event-scope")
+    need(xcode_setup_event(environment, phase, target=target), "candidate-companion-event-scope")
     scope = environment.get("MRK_MACOS_SAME_PACKAGE_SCOPE", "disabled")
     need(scope in ("disabled", SAME_PACKAGE_PHASE)
          and (scope == "disabled" or ref == "refs/heads/verify/desktop-macos-preview"), "same-package-source-scope")
@@ -10511,7 +10533,7 @@ def admit(environment, *, target=ARM_TARGET, phase=None):
     if ref == APP_SIGNATURE_REF:
         need(phase in APP_SIGNATURE_PHASES, "app-signature-fixed-native-phase")
     if ref == CANDIDATE_REF:
-        need(scope == "disabled" and phase in CANDIDATE_PHASES, "candidate-fixed-native-phase")
+        need(scope == "disabled" and (phase in CANDIDATE_PHASES or candidate_python), "candidate-fixed-native-phase")
     if ref == REMOVAL_REF:
         removal_context_data(environment, target)
         need(phase not in PYTHON_PHASES and phase not in FINAL_IMAGE_PHASES, "removal-only-existing-purpose-route")
@@ -10537,10 +10559,10 @@ def admit(environment, *, target=ARM_TARGET, phase=None):
         need(ref == TOOL_REF, "closed-tool-purpose-ref")
     python_phase = phase in PYTHON_PHASES
     if python_phase:
-        need(ref == "refs/heads/verify/desktop-macos-python-runtime-signing-" + phase[len("python-"):],
+        need(candidate_python or ref == "refs/heads/verify/desktop-macos-python-runtime-signing-" + phase[len("python-"):],
              "closed-python-purpose-ref")
     workflow = ("desktop-macos-android-support-signing.yml" if support_phase else
-                "desktop-macos-python-runtime-signing.yml" if python_phase or tool_phase or store_phase else
+                "desktop-macos-python-runtime-signing.yml" if (python_phase and not candidate_python) or tool_phase or store_phase else
                 "desktop-macos-aqua.yml" if ref == "refs/heads/verify/desktop-macos-aqua" else
                 "desktop-macos-installed.yml" if ref in ("refs/heads/verify/desktop-macos-installed", "refs/heads/verify/desktop-macos-preview", REMOVAL_REF, APP_SIGNATURE_REF, APP_ABSENCE_REF, RESTORE_CHAIN_REF, UPDATE_REF, CANDIDATE_REF, XCODE_SETUP_REF) else None)
     need(workflow is not None, "closed-workflow-route")

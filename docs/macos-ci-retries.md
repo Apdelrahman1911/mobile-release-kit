@@ -6,8 +6,12 @@ not modify `main` or publish a release. The main workflow builds the candidates;
 
 ```mermaid
 flowchart LR
-  T[Build and notarize Tool26] --> TP[Saved signed Tool package]
-  G[Build and notarize Git27] --> GP[Saved signed Git package]
+  P[Build Python supplier] --> U[Saved Python supplier]
+  U --> PS[Sign Python]
+  PS --> SP[Saved signed Python]
+  SP --> T[Build and notarize Tool26] --> TP[Saved signed Tool package]
+  SP --> G[Build and notarize Git27]
+  G --> GP[Saved signed Git package]
   GP --> GL[Git local]
   GP --> GF[Git fetch]
   GP --> GPu[Git push]
@@ -43,6 +47,18 @@ source-bound candidates are still required before installed test groups resume.
 ```sh
 gh workflow run desktop-macos-installed.yml --ref verify/desktop-macos-candidate \
   -f operation=candidate-python-source -f target=aarch64-apple-darwin
+```
+
+Once the source supplier is verified and its actual pins are committed, run only
+`candidate-python-sign` to create the signed Python capsule in the existing
+`macos-developer-id` environment. It retains the original signature/native probes
+and clean-source checks, saves successful output for90 days, and starts no app
+builds. Verify the actual signed capsule and compose its runtime binding before
+starting both fresh candidates. Neither recovery stage qualifies installed groups.
+
+```sh
+gh workflow run desktop-macos-installed.yml --ref verify/desktop-macos-candidate \
+  -f operation=candidate-python-sign -f target=aarch64-apple-darwin
 ```
 
 After a failure, open the run and choose **Re-run failed jobs**. To retry one job,
