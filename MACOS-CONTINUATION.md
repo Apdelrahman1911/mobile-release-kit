@@ -1,5 +1,50 @@
 # Continue Mobile Release Kit on the owner's Mac
 
+## Current continuation — 2026-10-27 verified signed Python enrollment
+
+Independent signing run40476254849/attempt1, job122095117924, completed with
+actual success on ab07f2f82f7f5eb42f42b46e93c936e949aa74f5. Monitor32555
+completed/exit0. All six original signing/native calls returned zero; all nineteen
+credential originals returned/settled, the context retired, search was restored,
+and default unchanged. Capsule12720049992 has service ZIP SHA
+4879c1ebe9827470c872da32596bee53b65df4772162a177c03bff710676da20 and expires
+2027-01-25. Its actual Python SHA is
+32e798acd66e56ff24dcd1f832d6e9c413fc69132282974a2d7a6dc944be35bc;
+receipt SHA67307ba4fe9ba83f23f711b013f3804b4e00deeffb6d59b69f5733148d6697d2.
+Transport, exact receipt/native/finality DATA and an independent local strict
+codesign verification match the configured Team/leaf/identifier/runtime flags.
+The first facts download failed; a same-artifact download retry passed its service
+digest/size. No workflow retry, app installation, capsule notarization or local
+Python execution is claimed.
+
+The ARM runtime nomination now enrolls this complete signing tuple; Intel is
+unchanged. The old nomination S/M stay historical. The existing mandatory
+compose-store-runtime operation computes the actual complete Store/provider/
+observer S/M, and finalize-runtime-binding latches them to this candidate's
+source/run/attempt before any app compilation. Neither historical S/M nor the
+local Python-only preparation authorizes the new complete installed runtime.
+
+Fourteen focused signing/composition DATA checks pass on full Python3.14.6 and
+3.11.16 under umask077. Actual saved signed Python/receipt and all613 supplier
+file bytes were read by the production DATA parsers. A private exact-Git source
+projection compared430 source files; actual preparation and complete Python/core/
+bootstrap inventory passed for both Tool640-file and Git644-file projections.
+These omit Store/provider and perform no payload/native execution. All six required
+artifact IDs remain available in the service. The old broad consumer test still
+fails; a temporary stale mock expectation correction exposed four later failures/
+five errors and was reverted. Initial private preparation attempts also failed
+on a wrong entitlement filename and existing local bytecode caches; all evidence
+is retained. The successful projection copied only exact Git source and left
+all74 existing caches and source attributes untouched. No whole-suite pass.
+
+Commit/push this enrollment only to the two authorized branches, triggering both
+fresh signed app candidates and initial git-local/service-cli. Check existing
+runs/monitor first. Only after both initial groups actually succeed, dispatch the
+remaining nine independent groups against the same saved package/source/run.
+Both new candidates and all11 groups remain incomplete; no old package qualifies
+this changed runtime. Goal/heartbeat remain ACTIVE. Preserve working installation,
+credentials and original checkout. Never change main or publish production.
+
 ## Current continuation — 2026-10-27 verified Python supplier / independent signing
 
 The source-only recovery is committed/pushed as c6551aa07d0673436aa9587b3a039889d22449c3,

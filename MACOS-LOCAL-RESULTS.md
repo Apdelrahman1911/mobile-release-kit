@@ -1,5 +1,30 @@
 # Mac continuation results — 2026-10-24
 
+## Current continuation — 2026-10-27 verified signed Python enrollment
+
+Independent signing40476254849/1 is an actual hosted success, with capsule12720049992
+verified against service SHA/size, the exact signed receipt and native/finality
+records. Independent strict local codesign verification passed. The ARM nomination
+now pins its verified source/run/attempt/artifact and Python/receipt hashes; Intel
+is unchanged. Full Store/provider/observer source and runtime manifests must still
+be computed and latched by the candidate workflow before app compilation. Historical
+nomination S/M are not new installed qualification.
+
+Fourteen focused signing/composition DATA tests pass on Python3.14.6 and3.11.16
+under umask077. Actual supplier613-file bytes and signed receipt parse successfully
+against the enrolled nomination. Actual private exact-Git preparation compared430
+source files and verified640 Tool /644 Git Python/core/bootstrap files. It omits
+Store/provider and executes no payload/native Python. All six dependency artifacts
+remain available by the current service API.
+
+The broader old consumer method first failed its stale mock call; correcting that
+temporarily exposed four failures/five errors, then the edit was reverted. Its
+earlier fixture/attribute limitations remain unqualified. Private preparation first
+failed a wrong entitlement path, then refused74 existing bytecode-cache extras.
+The successful Git-only projection copied no cache and changed no source attributes.
+All failed logs remain private evidence. Neither full-suite nor installed/native
+success is inferred. Both fresh candidates and all eleven groups still need CI.
+
 ## Current continuation — 2026-10-27 verified Python supplier / independent signing
 
 The source-only recovery is committed/pushed as c6551aa07d0673436aa9587b3a039889d22449c3,
