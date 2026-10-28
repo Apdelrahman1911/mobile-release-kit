@@ -734,10 +734,8 @@ class ResourceGuard:
              'prepared-original-resource-bound')
         self.samples += 1
         need(self.samples <= 16, 'prepared-resource-sample-bound')
-        if op.environment.get('MRK_MACOS_RUNNER') == 'xcode-27':
+        if op.environment.get('MRK_MACOS_RUNNER') in ('xcode-27', 'macos-26'):
             reclaim_prepared_allocator(op)
-        elif op.environment.get('MRK_MACOS_RUNNER') == 'macos-26':
-            relieve_prepared_allocator(op)
         result = op.call('prepared-resource-memory', ['/usr/bin/vm_stat'], op.native_environment(),
                          cwd=op.work, timeout=10, limit=65536)
         class Clock:
@@ -764,38 +762,17 @@ class ResourceGuard:
         self.op.package_clock()
 
 
-def relieve_prepared_allocator(op):
-    """Ask THIS admitted macOS26 process to release unused malloc regions.
-
-    The cached SDK declares NULL as all zones in this process and a nonzero
-    goal as best effort. This one bounded request releases no live DATA and
-    grants no memory admission; the following vm_stat/full quote still decide.
-    """
-    import ctypes
-    need(sys.platform == 'darwin' and op.prepared_staging and op.phase == 'package-install'
-         and op.environment.get('MRK_MACOS_RUNNER') == 'macos-26', 'prepared-allocator-host')
-    op.package_clock()
-    relief = op.mount_api.library.malloc_zone_pressure_relief
-    relief.argtypes, relief.restype = [ctypes.c_void_p, ctypes.c_size_t], ctypes.c_size_t
-    goal = 64 * MIB
-    reclaimed = relief(None, goal)
-    op.package_clock()
-    need(type(reclaimed) is int and 0 <= reclaimed < 1 << 53, 'prepared-allocator-reclaim')
-    op.prepared_allocator_facts = dict(mechanism='malloc-zone-pressure-relief', requestedBytes=goal,
-                                      bytesReclaimed=reclaimed, currentProcessOnly=True)
-
-
 def reclaim_prepared_allocator(op):
-    """Flush bounded retired allocations of THIS admitted macOS27 process.
+    """Flush bounded retired allocations of THIS admitted macOS process.
 
-    SDK27 mach_vm.defs declares this synchronous current-task operation. It
+    The cached mach_vm.defs declares this synchronous current-task operation. It
     releases already freed regions in the deferred reclamation buffer; it does
     not purge other processes or release live DATA. Admission still uses only
     the subsequent real vm_stat sample against the unchanged full quote.
     """
     import ctypes
     need(sys.platform == 'darwin' and op.prepared_staging and op.phase == 'package-install'
-         and op.environment.get('MRK_MACOS_RUNNER') == 'xcode-27', 'prepared-allocator-host')
+         and op.environment.get('MRK_MACOS_RUNNER') in ('xcode-27', 'macos-26'), 'prepared-allocator-host')
     op.package_clock()
     library = op.mount_api.library  # SAME libSystem instance admitted by normal_mount_host.
     current = library.mach_task_self
