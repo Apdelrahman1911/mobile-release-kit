@@ -8,6 +8,16 @@ use crate::git_local_state::{Ack, GitLocalJournal, Original};
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 enum Kind { Publisher, Host, Open, Preparing, Candidate, Finish, RetireUse, FinishPublisher }
+#[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation",
+    not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"),
+    target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+fn installed_job_mark(owner:&Owner,kind:Kind,point:crate::service_git_requests::installed_progress::Point) {
+    use crate::service_git_requests::installed_progress::Job;
+    let job=match kind {Kind::Publisher=>Job::Publisher,Kind::Host=>Job::Host,Kind::Open=>Job::Open,
+        Kind::Preparing=>Job::Preparing,Kind::Candidate=>Job::Candidate,Kind::Finish=>Job::Finish,
+        Kind::RetireUse=>Job::RetireUse,Kind::FinishPublisher=>Job::FinishPublisher};
+    if let Some(progress)=owner.git_local.as_ref().and_then(|local|local.gate.installed_apply_progress()) {progress.job(job,point);}
+}
 enum Task {
     Publisher,
     Host(Arc<NativeStateTicket>),
@@ -74,11 +84,19 @@ impl Jobs {
         let (release,enter)=oneshot::channel();
         self.slots[index]=Some(Slot {kind,release:Some(release),handle:None,returned:None,join_error:None,released:false});
         self.active=Some(index);
+        #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation",
+    not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"),
+    target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+        installed_job_mark(owner,kind,crate::service_git_requests::installed_progress::Point::Registered);
         let gate=original.gate.clone();let id=owner.id.clone();let held=self.held.clone();let worker=owner.clone();
         let handle=match task {
             Task::Host(ticket)=>{
                 tokio::spawn(async move {
                     enter.await.map_err(|_|Failure::NotReleased)?;
+                #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation",
+    not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"),
+    target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+                installed_job_mark(&worker,kind,crate::service_git_requests::installed_progress::Point::Entered);
                     if worker.failed()||!within(&worker,false) {return Err(Failure::NotReleased)}
                     let host=gate.host().map_err(Failure::Bridge)?;
                     let path=gate.app_data().map_err(Failure::Bridge)?;
@@ -88,6 +106,10 @@ impl Jobs {
             },
             other=>tokio::task::spawn_blocking(move || {
                 enter.blocking_recv().map_err(|_|Failure::NotReleased)?;
+                #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation",
+    not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"),
+    target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+                installed_job_mark(&worker,kind,crate::service_git_requests::installed_progress::Point::Entered);
                 if !within(&worker,cleanup)||(!cleanup&&worker.failed()) {return Err(Failure::NotReleased)}
                 match other {
                     Task::Publisher=>{gate.accept_publisher_off_document(&id).map_err(Failure::Bridge)?;Ok(Value::Unit)},
@@ -192,6 +214,10 @@ impl Jobs {
                 _=stop.changed(),if observe_stop=>None,
             };
             let Some(result)=result else {continue};
+            #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation",
+    not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"),
+    target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+            installed_job_mark(owner,slot.kind,crate::service_git_requests::installed_progress::Point::JoinReturned);
             match result {
                 Ok(result)=>{
                     let result=Arc::new(result);slot.returned=Some(result.clone());slot.handle.take();self.active=None;
@@ -214,14 +240,30 @@ impl Jobs {
         unit((self.run(inner,owner,Task::Publisher).await?).as_ref())?;
         // Actual publisher job join precedes the same-Doc post-epoch/stamp and
         // TRY-only Host ticket. No Host/Store IO is performed under that Doc.
+        #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation",
+    not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"),
+    target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+        if let Some(progress)=invocation.gate.installed_apply_progress() {progress.boundary(crate::service_git_requests::installed_progress::Boundary::HostTicketRequested);}
         let ticket=Arc::new(invocation.gate.publisher_joined_begin_host(&owner.id,owner.endpoint())?);
+        #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation",
+    not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"),
+    target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+        if let Some(progress)=invocation.gate.installed_apply_progress() {progress.boundary(crate::service_git_requests::installed_progress::Boundary::HostTicketReturned);}
         self.host_ticket=Some(ticket.clone());
         unit((self.run(inner,owner,Task::Host(ticket)).await?).as_ref())?;
         // Keep the SAME ticket through TRY/currentness/handoff failure. Host
         // may clear pending before a later check fails; absence or a cancel
         // Conflict is not a successful returned handoff. Only positive
         // original Ready adoption below discharges this retained route.
+        #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation",
+    not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"),
+    target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+        if let Some(progress)=invocation.gate.installed_apply_progress() {progress.boundary(crate::service_git_requests::installed_progress::Boundary::ReadyHandoffRequested);}
         let ready=invocation.gate.host_joined(&owner.id,self.host_ticket.as_ref().ok_or_else(BridgeError::cleanup_unknown)?)?;
+        #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation",
+    not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"),
+    target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+        if let Some(progress)=invocation.gate.installed_apply_progress() {progress.boundary(crate::service_git_requests::installed_progress::Boundary::ReadyHandoffReturned);}
         self.host_ticket.take();
         let opened=self.run(inner,owner,Task::Open(ready)).await?;
         let expected=match opened.as_ref() {Ok(Value::Revision(v))=>*v,Err(e)=>return Err(e.bridge()),_=>return Err(BridgeError::cleanup_unknown())};

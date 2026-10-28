@@ -189,10 +189,20 @@ struct Row {
         target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
     installed_transitions: InstalledTransitionFacts,
 }
+#[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation",
+    not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"),
+    target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+#[path="service_git_installed_progress.rs"]
+pub(crate) mod installed_progress;
+
 pub(crate) struct Entry {
     input: p::Prepare,
     family: Family,
     runtime_id: String,
+    #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation",
+    not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"),
+    target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+    installed_apply_progress: Arc<installed_progress::ApplyProgress>,
     row: Mutex<Row>,
     failed: AtomicBool,
 }
@@ -500,6 +510,10 @@ impl NativeLink {
         }
         remote_requests::armed(&mut row,self.phase)?;
         self.armed.store(true, Ordering::Release);
+        #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation",
+    not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"),
+    target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+        if let Some(progress)=self.installed_apply_progress() {progress.boundary(installed_progress::Boundary::OwnerArmed);}
         change(&mut row)
     }
     pub(crate) fn current(&self, operation_id: &str) -> Result<(), Error> {
@@ -941,6 +955,10 @@ impl Inbox {
         };
         let entry = Arc::new(Entry {
             runtime_id: lease.scope.runtime_id.clone(),
+            #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation",
+    not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"),
+    target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+            installed_apply_progress: Arc::new(installed_progress::ApplyProgress::default()),
             input,
             family,
             failed: AtomicBool::new(false),
@@ -1080,12 +1098,20 @@ pub(crate) fn installed_cli_wait_data_facts(apply: bool) -> InstalledCliReturnFa
     tests::installed_cli_wait_data_facts(apply)
 }
 
+#[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation",
+    not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"),
+    target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+pub(crate) fn installed_cli_native_progress_data()->Arc<installed_progress::ApplyProgress> {
+    tests::installed_cli_native_progress_data()
+}
+
 #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation",
     not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"),
     target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
 impl Entry {
     /// Nonshipping comparison of THIS retained original. It grants nothing and
     /// never substitutes public status/history for native or relay retirement.
+    pub(crate) fn installed_cli_progress(&self)->Arc<installed_progress::ApplyProgress> {self.installed_apply_progress.clone()}
     pub(crate) fn installed_cli_returned(&self, origin:&p::Query, family:Family, phase:Phase, revision:u32)->bool {
         self.installed_cli_returned_observed(origin,family,phase,revision,&mut None)
     }

@@ -729,6 +729,11 @@ impl DocumentBinding {
     }
     pub(crate) fn installed_git_cli_returned_observed(&self, runtime:&str, origin:&wire::Query, apply:bool,
         facts:&mut Option<requests::InstalledCliReturnFacts>)->Result<Option<Value>,BridgeError>{
+        self.installed_git_cli_returned_sampled(runtime,origin,apply,facts,&mut None)
+    }
+    pub(crate) fn installed_git_cli_returned_sampled(&self, runtime:&str, origin:&wire::Query, apply:bool,
+        facts:&mut Option<requests::InstalledCliReturnFacts>,
+        progress:&mut Option<Arc<requests::installed_progress::ApplyProgress>>)->Result<Option<Value>,BridgeError>{
         let _state=self.lock();
         let book=self.inner.installed_macos_session.try_lock().map_err(|_|BridgeError::cleanup_unknown())?;
         let control=book.as_ref().and_then(|b|b.git_cli.as_ref()).ok_or_else(BridgeError::invalid)?;
@@ -740,7 +745,11 @@ impl DocumentBinding {
         let Some(entry)=found.next() else{return Ok(None)};
         if found.next().is_some()||entry.runtime_id()!=runtime{return Err(BridgeError::invalid());}
         let status=entry.status().map_err(public)?;
-        if !entry.installed_cli_returned_observed(origin,family,if apply{requests::Phase::Apply}else{requests::Phase::Prepare},status.revision,facts){
+        let returned=entry.installed_cli_returned_observed(origin,family,if apply{requests::Phase::Apply}else{requests::Phase::Prepare},status.revision,facts);
+        // SAME found original and sampled predicate, no extra query/owner lock.
+        // This Arc owns only two closed DATA fields, never an Entry/NativeLink.
+        if facts.is_some() {*progress=Some(entry.installed_cli_progress());}
+        if !returned {
             if matches!(status.state,wire::State::Unknown|wire::State::Refused|wire::State::Cancelled|wire::State::Expired)
                 ||status.reason.is_some(){return Err(BridgeError::invalid());}return Ok(None);
         }

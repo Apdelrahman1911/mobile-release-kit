@@ -705,7 +705,8 @@ impl Observation {
                     // Positive private retirement + Claim::returned + matching
                     // history ACK, not phase data or the public Row alone.
                     let mut facts=None;
-                    let returned=document.installed_git_cli_returned_observed(&project,&origin,apply,&mut facts);
+                    let mut progress=None;
+                    let returned=document.installed_git_cli_returned_sampled(&project,&origin,apply,&mut facts,&mut progress);
                     let status=match returned {
                         Ok(Some(status))=>status,
                         Ok(None)=>{
@@ -718,6 +719,9 @@ impl Observation {
                                 if r.step==OuterStep::GitCli(step)
                                     && r.git_cli.as_ref().is_some_and(|v|v.origin.as_ref()==Some(&origin)) {
                                     r.git_cli_wait=super::GitCliWaitSample::capture(self.case,r.step,facts);
+                                    // Retain only pure atomic DATA for this SAME original.
+                                    // The failure snapshot reads it independently of a stale poll.
+                                    r.git_cli_native_progress=super::GitCliNativeProgressHandle::capture(self.case,r.step,progress);
                                 }
                             }
                             return Ok(None);

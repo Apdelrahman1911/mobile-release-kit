@@ -235,6 +235,68 @@ class GitCliWaitDiagnosticTests(unittest.TestCase):
         self.assertIsNone(self.parsed(detail))
 
 
+class GitCliNativeProgressDiagnosticTests(unittest.TestCase):
+    @staticmethod
+    def detail(mask=0, first_error=None):
+        detail = GitCliWaitDiagnosticTests.detail()
+        detail['gitCliNativeProgress'] = dict(sample='same-original-frame-read', phase='apply',
+            facts=dict(mask=mask, firstError=first_error))
+        return detail
+
+    def parsed(self, detail, step='GitCli(Terminal)', reason='observer-deadline', case=A.M.GIT_CLI.INDEX):
+        return A.M.failure_context(b'', A.project_selection_row(detail, reason, step), case)
+
+    def test_closed_snapshot_can_differ_from_stale_poll_without_granting_original_return(self):
+        for case in A.M.GIT_CLI.CASES:
+            for mask in (0, 7, (1 << 31) | 7, 0xffffffff):
+                detail = self.detail(mask, 'busy')
+                self.assertEqual(self.parsed(detail, case=case), detail)
+                self.assertEqual(detail['gitCliWait']['facts']['state'], 'applying')
+                row = A.project_selection_row(detail, 'observer-deadline', 'GitCli(Terminal)')
+                with self.assertRaises(A.M.Refused):
+                    A.M.parse_result(b'', row, A.BINDING, case)
+                fixtures = A.InertFixtures()
+                fixtures.case, fixtures.stage, fixtures.inflight = case, 'invocation', True
+                fixtures.inner_failure_context = self.parsed(detail, case=case)
+                report = A.M.diagnostic(A.M.Refused('original-deadline'), None, fixtures)
+                self.assertEqual(report['innerFailureContext'], detail)
+                self.assertEqual((report['originalCallReturned'], report['appReturncode'], report['invocationFinality']),
+                                 (False, None, 'unknown'))
+
+    def test_foreign_scope_private_text_and_out_of_range_progress_are_refused(self):
+        for field, values in (('mask', (-1, 1 << 32, True, 1.0, 'CANARY_PRIVATE')),
+                              ('firstError', (True, 1, 'CANARY_PRIVATE', 'context_changed'))):
+            for value in values:
+                detail = self.detail(); detail['gitCliNativeProgress']['facts'][field] = value
+                self.assertIsNone(self.parsed(detail))
+        for field in ('mask', 'firstError'):
+            detail = self.detail(); del detail['gitCliNativeProgress']['facts'][field]
+            self.assertIsNone(self.parsed(detail))
+        for field, value in (('phase', 'prepare'), ('sample', 'first-failure'),
+                             ('projectId', 'CANARY_PRIVATE'), ('nativeOwner', 'CANARY_PRIVATE')):
+            detail = self.detail(); detail['gitCliNativeProgress'][field] = value
+            self.assertIsNone(self.parsed(detail))
+        for step in ('GitCli(Prepared)', 'GitCli(ReadWait)', 'OpenProject'):
+            self.assertIsNone(self.parsed(self.detail(), step=step))
+        for reason in ('git-cli-original-contract', 'observer-invariant', 'native-default-input'):
+            self.assertIsNone(self.parsed(self.detail(), reason=reason))
+        for case in (None, 'first-save', A.M.FETCH.CASES[0]):
+            self.assertIsNone(self.parsed(self.detail(), case=case))
+        for source in ('prearm-open-progress', 'prearm-open-return'):
+            detail = self.detail(); detail['snapshotSource'] = source
+            self.assertIsNone(self.parsed(detail))
+
+    def test_absent_progress_and_each_closed_error_remain_optional_data(self):
+        original = GitCliWaitDiagnosticTests.detail()
+        self.assertEqual(self.parsed(original), original)
+        for error in (None, 'cleanup-unknown', 'context-changed', 'busy', 'cancelled', 'shutting-down',
+                      'query-timeout', 'git-local-refused', 'invalid-request', 'protocol-error', 'other'):
+            detail = self.detail(first_error=error)
+            del detail['gitCliWait']
+            self.assertEqual(self.parsed(detail), detail)
+            self.assertNotIn('CANARY', json.dumps(self.parsed(detail)))
+
+
 class CandidateCheckpointTests(unittest.TestCase):
     @staticmethod
     def _cli_return_failure():

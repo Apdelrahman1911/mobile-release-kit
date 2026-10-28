@@ -4,6 +4,30 @@ use std::time::Duration;
 #[cfg(all(debug_assertions,feature="desktop-shell",feature="custom-protocol",feature="macos-installed-observation",
     not(feature="development-runtime"),not(feature="ubuntu-runtime-publisher"),not(feature="macos-installed-installer"),
     target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64")))]
+pub(super) fn installed_cli_native_progress_data()->Arc<installed_progress::ApplyProgress> {
+    use installed_progress::{Boundary,Job,Point};
+    let (_doc,inbox,input)=setup();let prepare=prepared(&inbox,&input);let entry=prepare.entry();
+    let before=entry.status().unwrap();let data=entry.installed_cli_progress();
+    assert_eq!(serde_json::to_value(data.snapshot()).unwrap(),serde_json::json!({"mask":0,"firstError":null}));
+    data.job(Job::Publisher,Point::Registered);data.job(Job::Publisher,Point::Entered);
+    data.job(Job::Publisher,Point::JoinReturned);data.job(Job::Publisher,Point::Entered);
+    data.boundary(Boundary::StartupEntered);data.first_error(InstalledNativeFailure::Busy);
+    data.first_error(InstalledNativeFailure::Other);
+    assert_eq!(serde_json::to_value(data.snapshot()).unwrap(),serde_json::json!({"mask":(1u32<<24)|7,"firstError":"busy"}));
+    assert_eq!(entry.status().unwrap(),before);
+    let mut foreign=input.origin.clone();foreign.request_id=id('f');let mut facts=None;
+    assert!(!entry.installed_cli_returned_observed(&foreign,Family::Index,Phase::Apply,before.revision,&mut facts));
+    assert!(facts.is_none());
+    // DATA remains readable while the original Entry mutex is held. No
+    // native/Entry authority or second predicate is reachable through it.
+    let _guard=entry.row.lock().unwrap();data.boundary(Boundary::HostTicketRequested);
+    assert_eq!(serde_json::to_value(data.snapshot()).unwrap()["mask"],serde_json::json!((3u32<<24)|7));
+    data
+}
+
+#[cfg(all(debug_assertions,feature="desktop-shell",feature="custom-protocol",feature="macos-installed-observation",
+    not(feature="development-runtime"),not(feature="ubuntu-runtime-publisher"),not(feature="macos-installed-installer"),
+    target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64")))]
 pub(super) fn installed_cli_wait_data_facts(apply: bool) -> InstalledCliReturnFacts {
     // Actual memory-only Entry sampling through the original predicate. These
     // synthetic link callbacks never execute a native or installed operation.

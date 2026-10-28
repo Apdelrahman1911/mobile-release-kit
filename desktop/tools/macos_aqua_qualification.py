@@ -4204,6 +4204,21 @@ def _git_cli_wait_context(value, source, step, reason, case):
     return value
 
 
+def _git_cli_native_progress_context(value, source, step, reason, case):
+    """Pure original atomic DATA at failure-snapshot read, never native finality."""
+    need(source == "record" and type(case) is str and case in GIT_CLI.CASES
+         and step == "GitCli(Terminal)" and reason == "observer-deadline"
+         and type(value) is dict and set(value) == {"sample", "phase", "facts"}
+         and value["sample"] == "same-original-frame-read" and value["phase"] == "apply", "failure-context")
+    facts = value["facts"]
+    need(type(facts) is dict and set(facts) == {"mask", "firstError"}
+         and type(facts["mask"]) is int and 0 <= facts["mask"] <= 0xffffffff
+         and (facts["firstError"] is None or type(facts["firstError"]) is str and facts["firstError"] in (
+             "cleanup-unknown", "context-changed", "busy", "cancelled", "shutting-down",
+             "query-timeout", "git-local-refused", "invalid-request", "protocol-error", "other")), "failure-context")
+    return value
+
+
 def _git_read_failure_context(value, source, step, reason, case):
     """Already-observed, finite original failure facts; never an operation result."""
     bindings = (
@@ -4364,7 +4379,7 @@ def failure_context(stdout, stderr, case=None):
     try:
         value = json.loads(row.decode("ascii"), object_pairs_hook=_pairs,
                            parse_constant=lambda _: (_ for _ in ()).throw(Refused("failure-context")))
-        need(type(value) is dict and set(value) - {"accessibilityBinding", "snapshotSource", "originalWindow", "projectSelection", "completionSelection", "projectFieldPreparation", "dom", "bootstrap", "vault", "uploadKey", "inputBodyAdmission", "toolService", "gitReadFailure", "gitCliWait"} in (
+        need(type(value) is dict and set(value) - {"accessibilityBinding", "snapshotSource", "originalWindow", "projectSelection", "completionSelection", "projectFieldPreparation", "dom", "bootstrap", "vault", "uploadKey", "inputBodyAdmission", "toolService", "gitReadFailure", "gitCliWait", "gitCliNativeProgress"} in (
             {"pending", "nativeHandler", "lastPanel"},
             {"pending", "nativeHandler", "lastPanel", "nativeAction"},
             {"pending", "nativeHandler", "lastPanel", "nativeAction", "accessibility"}), "failure-context")
@@ -4392,6 +4407,9 @@ def failure_context(stdout, stderr, case=None):
                 failure_step(stdout, stderr), failure_reason(stdout, stderr), case)
         if "gitReadFailure" in value:
             value["gitReadFailure"] = _git_read_failure_context(value["gitReadFailure"], value.get("snapshotSource"),
+                failure_step(stdout, stderr), failure_reason(stdout, stderr), case)
+        if "gitCliNativeProgress" in value:
+            value["gitCliNativeProgress"] = _git_cli_native_progress_context(value["gitCliNativeProgress"], value.get("snapshotSource"),
                 failure_step(stdout, stderr), failure_reason(stdout, stderr), case)
         if "gitCliWait" in value:
             value["gitCliWait"] = _git_cli_wait_context(value["gitCliWait"], value.get("snapshotSource"),

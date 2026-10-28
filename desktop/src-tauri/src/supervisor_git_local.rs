@@ -297,7 +297,9 @@ impl Invocation {
     pub(super) fn installed_capture_native_failure(&self,code:&str)->crate::service_git_requests::InstalledNativeFailure {
         // Called under the original OwnerState lock. No second lock or IO;
         // delayed publishers all carry this SAME first immutable category.
-        *self.first_native_failure.get_or_init(||crate::service_git_requests::InstalledNativeFailure::from_code(code))
+        let category=*self.first_native_failure.get_or_init(||crate::service_git_requests::InstalledNativeFailure::from_code(code));
+        if let Some(progress)=self.gate.installed_apply_progress() {progress.first_error(category);}
+        category
     }
     fn observation_stderr(&self,id:&str,bytes:&[u8])->bool {
         #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
@@ -312,6 +314,10 @@ impl Invocation {
     pub(super) fn unknown(&self) {*lock(&self.receipt)=GitLocalReceipt::RetainedUnknown;
         #[cfg(any(target_os="linux",target_os="macos"))] self.gate.agent_retired(&GitLocalReceipt::RetainedUnknown);}
     pub(super) fn retire(&self,outcome:Result<(),BridgeError>,was_unknown:bool) {
+        #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation",
+    not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"),
+    target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+        if let Some(progress)=self.gate.installed_apply_progress() {progress.boundary(crate::service_git_requests::installed_progress::Boundary::RetireEntered);}
         let mut receipt=lock(&self.receipt);
         if was_unknown || !matches!(*receipt,GitLocalReceipt::Pending)
             || outcome.as_ref().is_err_and(|e|e.code=="cleanup_unknown") {*receipt=GitLocalReceipt::RetainedUnknown;drop(receipt);
@@ -580,6 +586,10 @@ impl LocalResources {
 }
 #[cfg(any(target_os="linux",target_os="macos"))]
 pub(super) async fn startup(r:&mut Resources,inner:&Inner,owner:&Arc<Owner>)->Result<(),BridgeError> {
+    #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation",
+    not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"),
+    target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+    if let Some(progress)=owner.git_local.as_ref().and_then(|local|local.gate.installed_apply_progress()) {progress.boundary(crate::service_git_requests::installed_progress::Boundary::StartupEntered);}
     let local=r.git_local.as_mut().ok_or_else(BridgeError::cleanup_unknown)?;
     if let Some(jobs)=&mut local.jobs {jobs.startup(inner,owner).await?;}Ok(())
 }
@@ -621,6 +631,10 @@ pub(super) async fn candidate_returned(r:&mut Resources,inner:&Inner,owner:&Arc<
 /// original driver/watchdog returns, before Owner::retire releases any debit.
 #[cfg(any(target_os="linux",target_os="macos"))]
 pub(super) async fn finalize(inner:&Inner,owner:&Arc<Owner>)->bool {
+    #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation",
+    not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"),
+    target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+    if let Some(progress)=owner.git_local.as_ref().and_then(|local|local.gate.installed_apply_progress()) {progress.boundary(crate::service_git_requests::installed_progress::Boundary::FinalizeEntered);}
     if !owner.failed() {
         if let Some(local)=owner.git_local.as_ref() {
             if let Err(error)=local.gate.check_current(&owner.id) {owner.fail(error);}
