@@ -5079,6 +5079,9 @@ fn observer_data_checks() -> bool {
     if !git_read_wait_data_checks() || !git_read_failure_data_checks() { return data_contract_failure!(); }
     if !project_chooser_data_checks() { return data_contract_failure!(); }
     crate::asset_session::assert_project_selection_gate_contract();
+    // SAME inert bodies as the libtest regressions, before any fixture/native
+    // admission. Both fresh signed producers execute this existing DATA cut.
+    crate::asset_session::assert_git_prepare_epoch_reconciliation_contracts();
     // harness=false does not discover private #[test] functions. These exact
     // inert DATA bodies are shared with their ordinary libtest wrappers.
     // Exercise the positive normal-Mac description; no Finder/native call.

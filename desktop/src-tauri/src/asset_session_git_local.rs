@@ -53,6 +53,15 @@ fn prepare_check<T>(result:Result<T,BridgeError>,rejected:&mut Option<crate::ser
     check:crate::service_git_requests::PrepareRejection)->Result<T,BridgeError> {
     result.map_err(|original| {*rejected=Some(check);original})
 }
+// Closed DATA reconciliation cannot sample an epoch while the shared status
+// poll owns a lifecycle publisher. Retain the SAME receipt/review until the
+// strict reader returns; no epoch is adopted and no admission uses this path.
+fn review_epoch_changed(control:&crate::saved_command_owner::AndroidRegistrationControl,expected:u64)->bool {
+    match control.epoch() {Ok(epoch)=>epoch!=expected,Err(error)=>error.code!="busy"}
+}
+fn prepare_epoch_pending(error:&BridgeError,rejected:Option<crate::service_git_requests::PrepareRejection>,has_publisher:bool)->bool {
+    !has_publisher&&rejected==Some(crate::service_git_requests::PrepareRejection::EpochRead)&&error.code=="busy"
+}
 fn changed()->BridgeError {BridgeError::new("git_stale_observation","The reviewed project or Git action changed. Refresh and review it again.")}
 fn state_error(error:crate::service_protocol::Error)->BridgeError {
     use crate::service_protocol::Error;
@@ -354,18 +363,22 @@ pub(super) fn agent_tick(document:&Arc<Inner>,state:&mut DocumentState) {
 pub(super) fn reconcile(document:&Arc<Inner>,state:&mut DocumentState) {
     if state.git_local_review.as_ref().is_some_and(|r|Instant::now()>=r.expires
         ||!scope_current(document,state,&r.public.context,&r.root,state.revision)
-        ||!document.android_registration_control.matches_epoch(r.epoch)||!fetch::review_current(state,r)||!push::review_current(state,r)||r.agent.as_ref().is_some_and(|a|{a.entry().expire(Instant::now());a.stopped()})) {state.git_local_review=None;}
+        ||review_epoch_changed(&document.android_registration_control,r.epoch)||!fetch::review_current(state,r)||!push::review_current(state,r)||r.agent.as_ref().is_some_and(|a|{a.entry().expire(Instant::now());a.stopped()})) {state.git_local_review=None;}
     let Some(Entry::Original {ticket,gate})=&state.git_local else {return};
     if !ticket.settled() {return}
     let view=projection(state.git_local.as_ref().expect("same original"));
     let remote=gate.0.agent.as_ref().filter(|a|a.is_remote()).cloned();
     let mut prepare_rejection=None;
+    let mut epoch_pending=false;
     let mut prepared=if gate.0.phase==wire::Phase::Prepare {
         match ticket.receipt() {
             GitLocalReceipt::Settled {outcome:Ok(terminal),was_unknown:false} if terminal.status==read::Outcome::Ok=>{
                 (|| {
                     use crate::service_git_requests::PrepareRejection as R;
-                    gate.current_locked(document,state,ticket.operation_id(),&mut prepare_rejection).ok()?;
+                    if let Err(error)=gate.current_locked(document,state,ticket.operation_id(),&mut prepare_rejection) {
+                        epoch_pending=prepare_epoch_pending(&error,prepare_rejection,gate.0.publisher.is_some());
+                        return None;
+                    }
                     let expires=match gate.0.admitted.checked_add(REVIEW) {
                         Some(expires)=>expires,None=>{prepare_rejection=Some(R::ReviewClock);return None},
                     };
@@ -387,6 +400,11 @@ pub(super) fn reconcile(document:&Arc<Inner>,state:&mut DocumentState) {
             },_=>None,
         }
     }else{None};
+    // Every preceding original/scope/edit/request check already ran. A busy
+    // ordinary epoch reader is inconclusive, not context drift. Keep the
+    // original admission/expiry and all joins; the next poll rematches them.
+    // Poison/Unknown and every other first rejection remain terminal below.
+    if epoch_pending {return}
     if prepared.is_none() {if let Some(agent)=&gate.0.agent {
         #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation",
             not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"),
@@ -569,3 +587,9 @@ impl DocumentBinding {
 #[cfg(test)]
 #[path="service_git_native_tests.rs"]
 mod agent_tests;
+
+#[cfg(all(test,any(target_os="linux",target_os="macos")))]
+pub(super) fn assert_prepare_epoch_reconciliation_contracts() {
+    agent_tests::assert_prepare_reconciliation_epoch_data();
+    agent_tests::assert_prepare_reconciliation_rejection_boundaries();
+}

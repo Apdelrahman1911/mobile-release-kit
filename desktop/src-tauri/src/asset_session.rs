@@ -10329,6 +10329,9 @@ mod shared_memory_tests;
 #[cfg(test)]
 pub(crate) fn assert_installation_owner_contracts() { installation::assert_owner_contracts(); }
 
+#[cfg(all(test,any(target_os="linux",target_os="macos")))]
+pub(crate) fn assert_git_prepare_epoch_reconciliation_contracts() { git_local::assert_prepare_epoch_reconciliation_contracts(); }
+
 #[cfg(test)]
 #[test]
 fn installation_original_clock_routing_and_finality_contract() { assert_installation_owner_contracts(); }

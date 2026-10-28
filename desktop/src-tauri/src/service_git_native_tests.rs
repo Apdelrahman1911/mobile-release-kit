@@ -167,3 +167,57 @@ fn advisory_epoch_never_turns_poisoned_publisher_into_a_deferred_healthy_sample(
     drop(held);
     assert!(agent_watch_epoch(&control, Some(&slot)).is_err());
 }
+
+#[test]
+fn prepare_reconciliation_retains_busy_epoch_data_without_adopting_the_lifecycle_epoch() {
+    assert_prepare_reconciliation_epoch_data();
+}
+pub(super) fn assert_prepare_reconciliation_epoch_data() {
+    use requests::PrepareRejection as R;
+    let control=Arc::new(crate::saved_command_owner::AndroidRegistrationControl::default());
+    let original_epoch=control.epoch().unwrap();
+    // The SAME memory publisher reservation made by shared status polling.
+    // No Host, native owner, successful receipt or operational grant is made.
+    let publisher=control.reserve(RegistrationPublisherKind::General,false).unwrap();
+    let mut rejected=None;
+    let original=prepare_check(control.epoch(),&mut rejected,R::EpochRead).unwrap_err();
+    assert_eq!(original.code,"busy");
+    assert!(prepare_epoch_pending(&original,rejected,false));
+    assert!(!review_epoch_changed(&control,original_epoch));
+    assert!(control.epoch().is_err()&&!control.matches_epoch(original_epoch));
+    publisher.reject();
+    assert_eq!(control.epoch().unwrap(),original_epoch);
+
+    let mut changed=control.reserve(RegistrationPublisherKind::General,false).unwrap();
+    changed.accept(crate::android_registration_app_protocol::Reason::ContextChanged).unwrap();
+    assert!(!review_epoch_changed(&control,original_epoch));
+    changed.finish();
+    assert_eq!(control.epoch().unwrap(),original_epoch+1);
+    assert!(review_epoch_changed(&control,original_epoch));
+    assert!(!control.matches_epoch(original_epoch));
+}
+
+#[test]
+fn prepare_reconciliation_defers_only_the_original_ordinary_epoch_busy_rejection() {
+    assert_prepare_reconciliation_rejection_boundaries();
+}
+pub(super) fn assert_prepare_reconciliation_rejection_boundaries() {
+    use requests::PrepareRejection as R;
+    let control=Arc::new(crate::saved_command_owner::AndroidRegistrationControl::default());
+    let publisher=control.reserve(RegistrationPublisherKind::General,false).unwrap();
+    let original=control.epoch().unwrap_err();
+    assert!(prepare_epoch_pending(&original,Some(R::EpochRead),false));
+    assert!(!prepare_epoch_pending(&original,Some(R::EpochRead),true));
+    for rejection in [None,Some(R::OriginalGate),Some(R::RequestGate),Some(R::PublisherLock),
+        Some(R::PublisherFinished),Some(R::EpochMismatch),Some(R::EditStamp),Some(R::ReviewClock)] {
+        assert!(!prepare_epoch_pending(&original,rejection,false));
+    }
+    for error in [BridgeError::cleanup_unknown(),BridgeError::timeout(),changed(),BridgeError::invalid()] {
+        assert!(!prepare_epoch_pending(&error,Some(R::EpochRead),false));
+    }
+    publisher.reject();
+    control.poisoned();
+    let original=control.epoch().unwrap_err();
+    assert!(!prepare_epoch_pending(&original,Some(R::EpochRead),false));
+    assert!(review_epoch_changed(&control,0));
+}
