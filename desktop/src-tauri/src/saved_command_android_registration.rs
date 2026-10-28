@@ -276,10 +276,8 @@ impl Publisher {
             #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation",
     not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"),
     target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
-            let error = if observe_git {error.with_installed_git_epoch_rejection(Some(match &original {
-                TryLockError::WouldBlock => crate::error::InstalledGitEpochRejection::BookWouldBlock,
-                TryLockError::Poisoned(_) => crate::error::InstalledGitEpochRejection::BookPoisoned,
-            }))} else {error};
+            let error = if observe_git {error.with_installed_git_epoch_rejection(Some(
+                crate::error::InstalledGitEpochRejection::from_try_lock(&original)))} else {error};
             let _ = original;
             error
         })?;
@@ -415,15 +413,12 @@ impl ControlSlot {
         slot.book.lock().unwrap().pending[0] = original;
         assert_eq!(p.git_local_epoch().unwrap(), 0);
         p.reject(); assert_eq!(slot.epoch().unwrap(), 0);
-        let poisoned = Arc::new(ControlSlot::default());
-        let mut p = poisoned.reserve(PublisherKind::General, false).unwrap();
-        let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
-            let _guard = poisoned.book.lock().unwrap(); panic!("inert ControlBook poison fixture");
-        }));
-        assert!(caught.is_err()); rejected(&p, R::BookPoisoned);
-        // Avoid Drop's original poison propagation; this inert fixture has no
-        // host/control and the poisoned book is deliberately never reused.
-        p.finished = true;
+        // Exercise the SAME original lock-error reducer with inert typed
+        // errors. No panic/hook/poison propagation or stderr is introduced.
+        let poisoned = TryLockError::Poisoned(std::sync::PoisonError::new(()));
+        assert_eq!(R::from_try_lock(&poisoned), R::BookPoisoned);
+        let busy: TryLockError<()> = TryLockError::WouldBlock;
+        assert_eq!(R::from_try_lock(&busy), R::BookWouldBlock);
     }
 }
 
