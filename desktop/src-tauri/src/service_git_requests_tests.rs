@@ -5,23 +5,43 @@ use std::time::Duration;
     not(feature="development-runtime"),not(feature="ubuntu-runtime-publisher"),not(feature="macos-installed-installer"),
     target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64")))]
 pub(super) fn installed_cli_native_progress_data()->Arc<installed_progress::ApplyProgress> {
-    use installed_progress::{Boundary,Job,Point};
+    use installed_progress::{Boundary,Control,Job,Point};
     let (_doc,inbox,input)=setup();let prepare=prepared(&inbox,&input);let entry=prepare.entry();
     let before=entry.status().unwrap();let data=entry.installed_cli_progress();
-    assert_eq!(serde_json::to_value(data.snapshot()).unwrap(),serde_json::json!({"mask":0,"firstError":null}));
+    assert_eq!(serde_json::to_value(data.snapshot()).unwrap(),serde_json::json!({"mask":0,"controlMask":0,"firstError":null}));
     data.job(Job::Publisher,Point::Registered);data.job(Job::Publisher,Point::Entered);
     data.job(Job::Publisher,Point::JoinReturned);data.job(Job::Publisher,Point::Entered);
     data.boundary(Boundary::StartupEntered);data.first_error(InstalledNativeFailure::Busy);
     data.first_error(InstalledNativeFailure::Other);
-    assert_eq!(serde_json::to_value(data.snapshot()).unwrap(),serde_json::json!({"mask":(1u32<<24)|7,"firstError":"busy"}));
+    data.control(Control::RuntimeResolveRequested);data.control(Control::RuntimeResolveRequested);
+    assert_eq!(serde_json::to_value(data.snapshot()).unwrap(),serde_json::json!({"mask":(1u32<<24)|7,"controlMask":1u32<<6,"firstError":"busy"}));
     assert_eq!(entry.status().unwrap(),before);
     let mut foreign=input.origin.clone();foreign.request_id=id('f');let mut facts=None;
     assert!(!entry.installed_cli_returned_observed(&foreign,Family::Index,Phase::Apply,before.revision,&mut facts));
     assert!(facts.is_none());
+    assert!(!entry.installed_cli_returned_observed(&input.origin,Family::Index,Phase::Apply,before.revision,&mut facts));
+    assert_eq!(entry.status().unwrap(),before);
     // DATA remains readable while the original Entry mutex is held. No
     // native/Entry authority or second predicate is reachable through it.
     let _guard=entry.row.lock().unwrap();data.boundary(Boundary::HostTicketRequested);
     assert_eq!(serde_json::to_value(data.snapshot()).unwrap()["mask"],serde_json::json!((3u32<<24)|7));
+    let earlier=data.snapshot();data.control(Control::SourceInspectRequested);
+    assert_ne!(data.snapshot(),earlier);
+    assert_eq!(serde_json::to_value(earlier).unwrap()["controlMask"],serde_json::json!(1u32<<6));
+    use Control::*;
+    let points=[StartupReturnedOk,InspectionRegistered,InspectionWorkerReleased,GitInspectionEntered,
+        AclArmRequested,AclArmReturned,RuntimeResolveRequested,RuntimeResolveReturned,SourceInspectRequested,
+        SourceInspectReturned,RequestStoredCurrentOk,InspectionJoinReturned,InspectionOkAccepted,
+        ChildSpawnRequested,ChildSpawnReturned,RequestWriteReturned,ReadyParsed,WriterReadyReturned,
+        WriterPostSent,PostReceived,NativePostRequested,NativePostReturned,SourcePostRequested,
+        SourcePostReturned,PostJoinReturned,PostAckRequested,WriterPostReplyReturned,GoClaimRequested,
+        GoClaimReturnedOk,GoWriteReturned,CandidateRowValidated,CandidateReceiverReturned];
+    let all=installed_progress::ApplyProgress::default();let mut expected=0u32;
+    for (index,point) in points.into_iter().enumerate() {
+        all.control(point);all.control(point);expected|=1u32<<index;
+        assert_eq!(serde_json::to_value(all.snapshot()).unwrap(),serde_json::json!({"mask":0,"controlMask":expected,"firstError":null}));
+    }
+    assert_eq!(expected,u32::MAX);
     data
 }
 

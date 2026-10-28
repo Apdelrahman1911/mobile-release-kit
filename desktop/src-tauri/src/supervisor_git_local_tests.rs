@@ -27,7 +27,10 @@ fn parse(bytes:&[u8],r:Arc<wire::Request>)->(ReadEnd,Result<(),BridgeError>,Opti
     let runtime=tokio::runtime::Builder::new_current_thread().build().unwrap();
     runtime.block_on(async {
         let (ready,returned)=oneshot::channel();let (candidate,observed)=oneshot::channel();let (faults,_)=mpsc::channel(4);
-        let result=super::read(bytes,r,ready,candidate,faults).await;
+        let result=super::read(bytes,r,ready,candidate,faults,
+            #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+            None
+        ).await;
         (result,returned.await.unwrap(),observed.await.ok())
     })
 }

@@ -4716,9 +4716,11 @@ fn git_cli_wait_data_checks() -> bool {
     let Some(handle)=GitCliNativeProgressHandle::capture(Case::GitCli(git_cli::Case::Index),terminal,Some(data.clone())) else {return false;};
     let earlier=handle.snapshot();
     data.boundary(crate::service_git_requests::installed_progress::Boundary::ReadyHandoffRequested);
+    data.control(crate::service_git_requests::installed_progress::Control::CandidateReceiverReturned);
     let current=handle.snapshot();
     if earlier.facts==current.facts {return false;}
     let value=current.value();
+    if value["facts"]["controlMask"]!=json!((1u32<<31)|(1u32<<8)|(1u32<<6)) {return false;}
     if serde_json::to_string(&value).map_or(true,|raw|raw.len()>=512 || raw.contains("requestId") || raw.contains("projectId")) {return false;}
     let current=FailureSnapshot {step:terminal,git_cli_native_progress:Some(current),..snapshot};
     let Some(frame)=current.frame("observer-deadline") else {return false;};

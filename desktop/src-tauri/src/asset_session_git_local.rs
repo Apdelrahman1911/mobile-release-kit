@@ -220,6 +220,12 @@ impl GitLocalGate {
         self.0.agent.as_ref().and_then(|agent|agent.installed_apply_progress())
     }
     #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation",
+        not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"),
+        target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+    pub(crate) fn installed_apply_progress_data(&self)->Option<std::sync::Arc<crate::service_git_requests::installed_progress::ApplyProgress>> {
+        self.0.agent.as_ref().and_then(|agent|agent.installed_apply_progress_data())
+    }
+    #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation",
     not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"),
     target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
     pub(crate) fn installed_native_failure(&self,category:crate::service_git_requests::InstalledNativeFailure) {

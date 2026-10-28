@@ -355,13 +355,24 @@ impl Invocation {
     #[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64")))]
     pub(super) fn inspect(&self,runtime:&RuntimeConfig,owner:&Owner,preparing:Option<&crate::git_local_state::Ack>)
         ->Result<VerifiedRuntime,BridgeError> {
+        #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+        installed_control_mark(owner,crate::service_git_requests::installed_progress::Control::GitInspectionEntered);
         let root=self.gate.check_current(&owner.id)?;let stop=owner.stop.subscribe();
         let selected={let mut native=self.slots.lock().map_err(|_|BridgeError::cleanup_unknown())?;
             if self.action.kind()==wire::Kind::Fetch {native.arm_fetch_once().map_err(|_|BridgeError::cleanup_unknown())?;}
             if self.action.kind().is_push() {native.arm_push_once().map_err(|_|BridgeError::cleanup_unknown())?;}
-            let armed=native.arm_acl_once(owner.endpoint(),&stop);owner.observe_native_failure(native.first_failure());
+            #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+            installed_control_mark(owner,crate::service_git_requests::installed_progress::Control::AclArmRequested);
+            let armed=native.arm_acl_once(owner.endpoint(),&stop);
+            #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+            installed_control_mark(owner,crate::service_git_requests::installed_progress::Control::AclArmReturned);
+            owner.observe_native_failure(native.first_failure());
             armed.map_err(|_|BridgeError::cleanup_unknown())?;
+            #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+            installed_control_mark(owner,crate::service_git_requests::installed_progress::Control::RuntimeResolveRequested);
             let result=runtime.resolve_git_local_installed_for(self.action.kind(),&mut native,owner.endpoint(),&stop);
+            #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+            installed_control_mark(owner,crate::service_git_requests::installed_progress::Control::RuntimeResolveReturned);
             owner.observe_native_failure(native.first_failure());result?};
         #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
         if self.action.kind()==wire::Kind::Fetch {
@@ -391,10 +402,14 @@ impl Invocation {
         }
         let (snapshot,switch_sources,rename_sources,fast_forward_sources,initialization,upstream_sources)={let mut sources=self.sources.lock().map_err(|_|BridgeError::cleanup_unknown())?;
             let mut cut=||owner.failed()||*stop.borrow()||Instant::now()>=owner.endpoint();
+            #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+            installed_control_mark(owner,crate::service_git_requests::installed_progress::Control::SourceInspectRequested);
             let result=if let wire::Action::Upstream(action)=&self.action {
                 sources.inspect_upstream(&root,crate::installed_runtime::GitLocalRuntimeSlots::source_runtime_fd_bound(),&owner.id,action,review.as_ref(),&mut cut)
             }else{sources.inspect(&root,crate::installed_runtime::GitLocalRuntimeSlots::source_runtime_fd_bound(),
                 &owner.id,self.action.kind(),review.as_ref(),&mut cut)};
+            #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+            installed_control_mark(owner,crate::service_git_requests::installed_progress::Control::SourceInspectReturned);
             observe_source_failure(owner,sources.first_failure());result.map_err(source_error)?;
             (if self.action.kind()==wire::Kind::Initialize {None}else{Some(sources.native_snapshot().map_err(source_error)?.clone())},
                 sources.switch_projection().map_err(source_error)?.cloned(),sources.rename_projection().map_err(source_error)?.cloned(),sources.fast_forward_projection().map_err(source_error)?.cloned(),sources.init_projection().map_err(source_error)?.cloned(),sources.upstream_snapshot().map_err(source_error)?) };
@@ -432,7 +447,10 @@ impl Invocation {
         #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
         if self.push_observation.get().is_some_and(|c|!c.observed(&request)){return Err(BridgeError::invalid())}
         *slot=Some(request);*bridge=Some(clock);drop(bridge);drop(slot);
-        self.gate.check_current(&owner.id)?;Ok(selected)
+        self.gate.check_current(&owner.id)?;
+        #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+        installed_control_mark(owner,crate::service_git_requests::installed_progress::Control::RequestStoredCurrentOk);
+        Ok(selected)
     }
     #[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64")))]
     pub(super) fn before_go(&self,owner:&Owner)->Result<(),BridgeError> {self.post_before_effect(owner)}
@@ -493,11 +511,19 @@ impl Invocation {
     fn post_before_effect(&self,owner:&Owner)->Result<(),BridgeError> {
         self.gate.check_current(&owner.id)?;let stop=owner.stop.subscribe();
         {let mut native=self.slots.lock().map_err(|_|BridgeError::cleanup_unknown())?;
+            #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+            installed_control_mark(owner,crate::service_git_requests::installed_progress::Control::NativePostRequested);
             let result=native.capability().map_err(|_|BridgeError::cleanup_unknown())?
                 .post_original(owner.endpoint(),&stop,&mut |f|owner.observe_native_failure(f));
+            #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+            installed_control_mark(owner,crate::service_git_requests::installed_progress::Control::NativePostReturned);
             owner.observe_native_failure(native.first_failure());result.map_err(|_|BridgeError::cleanup_unknown())?;}
         {let mut sources=self.sources.lock().map_err(|_|BridgeError::cleanup_unknown())?;
+            #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+            installed_control_mark(owner,crate::service_git_requests::installed_progress::Control::SourcePostRequested);
             let result=sources.post(&mut ||owner.failed()||*stop.borrow()||Instant::now()>=owner.endpoint());
+            #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+            installed_control_mark(owner,crate::service_git_requests::installed_progress::Control::SourcePostReturned);
             observe_source_failure(owner,sources.first_failure());result.map_err(source_error)?;}
         // Never acquire Doc under the source/native mutex. The exact current
         // publisher/stamp/NativeReady is checked again immediately after IO.
@@ -591,11 +617,16 @@ pub(super) async fn startup(r:&mut Resources,inner:&Inner,owner:&Arc<Owner>)->Re
     target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
     if let Some(progress)=owner.git_local.as_ref().and_then(|local|local.gate.installed_apply_progress()) {progress.boundary(crate::service_git_requests::installed_progress::Boundary::StartupEntered);}
     let local=r.git_local.as_mut().ok_or_else(BridgeError::cleanup_unknown)?;
-    if let Some(jobs)=&mut local.jobs {jobs.startup(inner,owner).await?;}Ok(())
+    if let Some(jobs)=&mut local.jobs {jobs.startup(inner,owner).await?;}
+    #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+    installed_control_mark(owner,crate::service_git_requests::installed_progress::Control::StartupReturnedOk);
+    Ok(())
 }
 #[cfg(any(target_os="linux",target_os="macos"))]
 pub(super) async fn candidate_returned(r:&mut Resources,inner:&Inner,owner:&Arc<Owner>,candidate:Result<Arc<wire::Candidate>,oneshot::error::RecvError>) {
     let Some(local)=r.git_local.as_mut() else {owner.unknown(inner);return};
+    #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+    installed_control_mark(owner,crate::service_git_requests::installed_progress::Control::CandidateReceiverReturned);
     local.candidate_receive.take();
     // A normal pre-candidate refusal closes this channel. Its terminal will be
     // validated after the real wait/EOFs; absence grants neither retry nor GO.
@@ -816,6 +847,10 @@ fn control_terminal_matches(closed:Option<ControlClosed>,write:Option<&WriteEnd>
 }
 // One original writer: private request, READY/POST/GO, at most one candidate
 // ACK, then keep stdin alive through actual wait. No arbitrary message RPC.
+#[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+pub(super) fn installed_control_mark(owner:&Owner,point:crate::service_git_requests::installed_progress::Control) {
+    if let Some(progress)=owner.git_local.as_ref().and_then(|local|local.gate.installed_apply_progress()) {progress.control(point);}
+}
 pub(super) async fn write(mut stdin:tokio::process::ChildStdin,request:Arc<wire::Request>,
     ready:oneshot::Receiver<Result<(),BridgeError>>,wait:oneshot::Receiver<()>,
     post:oneshot::Sender<oneshot::Sender<Result<(),BridgeError>>>,ack:oneshot::Receiver<Result<Vec<u8>,BridgeError>>,
@@ -823,14 +858,24 @@ pub(super) async fn write(mut stdin:tokio::process::ChildStdin,request:Arc<wire:
     let mut stop=owner.stop.subscribe();
     if *stop.borrow()||owner.failed()||Instant::now()>=owner.endpoint() {return WriteEnd {complete:false}}
     let result=tokio::select! {biased;_=stop.changed()=>return WriteEnd {complete:false},v=stdin.write_all(request.bytes())=>v};
+    #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+    installed_control_mark(&owner,crate::service_git_requests::installed_progress::Control::RequestWriteReturned);
     if result.is_err() {owner.fail(BridgeError::new("io_error","The original Git request write failed."));return WriteEnd {complete:false}}
     let ready=tokio::select! {biased;_=stop.changed()=>return WriteEnd {complete:false},v=ready=>v};
+    #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+    installed_control_mark(&owner,crate::service_git_requests::installed_progress::Control::WriterReadyReturned);
     if !matches!(ready,Ok(Ok(()))) {owner.fail(BridgeError::protocol());return WriteEnd {complete:false}}
     let (send,returned)=oneshot::channel();
     if post.send(send).is_err() {owner.fail(BridgeError::cleanup_unknown());return WriteEnd {complete:false}}
+    #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+    installed_control_mark(&owner,crate::service_git_requests::installed_progress::Control::WriterPostSent);
     let posted=tokio::select! {biased;_=stop.changed()=>return WriteEnd {complete:false},v=returned=>v};
+    #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+    installed_control_mark(&owner,crate::service_git_requests::installed_progress::Control::WriterPostReplyReturned);
     if !matches!(posted,Ok(Ok(()))) {owner.fail(BridgeError::cleanup_unknown());return WriteEnd {complete:false}}
     let Some(local)=owner.git_local.as_ref() else {owner.fail(BridgeError::cleanup_unknown());return WriteEnd {complete:false}};
+    #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+    installed_control_mark(&owner,crate::service_git_requests::installed_progress::Control::GoClaimRequested);
     let go=if request.action.kind().is_push() {
         match local.gate.push_go(&owner.id,&request,|| {
             if local.push_go_claimed.swap(true,Ordering::SeqCst) {return false}
@@ -846,7 +891,13 @@ pub(super) async fn write(mut stdin:tokio::process::ChildStdin,request:Arc<wire:
             .then_some(()).ok_or_else(BridgeError::cleanup_unknown)) {owner.fail(error);return WriteEnd {complete:false}}
         zeroize::Zeroizing::new(request.go())
     };
-    let sent=tokio::select! {biased;_=stop.changed()=>false,v=stdin.write_all(&go)=>v.is_ok()};
+    #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+    installed_control_mark(&owner,crate::service_git_requests::installed_progress::Control::GoClaimReturnedOk);
+    let sent=tokio::select! {biased;_=stop.changed()=>false,v=stdin.write_all(&go)=>{
+        #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+        installed_control_mark(&owner,crate::service_git_requests::installed_progress::Control::GoWriteReturned);
+        v.is_ok()
+    }};
     drop(go); // Private selected-account token copy is zeroized after the sole write attempt.
     if !sent {owner.fail(BridgeError::new("io_error","The original Git GO write failed."));return WriteEnd {complete:false}}
     let mut wait=wait;let mut ack=ack;let mut ack_pending=request.phase==wire::Phase::Apply;
@@ -890,7 +941,9 @@ pub(super) async fn write(mut stdin:tokio::process::ChildStdin,request:Arc<wire:
 }
 pub(super) async fn read<T:AsyncRead+Unpin>(mut stdout:T,request:Arc<wire::Request>,
     ready:oneshot::Sender<Result<(),BridgeError>>,candidate:oneshot::Sender<Arc<wire::Candidate>>,
-    faults:mpsc::Sender<BridgeError>)->ReadEnd {
+    faults:mpsc::Sender<BridgeError>,
+    #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+    progress:Option<Arc<crate::service_git_requests::installed_progress::ApplyProgress>>)->ReadEnd {
     let mut ready=Some(ready);let mut candidate=Some(candidate);let mut first_after_ready=true;
     let mut buffer=[0u8;4096];let mut bytes=Vec::new();let mut total=0usize;let mut eof=false;let mut overflow=false;
     loop {
@@ -904,6 +957,8 @@ pub(super) async fn read<T:AsyncRead+Unpin>(mut stdout:T,request:Arc<wire::Reque
                 if ready.is_some() {
                     if let Some(index)=bytes.iter().position(|b|*b==b'\n') {
                         let result=request.ready(&bytes[..=index]);
+                        #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+                        if let Some(progress)=&progress {progress.control(crate::service_git_requests::installed_progress::Control::ReadyParsed);}
                         if result.is_err() {overflow=true;let _=faults.try_send(BridgeError::protocol());}
                         if let Some(send)=ready.take() {let _=send.send(result);}bytes.drain(..=index);
                     }else if bytes.len()>wire::READY_LIMIT {overflow=true;let _=faults.try_send(BridgeError::protocol());}
@@ -914,7 +969,10 @@ pub(super) async fn read<T:AsyncRead+Unpin>(mut stdout:T,request:Arc<wire::Reque
                         let is_candidate=crate::protocol::strict_json(&bytes[..=index]).is_ok_and(|v|v["kind"]=="candidate");
                         if is_candidate {
                             match request.candidate(&bytes[..=index]) {
-                                Ok(value)=>{if !candidate.take().is_some_and(|s|s.send(Arc::new(value)).is_ok()) {overflow=true;let _=faults.try_send(BridgeError::protocol());}},
+                                Ok(value)=>{
+                                    #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+                                    if let Some(progress)=&progress {progress.control(crate::service_git_requests::installed_progress::Control::CandidateRowValidated);}
+                                    if !candidate.take().is_some_and(|s|s.send(Arc::new(value)).is_ok()) {overflow=true;let _=faults.try_send(BridgeError::protocol());}},
                                 Err(error)=>{overflow=true;let _=faults.try_send(error);candidate.take();},
                             }
                             bytes.drain(..=index);
@@ -986,7 +1044,12 @@ pub(super) fn acquire_original(
     runtime.claim_once().map_err(AcquisitionError::final_claim)?;
     drop(state);
     drop(owners);
-    command.spawn().map_err(AcquisitionError::returned_spawn)
+    #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+    installed_control_mark(owner,crate::service_git_requests::installed_progress::Control::ChildSpawnRequested);
+    let result=command.spawn().map_err(AcquisitionError::returned_spawn);
+    #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+    installed_control_mark(owner,crate::service_git_requests::installed_progress::Control::ChildSpawnReturned);
+    result
 }
 #[cfg(all(
     target_os = "macos",

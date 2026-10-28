@@ -237,10 +237,10 @@ class GitCliWaitDiagnosticTests(unittest.TestCase):
 
 class GitCliNativeProgressDiagnosticTests(unittest.TestCase):
     @staticmethod
-    def detail(mask=0, first_error=None):
+    def detail(mask=0, first_error=None, control_mask=0):
         detail = GitCliWaitDiagnosticTests.detail()
         detail['gitCliNativeProgress'] = dict(sample='same-original-frame-read', phase='apply',
-            facts=dict(mask=mask, firstError=first_error))
+            facts=dict(mask=mask, controlMask=control_mask, firstError=first_error))
         return detail
 
     def parsed(self, detail, step='GitCli(Terminal)', reason='observer-deadline', case=A.M.GIT_CLI.INDEX):
@@ -249,7 +249,7 @@ class GitCliNativeProgressDiagnosticTests(unittest.TestCase):
     def test_closed_snapshot_can_differ_from_stale_poll_without_granting_original_return(self):
         for case in A.M.GIT_CLI.CASES:
             for mask in (0, 7, (1 << 31) | 7, 0xffffffff):
-                detail = self.detail(mask, 'busy')
+                detail = self.detail(mask, 'busy', control_mask=0xffffffff)
                 self.assertEqual(self.parsed(detail, case=case), detail)
                 self.assertEqual(detail['gitCliWait']['facts']['state'], 'applying')
                 row = A.project_selection_row(detail, 'observer-deadline', 'GitCli(Terminal)')
@@ -265,6 +265,7 @@ class GitCliNativeProgressDiagnosticTests(unittest.TestCase):
 
     def test_foreign_scope_private_text_and_out_of_range_progress_are_refused(self):
         for field, values in (('mask', (-1, 1 << 32, True, 1.0, 'CANARY_PRIVATE')),
+                              ('controlMask', (-1, 1 << 32, True, 1.0, None, 'CANARY_PRIVATE', {})),
                               ('firstError', (True, 1, 'CANARY_PRIVATE', 'context_changed'))):
             for value in values:
                 detail = self.detail(); detail['gitCliNativeProgress']['facts'][field] = value
@@ -289,12 +290,28 @@ class GitCliNativeProgressDiagnosticTests(unittest.TestCase):
     def test_absent_progress_and_each_closed_error_remain_optional_data(self):
         original = GitCliWaitDiagnosticTests.detail()
         self.assertEqual(self.parsed(original), original)
+        legacy = self.detail(); del legacy['gitCliNativeProgress']['facts']['controlMask']
+        self.assertEqual(self.parsed(legacy), legacy)
         for error in (None, 'cleanup-unknown', 'context-changed', 'busy', 'cancelled', 'shutting-down',
                       'query-timeout', 'git-local-refused', 'invalid-request', 'protocol-error', 'other'):
             detail = self.detail(first_error=error)
             del detail['gitCliWait']
             self.assertEqual(self.parsed(detail), detail)
             self.assertNotIn('CANARY', json.dumps(self.parsed(detail)))
+
+    def test_control_milestones_are_closed_data_and_do_not_fill_pending_or_return(self):
+        for mask in (0, *(1 << bit for bit in range(32)), 0xffffffff):
+            detail = self.detail(control_mask=mask)
+            result = self.parsed(detail)
+            self.assertEqual(result, detail)
+            self.assertFalse(result['gitCliWait']['facts']['applyJoined'])
+            self.assertFalse(result['gitCliWait']['facts']['claimed'])
+            fixtures = A.InertFixtures()
+            fixtures.case, fixtures.stage, fixtures.inflight = A.M.GIT_CLI.INDEX, 'invocation', True
+            fixtures.inner_failure_context = result
+            report = A.M.diagnostic(A.M.Refused('original-deadline'), None, fixtures)
+            self.assertEqual((report['originalCallReturned'], report['appReturncode'], report['invocationFinality']),
+                             (False, None, 'unknown'))
 
 
 class CandidateCheckpointTests(unittest.TestCase):

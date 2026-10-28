@@ -3321,8 +3321,12 @@ async fn drive(inner: Arc<Inner>, owner: Arc<Owner>, bytes: Vec<u8>) -> DriverEn
     let inspection_owner = owner.clone();
     let (inspect_start, inspect_enter) = oneshot::channel();
     resources.inspection_return = Some(ManagementJoin::Pending);
+    #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+    git_local::installed_control_mark(&owner,crate::service_git_requests::installed_progress::Control::InspectionRegistered);
     resources.inspection = Some(tokio::task::spawn_blocking(move || {
         inspect_enter.blocking_recv().map_err(|_| BridgeError::cleanup_unknown())?;
+        #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+        git_local::installed_control_mark(&inspection_owner,crate::service_git_requests::installed_progress::Control::InspectionWorkerReleased);
         #[cfg(all(test, feature = "development-runtime"))]
         inspection_gate.wait();
         let runtime = match profile {
@@ -3602,11 +3606,16 @@ async fn drive(inner: Arc<Inner>, owner: Arc<Owner>, bytes: Vec<u8>) -> DriverEn
     }));
     let _ = inspect_start.send(());
     let inspected = join_slot(&mut resources.inspection).await;
+    #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+    git_local::installed_control_mark(&owner,crate::service_git_requests::installed_progress::Control::InspectionJoinReturned);
     resources.inspection_return = Some(match &inspected { Ok(_) => ManagementJoin::Returned, Err(error) => ManagementJoin::error(error) });
     #[cfg(all(test, feature = "development-runtime"))]
     if inspected.is_ok() { lock(&owner.observation).inspection_joined = true; }
     let runtime = match inspected {
-        Ok(Ok(runtime)) => { resources.inspection.take(); runtime },
+        Ok(Ok(runtime)) => { resources.inspection.take();
+            #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+            git_local::installed_control_mark(&owner,crate::service_git_requests::installed_progress::Control::InspectionOkAccepted);
+            runtime },
         Ok(Err(error)) => {
             resources.inspection.take();
             owner.fail(error.clone()); // Original detection, not later management-return scheduling.
@@ -4004,7 +4013,10 @@ async fn drive(inner: Arc<Inner>, owner: Arc<Owner>, bytes: Vec<u8>) -> DriverEn
     if let Some(stdout) = stdout {
         if matches!(profile,Profile::GitLocal) {
             match (git_local_request.as_ref(),ready_send.take(),local_candidate.take()) {
-                (Some(request),Some(ready),Some(candidate))=>resources.stdout=Some(tokio::spawn(git_local::read(stdout,request.clone(),ready,candidate,faults.clone()))),
+                (Some(request),Some(ready),Some(candidate))=>resources.stdout=Some(tokio::spawn(git_local::read(stdout,request.clone(),ready,candidate,faults.clone(),
+                    #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+                    owner.git_local.as_ref().and_then(|local|local.gate.installed_apply_progress_data())
+                ))),
                 _=>owner.fail(BridgeError::cleanup_unknown()),
             }
         } else if matches!(profile, Profile::GitRead) {
@@ -4193,6 +4205,8 @@ async fn drive(inner: Arc<Inner>, owner: Arc<Owner>, bytes: Vec<u8>) -> DriverEn
                 if !source.work_returned(result, &owner, &inner) { return DriverEnd::RetainedUnknown; }
             },
             Event::HistoryPostRequest(request)=>{
+                #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+                git_local::installed_control_mark(&owner,crate::service_git_requests::installed_progress::Control::PostReceived);
                 history_post_receive.take();
                 match request {
                     Ok(reply)=>{
@@ -4244,6 +4258,8 @@ async fn drive(inner: Arc<Inner>, owner: Arc<Owner>, bytes: Vec<u8>) -> DriverEn
                 }
             },
             Event::HistoryPost(Ok(result))=>{
+                #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+                git_local::installed_control_mark(&owner,crate::service_git_requests::installed_progress::Control::PostJoinReturned);
                 resources.history_post.take();
                 if let Err(error)=&result{owner.fail(error.clone());}
                 resources.history_post_return=Some(result.clone());
@@ -4251,11 +4267,15 @@ async fn drive(inner: Arc<Inner>, owner: Arc<Owner>, bytes: Vec<u8>) -> DriverEn
                 let reply=if history::post_ack_data(true,result.is_ok(),owner.failed(),*owner.stop.borrow(),Instant::now(),owner.endpoint()){
                     result
                 }else{let error=lock(&owner.state).error.clone().unwrap_or_else(BridgeError::timeout);owner.fail(error.clone());Err(error)};
+                #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+                git_local::installed_control_mark(&owner,crate::service_git_requests::installed_progress::Control::PostAckRequested);
                 if !resources.history_post_ack.take().is_some_and(|ack|ack.send(reply).is_ok()){
                     owner.fail(BridgeError::new("io_error","The original History source-post acknowledgement was not consumed."));
                 }
             },
             Event::HistoryPost(Err(_))=>{
+                #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+                git_local::installed_control_mark(&owner,crate::service_git_requests::installed_progress::Control::PostJoinReturned);
                 resources.history_post_join_failed=true;
                 if let Some(reply)=resources.history_post_ack.take(){let _=reply.send(Err(BridgeError::cleanup_unknown()));}
                 owner_unknown!(owner,&inner,Some(&resources),Io);return DriverEnd::RetainedUnknown;

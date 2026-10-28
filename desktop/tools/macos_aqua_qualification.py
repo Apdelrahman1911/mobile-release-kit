@@ -4211,8 +4211,9 @@ def _git_cli_native_progress_context(value, source, step, reason, case):
          and type(value) is dict and set(value) == {"sample", "phase", "facts"}
          and value["sample"] == "same-original-frame-read" and value["phase"] == "apply", "failure-context")
     facts = value["facts"]
-    need(type(facts) is dict and set(facts) == {"mask", "firstError"}
+    need(type(facts) is dict and set(facts) in ({"mask", "firstError"}, {"mask", "controlMask", "firstError"})
          and type(facts["mask"]) is int and 0 <= facts["mask"] <= 0xffffffff
+         and ("controlMask" not in facts or type(facts["controlMask"]) is int and 0 <= facts["controlMask"] <= 0xffffffff)
          and (facts["firstError"] is None or type(facts["firstError"]) is str and facts["firstError"] in (
              "cleanup-unknown", "context-changed", "busy", "cancelled", "shutting-down",
              "query-timeout", "git-local-refused", "invalid-request", "protocol-error", "other")), "failure-context")

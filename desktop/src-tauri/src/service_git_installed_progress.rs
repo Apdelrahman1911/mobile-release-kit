@@ -6,12 +6,14 @@ use std::sync::atomic::{AtomicU8, AtomicU32, Ordering};
 #[derive(Default)]
 pub(crate) struct ApplyProgress {
     mask: AtomicU32,
+    control_mask: AtomicU32,
     first_error: AtomicU8,
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all="camelCase")]
 pub(crate) struct Facts {
     mask: u32,
+    control_mask: u32,
     first_error: Option<InstalledNativeFailure>,
 }
 #[derive(Clone, Copy)]
@@ -24,7 +26,28 @@ pub(crate) enum Boundary {
     ReadyHandoffRequested, ReadyHandoffReturned, FinalizeEntered,
     RetireEntered, OwnerArmed,
 }
+// Closed original control milestones. Requested/returned bits include errors
+// unless named Ok; none proves native entry, coherent state or finality.
+#[derive(Clone, Copy)]
+#[repr(u8)]
+pub(crate) enum Control {
+    StartupReturnedOk=0, InspectionRegistered=1, InspectionWorkerReleased=2,
+    GitInspectionEntered=3, AclArmRequested=4, AclArmReturned=5,
+    RuntimeResolveRequested=6, RuntimeResolveReturned=7,
+    SourceInspectRequested=8, SourceInspectReturned=9, RequestStoredCurrentOk=10,
+    InspectionJoinReturned=11, InspectionOkAccepted=12,
+    ChildSpawnRequested=13, ChildSpawnReturned=14, RequestWriteReturned=15,
+    ReadyParsed=16, WriterReadyReturned=17, WriterPostSent=18, PostReceived=19,
+    NativePostRequested=20, NativePostReturned=21,
+    SourcePostRequested=22, SourcePostReturned=23, PostJoinReturned=24,
+    PostAckRequested=25, WriterPostReplyReturned=26,
+    GoClaimRequested=27, GoClaimReturnedOk=28, GoWriteReturned=29,
+    CandidateRowValidated=30, CandidateReceiverReturned=31,
+}
 impl ApplyProgress {
+    pub(crate) fn control(&self, point: Control) {
+        self.control_mask.fetch_or(1u32 << point as u8,Ordering::Release);
+    }
     pub(crate) fn job(&self, job: Job, point: Point) {
         let index=match job {Job::Publisher=>0,Job::Host=>1,Job::Open=>2,Job::Preparing=>3,
             Job::Candidate=>4,Job::Finish=>5,Job::RetireUse=>6,Job::FinishPublisher=>7};
@@ -49,14 +72,18 @@ impl ApplyProgress {
         // Separate closed atomics, not a coherent owner status or a join proof.
         use InstalledNativeFailure as F;
         let mask=self.mask.load(Ordering::Acquire);
+        let control_mask=self.control_mask.load(Ordering::Acquire);
         let first_error=match self.first_error.load(Ordering::Acquire) {1=>Some(F::CleanupUnknown),2=>Some(F::ContextChanged),
             3=>Some(F::Busy),4=>Some(F::Cancelled),5=>Some(F::ShuttingDown),6=>Some(F::QueryTimeout),
             7=>Some(F::GitLocalRefused),8=>Some(F::InvalidRequest),9=>Some(F::ProtocolError),10=>Some(F::Other),_=>None};
-        Facts {mask,first_error}
+        Facts {mask,control_mask,first_error}
     }
 }
 impl NativeLink {
     pub(crate) fn installed_apply_progress(&self) -> Option<&ApplyProgress> {
         (self.phase==Phase::Apply && !self.is_remote()).then_some(self.entry.installed_apply_progress.as_ref())
+    }
+    pub(crate) fn installed_apply_progress_data(&self) -> Option<std::sync::Arc<ApplyProgress>> {
+        (self.phase==Phase::Apply && !self.is_remote()).then(||self.entry.installed_apply_progress.clone())
     }
 }
