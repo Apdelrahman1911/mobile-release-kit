@@ -182,6 +182,17 @@ fn git_read_failure_reason(step: Step) -> Option<&'static str> {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum GitReadReason { Absent, Known(u8), Unrecognized }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct GitCliWaitSample {
+    step: Step, facts: crate::service_git_requests::InstalledCliReturnFacts,
+}
+impl GitCliWaitSample {
+    fn capture(case: Case, step: Step, facts: Option<crate::service_git_requests::InstalledCliReturnFacts>) -> Option<Self> {
+        if !matches!(case, Case::GitCli(_)) || !matches!(step, Step::GitCli(git_cli::Step::Prepared | git_cli::Step::Terminal)) { return None; }
+        Some(Self { step, facts: facts? })
+    }
+    fn value(self) -> Value { json!({"sample":"same-original-last-poll", "facts":self.facts}) }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct GitReadFailureSample {
     step: Step, check: GitReadCheck, phase: Option<git_read::Phase>, outcome: Option<git_read::Outcome>,
     reason: GitReadReason, result_valid: Option<bool>,
@@ -1187,6 +1198,7 @@ struct Record {
     vault_failure: Option<vault::FailureSample>,
     upload_failure: Option<vault::upload_key::FailureSample>,
     git_read_failure: Option<GitReadFailureSample>,
+    git_cli_wait: Option<GitCliWaitSample>,
     last_project_chooser: Option<ProjectChooserSample>,
     original_window: Option<OriginalWindowSample>,
     native_dispatch: Option<NativeDispatch>, last_panel: Option<PanelSample>, native_action: Option<NativeActionSample>,
@@ -1309,6 +1321,7 @@ struct FailureSnapshot {
     upload: Option<vault::upload_key::FailureSample>,
     tool_service: Option<tool_setup::ServiceFailureSample>,
     git_read_failure: Option<GitReadFailureSample>,
+    git_cli_wait: Option<GitCliWaitSample>,
     dom: Option<(u16, Option<ProjectChooserSample>)>,
     original_window: Option<OriginalWindowSample>,
     last_panel: Option<PanelSample>, native_action: Option<NativeActionSample>,
@@ -1322,6 +1335,7 @@ impl FailureSnapshot {
             bootstrap: r.bootstrap_failure, vault: r.vault_failure, upload: r.upload_failure,
             tool_service: r.tool_setup.as_ref().and_then(tool_setup::Record::service_failure),
             git_read_failure: r.git_read_failure,
+            git_cli_wait: r.git_cli_wait,
             dom: Some((r.evaluations, r.last_project_chooser)), original_window: r.original_window,
             last_panel: r.last_panel, native_action: r.native_action, accessibility: r.open_sample(), identity_binding: r.identity_binding,
             project_selection: r.project_selection, completion_selection: r.completion_selection,
@@ -1343,6 +1357,7 @@ impl FailureSnapshot {
         self.vault = None; // Never attach a later original vault sample to an earlier cache.
         self.tool_service = None; // A cached panel expiry did not sample Service status.
         self.git_read_failure = None; // Cached panel DATA did not observe this ReadWait failure.
+        self.git_cli_wait = None; // A pre-arm cache did not observe this original CLI poll.
         self.project_selection = None; // Never attach fresh return DATA to a pre-arm snapshot.
         self.completion_selection = None;
         self.accessibility = self.accessibility.map(|sample| sample.reconciled(progress));
@@ -1399,6 +1414,11 @@ impl FailureSnapshot {
             && matches!(self.step, Step::ToolSetup(step) if sample.matches(step)));
         self.git_read_failure = self.git_read_failure.filter(|sample| self.source == "record"
             && self.step == sample.step && git_read_failure_reason(self.step) == Some(reason));
+        // Last pending-poll DATA belongs only to this step's winning deadline.
+        // It is neither the first failure instant nor return/finality evidence.
+        self.git_cli_wait = self.git_cli_wait.filter(|sample| self.source == "record"
+            && reason == "observer-deadline" && self.step == sample.step
+            && matches!(self.step, Step::GitCli(git_cli::Step::Prepared | git_cli::Step::Terminal)));
         let mut frame = format!("MRK_MACOS_AQUA_FAILURE_STEP={step}\nMRK_MACOS_AQUA_FAILURE_REASON={reason}\nMRK_MACOS_AQUA_FAILURE_CONTEXT=").into_bytes();
         let tail = b"\nMRK_MACOS_AQUA=failed\n";
         let context = bounded_failure_context(failure_context(&self), self.press_timing(), frame.len().checked_add(tail.len())?)?;
@@ -1420,6 +1440,7 @@ fn bounded_failure_context(mut value: Value, timing: Option<mrk_macos_installed_
     // The optional finite read sample cannot consume the original frame's
     // room. Serialize the unchanged context first and retain it on overflow.
     let git_read_failure = value.as_object_mut().and_then(|fields| fields.remove("gitReadFailure"));
+    let git_cli_wait = value.as_object_mut().and_then(|fields| fields.remove("gitCliWait"));
     let identity_failure = value.get_mut("toolService").and_then(Value::as_object_mut)
         .and_then(|fields| fields.remove("identityFailure"));
     let mut baseline = edit::bounded(&value, 8192).ok()?;
@@ -1430,6 +1451,14 @@ fn bounded_failure_context(mut value: Value, timing: Option<mrk_macos_installed_
             baseline = bytes;
         } else if let Some(fields) = value.as_object_mut() {
             fields.remove("gitReadFailure");
+        }
+    }
+    if let Some(sample) = git_cli_wait {
+        value["gitCliWait"] = sample;
+        if let Some(bytes) = edit::bounded(&value, 8192).ok().filter(|bytes| bytes.is_ascii() && fits(bytes)) {
+            baseline = bytes;
+        } else if let Some(fields) = value.as_object_mut() {
+            fields.remove("gitCliWait");
         }
     }
     // The optional identity substage must never hide the original returned
@@ -1487,6 +1516,7 @@ fn failure_context(r: &FailureSnapshot) -> Value {
     if let Some(sample) = r.upload { value["uploadKey"] = sample.value(); }
     if let Some(sample) = r.tool_service { value["toolService"] = sample.value(); }
     if let Some(sample) = r.git_read_failure { value["gitReadFailure"] = sample.value(); }
+    if let Some(sample) = r.git_cli_wait { value["gitCliWait"] = sample.value(); }
     if let Some(completion) = r.completion_selection { value["completionSelection"] = completion.value(); }
     if let Some(selection) = r.project_selection { value["projectSelection"] = selection.value(); }
     if let Some(admitted) = r.input_body_admission { value["inputBodyAdmission"] = json!(admitted); }
@@ -1596,7 +1626,7 @@ impl Observation {
         let tool_record = if let Case::ToolSetup(c)=case {Some(tool_setup::Record::new(c,&project_path,fixture.uid)?)}else{None};
         let record = Mutex::new(Record {
                 step: Step::Bootstrap, pending: None, evaluations: 0, attached: false, started: false, loaded: false,
-                bootstrap_failure: None, vault_failure: None, upload_failure: None, git_read_failure: None,
+                bootstrap_failure: None, vault_failure: None, upload_failure: None, git_read_failure: None, git_cli_wait: None,
                 last_project_chooser: None, original_window: None,
                 native_dispatch: None, last_panel: None, native_action: None,
                 ax_trusted: false, prepared_open: None, accessibility: None, open_progress: None, identity_binding: None, completion_selection: None,
@@ -4442,7 +4472,7 @@ fn press_diagnostic_data_check(full: OpenInputSample) -> bool {
         parent_references_panel: Some(true), panel_references_parent: Some(true), panel_visible: Some(true),
         directory_bound: true, directory_returned: true, directory_ready: true, directory_readiness: "ready", wait_location: None };
     let snapshot = FailureSnapshot { source: "record", step: Step::OpenProject, pending: None, native_dispatch: Some(native),
-        input_body_admission: None, bootstrap: None, vault: None, upload:None, tool_service:None, git_read_failure:None, dom: None, original_window: None, last_panel: Some(panel),
+        input_body_admission: None, bootstrap: None, vault: None, upload:None, tool_service:None, git_read_failure:None, git_cli_wait: None, dom: None, original_window: None, last_panel: Some(panel),
         native_action: None, accessibility: Some(failed), identity_binding: Some(identity),
         completion_selection: None, project_selection: None, field_preparation: None };
     if snapshot.press_timing() != Some(timing) || snapshot.frame("native-default-input").is_none() { return false; }
@@ -4635,6 +4665,67 @@ fn git_read_wait_data_checks() -> bool {
     }
     true
 }
+fn git_cli_wait_data_checks() -> bool {
+    // Same memory-only original Entry predicate and actual bounded serializer.
+    // These facts cannot change the first error, wait, native work or finality.
+    let snapshot = FailureSnapshot { source: "record", step: Step::GitCli(git_cli::Step::Prepared),
+        pending: None, native_dispatch: None, input_body_admission: None, bootstrap: None, vault: None, upload: None,
+        tool_service: None, git_read_failure: None, git_cli_wait: None, dom: None, original_window: None,
+        last_panel: None, native_action: None, accessibility: None, identity_binding: None,
+        completion_selection: None, project_selection: None, field_preparation: None };
+    fn frame_has(snapshot: FailureSnapshot, reason: &'static str, sample: Option<Value>) -> bool {
+        let Some(frame) = snapshot.frame(reason) else { return false; };
+        let Some(row) = frame.split(|byte| *byte == b'\n').find_map(|row| row.strip_prefix(b"MRK_MACOS_AQUA_FAILURE_CONTEXT=")) else { return false; };
+        let Ok(context) = serde_json::from_slice::<Value>(row) else { return false; };
+        frame.len() <= 8448 && row.len() <= 8192 && frame.is_ascii()
+            && context.get("gitCliWait") == sample.as_ref()
+            && context.get("gitReadFailure").is_none()
+    }
+    for apply in [false, true] {
+        let facts = crate::service_git_requests::installed_cli_wait_data_facts(apply);
+        let step = Step::GitCli(if apply {git_cli::Step::Terminal}else{git_cli::Step::Prepared});
+        for case in [git_cli::Case::Index, git_cli::Case::Branch] {
+            let Some(sample) = GitCliWaitSample::capture(Case::GitCli(case), step, Some(facts)) else { return false; };
+            let value = sample.value();
+            if value != json!({"sample":"same-original-last-poll", "facts":facts})
+                || serde_json::to_string(&value).map_or(true, |raw| raw.len() >= 1024 || raw.contains("requestId")
+                    || raw.contains("projectId") || raw.contains("git-local-")) { return false; }
+            let current = FailureSnapshot { step, git_cli_wait: Some(sample), ..snapshot };
+            if !frame_has(current, "observer-deadline", Some(value.clone())) { return false; }
+            for reason in ["git-cli-original-contract", "observer-invariant", "native-default-input"] {
+                if !frame_has(current, reason, None) { return false; }
+                let first = AtomicU8::new(0); let failed = AtomicBool::new(false);
+                latch_failure(&first, &failed, reason);
+                latch_failure(&first, &failed, "observer-deadline");
+                if first_failure_reason(&first) != Some(reason) { return false; }
+            }
+            for other in [Step::OpenProject, Step::GitCli(git_cli::Step::ReadWait),
+                Step::GitCli(if apply {git_cli::Step::Prepared}else{git_cli::Step::Terminal})] {
+                if !frame_has(FailureSnapshot { step: other, ..current }, "observer-deadline", None) { return false; }
+            }
+            if !frame_has(FailureSnapshot { source: "prearm-open-progress", ..current }, "observer-deadline", None)
+                || (FailureSnapshot { source: "prearm-open-return", ..current }).frame("observer-deadline").is_some() { return false; }
+            let expired = current.at_expiry(OpenProgress {state:"unknown",requested:false,dispatched:false,
+                entered:false,returned:false,joined:false,retired:false,expired:true});
+            if expired.git_cli_wait.is_some() || !frame_has(expired, "observer-deadline", None) { return false; }
+            let mut near = json!({"padding":""});
+            let Ok(empty) = edit::bounded(&near, 8192) else { return false; };
+            near["padding"] = json!("x".repeat(8192 - empty.len()));
+            let Ok(baseline) = edit::bounded(&near, 8192) else { return false; };
+            near["gitCliWait"] = value.clone();
+            if bounded_failure_context(near, None, 256) != Some(baseline) { return false; }
+            let mut small = json!({"padding":""});
+            let Ok(baseline) = edit::bounded(&small, 8192) else { return false; };
+            small["gitCliWait"] = value;
+            if bounded_failure_context(small, None, 8448 - baseline.len()) != Some(baseline) { return false; }
+        }
+        if GitCliWaitSample::capture(Case::FirstSave, step, Some(facts)).is_some()
+            || GitCliWaitSample::capture(Case::GitCli(git_cli::Case::Index), Step::OpenProject, Some(facts)).is_some()
+            || GitCliWaitSample::capture(Case::GitCli(git_cli::Case::Index), step, None).is_some()
+            || !frame_has(FailureSnapshot { step, ..snapshot }, "observer-deadline", None) { return false; }
+    }
+    true
+}
 fn git_read_failure_data_checks() -> bool {
     // The real first-error latch/frame over finite DATA. Never a second status
     // query, fixture/result validator, native controller or finality witness.
@@ -4650,7 +4741,7 @@ fn git_read_failure_data_checks() -> bool {
     }
     let snapshot = FailureSnapshot { source: "record", step: Step::GitCli(git_cli::Step::ReadWait),
         pending: None, native_dispatch: None, input_body_admission: None, bootstrap: None, vault: None, upload: None,
-        tool_service: None, git_read_failure: None, dom: None, original_window: None, last_panel: None,
+        tool_service: None, git_read_failure: None, git_cli_wait: None, dom: None, original_window: None, last_panel: None,
         native_action: None, accessibility: None, identity_binding: None, completion_selection: None,
         project_selection: None, field_preparation: None };
     let mut p = git_read::Projection { operation_id: "private-operation-never-exported".into(),
@@ -4774,6 +4865,7 @@ fn git_read_failure_data_checks() -> bool {
 fn git_read_wait_and_first_failure_frame_preserve_pending_and_bounded_data() {
     assert!(git_read_wait_data_checks());
     assert!(git_read_failure_data_checks());
+    assert!(git_cli_wait_data_checks());
 }
 fn tool_service_failure_data_checks(sample: tool_setup::ServiceFailureSample, steps: [tool_setup::Step; 5]) -> bool {
     // Real frame/serializer over inert returned-status DATA. No Control, native
@@ -4790,7 +4882,7 @@ fn tool_service_failure_data_checks(sample: tool_setup::ServiceFailureSample, st
     }
     let reason = "tool-setup-original-contract";
     let snapshot = FailureSnapshot { source: "record", step: Step::ToolSetup(steps[0]), pending: None, native_dispatch: None,
-        input_body_admission: None, bootstrap: None, vault: None, upload: None, tool_service: None, git_read_failure: None, dom: None,
+        input_body_admission: None, bootstrap: None, vault: None, upload: None, tool_service: None, git_read_failure: None, git_cli_wait: None, dom: None,
         original_window: None, last_panel: None, native_action: None, accessibility: None, identity_binding: None,
         completion_selection: None, project_selection: None, field_preparation: None };
     for (i, (step, label)) in steps.into_iter().zip(["ToolService(Request)","ToolService(RequestWait)","ToolService(Check)",
@@ -4850,7 +4942,7 @@ fn bootstrap_diagnostic_data_checks() -> bool {
     latch_bootstrap(&first, &failed, &mut detail, "bootstrap-info-duplicate", later);
     if detail.is_some() || first_failure_reason(&first) != Some("bootstrap-info-methods-shape") { return false; }
     let snapshot = FailureSnapshot { source: "record", step: Step::Bootstrap, pending: None, native_dispatch: None, input_body_admission: None,
-        bootstrap: Some(sample), vault: None, upload:None, tool_service:None, git_read_failure:None, dom: Some((0, None)), original_window: None, last_panel: None, native_action: None,
+        bootstrap: Some(sample), vault: None, upload:None, tool_service:None, git_read_failure:None, git_cli_wait: None, dom: Some((0, None)), original_window: None, last_panel: None, native_action: None,
         accessibility: None, identity_binding: None, completion_selection: None, project_selection: None, field_preparation: None };
     if snapshot.frame("bootstrap-info-available-count").is_none() || snapshot.frame("observer-invariant").is_some()
         || (FailureSnapshot { source: "prearm-open-progress", ..snapshot }).frame("bootstrap-info-available-count").is_some() { return false; }
@@ -5076,7 +5168,7 @@ macro_rules! data_contract_failure {
 fn observer_data_checks() -> bool {
     use mrk_macos_installed_native::{PanelKind, PanelObservation, PanelResponse};
     if !final_fixture_readback_data_check() { return data_contract_failure!(); }
-    if !git_read_wait_data_checks() || !git_read_failure_data_checks() { return data_contract_failure!(); }
+    if !git_read_wait_data_checks() || !git_read_failure_data_checks() || !git_cli_wait_data_checks() { return data_contract_failure!(); }
     if !project_chooser_data_checks() { return data_contract_failure!(); }
     crate::asset_session::assert_project_selection_gate_contract();
     // SAME inert bodies as the libtest regressions, before any fixture/native

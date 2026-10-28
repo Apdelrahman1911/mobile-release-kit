@@ -157,6 +157,84 @@ def native_fixture(scope='git-native'):
     return values, manifest, service, consumer
 
 
+class GitCliWaitDiagnosticTests(unittest.TestCase):
+    """Finite pending-poll DATA through the real failure parser and reporter."""
+    @staticmethod
+    def detail():
+        return dict(snapshotSource='record', pending=None, nativeHandler=None, lastPanel=None,
+            gitCliWait=dict(sample='same-original-last-poll', facts=dict(state='applying', reason=None,
+                claimed=False, prepareJoined=True, applyJoined=False, historyFailed=False,
+                historyClaimed=False, historyAcknowledged=False, stopped=False,
+                reviewPresent=False, revisionMatched=True)))
+
+    def parsed(self, detail, step='GitCli(Terminal)', reason='observer-deadline', case=A.M.GIT_CLI.INDEX):
+        return A.M.failure_context(b'', A.project_selection_row(detail, reason, step), case)
+
+    def test_both_wait_steps_and_cases_keep_pending_facts_without_return_or_finality(self):
+        for step in ('GitCli(Prepared)', 'GitCli(Terminal)'):
+            for case in A.M.GIT_CLI.CASES:
+                detail = self.detail()
+                self.assertEqual(self.parsed(detail, step=step, case=case), detail)
+                row = A.project_selection_row(detail, 'observer-deadline', step)
+                with self.assertRaises(A.M.Refused):
+                    A.M.parse_result(b'', row, A.BINDING, case)
+                fixtures = A.InertFixtures()
+                fixtures.case, fixtures.stage, fixtures.inflight = case, 'invocation', True
+                fixtures.inner_failure_context = self.parsed(detail, step=step, case=case)
+                fixtures.inner_failure_reason = 'observer-deadline'
+                report = A.M.diagnostic(A.M.Refused('original-deadline'), None, fixtures)
+                self.assertEqual(report['innerFailureContext'], detail)
+                self.assertEqual((report['originalCallReturned'], report['appReturncode'], report['invocationFinality']),
+                                 (False, None, 'unknown'))
+                self.assertEqual(report['innerFailureReason'], 'observer-deadline')
+
+    def test_missing_sample_is_optional_and_foreign_source_step_case_or_reason_is_refused(self):
+        absent = self.detail(); del absent['gitCliWait']
+        self.assertEqual(self.parsed(absent), absent)
+        for source in ('prearm-open-progress', 'prearm-open-return', 'CANARY_PRIVATE'):
+            detail = self.detail(); detail['snapshotSource'] = source
+            self.assertIsNone(self.parsed(detail))
+        for step in ('GitCli(ReadWait)', 'GitCli(Allow)', 'GitFetch(ReadWait)', 'OpenProject'):
+            self.assertIsNone(self.parsed(self.detail(), step=step))
+        for reason in ('git-cli-original-contract', 'observer-invariant', 'native-default-input'):
+            self.assertIsNone(self.parsed(self.detail(), reason=reason))
+        for case in (None, 'first-save', A.M.FETCH.CASES[0]):
+            self.assertIsNone(self.parsed(self.detail(), case=case))
+
+    def test_missing_malformed_private_and_unbounded_facts_are_refused(self):
+        facts = self.detail()['gitCliWait']['facts']
+        for field in facts:
+            detail = self.detail(); del detail['gitCliWait']['facts'][field]
+            self.assertIsNone(self.parsed(detail))
+            detail = self.detail()
+            detail['gitCliWait']['facts'][field] = 'CANARY_PRIVATE' if field in ('state', 'reason') else 1
+            self.assertIsNone(self.parsed(detail))
+        for field, value in (('projectId', 'CANARY_PRIVATE'), ('operationId', 'CANARY_PRIVATE'),
+                             ('output', 'x' * 8192), ('nativeFailure', dict(category='CANARY_PRIVATE', phase='apply')),
+                             ('unknownTransition', dict(origin='claim-dropped', phase='apply', private='CANARY')),
+                             ('applyRejection', 'review-clock'), ('prepareRejection', 'CANARY_PRIVATE')):
+            detail = self.detail(); detail['gitCliWait']['facts'][field] = value
+            self.assertIsNone(self.parsed(detail))
+        for field, value in (('sample', 'first-failure'), ('sample', 1), ('facts', None), ('extra', True)):
+            detail = self.detail(); detail['gitCliWait'][field] = value
+            self.assertIsNone(self.parsed(detail))
+        detail = self.detail()
+        row = A.project_selection_row(detail, 'observer-deadline', 'GitCli(Terminal)')
+        self.assertIsNone(A.M.failure_context(b'', row + A.context_row(detail), A.M.GIT_CLI.INDEX))
+
+    def test_closed_first_transition_and_prior_prepare_facts_remain_diagnostic_only(self):
+        detail = self.detail()
+        detail['gitCliWait']['facts'].update(prepareRejection='epoch-read', applyRejection='publisher-finished',
+            unknownTransition=dict(origin='claim-returned-armed-error', phase='apply'),
+            nativeFailure=dict(category='context-changed', phase='apply'))
+        self.assertEqual(self.parsed(detail), detail)
+        self.assertIsNone(self.parsed(detail, step='GitCli(Prepared)'))
+        # An unrelated later rejected-return sample cannot ride the deadline.
+        detail['gitReadFailure'] = dict(check='cli-original-return', phase=None,
+                                       outcome=None, reason=None, resultValid=None)
+        self.assertIsNone(self.parsed(detail))
+
+
 class CandidateCheckpointTests(unittest.TestCase):
     @staticmethod
     def _cli_return_failure():

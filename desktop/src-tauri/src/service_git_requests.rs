@@ -1073,6 +1073,13 @@ pub(crate) fn assert_installed_transition_contracts() {
     tests::assert_installed_apply_failure_contract();
 }
 
+#[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation",
+    not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"),
+    target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+pub(crate) fn installed_cli_wait_data_facts(apply: bool) -> InstalledCliReturnFacts {
+    tests::installed_cli_wait_data_facts(apply)
+}
+
 #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation",
     not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"),
     target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]

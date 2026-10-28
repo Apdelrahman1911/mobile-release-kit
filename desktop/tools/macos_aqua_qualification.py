@@ -4143,6 +4143,67 @@ def _vault_failure_context(value, source, step, reason, case):
     return value
 
 
+def _git_cli_return_facts(facts, step, *, pending_poll=False):
+    """Closed already-sampled Entry scalars; no return or finality grant."""
+    flags = {"claimed", "prepareJoined", "applyJoined", "historyFailed", "historyClaimed",
+             "historyAcknowledged", "stopped", "reviewPresent", "revisionMatched"}
+    need(type(facts) is dict
+         and set(facts) - {"prepareRejection", "unknownTransition", "applyRejection", "nativeFailure"} == flags | {"state", "reason"}
+         and all(type(facts[key]) is bool for key in flags)
+         and type(facts["state"]) is str and facts["state"] in (
+             "queued", "preparing", "prepared", "start-queued", "applying", "stopping",
+             "refused", "cancelled", "expired", "finished", "unknown")
+         and (facts["reason"] is None or type(facts["reason"]) is str and facts["reason"] in (
+             "user-cancelled", "permission-revoked", "expired", "context-changed", "document-lost",
+             "shutdown", "busy", "unavailable", "native-refused", "recovery-required", "cleanup-unknown")),
+         "failure-context")
+    if "prepareRejection" in facts:
+        # A last pending Apply poll can still retain its first Prepare reject.
+        # The original rejected-return parser keeps its existing step binding.
+        need((step == "GitCli(Prepared)" or pending_poll and step == "GitCli(Terminal)")
+             and type(facts["prepareRejection"]) is str
+             and facts["prepareRejection"] in (
+                 "edit-guard", "original-gate", "fetch-gate", "push-gate", "request-gate",
+                 "publisher-lock", "publisher-finished", "publisher-missing", "epoch-read",
+                 "epoch-mismatch", "edit-stamp", "native-project", "post-project", "native-state",
+                 "review-clock", "review-decode", "selection-review", "entry-ready"), "failure-context")
+    if "applyRejection" in facts:
+        need(step == "GitCli(Terminal)" and type(facts["applyRejection"]) is str
+             and facts["applyRejection"] in (
+                 "edit-guard", "original-gate", "fetch-gate", "push-gate", "request-gate",
+                 "publisher-lock", "publisher-finished", "publisher-missing", "epoch-read",
+                 "epoch-mismatch", "edit-stamp", "native-project", "post-project", "native-state"), "failure-context")
+    if "unknownTransition" in facts:
+        transition = facts["unknownTransition"]
+        need(type(transition) is dict and set(transition) == {"origin", "phase"}
+             and type(transition["origin"]) is str and transition["origin"] in (
+                 "unspecified", "native-retirement-unknown", "native-retirement-invalid",
+                 "duplicate-prepare-retirement", "duplicate-apply-retirement", "claim-phase-mismatch",
+                 "claim-ok-unarmed", "claim-returned-unknown", "claim-returned-armed-error",
+                 "claim-remote-return-unknown", "claim-dropped")
+             and (transition["phase"] is None or type(transition["phase"]) is str
+                  and transition["phase"] in ("prepare", "apply")), "failure-context")
+    if "nativeFailure" in facts:
+        failure = facts["nativeFailure"]
+        need(type(failure) is dict and set(failure) == {"category", "phase"}
+             and type(failure["phase"]) is str and failure["phase"] in ("prepare", "apply")
+             and type(failure["category"]) is str and failure["category"] in (
+                 "cleanup-unknown", "context-changed", "busy", "cancelled", "shutting-down",
+                 "query-timeout", "git-local-refused", "invalid-request", "protocol-error", "other"), "failure-context")
+    # Inconsistent/partial scalars are the diagnostic, not finality proof.
+    return facts
+
+
+def _git_cli_wait_context(value, source, step, reason, case):
+    """Last SAME original pending poll, never the first error or return proof."""
+    need(source == "record" and type(case) is str and case in GIT_CLI.CASES
+         and step in ("GitCli(Prepared)", "GitCli(Terminal)") and reason == "observer-deadline"
+         and type(value) is dict and set(value) == {"sample", "facts"}
+         and type(value["sample"]) is str and value["sample"] == "same-original-last-poll", "failure-context")
+    value["facts"] = _git_cli_return_facts(value["facts"], step, pending_poll=True)
+    return value
+
+
 def _git_read_failure_context(value, source, step, reason, case):
     """Already-observed, finite original failure facts; never an operation result."""
     bindings = (
@@ -4179,50 +4240,8 @@ def _git_read_failure_context(value, source, step, reason, case):
         need(all(value[key] is None for key in ("phase", "outcome", "reason", "resultValid"))
              and "provenance" not in value, "failure-context")
     if "cliOriginalReturn" in value:
-        facts = value["cliOriginalReturn"]
-        flags = {"claimed", "prepareJoined", "applyJoined", "historyFailed", "historyClaimed",
-                 "historyAcknowledged", "stopped", "reviewPresent", "revisionMatched"}
-        need(cli_return and type(facts) is dict
-             and set(facts) - {"prepareRejection", "unknownTransition", "applyRejection", "nativeFailure"} == flags | {"state", "reason"}
-             and all(type(facts[key]) is bool for key in flags)
-             and type(facts["state"]) is str and facts["state"] in (
-                 "queued", "preparing", "prepared", "start-queued", "applying", "stopping",
-                 "refused", "cancelled", "expired", "finished", "unknown")
-             and (facts["reason"] is None or type(facts["reason"]) is str and facts["reason"] in (
-                 "user-cancelled", "permission-revoked", "expired", "context-changed", "document-lost",
-                 "shutdown", "busy", "unavailable", "native-refused", "recovery-required", "cleanup-unknown")),
-             "failure-context")
-        if "prepareRejection" in facts:
-            need(step == "GitCli(Prepared)" and type(facts["prepareRejection"]) is str
-                 and facts["prepareRejection"] in (
-                     "edit-guard", "original-gate", "fetch-gate", "push-gate", "request-gate",
-                     "publisher-lock", "publisher-finished", "publisher-missing", "epoch-read",
-                     "epoch-mismatch", "edit-stamp", "native-project", "post-project", "native-state",
-                     "review-clock", "review-decode", "selection-review", "entry-ready"), "failure-context")
-        if "applyRejection" in facts:
-            need(step == "GitCli(Terminal)" and type(facts["applyRejection"]) is str
-                 and facts["applyRejection"] in (
-                     "edit-guard", "original-gate", "fetch-gate", "push-gate", "request-gate",
-                     "publisher-lock", "publisher-finished", "publisher-missing", "epoch-read",
-                     "epoch-mismatch", "edit-stamp", "native-project", "post-project", "native-state"), "failure-context")
-        if "unknownTransition" in facts:
-            transition = facts["unknownTransition"]
-            need(type(transition) is dict and set(transition) == {"origin", "phase"}
-                 and type(transition["origin"]) is str and transition["origin"] in (
-                     "unspecified", "native-retirement-unknown", "native-retirement-invalid",
-                     "duplicate-prepare-retirement", "duplicate-apply-retirement", "claim-phase-mismatch",
-                     "claim-ok-unarmed", "claim-returned-unknown", "claim-returned-armed-error",
-                     "claim-remote-return-unknown", "claim-dropped")
-                 and (transition["phase"] is None or type(transition["phase"]) is str
-                      and transition["phase"] in ("prepare", "apply")), "failure-context")
-        if "nativeFailure" in facts:
-            failure = facts["nativeFailure"]
-            need(type(failure) is dict and set(failure) == {"category", "phase"}
-                 and type(failure["phase"]) is str and failure["phase"] in ("prepare", "apply")
-                 and type(failure["category"]) is str and failure["category"] in (
-                     "cleanup-unknown", "context-changed", "busy", "cancelled", "shutting-down",
-                     "query-timeout", "git-local-refused", "invalid-request", "protocol-error", "other"), "failure-context")
-        # Inconsistent/partial scalars are the diagnostic, not finality proof.
+        need(cli_return, "failure-context")
+        value["cliOriginalReturn"] = _git_cli_return_facts(value["cliOriginalReturn"], step)
     if "provenance" in value:
         provenance = value["provenance"]
         need(value["check"] not in ("missing-operation", "missing-fixture", "missing-original", "original-mismatch")
@@ -4345,7 +4364,7 @@ def failure_context(stdout, stderr, case=None):
     try:
         value = json.loads(row.decode("ascii"), object_pairs_hook=_pairs,
                            parse_constant=lambda _: (_ for _ in ()).throw(Refused("failure-context")))
-        need(type(value) is dict and set(value) - {"accessibilityBinding", "snapshotSource", "originalWindow", "projectSelection", "completionSelection", "projectFieldPreparation", "dom", "bootstrap", "vault", "uploadKey", "inputBodyAdmission", "toolService", "gitReadFailure"} in (
+        need(type(value) is dict and set(value) - {"accessibilityBinding", "snapshotSource", "originalWindow", "projectSelection", "completionSelection", "projectFieldPreparation", "dom", "bootstrap", "vault", "uploadKey", "inputBodyAdmission", "toolService", "gitReadFailure", "gitCliWait"} in (
             {"pending", "nativeHandler", "lastPanel"},
             {"pending", "nativeHandler", "lastPanel", "nativeAction"},
             {"pending", "nativeHandler", "lastPanel", "nativeAction", "accessibility"}), "failure-context")
@@ -4373,6 +4392,9 @@ def failure_context(stdout, stderr, case=None):
                 failure_step(stdout, stderr), failure_reason(stdout, stderr), case)
         if "gitReadFailure" in value:
             value["gitReadFailure"] = _git_read_failure_context(value["gitReadFailure"], value.get("snapshotSource"),
+                failure_step(stdout, stderr), failure_reason(stdout, stderr), case)
+        if "gitCliWait" in value:
+            value["gitCliWait"] = _git_cli_wait_context(value["gitCliWait"], value.get("snapshotSource"),
                 failure_step(stdout, stderr), failure_reason(stdout, stderr), case)
         if "originalWindow" in value:
             value["originalWindow"] = _original_window_context(value["originalWindow"])

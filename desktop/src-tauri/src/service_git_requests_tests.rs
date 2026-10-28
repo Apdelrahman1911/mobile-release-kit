@@ -4,6 +4,37 @@ use std::time::Duration;
 #[cfg(all(debug_assertions,feature="desktop-shell",feature="custom-protocol",feature="macos-installed-observation",
     not(feature="development-runtime"),not(feature="ubuntu-runtime-publisher"),not(feature="macos-installed-installer"),
     target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64")))]
+pub(super) fn installed_cli_wait_data_facts(apply: bool) -> InstalledCliReturnFacts {
+    // Actual memory-only Entry sampling through the original predicate. These
+    // synthetic link callbacks never execute a native or installed operation.
+    let (_doc,inbox,input)=setup();let prepare=prepared(&inbox,&input);
+    let entry=prepare.entry();
+    if apply {
+        let (_,revision,_,_)=entry.claim_history().unwrap().unwrap();
+        entry.history_returned(revision,Ok(())).unwrap();
+        inbox.start(&start(&input)).unwrap();
+        let mut claim=inbox.claim().unwrap().unwrap();let link=claim.link().unwrap();
+        link.arm("git-local-2").unwrap();claim.returned(Ok(()));
+    }
+    let before=entry.status().unwrap();let mut facts=None;
+    let phase=if apply {Phase::Apply}else{Phase::Prepare};
+    assert!(!entry.installed_cli_returned_observed(&input.origin,Family::Index,phase,before.revision,&mut facts));
+    assert_eq!(entry.status().unwrap(),before);
+    let actual=facts.unwrap();
+    assert!(actual.prepare_joined && !actual.apply_joined && !actual.claimed && !actual.history_failed);
+    assert_eq!(actual.state,if apply {p::State::Applying}else{p::State::Prepared});
+    assert!(!actual.history_acknowledged); // Neither missing return is admitted.
+    let mut foreign=input.origin.clone();foreign.request_id=id('f');facts=None;
+    assert!(!entry.installed_cli_returned_observed(&foreign,Family::Index,phase,before.revision,&mut facts));
+    assert!(facts.is_none());
+    let raw=serde_json::to_string(&actual).unwrap();
+    assert!(raw.len()<1024 && !raw.contains("requestId") && !raw.contains("projectId") && !raw.contains("git-local-"));
+    actual
+}
+
+#[cfg(all(debug_assertions,feature="desktop-shell",feature="custom-protocol",feature="macos-installed-observation",
+    not(feature="development-runtime"),not(feature="ubuntu-runtime-publisher"),not(feature="macos-installed-installer"),
+    target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64")))]
 #[test]
 fn installed_unknown_transition_is_first_original_and_cannot_grant_return() {
     assert_installed_unknown_transition_contract();

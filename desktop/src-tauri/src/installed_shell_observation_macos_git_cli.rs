@@ -707,7 +707,21 @@ impl Observation {
                     let mut facts=None;
                     let returned=document.installed_git_cli_returned_observed(&project,&origin,apply,&mut facts);
                     let status=match returned {
-                        Ok(Some(status))=>status,Ok(None)=>return Ok(None),
+                        Ok(Some(status))=>status,
+                        Ok(None)=>{
+                            // The SAME original poll already sampled these typed
+                            // scalars under its Document/Entry locks. Publish only
+                            // after that call returned, without another query or
+                            // extending the original wait. Missing facts clear
+                            // this step's earlier sample rather than inventing it.
+                            if let Ok(mut r)=self.record.try_lock() {
+                                if r.step==OuterStep::GitCli(step)
+                                    && r.git_cli.as_ref().is_some_and(|v|v.origin.as_ref()==Some(&origin)) {
+                                    r.git_cli_wait=super::GitCliWaitSample::capture(self.case,r.step,facts);
+                                }
+                            }
+                            return Ok(None);
+                        },
                         Err(_)=>{
                             // Same-origin scalar facts from the actual rejected
                             // predicate. No retry, reconciliation, IO or private
