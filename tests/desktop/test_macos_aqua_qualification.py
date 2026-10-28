@@ -489,6 +489,32 @@ class GitReadFailureProvenanceDataTests(unittest.TestCase):
     def row(value, step="GitCli(ReadWait)", reason="git-cli-original-contract"):
         return project_selection_row(value, reason, step)
 
+    def test_closed_original_command_failure_keeps_refusal_and_rejects_private_or_unbound_data(self):
+        value = self.detail("child-terminal", True)
+        value["gitReadFailure"].update(outcome="refused", reason="command-failed")
+        data = {"category": "process", "reason": "incomplete-output", "command": "index", "ordinal": 3,
+                "dispatched": True, "contained": True, "cleanupComplete": True,
+                "failureMask": 52, "ownerFinality": [1, 1, 0, 0, 52]}
+        value["gitReadFailure"]["provenance"]["commandFailure"] = data
+        self.assertEqual(M.failure_context(b"", self.row(value), M.GIT_CLI.INDEX), value)
+        with self.assertRaises(M.Refused):
+            M.parse_result(b"", self.row(value), BINDING, M.GIT_CLI.INDEX)
+        for key, replacement in (("category", "private-error"), ("reason", "private-stderr"),
+                                 ("command", "private-command"), ("ordinal", True), ("ordinal", 257),
+                                 ("contained", 1), ("failureMask", 47), ("failureMask", True),
+                                 ("ownerFinality", [1, 0, 1024, 0, None]),
+                                 ("ownerFinality", [1, 1, 0, 0, 47]), ("argv", ["private"])):
+            invalid = deepcopy(value)
+            invalid["gitReadFailure"]["provenance"]["commandFailure"][key] = replacement
+            self.assertIsNone(M.failure_context(b"", self.row(invalid), M.GIT_CLI.INDEX), key)
+        for field, replacement in (("outcome", "ok"), ("outcome", "cancelled"), ("reason", "authorization")):
+            invalid = deepcopy(value); invalid["gitReadFailure"][field] = replacement
+            self.assertIsNone(M.failure_context(b"", self.row(invalid), M.GIT_CLI.INDEX))
+        invalid = deepcopy(value)
+        invalid["gitReadFailure"]["provenance"].update(origin="document-stop")
+        del invalid["gitReadFailure"]["provenance"]["childSubcause"]
+        self.assertIsNone(M.failure_context(b"", self.row(invalid), M.GIT_CLI.INDEX))
+
     def test_optional_closed_provenance_and_legacy_frames_for_each_read_family(self):
         for family, reason, cases in (
                 ("GitCli", "git-cli-original-contract", M.GIT_CLI.CASES),

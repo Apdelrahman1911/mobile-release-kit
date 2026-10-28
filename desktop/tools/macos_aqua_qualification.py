@@ -4209,14 +4209,43 @@ def _git_read_failure_context(value, source, step, reason, case):
                  "source-post-owner-failed", "source-post-stop-flag", "source-post-expired", "child-terminal"),
              "failure-context")
         child = provenance["origin"] == "child-terminal"
-        need(set(provenance) == {"origin", "goClaimedAtBoundary"} | ({"childSubcause"} if child else set())
+        need(set(provenance) - {"commandFailure"} == {"origin", "goClaimedAtBoundary"} | ({"childSubcause"} if child else set())
              and (provenance["goClaimedAtBoundary"] is None or type(provenance["goClaimedAtBoundary"]) is bool)
              and (not child or type(provenance["childSubcause"]) is str and provenance["childSubcause"] == "unavailable"), "failure-context")
         # This is a winning-error boundary, not the child's first-failure time.
         # GO is only the already-held native claim flag, never sent-byte, child
         # entry or successful settlement evidence. Child subcause stays unknown.
+        if "commandFailure" in provenance:
+            need(child and value["outcome"] == "refused" and value["reason"] == "command-failed", "failure-context")
+            _git_read_command_failure(provenance["commandFailure"])
     # Invalid/partial status is precisely what is being diagnosed. Do not
     # normalize it, infer successful settlement, or export raw Git results.
+    return value
+
+
+def _git_read_command_failure(value):
+    """Closed same-original process-error snapshot, never finality evidence."""
+    need(type(value) is dict and set(value) == {
+        "category", "reason", "command", "ordinal", "dispatched", "contained",
+        "cleanupComplete", "failureMask", "ownerFinality",
+    } and type(value["category"]) is str and value["category"] in (
+        "process", "process-cleanup", "process-outcome-unknown")
+        and type(value["reason"]) is str and value["reason"] in (
+            "incomplete-output", "original-deadline", "output-bound", "protocol-or-ownership",
+            "command-failed-or-incomplete", "cleanup-unconfirmed", "exec-rejected",
+            "stopped-before-exec", "parent-ended", "observer-ended", "fence-collision", "unknown")
+        and type(value["command"]) is str and value["command"] in (
+            "configuration", "version", "revision", "index", "status", "symbolic-ref", "references", "diff", "walk", "unknown")
+        and type(value["ordinal"]) is int and 1 <= value["ordinal"] <= 256
+        and all(value[key] is None or type(value[key]) is bool
+                for key in ("dispatched", "contained", "cleanupComplete")), "failure-context")
+    mask, observed = value["failureMask"], value["ownerFinality"]
+    need(mask is None or type(mask) is int and (mask == 32 or 48 <= mask <= 63), "failure-context")
+    need(observed is None or type(observed) is list and len(observed) == 5
+         and all(type(n) is int for n in observed[:4]) and observed[0] == 1
+         and observed[1] in (0, 1) and 0 <= observed[2] <= (1023 if observed[1] == 0 else 1048575)
+         and 0 <= observed[3] <= 15 and (observed[4] is None or type(observed[4]) is int
+         and observed[1] == 1 and (observed[4] in (0, 32) or 48 <= observed[4] <= 63)), "failure-context")
     return value
 
 

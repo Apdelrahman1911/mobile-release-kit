@@ -21,9 +21,52 @@ from . import git_service as core
 from ._desktop_git_read_control import GitReadInput
 from ._desktop_saved_command_engine import _Output, _SavedCommandEngine
 from .cancellation import CleanupScope, DefaultCancellation
-from .owned_process import ProcessCleanupError, ProcessError, run_owned
+from .owned_process import ProcessCleanupError, ProcessError, ProcessOutcomeUnknown, run_owned
 
 _RETAINED = []
+
+
+def _command_failure(error: ProcessError, args: list[str], ordinal: int) -> dict:
+    """Snapshot the same original error; never stringify or walk its causes."""
+    category = {ProcessError: "process", ProcessCleanupError: "process-cleanup",
+                ProcessOutcomeUnknown: "process-outcome-unknown"}[type(error)]
+    arguments = BaseException.args.__get__(error)
+    reason = {
+        "owned command produced incomplete output": "incomplete-output",
+        "owned command exceeded its original deadline": "original-deadline",
+        "owned command output exceeds its bound": "output-bound",
+        "owned command protocol or original ownership is incomplete": "protocol-or-ownership",
+        "owned command failed, timed out, or produced incomplete output": "command-failed-or-incomplete",
+        "owned command cleanup could not be confirmed": "cleanup-unconfirmed",
+        "owned command executable could not be started": "exec-rejected",
+        "owned command was stopped before execution": "stopped-before-exec",
+        "owned command original parent ended": "parent-ended",
+        "owned command original observer ended": "observer-ended",
+        "owned command fence name already exists": "fence-collision",
+    }.get(arguments[0], "unknown") if (type(arguments) is tuple and len(arguments) == 1
+        and type(arguments[0]) is str and len(arguments[0]) <= 128) else "unknown"
+    command = {"config": "configuration", "--version": "version", "rev-parse": "revision", "ls-files": "index",
+               "status": "status", "symbolic-ref": "symbolic-ref", "for-each-ref": "references",
+               "show-ref": "references", "diff": "diff", "rev-list": "walk"}.get(args[0], "unknown") if args else "unknown"
+    facts = error.__dict__
+    row = {"category": category, "reason": reason, "command": command, "ordinal": ordinal}
+    for source, target in (("dispatched", "dispatched"), ("contained", "contained"),
+                           ("cleanup_complete", "cleanupComplete")):
+        value = facts.get(source)
+        row[target] = value if type(value) is bool else None
+    mask = facts.get("owner_failure_mask")
+    row["failureMask"] = mask if type(mask) is int and (mask == 32 or 48 <= mask <= 63) else None
+    observed = facts.get("owner_finality_diagnostic")
+    row["ownerFinality"] = None
+    if type(observed) is tuple and len(observed) == 5:
+        candidate = {**row, "ownerFinality": list(observed)}
+        try:
+            wire.command_failure(candidate)
+        except wire.ProtocolError:
+            pass
+        else:
+            row = candidate
+    return wire.command_failure(row)
 
 
 @dataclass(slots=True, repr=False)
@@ -55,6 +98,8 @@ class GitReadOperation:
         self.originals.extend(_Original(row.path, row.identity, row.sha256) for row in (request.tool, *request.files))
         self.entered = self.returned = self.closed = self.unknown = False
         self.calls = 0
+        self.first_command_error: BaseException | None = None
+        self.command_failure_data: dict | None = None
         self.pending: _Command | None = None
         self.repository: read.GitReadRepository | None = None
         self.result: read.ReadObservation | core.Diff | read.History | branch.Branches | None = None
@@ -167,7 +212,7 @@ class GitReadOperation:
             self.source_post(hash_files=False)
             self.pending = None
             return result
-        except BaseException:
+        except BaseException as error:
             self.source.failure_observed()
             verdict = self.guard.lifetime_ledger.verdict()
             self.unknown = self.unknown or not verdict.cleanup_complete or not verdict.contained
@@ -175,6 +220,12 @@ class GitReadOperation:
             # turn this into a rerunnable command or forget its pending inputs.
             if not self.unknown:
                 self.pending = None
+            if self.first_command_error is None and type(error) in (ProcessError, ProcessCleanupError, ProcessOutcomeUnknown):
+                self.first_command_error = error
+                try:
+                    self.command_failure_data = _command_failure(error, args, self.calls)
+                except BaseException:
+                    pass  # After the original failure clock/lifetime cut; DATA cannot replace it.
             raise
 
     def run(self) -> None:
@@ -323,7 +374,9 @@ class _Engine:
             reason = "command-failed"
         self.write(wire.terminal(self.request, status, reason=reason, result=result,
             first_failure_ns=self.input.first_failure_ns,
-            cleanup_end_ns=self.input.cleanup_end_ns or self.request.hard_end_ns), terminal=True)
+            cleanup_end_ns=self.input.cleanup_end_ns or self.request.hard_end_ns,
+            command_failure_data=(operation.command_failure_data if status == "refused"
+                and reason == "command-failed" and self.primary is operation.first_command_error else None)), terminal=True)
         operation.result = None
 
 

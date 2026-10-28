@@ -287,25 +287,23 @@ impl Request {
     }
     pub(crate) fn terminal(&self, bytes: &[u8]) -> Result<Terminal, BridgeError> {
         let row = frame(bytes, RESPONSE_LIMIT)?;
+        let mut expected = vec!["protocol", "id", "digest", "action", "status", "reason", "result", "firstFailureNs", "cleanupEndNs"];
+        if row.get("commandFailure").is_some() {
+            expected.push("commandFailure");
+            need(keys(&row["commandFailure"], &[
+                "category", "reason", "command", "ordinal", "dispatched", "contained",
+                "cleanupComplete", "failureMask", "ownerFinality",
+            ]))?;
+        }
         need(
-            keys(
-                &row,
-                &[
-                    "protocol",
-                    "id",
-                    "digest",
-                    "action",
-                    "status",
-                    "reason",
-                    "result",
-                    "firstFailureNs",
-                    "cleanupEndNs",
-                ],
-            ) && row["protocol"] == PROTOCOL
+            keys(&row, &expected) && row["protocol"] == PROTOCOL
                 && row["id"] == self.id
                 && row["digest"] == self.digest,
         )?;
         let terminal: Terminal = serde_json::from_value(row).map_err(|_| BridgeError::protocol())?;
+        if let Some(failure) = terminal.command_failure {
+            need(terminal.status == Outcome::Refused && terminal.reason.as_deref() == Some("command-failed") && failure.valid())?;
+        }
         need(terminal.action == self.action.kind && terminal.cleanup_end_ns > 0 && terminal.cleanup_end_ns <= self.clock.hard_end_ns)?;
         if let Some(first) = terminal.first_failure_ns {
             need(first > 0 && first <= terminal.cleanup_end_ns && terminal.cleanup_end_ns - first <= 10_000_000_000)?;
@@ -375,6 +373,8 @@ pub(crate) struct Terminal {
     pub(crate) result: Value,
     pub(crate) first_failure_ns: Option<u64>,
     pub(crate) cleanup_end_ns: u64,
+    #[serde(default)]
+    pub(crate) command_failure: Option<crate::error::GitReadCommandFailure>,
 }
 impl Terminal {
     // Necessary child-side declaration ONLY. The original owner separately
@@ -611,6 +611,43 @@ pub(crate) fn validate_result(action: &Action, v: &Value) -> Result<(), BridgeEr
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn original_command_failure_is_closed_optional_and_never_changes_terminal_settlement() {
+        // Private-wire DATA only; no native admission, command or owner executes.
+        let request = Request {
+            id: "fixture".into(), action: Action { kind: Kind::Observe, expected_revision: None, paths: vec![], staged: false },
+            context: Context { project_id: "project".into(), generation: 1, revision: "1".into() },
+            clock: Clock { work_end_ns: 100_000_000_000, hard_end_ns: 110_000_000_000 },
+            bytes: vec![], digest: "a".repeat(64),
+        };
+        let mut row = json!({"protocol": PROTOCOL, "id":request.id, "digest":request.digest, "action":"observe",
+            "status":"refused", "reason":"command-failed", "result":null, "firstFailureNs":1, "cleanupEndNs":2});
+        let encode = |v: &Value| { let mut b = serde_json::to_vec(v).unwrap(); b.push(b'\n'); b };
+        assert!(request.terminal(&encode(&row)).unwrap().command_failure.is_none());
+        let data = json!({"category":"process", "reason":"incomplete-output", "command":"index", "ordinal":3,
+            "dispatched":true, "contained":true, "cleanupComplete":true, "failureMask":52, "ownerFinality":[1,1,0,0,52]});
+        row["commandFailure"] = data.clone();
+        let decoded = request.terminal(&encode(&row)).unwrap();
+        assert!(decoded.child_declared_settled());
+        assert_eq!(serde_json::to_value(decoded.command_failure.unwrap()).unwrap(), data);
+        for (key, bad) in [("ordinal", json!(true)), ("ordinal", json!(257)), ("category", json!("private")),
+            ("reason", json!("private")), ("command", json!("private")), ("dispatched", json!(1)),
+            ("failureMask", json!(47)), ("ownerFinality", json!([1,0,1024,0,null])),
+            ("ownerFinality", json!([1,1,0,0,47])), ("ownerFinality", json!([true,1,0,0,null])), ("argv", json!(["private"]))] {
+            let mut invalid = row.clone(); invalid["commandFailure"][key] = bad;
+            assert!(request.terminal(&encode(&invalid)).is_err(), "{key}");
+        }
+        for status in ["ok", "cancelled", "timed-out", "cleanup-unknown"] {
+            let mut invalid = row.clone(); invalid["status"] = json!(status);
+            assert!(request.terminal(&encode(&invalid)).is_err());
+        }
+        let mut invalid = row.clone(); invalid["reason"] = json!("authorization");
+        assert!(request.terminal(&encode(&invalid)).is_err());
+        let mut invalid = row.clone(); invalid["commandFailure"] = Value::Null;
+        assert!(request.terminal(&encode(&invalid)).is_err());
+        let mut invalid = row; invalid["commandFailure"].as_object_mut().unwrap().remove("contained");
+        assert!(request.terminal(&encode(&invalid)).is_err());
+    }
     fn start() -> Value {
         json!({"projectId":"project-1","expectedDocumentRevision":2,"action":{"kind":"observe","expectedRevision":null,"paths":[],"staged":false}})
     }

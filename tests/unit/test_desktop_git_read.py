@@ -18,7 +18,7 @@ import subprocess
 import tempfile
 import time
 import unittest
-from unittest.mock import patch
+from unittest.mock import PropertyMock, patch
 
 from mobile_release import _desktop_git_read_protocol as wire
 from mobile_release import git_repository_read as read
@@ -26,8 +26,8 @@ from mobile_release import git_service as core
 from mobile_release._desktop_git_read_control import GitReadInput
 from mobile_release._desktop_saved_command_control import SavedCommandDomain, source_domain
 from mobile_release.cancellation import DefaultCancellation
-from mobile_release.desktop_git_read import GitReadOperation, _Engine
-from mobile_release.owned_process import ProcessCleanupError, run_owned
+from mobile_release.desktop_git_read import GitReadOperation, _Engine, _command_failure
+from mobile_release.owned_process import ProcessError, ProcessCleanupError, ProcessOutcomeUnknown, run_owned
 from test_git_repository_read import FakeGit, HEAD, UPSTREAM
 
 
@@ -49,6 +49,26 @@ def fixture():
 
 
 class ProtocolTests(unittest.TestCase):
+    def test_command_failure_is_optional_and_cannot_decorate_success_or_other_failures(self):
+        request = wire.parse_request(frame(fixture()))
+        data = _command_failure(ProcessError("owned command produced incomplete output"), ["ls-files"], 3)
+        raw = wire.terminal(request, "refused", reason="command-failed", first_failure_ns=1,
+                            cleanup_end_ns=2, command_failure_data=data)
+        self.assertEqual(json.loads(raw)["commandFailure"], data)
+        for status, reason in (("refused", "unsupported-repository"), ("cancelled", "authorization"),
+                               ("cleanup-unknown", "unknown")):
+            with self.subTest(status=status), self.assertRaises(wire.ProtocolError):
+                wire.terminal(request, status, reason=reason, first_failure_ns=1,
+                              cleanup_end_ns=2, command_failure_data=data)
+        for key, value in (("ordinal", True), ("ordinal", 0), ("ordinal", 257),
+                           ("command", "private command"), ("reason", "private stderr"),
+                           ("category", "custom-error"), ("dispatched", 1), ("failureMask", True),
+                           ("failureMask", 47), ("ownerFinality", [1, 0, 1024, 0, None]),
+                           ("ownerFinality", [1, 1, 0, 0, 47]), ("ownerFinality", [True, 1, 0, 0, None]),
+                           ("argv", ["private"])):
+            with self.subTest(key=key), self.assertRaises(wire.ProtocolError):
+                wire.command_failure({**data, key: value})
+
     def test_fixed_provider_no_path_or_command_fields_and_exact_actions(self):
         request = wire.parse_request(frame(fixture()))
         self.assertEqual(request.tool.path, Path("/Library/Developer/CommandLineTools/usr/bin/git"))
@@ -228,6 +248,56 @@ def synthetic_operation():
 
 
 class OperationTests(unittest.TestCase):
+    def test_same_original_process_failure_is_snapshotted_without_private_inputs_or_retry(self):
+        with synthetic_operation() as operation:
+            operation.admit()
+            error = ProcessError("owned command produced incomplete output", dispatched=True, owner_failure_mask=52)
+            error.owner_finality_diagnostic = (1, 1, 0, 0, 52)
+            events = []
+            original_failure_observed = operation.source.failure_observed
+            def failure_observed():
+                events.append("original-failure-cut")
+                original_failure_observed()
+            def snapshot(original, args, ordinal):
+                events.append("snapshot")
+                return _command_failure(original, args, ordinal)
+            with patch("mobile_release._command_process.run_command", side_effect=error) as command, \
+                 patch("mobile_release.desktop_git_read._command_failure", side_effect=snapshot), \
+                 patch.object(operation.source, "failure_observed", side_effect=failure_observed):
+                with self.assertRaises(ProcessError) as raised:
+                    operation.run()
+                self.assertIs(raised.exception, error)
+                self.assertIs(operation.first_command_error, error)
+                command.assert_called_once()
+            self.assertLess(events.index("original-failure-cut"), events.index("snapshot"))
+            saved = dict(operation.command_failure_data)
+            self.assertEqual(saved, {"category": "process", "reason": "incomplete-output",
+                "command": "configuration", "ordinal": 1, "dispatched": True, "contained": True,
+                "cleanupComplete": True, "failureMask": 52, "ownerFinality": [1, 1, 0, 0, 52]})
+            error.dispatched = False
+            error.owner_finality_diagnostic = (1, 0, 0, 0, None)
+            self.assertEqual(operation.command_failure_data, saved)
+            self.assertNotIn(str(operation.request.root), json.dumps(saved))
+            self.assertFalse(operation.returned)
+            self.assertIsNone(operation.result)
+
+    def test_optional_snapshot_failure_preserves_original_and_unknown_error_text_is_not_exported(self):
+        with synthetic_operation() as operation:
+            operation.admit()
+            error = ProcessError("private path and stderr")
+            with patch("mobile_release._command_process.run_command", side_effect=error), \
+                 patch("mobile_release.desktop_git_read._command_failure", side_effect=MemoryError):
+                with self.assertRaises(ProcessError) as raised:
+                    operation.run()
+                self.assertIs(raised.exception, error)
+            self.assertIs(operation.first_command_error, error)
+            self.assertIsNone(operation.command_failure_data)
+        for error_type, category in ((ProcessError, "process"), (ProcessCleanupError, "process-cleanup"),
+                                     (ProcessOutcomeUnknown, "process-outcome-unknown")):
+            data = _command_failure(error_type("private path and stderr"), ["private", "private"], 2)
+            self.assertEqual((data["category"], data["reason"], data["command"]), (category, "unknown", "unknown"))
+            self.assertNotIn("private", json.dumps(data))
+
     def test_original_shared_seam_uses_fixed_view_and_unpublished_caw_cannot_claim_success(self):
         with synthetic_operation() as operation:
             operation.admit()
@@ -332,3 +402,27 @@ class OperationTests(unittest.TestCase):
             engine.terminal()
             self.assertEqual(sent[0]["status"], "cleanup-unknown")
             self.assertIsNone(sent[0]["result"])
+
+    def test_terminal_diagnostic_requires_same_original_primary_and_known_lifetime(self):
+        # Inert closed-owner DATA; no stdout, signals or command executes.
+        for same_primary, closed in ((True, True), (False, True), (True, False)):
+            with self.subTest(same=same_primary, closed=closed), synthetic_operation() as operation:
+                operation.admit()
+                first = ProcessError("owned command produced incomplete output")
+                operation.first_command_error = first
+                operation.command_failure_data = _command_failure(first, ["config"], 1)
+                operation.cleanup(); operation.source.close()
+                operation.closed = closed
+                operation.source.first_failure_ns = 1
+                operation.source.cleanup_end_ns = 2
+                engine = _Engine.__new__(_Engine)
+                engine.operation, engine.request, engine.guard, engine.input = operation, operation.request, operation.guard, operation.source
+                engine.frames = 1
+                engine.primary = first if same_primary else ProcessError("owned command produced incomplete output")
+                sent = []
+                engine.write = lambda raw, **_: sent.append(json.loads(raw))
+                with patch.object(DefaultCancellation, "handler_state", new_callable=PropertyMock, return_value="RESTORED"):
+                    engine.terminal()
+                self.assertEqual("commandFailure" in sent[0], same_primary and closed)
+                self.assertEqual(sent[0]["status"], "refused" if closed else "cleanup-unknown")
+                self.assertIsNone(sent[0]["result"])

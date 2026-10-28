@@ -208,7 +208,7 @@ pub(super) fn selected(profile: Profile) -> bool {
     )) && matches!(profile, Profile::GitRead)
 }
 pub(super) fn boundary_provenance(owner: &Owner, origin: GitReadFailureOrigin) -> GitReadFailureProvenance {
-    GitReadFailureProvenance { origin, go_claimed_at_boundary: Some(owner.preflight_go_claimed.load(Ordering::SeqCst)) }
+    GitReadFailureProvenance { origin, go_claimed_at_boundary: Some(owner.preflight_go_claimed.load(Ordering::SeqCst)), command_failure: None }
 }
 #[derive(Clone, Copy)]
 enum SourcePhase { Inspect, Post }
@@ -399,8 +399,10 @@ impl Invocation {
                 .ok_or_else(BridgeError::cleanup_unknown)?
                 .failure_bound(first)
                 .ok_or_else(BridgeError::cleanup_unknown)?;
+            let mut provenance = boundary_provenance(owner, GitReadFailureOrigin::ChildTerminal);
+            provenance.command_failure = terminal.command_failure;
             let error = BridgeError::new("git_read_refused", "The original bounded Git read did not complete.")
-                .with_git_read_failure_provenance(Some(boundary_provenance(owner, GitReadFailureOrigin::ChildTerminal)));
+                .with_git_read_failure_provenance(Some(provenance));
             lock(&owner.state).fail_at(error, at);
             owner.stop.send_replace(true);
             owner.changed.notify_waiters();
@@ -710,7 +712,7 @@ mod tests {
             ticket.stop(cause);
             let first = lock(&owner.state).error.clone().unwrap();
             assert_eq!(first, BridgeError::new("cancelled", "The original local Git read was stopped."));
-            assert_eq!(first.git_read_failure_provenance(), Some(GitReadFailureProvenance { origin, go_claimed_at_boundary: Some(false) }));
+            assert_eq!(first.git_read_failure_provenance(), Some(GitReadFailureProvenance { origin, go_claimed_at_boundary: Some(false), command_failure: None }));
             owner.preflight_go_claimed.store(true, Ordering::SeqCst);
             ticket.stop(GitReadStop::DocumentStop);
             assert_eq!(lock(&owner.state).error.as_ref().unwrap().git_read_failure_provenance(), first.git_read_failure_provenance());
@@ -742,7 +744,7 @@ mod tests {
                 if cause <= 1 { owner.stop.send_replace(true); }
                 if cause == 0 { lock(&owner.state).error = Some(BridgeError::timeout()); }
                 assert!(source_checkpoint(&owner, &stop, phase, &mut first));
-                let expected = Some(GitReadFailureProvenance { origin, go_claimed_at_boundary: Some(false) });
+                let expected = Some(GitReadFailureProvenance { origin, go_claimed_at_boundary: Some(false), command_failure: None });
                 assert_eq!(first, expected);
                 owner.preflight_go_claimed.store(true, Ordering::SeqCst);
                 owner.fail(BridgeError::unavailable("inert later native forwarding"));
@@ -767,7 +769,7 @@ mod tests {
         let plain = BridgeError::new("cancelled", "inert original error");
         let child = BridgeError::new("git_read_refused", "inert child refusal")
             .with_git_read_failure_provenance(Some(GitReadFailureProvenance {
-                origin: GitReadFailureOrigin::ChildTerminal, go_claimed_at_boundary: Some(true),
+                origin: GitReadFailureOrigin::ChildTerminal, go_claimed_at_boundary: Some(true), command_failure: None,
             }));
         state.fail_at(plain.clone(), early);
         for at in [late, early] {
@@ -807,7 +809,7 @@ mod tests {
                 let error = state.retirement_result(start + Duration::from_secs(1), true).unwrap().unwrap_err();
                 assert_eq!(error, if earlier { BridgeError::timeout() } else { BridgeError::shutdown() });
                 assert_eq!(error.git_read_failure_provenance(), (read && !earlier).then_some(GitReadFailureProvenance {
-                    origin: GitReadFailureOrigin::Shutdown, go_claimed_at_boundary: None,
+                    origin: GitReadFailureOrigin::Shutdown, go_claimed_at_boundary: None, command_failure: None,
                 }));
             }
         }

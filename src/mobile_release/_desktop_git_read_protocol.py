@@ -236,8 +236,40 @@ def go(request: Request) -> bytes:
     return b"MRK-GIT-READ-GO/1 " + request.digest.encode("ascii") + b"\n"
 
 
+COMMAND_FAILURE_REASONS = (
+    "incomplete-output", "original-deadline", "output-bound", "protocol-or-ownership",
+    "command-failed-or-incomplete", "cleanup-unconfirmed", "exec-rejected",
+    "stopped-before-exec", "parent-ended", "observer-ended", "fence-collision", "unknown",
+)
+COMMAND_FAILURE_KINDS = ("configuration", "version", "revision", "index", "status", "symbolic-ref", "references", "diff", "walk", "unknown")
+
+
+def command_failure(value: dict) -> dict:
+    """Closed first-command error DATA; no output, command inputs or authority."""
+    require(type(value) is dict and set(value) == {
+        "category", "reason", "command", "ordinal", "dispatched", "contained",
+        "cleanupComplete", "failureMask", "ownerFinality",
+    })
+    require(type(value["category"]) is str and value["category"] in (
+        "process", "process-cleanup", "process-outcome-unknown")
+        and type(value["reason"]) is str and value["reason"] in COMMAND_FAILURE_REASONS
+        and type(value["command"]) is str and value["command"] in COMMAND_FAILURE_KINDS)
+    _integer(value["ordinal"], 1, core.MAX_CALLS)
+    require(all(value[key] is None or type(value[key]) is bool
+                for key in ("dispatched", "contained", "cleanupComplete")))
+    mask = value["failureMask"]
+    require(mask is None or type(mask) is int and (mask == 32 or 48 <= mask <= 63))
+    observed = value["ownerFinality"]
+    require(observed is None or type(observed) is list and len(observed) == 5
+            and all(type(n) is int for n in observed[:4]) and observed[0] == 1
+            and observed[1] in (0, 1) and 0 <= observed[2] <= (1023 if observed[1] == 0 else 1048575)
+            and 0 <= observed[3] <= 15 and (observed[4] is None or type(observed[4]) is int
+            and observed[1] == 1 and (observed[4] in (0, 32) or 48 <= observed[4] <= 63)))
+    return value
+
+
 def terminal(request: Request, status: str, *, reason: str | None, result=None,
-             first_failure_ns: int | None, cleanup_end_ns: int) -> bytes:
+             first_failure_ns: int | None, cleanup_end_ns: int, command_failure_data=None) -> bytes:
     require(type(request) is Request and status in STATUSES and (reason is None or reason in REASONS))
     _integer(cleanup_end_ns, 1, request.hard_end_ns)
     if first_failure_ns is not None:
@@ -256,6 +288,10 @@ def terminal(request: Request, status: str, *, reason: str | None, result=None,
         result = result.as_dict()
     else:
         require(result is None and reason is not None and (first_failure_ns is not None or status == "cleanup-unknown"))
-    return _encode({"protocol": PROTOCOL, "id": request.id, "digest": request.digest,
+    row = {"protocol": PROTOCOL, "id": request.id, "digest": request.digest,
                     "action": request.action.kind, "status": status, "reason": reason, "result": result,
-                    "firstFailureNs": first_failure_ns, "cleanupEndNs": cleanup_end_ns}, RESPONSE_LIMIT - READY_LIMIT)
+                    "firstFailureNs": first_failure_ns, "cleanupEndNs": cleanup_end_ns}
+    if command_failure_data is not None:
+        require(status == "refused" and reason == "command-failed")
+        row["commandFailure"] = command_failure(command_failure_data)
+    return _encode(row, RESPONSE_LIMIT - READY_LIMIT)

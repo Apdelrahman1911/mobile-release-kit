@@ -672,7 +672,7 @@ impl OwnerState {
         if stopping {
             let error = BridgeError::shutdown().with_git_read_failure_provenance(self.git_read_endpoints.map(|_| {
                 crate::error::GitReadFailureProvenance { origin: crate::error::GitReadFailureOrigin::Shutdown,
-                    go_claimed_at_boundary: None }
+                    go_claimed_at_boundary: None, command_failure: None }
             }));
             self.fail_at(error, now);
         }

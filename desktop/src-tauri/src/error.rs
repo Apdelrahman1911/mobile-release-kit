@@ -1,4 +1,4 @@
-use serde::Serialize;
+use serde::{Deserialize, Serialize};
 
 /// Deliberately contains no command line, stderr, request, or filesystem dump.
 #[derive(Clone, Debug, Serialize)]
@@ -22,7 +22,49 @@ pub(crate) struct GitReadFailureProvenance {
     // Even true does not prove stdin delivery or child/Git entry. None means
     // this producer did not already have the original owner's GO flag.
     pub(crate) go_claimed_at_boundary: Option<bool>,
+    pub(crate) command_failure: Option<GitReadCommandFailure>,
 }
+
+// Same first original child command error, after strict private-wire decoding.
+// Diagnostic snapshots never grant dispatch, containment or finality authority.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub(crate) struct GitReadCommandFailure {
+    pub(crate) category: GitReadCommandCategory,
+    pub(crate) reason: GitReadCommandReason,
+    pub(crate) command: GitReadCommandKind,
+    pub(crate) ordinal: u16,
+    pub(crate) dispatched: Option<bool>,
+    pub(crate) contained: Option<bool>,
+    pub(crate) cleanup_complete: Option<bool>,
+    pub(crate) failure_mask: Option<u8>,
+    pub(crate) owner_finality: Option<[Option<u32>; 5]>,
+}
+impl GitReadCommandFailure {
+    pub(crate) fn valid(&self) -> bool {
+        (1..=256).contains(&self.ordinal)
+            && self.failure_mask.is_none_or(|m| m == 32 || (48..=63).contains(&m))
+            && self.owner_finality.is_none_or(|v| {
+                v[0] == Some(1) && matches!(v[1], Some(0 | 1))
+                    && v[2].is_some_and(|n| n <= if v[1] == Some(0) { 1023 } else { 1048575 })
+                    && v[3].is_some_and(|n| n <= 15)
+                    && v[4].is_none_or(|n| v[1] == Some(1) && (n == 0 || n == 32 || (48..=63).contains(&n)))
+            })
+    }
+}
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum GitReadCommandCategory { Process, ProcessCleanup, ProcessOutcomeUnknown }
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum GitReadCommandReason {
+    IncompleteOutput, OriginalDeadline, OutputBound, ProtocolOrOwnership,
+    CommandFailedOrIncomplete, CleanupUnconfirmed, ExecRejected, StoppedBeforeExec,
+    ParentEnded, ObserverEnded, FenceCollision, Unknown,
+}
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum GitReadCommandKind { Configuration, Version, Revision, Index, Status, SymbolicRef, References, Diff, Walk, Unknown }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "kebab-case")]
 pub(crate) enum GitReadFailureOrigin {
@@ -110,7 +152,7 @@ mod git_read_tests {
     fn git_read_provenance_is_cloned_but_not_public_or_equality_authority() {
         let plain = BridgeError::new("cancelled", "The original Git read was stopped.");
         let provenance = Some(GitReadFailureProvenance {
-            origin: GitReadFailureOrigin::DocumentStop, go_claimed_at_boundary: Some(false),
+            origin: GitReadFailureOrigin::DocumentStop, go_claimed_at_boundary: Some(false), command_failure: None,
         });
         let tagged = plain.clone().with_git_read_failure_provenance(provenance);
         assert_eq!(tagged.clone().git_read_failure_provenance(), provenance);
@@ -118,6 +160,11 @@ mod git_read_tests {
         assert_eq!(plain, tagged);
         assert_eq!(tagged, plain.clone().with_git_read_failure_provenance(Some(GitReadFailureProvenance {
             origin: GitReadFailureOrigin::ChildTerminal, go_claimed_at_boundary: Some(true),
+            command_failure: Some(serde_json::from_value(serde_json::json!({
+                "category":"process", "reason":"incomplete-output", "command":"index", "ordinal":3,
+                "dispatched":true, "contained":true, "cleanupComplete":true,
+                "failureMask":52, "ownerFinality":[1,1,0,0,52],
+            })).unwrap()),
         })));
         assert_eq!(serde_json::to_value(&tagged).unwrap(), serde_json::json!({
             "code":"cancelled", "message":"The original Git read was stopped.", "retryable":false,

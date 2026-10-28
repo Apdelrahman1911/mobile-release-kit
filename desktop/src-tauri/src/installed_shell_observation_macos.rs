@@ -218,6 +218,9 @@ impl GitReadFailureSample {
                 // The closed child terminal has no cancellation subcause.
                 // Neither its generic authorization reason nor GO proves one.
                 value["provenance"]["childSubcause"] = json!("unavailable");
+                if let Some(command) = provenance.command_failure {
+                    value["provenance"]["commandFailure"] = json!(command);
+                }
             }
         }
         value
@@ -4713,7 +4716,7 @@ fn git_read_failure_data_checks() -> bool {
         Origin::SourceInspectOwnerFailed, Origin::SourceInspectStopFlag, Origin::SourceInspectExpired,
         Origin::SourcePostOwnerFailed, Origin::SourcePostStopFlag, Origin::SourcePostExpired, Origin::ChildTerminal] {
         for go in [None, Some(false), Some(true)] {
-            p.failure_provenance = Some(GitReadFailureProvenance { origin, go_claimed_at_boundary: go });
+            p.failure_provenance = Some(GitReadFailureProvenance { origin, go_claimed_at_boundary: go, command_failure: None });
             if p.clone().failure_provenance != p.failure_provenance || serde_json::to_value(&p).ok().as_ref() != Some(&public) { return false; }
             let mut expected = json!({"origin":origin,"goClaimedAtBoundary":go});
             if origin == Origin::ChildTerminal { expected["childSubcause"] = json!("unavailable"); }
@@ -4736,6 +4739,23 @@ fn git_read_failure_data_checks() -> bool {
             }
         }
     }
+    let command_data = json!({"category":"process", "reason":"incomplete-output", "command":"index", "ordinal":3,
+        "dispatched":true, "contained":true, "cleanupComplete":true, "failureMask":52, "ownerFinality":[1,1,0,0,52]});
+    let Ok(command) = serde_json::from_value::<crate::error::GitReadCommandFailure>(command_data.clone()) else { return false; };
+    p.phase = git_read::Phase::Settled; p.outcome = Some(git_read::Outcome::Refused); p.reason = Some("command-failed".into());
+    p.failure_provenance = None;
+    let Ok(undecorated) = serde_json::to_value(&p) else { return false; };
+    p.failure_provenance = Some(GitReadFailureProvenance { origin: Origin::ChildTerminal,
+        go_claimed_at_boundary: Some(true), command_failure: Some(command) });
+    if serde_json::to_value(&p).ok().as_ref() != Some(&undecorated) { return false; }
+    let detailed = GitReadFailureSample::capture(snapshot.step, Some(&p), GitReadCheck::TerminalOutcome, None);
+    if detailed.value()["provenance"]["commandFailure"] != command_data { return false; }
+    let first = AtomicU8::new(0); let failed = AtomicBool::new(false); let mut detail = None;
+    let original = GitReadFailureSample { provenance: None, ..detailed };
+    let reason = git_read_failure_reason(snapshot.step).unwrap();
+    latch_git_read_failure(&first, &failed, &mut detail, snapshot.step, reason, original);
+    latch_git_read_failure(&first, &failed, &mut detail, snapshot.step, reason, detailed);
+    if detail != Some(original) { return false; }
     // Optional diagnostic overflow must return the unchanged failure context.
     let tagged = GitReadFailureSample::capture(snapshot.step, Some(&p), GitReadCheck::TerminalOutcome, None).value();
     let mut near = json!({"padding":""});
