@@ -428,6 +428,41 @@ class PreparedPackageData(unittest.TestCase):
                     P.reclaim_prepared_allocator(op)
                 self.assertEqual(flush.call_count, 1)
 
+    def test_prepared_pressure_relief_is_one_current_process_request_and_preserves_failures(self):
+        import ctypes
+        for result in (0, 42, True, -1, 1 << 53):
+            relief = mock.Mock(return_value=result)
+            op = SimpleNamespace(prepared_staging=True, phase='package-install',
+                environment={'MRK_MACOS_RUNNER': 'macos-26'}, package_clock=mock.Mock(),
+                mount_api=SimpleNamespace(library=SimpleNamespace(malloc_zone_pressure_relief=relief)))
+            with mock.patch.object(P.sys, 'platform', 'darwin'):
+                if type(result) is int and 0 <= result < 1 << 53:
+                    P.relieve_prepared_allocator(op)
+                    self.assertEqual(op.prepared_allocator_facts, dict(mechanism='malloc-zone-pressure-relief',
+                        requestedBytes=64 * P.MIB, bytesReclaimed=result, currentProcessOnly=True))
+                else:
+                    with self.assertRaisesRegex(ValueError, 'prepared-allocator-reclaim'):
+                        P.relieve_prepared_allocator(op)
+                    self.assertFalse(hasattr(op, 'prepared_allocator_facts'))
+                relief.assert_called_once_with(None, 64 * P.MIB)
+                self.assertEqual(relief.argtypes, [ctypes.c_void_p, ctypes.c_size_t])
+                self.assertIs(relief.restype, ctypes.c_size_t)
+                self.assertEqual(op.package_clock.call_count, 2)
+                for attribute, changed in (('prepared_staging', False), ('phase', 'hydrate')):
+                    original = getattr(op, attribute)
+                    setattr(op, attribute, changed)
+                    with self.assertRaisesRegex(ValueError, 'prepared-allocator-host'):
+                        P.relieve_prepared_allocator(op)
+                    setattr(op, attribute, original)
+                op.environment['MRK_MACOS_RUNNER'] = 'xcode-27'
+                with self.assertRaisesRegex(ValueError, 'prepared-allocator-host'):
+                    P.relieve_prepared_allocator(op)
+                self.assertEqual(relief.call_count, 1)
+                op.environment['MRK_MACOS_RUNNER'] = 'macos-26'
+                relief.side_effect = OSError('original native call failed')
+                with self.assertRaises(OSError): P.relieve_prepared_allocator(op)
+                self.assertEqual(relief.call_count, 2)
+
     def test_real_original_cpio_materialization_and_final_product_audit_both_targets(self):
         base=Path(os.environ.get('MRK_TEST_REPO',ROOT))
         sys.path.insert(0,str(base/'tests/desktop'))
@@ -975,10 +1010,12 @@ class PreparedPackageData(unittest.TestCase):
 
     def test_resource_reclamation_precedes_real_sample_and_cannot_override_full_quote(self):
         _, tool, helper = real_modules()
-        for refused in (False, True):
-            with self.subTest(refused=refused), tempfile.TemporaryDirectory() as directory:
+        for host, method, refused in ((h, m, r) for h, m in
+                (('xcode-27', 'reclaim_prepared_allocator'), ('macos-26', 'relieve_prepared_allocator'))
+                for r in (False, True)):
+            with self.subTest(host=host, refused=refused), tempfile.TemporaryDirectory() as directory:
                 op, guard, dispatch, body = self.resource_original(helper, tool, Path(directory))
-                op.environment['MRK_MACOS_RUNNER'] = 'xcode-27'
+                op.environment['MRK_MACOS_RUNNER'] = host
                 quote = dict(memoryBytes=8 << 30, diskBytes=1)
                 def reclaim(actual):
                     self.assertIs(actual, op)
@@ -986,7 +1023,7 @@ class PreparedPackageData(unittest.TestCase):
                     if refused: raise ValueError('prepared-allocator-reclaim')
                     op.prepared_allocator_facts = dict(bytesReclaimed=1 << 40)
                 try:
-                    with mock.patch.object(P, 'reclaim_prepared_allocator', side_effect=reclaim) as called, \
+                    with mock.patch.object(P, method, side_effect=reclaim) as called, \
                             mock.patch.object(guard.data, 'host_memory_data', return_value=(4096, 16 << 30)):
                         reason = 'prepared-allocator-reclaim' if refused else 'prepared-resource-insufficient'
                         with self.assertRaisesRegex(ValueError, reason): guard.check(quote)

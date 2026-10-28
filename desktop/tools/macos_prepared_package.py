@@ -736,6 +736,8 @@ class ResourceGuard:
         need(self.samples <= 16, 'prepared-resource-sample-bound')
         if op.environment.get('MRK_MACOS_RUNNER') == 'xcode-27':
             reclaim_prepared_allocator(op)
+        elif op.environment.get('MRK_MACOS_RUNNER') == 'macos-26':
+            relieve_prepared_allocator(op)
         result = op.call('prepared-resource-memory', ['/usr/bin/vm_stat'], op.native_environment(),
                          cwd=op.work, timeout=10, limit=65536)
         class Clock:
@@ -760,6 +762,27 @@ class ResourceGuard:
         # copy windows; no logical-size-only accounting or cap rise.
         need(required <= self.quote['memoryBytes'], 'prepared-codec-window')
         self.op.package_clock()
+
+
+def relieve_prepared_allocator(op):
+    """Ask THIS admitted macOS26 process to release unused malloc regions.
+
+    The cached SDK declares NULL as all zones in this process and a nonzero
+    goal as best effort. This one bounded request releases no live DATA and
+    grants no memory admission; the following vm_stat/full quote still decide.
+    """
+    import ctypes
+    need(sys.platform == 'darwin' and op.prepared_staging and op.phase == 'package-install'
+         and op.environment.get('MRK_MACOS_RUNNER') == 'macos-26', 'prepared-allocator-host')
+    op.package_clock()
+    relief = op.mount_api.library.malloc_zone_pressure_relief
+    relief.argtypes, relief.restype = [ctypes.c_void_p, ctypes.c_size_t], ctypes.c_size_t
+    goal = 64 * MIB
+    reclaimed = relief(None, goal)
+    op.package_clock()
+    need(type(reclaimed) is int and 0 <= reclaimed < 1 << 53, 'prepared-allocator-reclaim')
+    op.prepared_allocator_facts = dict(mechanism='malloc-zone-pressure-relief', requestedBytes=goal,
+                                      bytesReclaimed=reclaimed, currentProcessOnly=True)
 
 
 def reclaim_prepared_allocator(op):
