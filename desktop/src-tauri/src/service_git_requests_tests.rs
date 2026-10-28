@@ -143,13 +143,16 @@ fn installed_apply_rejection_and_native_failure_are_first_closed_data_only() {
     not(feature="development-runtime"),not(feature="ubuntu-runtime-publisher"),not(feature="macos-installed-installer"),
     target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64")))]
 pub(super) fn assert_installed_apply_failure_contract() {
+    crate::saved_command_owner::AndroidRegistrationControl::assert_installed_git_epoch_rejection_data();
     let (_doc,inbox,input)=setup();let prepare=prepared(&inbox,&input);
     prepare.installed_apply_rejected(PrepareRejection::EditGuard);
     assert!(prepare.entry().row.lock().unwrap().installed_transitions.apply_rejection.is_none());
     inbox.start(&start(&input)).unwrap();
     let mut claim=inbox.claim().unwrap().unwrap();let apply=claim.link().unwrap();apply.arm("git-local-2").unwrap();
     claim.returned(Ok(()));let entry=apply.entry();let before=entry.status().unwrap();
-    apply.installed_apply_rejected(PrepareRejection::PublisherFinished);
+    apply.installed_apply_rejected_with_epoch(PrepareRejection::PublisherFinished,Some(crate::error::InstalledGitEpochRejection::BookWouldBlock));
+    apply.installed_apply_rejected_with_epoch(PrepareRejection::EpochRead,Some(crate::error::InstalledGitEpochRejection::OtherPublisherPending));
+    assert!(entry.row.lock().unwrap().installed_transitions.apply_epoch_rejection.is_none());
     apply.installed_apply_rejected(PrepareRejection::EpochMismatch);
     apply.installed_native_failure(InstalledNativeFailure::ContextChanged);
     apply.installed_native_failure(InstalledNativeFailure::CleanupUnknown);
@@ -164,6 +167,20 @@ pub(super) fn assert_installed_apply_failure_contract() {
     assert!(raw.len()<1024 && !raw.contains("requestId") && !raw.contains("projectId") && !raw.contains("git-local-2"));
     assert_eq!(InstalledNativeFailure::from_code("CANARY_PRIVATE"),InstalledNativeFailure::Other);
     assert_eq!(InstalledNativeFailure::from_code("busy"),InstalledNativeFailure::Busy);
+    drop(apply);
+    let (_doc,inbox,input)=setup();let _prepare=prepared(&inbox,&input);
+    inbox.start(&start(&input)).unwrap();let mut claim=inbox.claim().unwrap().unwrap();
+    let apply=claim.link().unwrap();apply.arm("git-local-2").unwrap();claim.returned(Ok(()));
+    let entry=apply.entry();let before=entry.status().unwrap();
+    apply.installed_apply_rejected_with_epoch(PrepareRejection::EpochRead,Some(crate::error::InstalledGitEpochRejection::BookWouldBlock));
+    apply.installed_apply_rejected_with_epoch(PrepareRejection::EpochRead,Some(crate::error::InstalledGitEpochRejection::OtherPublisherPending));
+    let mut facts=None;
+    assert!(!entry.installed_cli_returned_observed(&input.origin,Family::Index,Phase::Apply,before.revision,&mut facts));
+    let actual=facts.unwrap();
+    assert_eq!(actual.apply_rejection,Some(PrepareRejection::EpochRead));
+    assert_eq!(actual.apply_epoch_rejection,Some(crate::error::InstalledGitEpochRejection::BookWouldBlock));
+    assert_eq!(serde_json::to_value(actual).unwrap()["applyEpochRejection"],serde_json::json!("book-would-block"));
+    assert_eq!(entry.status().unwrap(),before);
 }
 
 #[cfg(all(debug_assertions,feature="desktop-shell",feature="custom-protocol",feature="macos-installed-observation",

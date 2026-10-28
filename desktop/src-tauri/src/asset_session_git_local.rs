@@ -143,7 +143,12 @@ impl GitLocalGate {
         #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation",
             not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"),
             target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
-        if let Some(rejection)=rejected { self.installed_apply_rejected(rejection); }
+        if let Some(rejection)=rejected {
+            if let Some(agent)=&self.0.agent {
+                agent.installed_apply_rejected_with_epoch(rejection,
+                    result.as_ref().err().and_then(BridgeError::installed_git_epoch_rejection));
+            }
+        }
         result
     }
     fn current_with_edit_locked_observed(&self,document:&Arc<Inner>,state:&DocumentState,id:&str,edit:&crate::edit_owner::SavedEditGuard<'_>,

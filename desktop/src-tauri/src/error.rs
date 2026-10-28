@@ -11,6 +11,23 @@ pub struct BridgeError {
     linux_passive_cause: Option<LinuxPassiveCause>,
     #[serde(skip)]
     git_read_failure_provenance: Option<GitReadFailureProvenance>,
+    #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation",
+    not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"),
+    target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+    #[serde(skip)]
+    installed_git_epoch_rejection: Option<InstalledGitEpochRejection>,
+}
+
+// Exact first rejected predicate from one original TRY-only epoch read.
+// Nonshipping closed DATA; never a public error, epoch or admission grant.
+#[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation",
+    not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"),
+    target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all="kebab-case")]
+pub(crate) enum InstalledGitEpochRejection {
+    BookWouldBlock, BookPoisoned, PublisherFinished, PublisherKind,
+    ControlUnknown, CancelPending, OtherPublisherPending, PublisherMismatch,
 }
 
 // Closed facts at the producer of the winning original GitRead error. These
@@ -109,7 +126,24 @@ impl BridgeError {
             #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
             linux_passive_cause: None,
             git_read_failure_provenance: None,
+            #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation",
+    not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"),
+    target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+            installed_git_epoch_rejection: None,
         }
+    }
+
+    #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation",
+    not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"),
+    target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+    pub(crate) fn with_installed_git_epoch_rejection(mut self, rejection: Option<InstalledGitEpochRejection>) -> Self {
+        self.installed_git_epoch_rejection = rejection; self
+    }
+    #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation",
+    not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"),
+    target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+    pub(crate) fn installed_git_epoch_rejection(&self) -> Option<InstalledGitEpochRejection> {
+        self.installed_git_epoch_rejection
     }
 
     pub(crate) fn with_git_read_failure_provenance(mut self, provenance: Option<GitReadFailureProvenance>) -> Self {

@@ -163,6 +163,7 @@ pub(crate) struct InstalledNativeFailureFacts {
 struct InstalledTransitionFacts {
     unknown: Option<InstalledUnknownTransition>,
     apply_rejection: Option<PrepareRejection>,
+    apply_epoch_rejection: Option<crate::error::InstalledGitEpochRejection>,
     native_failure: Option<InstalledNativeFailureFacts>,
 }
 struct Row {
@@ -1124,7 +1125,7 @@ impl Entry {
             history_claimed:r.history_claim.is_some(),history_acknowledged:r.history_ack==Some(revision),
             stopped:r.stop.is_some(),review_present:r.review.is_some(),revision_matched:r.status.revision==revision,
             prepare_rejection:r.prepare_rejection, unknown_transition:r.installed_transitions.unknown,
-            apply_rejection:r.installed_transitions.apply_rejection, native_failure:r.installed_transitions.native_failure});
+            apply_rejection:r.installed_transitions.apply_rejection, apply_epoch_rejection:r.installed_transitions.apply_epoch_rejection, native_failure:r.installed_transitions.native_failure});
         r.status.revision==revision && r.claimed.is_none() && r.prepare_joined
             && !r.history_failed && r.history_claim.is_none() && r.history_ack==Some(revision)
             && r.stop.is_none() && r.status.reason.is_none() && match phase {
@@ -1152,6 +1153,8 @@ pub(crate) struct InstalledCliReturnFacts {
     #[serde(skip_serializing_if="Option::is_none")]
     apply_rejection:Option<PrepareRejection>,
     #[serde(skip_serializing_if="Option::is_none")]
+    apply_epoch_rejection:Option<crate::error::InstalledGitEpochRejection>,
+    #[serde(skip_serializing_if="Option::is_none")]
     native_failure:Option<InstalledNativeFailureFacts>,
 }
 
@@ -1160,9 +1163,18 @@ pub(crate) struct InstalledCliReturnFacts {
     target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
 impl NativeLink {
     pub(crate) fn installed_apply_rejected(&self, rejection:PrepareRejection) {
+        self.installed_apply_rejected_with_epoch(rejection, None);
+    }
+    pub(crate) fn installed_apply_rejected_with_epoch(&self, rejection:PrepareRejection,
+        epoch:Option<crate::error::InstalledGitEpochRejection>) {
         if self.phase != Phase::Apply || self.is_remote() { return; }
         if let Ok(mut row)=self.entry.lock() {
-            row.installed_transitions.apply_rejection.get_or_insert(rejection);
+            // Freeze the SAME first gate and its returned closed epoch detail
+            // together. A later epoch failure cannot fill an earlier reject.
+            if row.installed_transitions.apply_rejection.is_none() {
+                row.installed_transitions.apply_rejection=Some(rejection);
+                row.installed_transitions.apply_epoch_rejection=if rejection==PrepareRejection::EpochRead {epoch}else{None};
+            }
         }
     }
     pub(crate) fn installed_native_failure(&self, category:InstalledNativeFailure) {

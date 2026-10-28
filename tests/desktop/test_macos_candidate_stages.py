@@ -451,6 +451,46 @@ class CandidateCheckpointTests(unittest.TestCase):
         row = A.project_selection_row(detail, 'git-cli-original-contract', 'GitCli(Prepared)')
         self.assertIsNone(A.M.failure_context(b'', row, A.M.GIT_CLI.INDEX))
 
+    def test_apply_epoch_rejection_is_paired_closed_data_without_return_or_finality(self):
+        values = ('book-would-block book-poisoned publisher-finished publisher-kind control-unknown '
+                  'cancel-pending other-publisher-pending publisher-mismatch').split()
+        for value in values:
+            detail = self._cli_return_failure()
+            detail['gitReadFailure']['cliOriginalReturn'].update(applyRejection='epoch-read', applyEpochRejection=value)
+            row = A.project_selection_row(detail, 'git-cli-original-contract', 'GitCli(Terminal)')
+            self.assertEqual(A.M.failure_context(b'', row, A.M.GIT_CLI.INDEX), detail)
+            with self.assertRaises(A.M.Refused):
+                A.M.parse_result(b'', row, A.BINDING, A.M.GIT_CLI.INDEX)
+            fixtures = A.InertFixtures()
+            fixtures.case, fixtures.stage, fixtures.inflight = A.M.GIT_CLI.INDEX, 'invocation', True
+            fixtures.inner_failure_context = A.M.failure_context(b'', row, A.M.GIT_CLI.INDEX)
+            fixtures.inner_diagnostic_source = 'original-exception-buffer'
+            report = A.M.diagnostic(A.M.Refused('original-deadline'), None, fixtures)
+            self.assertEqual(report['innerFailureContext'], detail)
+            self.assertEqual((report['originalCallReturned'], report['appReturncode'], report['invocationFinality']),
+                             (False, None, 'unknown'))
+
+    def test_apply_epoch_rejection_rejects_missing_pair_foreign_phase_and_private_data(self):
+        for value in (None, True, 1, [], {}, 'CANARY_PRIVATE', 'book-would-block\n', 'epoch-read'):
+            detail = self._cli_return_failure()
+            detail['gitReadFailure']['cliOriginalReturn'].update(applyRejection='epoch-read', applyEpochRejection=value)
+            row = A.project_selection_row(detail, 'git-cli-original-contract', 'GitCli(Terminal)')
+            self.assertIsNone(A.M.failure_context(b'', row, A.M.GIT_CLI.INDEX))
+        for rejection in (None, 'epoch-mismatch', 'publisher-lock'):
+            detail = self._cli_return_failure()
+            facts = detail['gitReadFailure']['cliOriginalReturn']
+            facts['applyEpochRejection'] = 'other-publisher-pending'
+            if rejection is not None: facts['applyRejection'] = rejection
+            row = A.project_selection_row(detail, 'git-cli-original-contract', 'GitCli(Terminal)')
+            self.assertIsNone(A.M.failure_context(b'', row, A.M.GIT_CLI.INDEX))
+        detail = self._cli_return_failure()
+        detail['gitReadFailure']['cliOriginalReturn'].update(applyRejection='epoch-read', applyEpochRejection='book-poisoned')
+        for step, reason, case in (('GitCli(Prepared)', 'git-cli-original-contract', A.M.GIT_CLI.INDEX),
+                                  ('GitCli(Terminal)', 'observer-deadline', A.M.GIT_CLI.INDEX),
+                                  ('GitCli(Terminal)', 'git-cli-original-contract', 'CANARY_PRIVATE')):
+            row = A.project_selection_row(detail, reason, step)
+            self.assertIsNone(A.M.failure_context(b'', row, case))
+
     def _durable_runtime_record_boundary(self, fault=None):
         # Inert protected-record DATA plus the real runtime admission method.
         # Stop after its record/inventory join, before runtime/app execution.

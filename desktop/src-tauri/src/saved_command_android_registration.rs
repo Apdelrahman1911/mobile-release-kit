@@ -233,7 +233,14 @@ impl Publisher {
     /// epoch() remains strict for every other caller. No acceptance or renewal.
     pub(crate) fn git_local_epoch(&self) -> Result<u64, BridgeError> {
         // Same exact sole-publisher proof, no widening of ordinary epoch().
-        self.tool_source_epoch()
+        #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation",
+    not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"),
+    target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+        { self.tool_source_epoch_checked(true) }
+        #[cfg(not(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation",
+    not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"),
+    target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64"))))]
+        { self.tool_source_epoch() }
     }
     // Closed reserved-version chain comparison, not a new publisher/acceptance.
     // Wait-only observation for the retained reserved-version native job.
@@ -251,11 +258,59 @@ impl Publisher {
         self.tool_source_epoch()?; Ok(self.serial)
     }
     pub(crate) fn tool_source_epoch(&self) -> Result<u64, BridgeError> {
-        let book = self.slot.book.try_lock().map_err(|_| BridgeError::cleanup_unknown())?;
-        if self.finished || self.index >= 8 || self.slot.is_unknown() || book.cancel.is_some()
-            || book.pending.iter().enumerate().any(|(i,p)| i != self.index && p.is_some())
-            || !book.pending[self.index].is_some_and(|p| p.serial == self.serial && p.accepted == self.accepted) {
-            return Err(BridgeError::cleanup_unknown());
+        self.tool_source_epoch_checked(
+            #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation",
+    not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"),
+    target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+            false
+        )
+    }
+    fn tool_source_epoch_checked(&self,
+        #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation",
+    not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"),
+    target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+        observe_git: bool,
+    ) -> Result<u64, BridgeError> {
+        let book = self.slot.book.try_lock().map_err(|original| {
+            let error = BridgeError::cleanup_unknown();
+            #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation",
+    not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"),
+    target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+            let error = if observe_git {error.with_installed_git_epoch_rejection(Some(match &original {
+                TryLockError::WouldBlock => crate::error::InstalledGitEpochRejection::BookWouldBlock,
+                TryLockError::Poisoned(_) => crate::error::InstalledGitEpochRejection::BookPoisoned,
+            }))} else {error};
+            let _ = original;
+            error
+        })?;
+        #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation",
+    not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"),
+    target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+        let mut rejected = None;
+        // Each original short-circuit predicate is evaluated exactly once in
+        // its original order, under the SAME original ControlBook TRY lock.
+        macro_rules! epoch_rejected {
+            ($condition:expr, $kind:ident) => {{
+                let failed = $condition;
+                #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation",
+    not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"),
+    target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+                if observe_git && failed {rejected.get_or_insert(crate::error::InstalledGitEpochRejection::$kind);}
+                failed
+            }};
+        }
+        if epoch_rejected!(self.finished, PublisherFinished)
+            || epoch_rejected!(self.index >= 8, PublisherKind)
+            || epoch_rejected!(self.slot.is_unknown(), ControlUnknown)
+            || epoch_rejected!(book.cancel.is_some(), CancelPending)
+            || epoch_rejected!(book.pending.iter().enumerate().any(|(i,p)| i != self.index && p.is_some()), OtherPublisherPending)
+            || epoch_rejected!(!book.pending[self.index].is_some_and(|p| p.serial == self.serial && p.accepted == self.accepted), PublisherMismatch) {
+            let error = BridgeError::cleanup_unknown();
+            #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation",
+    not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"),
+    target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+            let error = error.with_installed_git_epoch_rejection(rejected);
+            return Err(error);
         }
         Ok(book.epoch)
     }
@@ -319,6 +374,59 @@ impl Publisher {
 impl Drop for Publisher {
     fn drop(&mut self) { if !self.finished { self.slot.poisoned(); } }
 }
+
+#[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation",
+    not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"),
+    target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+impl ControlSlot {
+    /// Memory-only same original reader and all first-predicate cuts. No host,
+    /// IO, native owner, clock, registration or application is constructed.
+    pub(crate) fn assert_installed_git_epoch_rejection_data() {
+        use crate::error::InstalledGitEpochRejection as R;
+        fn rejected(p: &Publisher, expected: R) {
+            let actual = p.git_local_epoch().unwrap_err();
+            assert_eq!(actual, BridgeError::cleanup_unknown());
+            assert_eq!(actual.installed_git_epoch_rejection(), Some(expected));
+            assert_eq!(actual.clone().installed_git_epoch_rejection(), Some(expected));
+            assert_eq!(serde_json::to_value(&actual).unwrap(), serde_json::to_value(BridgeError::cleanup_unknown()).unwrap());
+            assert_eq!(p.tool_source_epoch().unwrap_err().installed_git_epoch_rejection(), None);
+        }
+        let slot = Arc::new(ControlSlot::default());
+        let mut p = slot.reserve(PublisherKind::General, false).unwrap();
+        assert_eq!(p.git_local_epoch().unwrap(), 0);
+        let held = slot.book.lock().unwrap();
+        rejected(&p, R::BookWouldBlock); drop(held);
+        p.finished = true; p.index = 10;
+        rejected(&p, R::PublisherFinished);
+        p.finished = false; rejected(&p, R::PublisherKind); p.index = 0;
+        slot.unknown.store(true, Ordering::SeqCst);
+        slot.book.lock().unwrap().cancel = Some(PendingCancel {serial: 99, original: Weak::new(), reviewed: None});
+        rejected(&p, R::ControlUnknown);
+        slot.unknown.store(false, Ordering::SeqCst);
+        slot.book.lock().unwrap().pending[1] = Some(PendingPublisher {serial: 99, accepted: false});
+        rejected(&p, R::CancelPending);
+        slot.book.lock().unwrap().cancel = None;
+        rejected(&p, R::OtherPublisherPending);
+        slot.book.lock().unwrap().pending[1] = None;
+        p.serial += 1; rejected(&p, R::PublisherMismatch); p.serial -= 1;
+        p.accepted = true; rejected(&p, R::PublisherMismatch); p.accepted = false;
+        let original = slot.book.lock().unwrap().pending[0].take();
+        rejected(&p, R::PublisherMismatch);
+        slot.book.lock().unwrap().pending[0] = original;
+        assert_eq!(p.git_local_epoch().unwrap(), 0);
+        p.reject(); assert_eq!(slot.epoch().unwrap(), 0);
+        let poisoned = Arc::new(ControlSlot::default());
+        let mut p = poisoned.reserve(PublisherKind::General, false).unwrap();
+        let caught = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _guard = poisoned.book.lock().unwrap(); panic!("inert ControlBook poison fixture");
+        }));
+        assert!(caught.is_err()); rejected(&p, R::BookPoisoned);
+        // Avoid Drop's original poison propagation; this inert fixture has no
+        // host/control and the poisoned book is deliberately never reused.
+        p.finished = true;
+    }
+}
+
 #[derive(Clone,Copy,PartialEq,Eq)]
 enum ControlLane { Sources, Service, Maintenance }
 pub(super) struct Control { agent:Option<Arc<crate::service_tool_setup_requests::NativeLink>>,

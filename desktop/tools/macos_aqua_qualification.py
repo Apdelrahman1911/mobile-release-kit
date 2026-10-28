@@ -4148,7 +4148,7 @@ def _git_cli_return_facts(facts, step, *, pending_poll=False):
     flags = {"claimed", "prepareJoined", "applyJoined", "historyFailed", "historyClaimed",
              "historyAcknowledged", "stopped", "reviewPresent", "revisionMatched"}
     need(type(facts) is dict
-         and set(facts) - {"prepareRejection", "unknownTransition", "applyRejection", "nativeFailure"} == flags | {"state", "reason"}
+         and set(facts) - {"prepareRejection", "unknownTransition", "applyRejection", "applyEpochRejection", "nativeFailure"} == flags | {"state", "reason"}
          and all(type(facts[key]) is bool for key in flags)
          and type(facts["state"]) is str and facts["state"] in (
              "queued", "preparing", "prepared", "start-queued", "applying", "stopping",
@@ -4173,6 +4173,13 @@ def _git_cli_return_facts(facts, step, *, pending_poll=False):
                  "edit-guard", "original-gate", "fetch-gate", "push-gate", "request-gate",
                  "publisher-lock", "publisher-finished", "publisher-missing", "epoch-read",
                  "epoch-mismatch", "edit-stamp", "native-project", "post-project", "native-state"), "failure-context")
+    if "applyEpochRejection" in facts:
+        # Paired with this SAME first rejected strict epoch gate. Closed DATA
+        # cannot establish native currentness, cause ordering or finality.
+        need(step == "GitCli(Terminal)" and facts.get("applyRejection") == "epoch-read"
+             and type(facts["applyEpochRejection"]) is str and facts["applyEpochRejection"] in (
+                 "book-would-block", "book-poisoned", "publisher-finished", "publisher-kind",
+                 "control-unknown", "cancel-pending", "other-publisher-pending", "publisher-mismatch"), "failure-context")
     if "unknownTransition" in facts:
         transition = facts["unknownTransition"]
         need(type(transition) is dict and set(transition) == {"origin", "phase"}
