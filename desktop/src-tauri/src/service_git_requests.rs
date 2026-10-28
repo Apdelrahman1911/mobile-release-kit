@@ -92,7 +92,8 @@ pub(crate) struct Inbox {
     failed: AtomicBool,
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "kebab-case")]
 pub(crate) enum Phase {
     Prepare,
     Apply,
@@ -106,6 +107,63 @@ pub(crate) enum PrepareRejection {
     PublisherLock, PublisherFinished, PublisherMissing, EpochRead,
     EpochMismatch, EditStamp, NativeProject, PostProject, NativeState,
     ReviewClock, ReviewDecode, SelectionReview, EntryReady,
+}
+/// Closed first-transition labels, with no error text or native authority.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum UnknownOrigin {
+    Unspecified, NativeRetirementUnknown, NativeRetirementInvalid,
+    DuplicatePrepareRetirement, DuplicateApplyRetirement,
+    ClaimPhaseMismatch, ClaimOkUnarmed, ClaimReturnedUnknown,
+    ClaimReturnedArmedError, ClaimRemoteReturnUnknown, ClaimDropped,
+}
+#[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation",
+    not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"),
+    target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+pub(crate) struct InstalledUnknownTransition {
+    origin: UnknownOrigin,
+    phase: Option<Phase>,
+}
+#[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation",
+    not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"),
+    target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum InstalledNativeFailure {
+    CleanupUnknown, ContextChanged, Busy, Cancelled, ShuttingDown,
+    QueryTimeout, GitLocalRefused, InvalidRequest, ProtocolError, Other,
+}
+#[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation",
+    not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"),
+    target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+impl InstalledNativeFailure {
+    pub(crate) fn from_code(code: &str) -> Self {
+        match code {
+            "cleanup_unknown"=>Self::CleanupUnknown, "git_stale_observation"=>Self::ContextChanged,
+            "busy"=>Self::Busy, "cancelled"=>Self::Cancelled, "shutting_down"=>Self::ShuttingDown,
+            "query_timeout"=>Self::QueryTimeout, "git_local_refused"=>Self::GitLocalRefused,
+            "invalid_request"=>Self::InvalidRequest, "protocol_error"=>Self::ProtocolError,
+            _=>Self::Other,
+        }
+    }
+}
+#[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation",
+    not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"),
+    target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+pub(crate) struct InstalledNativeFailureFacts {
+    category: InstalledNativeFailure,
+    phase: Phase,
+}
+#[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation",
+    not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"),
+    target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+#[derive(Default)]
+struct InstalledTransitionFacts {
+    unknown: Option<InstalledUnknownTransition>,
+    apply_rejection: Option<PrepareRejection>,
+    native_failure: Option<InstalledNativeFailureFacts>,
 }
 struct Row {
     lease: Option<Arc<Lease>>,
@@ -126,6 +184,10 @@ struct Row {
         not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"),
         target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
     prepare_rejection: Option<PrepareRejection>,
+    #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation",
+        not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"),
+        target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+    installed_transitions: InstalledTransitionFacts,
 }
 pub(crate) struct Entry {
     input: p::Prepare,
@@ -267,6 +329,9 @@ impl Entry {
         Ok(status)
     }
     pub(crate) fn unknown(&self) {
+        self.unknown_from(UnknownOrigin::Unspecified, None);
+    }
+    fn unknown_from(&self, origin: UnknownOrigin, phase: Option<Phase>) {
         let Ok(mut row) = self.row.lock() else {
             self.failed.store(true, Ordering::Release);
             return;
@@ -274,6 +339,12 @@ impl Entry {
         if row.status.state == p::State::Unknown {
             return;
         }
+        // SAME locked first transition. Later retirement/drop never replaces it.
+        #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation",
+            not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"),
+            target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+        row.installed_transitions.unknown.get_or_insert(InstalledUnknownTransition {origin, phase});
+        let _ = (origin, phase);
         row.status.state = p::State::Unknown;
         row.status.settlement = Settlement::Unknown;
         row.status.outcome = Some(OperationState::Unknown);
@@ -536,7 +607,7 @@ impl NativeLink {
     /// child terminal, socket EOF and public Status never call this method.
     pub(crate) fn retired(&self, result: OperationState) {
         if result == OperationState::Unknown {
-            self.entry.unknown();
+            self.entry.unknown_from(UnknownOrigin::NativeRetirementUnknown, Some(self.phase));
             return;
         }
         let Ok(mut row) = self.entry.lock() else {
@@ -552,7 +623,7 @@ impl NativeLink {
             | OperationState::RecoveryRequired => result,
             _ => {
                 drop(row);
-                self.entry.unknown();
+                self.entry.unknown_from(UnknownOrigin::NativeRetirementInvalid, Some(self.phase));
                 return;
             }
         };
@@ -560,7 +631,7 @@ impl NativeLink {
         if self.phase == Phase::Prepare {
             if row.prepare_joined {
                 drop(row);
-                self.entry.unknown();
+                self.entry.unknown_from(UnknownOrigin::DuplicatePrepareRetirement, Some(self.phase));
                 return;
             }
             row.prepare_joined = true;
@@ -570,7 +641,7 @@ impl NativeLink {
         } else {
             if row.apply_joined {
                 drop(row);
-                self.entry.unknown();
+                self.entry.unknown_from(UnknownOrigin::DuplicateApplyRetirement, Some(self.phase));
                 return;
             }
             row.apply_joined = true;
@@ -625,7 +696,7 @@ impl Claim {
         };
         if row.claimed != Some(self.phase) {
             drop(row);
-            self.entry.unknown();
+            self.entry.unknown_from(UnknownOrigin::ClaimPhaseMismatch, Some(self.phase));
             return;
         }
         row.claimed = None;
@@ -636,7 +707,7 @@ impl Claim {
                 .is_none_or(|v| !v.armed.load(Ordering::Acquire))
         {
             drop(row);
-            self.entry.unknown();
+            self.entry.unknown_from(UnknownOrigin::ClaimOkUnarmed, Some(self.phase));
             return;
         }
         if let Err(error) = result {
@@ -647,7 +718,9 @@ impl Claim {
                     .is_some_and(|v| v.armed.load(Ordering::Acquire))
             {
                 drop(row);
-                self.entry.unknown();
+                self.entry.unknown_from(if error == Error::StateUnknown {
+                    UnknownOrigin::ClaimReturnedUnknown
+                } else { UnknownOrigin::ClaimReturnedArmedError }, Some(self.phase));
                 return;
             }
             let reason = row.stop.map_or(
@@ -669,13 +742,13 @@ impl Claim {
                 self.entry.failed.store(true, Ordering::Release);
             }
         }
-        if remote_requests::caller_returned(&mut row,self.phase).is_err() {drop(row);self.entry.unknown();}
+        if remote_requests::caller_returned(&mut row,self.phase).is_err() {drop(row);self.entry.unknown_from(UnknownOrigin::ClaimRemoteReturnUnknown, Some(self.phase));}
     }
 }
 impl Drop for Claim {
     fn drop(&mut self) {
         if !self.returned {
-            self.entry.unknown();
+            self.entry.unknown_from(UnknownOrigin::ClaimDropped, Some(self.phase));
         }
     }
 }
@@ -888,6 +961,10 @@ impl Inbox {
                     not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"),
                     target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
                 prepare_rejection: None,
+                #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation",
+                    not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"),
+                    target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+                installed_transitions: InstalledTransitionFacts::default(),
             }),
         });
         lease.used.store(true, Ordering::Release);
@@ -988,6 +1065,14 @@ mod commit;
 #[path = "service_git_requests_tests.rs"]
 mod tests;
 
+#[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation",
+    not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"),
+    target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+pub(crate) fn assert_installed_transition_contracts() {
+    tests::assert_installed_unknown_transition_contract();
+    tests::assert_installed_apply_failure_contract();
+}
+
 #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation",
     not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"),
     target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
@@ -1005,7 +1090,8 @@ impl Entry {
             prepare_joined:r.prepare_joined,apply_joined:r.apply_joined,history_failed:r.history_failed,
             history_claimed:r.history_claim.is_some(),history_acknowledged:r.history_ack==Some(revision),
             stopped:r.stop.is_some(),review_present:r.review.is_some(),revision_matched:r.status.revision==revision,
-            prepare_rejection:r.prepare_rejection});
+            prepare_rejection:r.prepare_rejection, unknown_transition:r.installed_transitions.unknown,
+            apply_rejection:r.installed_transitions.apply_rejection, native_failure:r.installed_transitions.native_failure});
         r.status.revision==revision && r.claimed.is_none() && r.prepare_joined
             && !r.history_failed && r.history_claim.is_none() && r.history_ack==Some(revision)
             && r.stop.is_none() && r.status.reason.is_none() && match phase {
@@ -1028,12 +1114,30 @@ pub(crate) struct InstalledCliReturnFacts {
     history_failed:bool,history_claimed:bool,history_acknowledged:bool,stopped:bool,review_present:bool,revision_matched:bool,
     #[serde(skip_serializing_if="Option::is_none")]
     prepare_rejection:Option<PrepareRejection>,
+    #[serde(skip_serializing_if="Option::is_none")]
+    unknown_transition:Option<InstalledUnknownTransition>,
+    #[serde(skip_serializing_if="Option::is_none")]
+    apply_rejection:Option<PrepareRejection>,
+    #[serde(skip_serializing_if="Option::is_none")]
+    native_failure:Option<InstalledNativeFailureFacts>,
 }
 
 #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation",
     not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"),
     target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
 impl NativeLink {
+    pub(crate) fn installed_apply_rejected(&self, rejection:PrepareRejection) {
+        if self.phase != Phase::Apply || self.is_remote() { return; }
+        if let Ok(mut row)=self.entry.lock() {
+            row.installed_transitions.apply_rejection.get_or_insert(rejection);
+        }
+    }
+    pub(crate) fn installed_native_failure(&self, category:InstalledNativeFailure) {
+        if self.is_remote() { return; }
+        if let Ok(mut row)=self.entry.lock() {
+            row.installed_transitions.native_failure.get_or_insert(InstalledNativeFailureFacts {category, phase:self.phase});
+        }
+    }
     /// First failure from THIS original reconcile, before its existing no_review.
     /// Capturing it never changes the public status, stop, review or finality.
     pub(crate) fn installed_prepare_rejected(&self, rejection:PrepareRejection) {

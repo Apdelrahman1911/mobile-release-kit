@@ -138,7 +138,13 @@ impl GitLocalGate {
         self.current_with_edit_locked_observed(document,state,id,&edit,rejected)
     }
     fn current_with_edit_locked(&self,document:&Arc<Inner>,state:&DocumentState,id:&str,edit:&crate::edit_owner::SavedEditGuard<'_>)->Result<(),BridgeError> {
-        self.current_with_edit_locked_observed(document,state,id,edit,&mut None)
+        let mut rejected=None;
+        let result=self.current_with_edit_locked_observed(document,state,id,edit,&mut rejected);
+        #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation",
+            not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"),
+            target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+        if let Some(rejection)=rejected { self.installed_apply_rejected(rejection); }
+        result
     }
     fn current_with_edit_locked_observed(&self,document:&Arc<Inner>,state:&DocumentState,id:&str,edit:&crate::edit_owner::SavedEditGuard<'_>,
         rejected:&mut Option<crate::service_git_requests::PrepareRejection>)->Result<(),BridgeError> {
@@ -190,11 +196,28 @@ impl GitLocalGate {
     pub(crate) fn claim<T>(&self,id:&str,claim:impl FnOnce()->Result<T,BridgeError>)->Result<T,BridgeError> {
         let document=self.0.document.upgrade().ok_or_else(BridgeError::cleanup_unknown)?;
         let state=document.state.lock().map_err(|_|BridgeError::cleanup_unknown())?;
-        let edit=document.bridge.edits.saved_registration_guard(&document.session_identity)?;
+        let edit=document.bridge.edits.saved_registration_guard(&document.session_identity);
+        #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation",
+            not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"),
+            target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+        if edit.is_err() { self.installed_apply_rejected(crate::service_git_requests::PrepareRejection::EditGuard); }
+        let edit=edit?;
         self.current_with_edit_locked(&document,&state,id,&edit)?;
         // Fixed callers only: Doc -> original Supervisor registry -> state.
         // The supplied body does no filesystem/Host/native IO and no await.
         let result=claim();drop(edit);result
+    }
+    #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation",
+        not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"),
+        target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+    fn installed_apply_rejected(&self,rejection:crate::service_git_requests::PrepareRejection) {
+        if let Some(agent)=&self.0.agent { agent.installed_apply_rejected(rejection); }
+    }
+    #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation",
+        not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"),
+        target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+    pub(crate) fn installed_native_failure(&self,category:crate::service_git_requests::InstalledNativeFailure) {
+        if let Some(agent)=&self.0.agent { agent.installed_native_failure(category); }
     }
     /// First registered original blocking job. The Doc scope check is finished
     /// BEFORE touching Publisher::accept, which can wait for Host/Store IO.

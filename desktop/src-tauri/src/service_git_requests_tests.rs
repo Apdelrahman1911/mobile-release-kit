@@ -5,6 +5,96 @@ use std::time::Duration;
     not(feature="development-runtime"),not(feature="ubuntu-runtime-publisher"),not(feature="macos-installed-installer"),
     target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64")))]
 #[test]
+fn installed_unknown_transition_is_first_original_and_cannot_grant_return() {
+    assert_installed_unknown_transition_contract();
+}
+#[cfg(all(debug_assertions,feature="desktop-shell",feature="custom-protocol",feature="macos-installed-observation",
+    not(feature="development-runtime"),not(feature="ubuntu-runtime-publisher"),not(feature="macos-installed-installer"),
+    target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64")))]
+pub(super) fn assert_installed_unknown_transition_contract() {
+    // Inert rows and synthetic callbacks, never an actual native retirement.
+    for origin in [UnknownOrigin::Unspecified, UnknownOrigin::NativeRetirementUnknown,
+        UnknownOrigin::NativeRetirementInvalid, UnknownOrigin::DuplicatePrepareRetirement,
+        UnknownOrigin::DuplicateApplyRetirement, UnknownOrigin::ClaimPhaseMismatch,
+        UnknownOrigin::ClaimOkUnarmed, UnknownOrigin::ClaimReturnedUnknown,
+        UnknownOrigin::ClaimReturnedArmedError, UnknownOrigin::ClaimRemoteReturnUnknown,
+        UnknownOrigin::ClaimDropped] {
+        let (_doc,inbox,input)=setup();
+        let link=prepared(&inbox,&input);let entry=link.entry();
+        let before=entry.status().unwrap();
+        entry.unknown_from(origin,Some(Phase::Prepare));
+        let first=entry.status().unwrap();
+        assert_eq!(first.state,p::State::Unknown);
+        assert_eq!(first.settlement,Settlement::Unknown);
+        assert_eq!(first.revision,before.revision+1);
+        entry.unknown_from(UnknownOrigin::ClaimDropped,Some(Phase::Apply));
+        assert_eq!(entry.status().unwrap(),first);
+        let mut facts=None;
+        assert!(!entry.installed_cli_returned_observed(&input.origin,Family::Index,Phase::Prepare,first.revision,&mut facts));
+        assert_eq!(facts.unwrap().unknown_transition,Some(InstalledUnknownTransition {origin,phase:Some(Phase::Prepare)}));
+        let mut foreign=input.origin.clone();foreign.request_id=id('f');facts=None;
+        assert!(!entry.installed_cli_returned_observed(&foreign,Family::Index,Phase::Prepare,first.revision,&mut facts));
+        assert!(facts.is_none());
+    }
+    // Real original Entry branch calls distinguish callback, caller and drop.
+    for (case,expected) in [(0,UnknownOrigin::NativeRetirementUnknown),
+        (1,UnknownOrigin::DuplicatePrepareRetirement),(2,UnknownOrigin::ClaimReturnedArmedError),
+        (3,UnknownOrigin::ClaimDropped),(4,UnknownOrigin::ClaimOkUnarmed),
+        (5,UnknownOrigin::ClaimReturnedUnknown)] {
+        let (_doc,inbox,input)=setup();inbox.prepare(input.clone()).unwrap();
+        let mut claim=inbox.claim().unwrap().unwrap();
+        let entry=claim.entry().clone();
+        match case {
+            0|1=>{let link=claim.link().unwrap();link.arm("git-local-1").unwrap();claim.returned(Ok(()));
+                if case==1 {link.retired(OperationState::Succeeded);link.retired(OperationState::Succeeded);}
+                else {link.retired(OperationState::Unknown);}},
+            2=>{let link=claim.link().unwrap();link.arm("git-local-1").unwrap();claim.returned(Err(Error::Conflict));},
+            3=>drop(claim),4=>claim.returned(Ok(())),_=>claim.returned(Err(Error::StateUnknown)),
+        }
+        assert_eq!(entry.row.lock().unwrap().installed_transitions.unknown,
+            Some(InstalledUnknownTransition {origin:expected,phase:Some(Phase::Prepare)}));
+        assert_eq!(entry.status().unwrap().state,p::State::Unknown);
+    }
+}
+
+#[cfg(all(debug_assertions,feature="desktop-shell",feature="custom-protocol",feature="macos-installed-observation",
+    not(feature="development-runtime"),not(feature="ubuntu-runtime-publisher"),not(feature="macos-installed-installer"),
+    target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64")))]
+#[test]
+fn installed_apply_rejection_and_native_failure_are_first_closed_data_only() {
+    assert_installed_apply_failure_contract();
+}
+#[cfg(all(debug_assertions,feature="desktop-shell",feature="custom-protocol",feature="macos-installed-observation",
+    not(feature="development-runtime"),not(feature="ubuntu-runtime-publisher"),not(feature="macos-installed-installer"),
+    target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64")))]
+pub(super) fn assert_installed_apply_failure_contract() {
+    let (_doc,inbox,input)=setup();let prepare=prepared(&inbox,&input);
+    prepare.installed_apply_rejected(PrepareRejection::EditGuard);
+    assert!(prepare.entry().row.lock().unwrap().installed_transitions.apply_rejection.is_none());
+    inbox.start(&start(&input)).unwrap();
+    let mut claim=inbox.claim().unwrap().unwrap();let apply=claim.link().unwrap();apply.arm("git-local-2").unwrap();
+    claim.returned(Ok(()));let entry=apply.entry();let before=entry.status().unwrap();
+    apply.installed_apply_rejected(PrepareRejection::PublisherFinished);
+    apply.installed_apply_rejected(PrepareRejection::EpochMismatch);
+    apply.installed_native_failure(InstalledNativeFailure::ContextChanged);
+    apply.installed_native_failure(InstalledNativeFailure::CleanupUnknown);
+    assert_eq!(entry.status().unwrap(),before);
+    let mut facts=None;
+    assert!(!entry.installed_cli_returned_observed(&input.origin,Family::Index,Phase::Apply,before.revision,&mut facts));
+    let actual=facts.unwrap();
+    assert_eq!(actual.apply_rejection,Some(PrepareRejection::PublisherFinished));
+    assert_eq!(actual.native_failure,Some(InstalledNativeFailureFacts {category:InstalledNativeFailure::ContextChanged,phase:Phase::Apply}));
+    assert!(actual.prepare_rejection.is_none() && actual.unknown_transition.is_none() && !actual.apply_joined);
+    let raw=serde_json::to_string(&actual).unwrap();
+    assert!(raw.len()<1024 && !raw.contains("requestId") && !raw.contains("projectId") && !raw.contains("git-local-2"));
+    assert_eq!(InstalledNativeFailure::from_code("CANARY_PRIVATE"),InstalledNativeFailure::Other);
+    assert_eq!(InstalledNativeFailure::from_code("busy"),InstalledNativeFailure::Busy);
+}
+
+#[cfg(all(debug_assertions,feature="desktop-shell",feature="custom-protocol",feature="macos-installed-observation",
+    not(feature="development-runtime"),not(feature="ubuntu-runtime-publisher"),not(feature="macos-installed-installer"),
+    target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64")))]
+#[test]
 fn installed_return_diagnostics_keep_exact_history_and_caller_requirements() {
     // Inert request DATA and synthetic native-link returns, no installed result.
     let (_doc,inbox,input)=setup();

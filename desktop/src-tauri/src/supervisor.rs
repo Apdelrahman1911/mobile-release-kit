@@ -944,7 +944,15 @@ impl Owner {
         let mut state = lock(&self.state);
         if state.terminal { return; }
         state.fail_at(error.clone(), detected_at);
+        #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation",
+            not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"),
+            target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+        let git_failure=self.git_local.as_ref().and_then(|local|state.error.as_ref().map(|e|local.installed_capture_native_failure(&e.code)));
         drop(state);
+        #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation",
+            not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"),
+            target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+        if let (Some(local),Some(category))=(&self.git_local,git_failure) {local.gate.installed_native_failure(category);}
         if let Some(device)=&self.github_device { device.gate.failure(error.clone(),detected_at); }
         if let Some(gate)=&self.github_device_read_gate {gate.failure(error,detected_at);}
         self.stop.send_replace(true); self.changed.notify_waiters();
@@ -958,7 +966,15 @@ impl Owner {
         let mut state = lock(&self.state);
         if state.terminal { return; }
         let at=Instant::now(); state.fail_at(error.clone(), at);
+        #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation",
+            not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"),
+            target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+        let git_failure=self.git_local.as_ref().and_then(|local|state.error.as_ref().map(|e|local.installed_capture_native_failure(&e.code)));
         drop(state);
+        #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation",
+            not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"),
+            target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+        if let (Some(local),Some(category))=(&self.git_local,git_failure) {local.gate.installed_native_failure(category);}
         if let Some(device)=&self.github_device { device.gate.failure(error.clone(),at); }
         if let Some(gate)=&self.github_device_read_gate {gate.failure(error,at);}
         self.stop.send_replace(true);

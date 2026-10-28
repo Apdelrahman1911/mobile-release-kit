@@ -234,6 +234,66 @@ class CandidateCheckpointTests(unittest.TestCase):
             row = A.project_selection_row(detail, 'git-cli-original-contract', 'GitCli(Prepared)')
             self.assertIsNone(A.M.failure_context(b'', row, A.M.GIT_CLI.INDEX))
 
+    def test_first_original_unknown_apply_and_native_diagnostics_remain_closed_and_unqualified(self):
+        origins = ('unspecified native-retirement-unknown native-retirement-invalid '
+                   'duplicate-prepare-retirement duplicate-apply-retirement claim-phase-mismatch '
+                   'claim-ok-unarmed claim-returned-unknown claim-returned-armed-error '
+                   'claim-remote-return-unknown claim-dropped').split()
+        checks = ('edit-guard original-gate fetch-gate push-gate request-gate publisher-lock '
+                  'publisher-finished publisher-missing epoch-read epoch-mismatch edit-stamp '
+                  'native-project post-project native-state').split()
+        categories = ('cleanup-unknown context-changed busy cancelled shutting-down query-timeout '
+                      'git-local-refused invalid-request protocol-error other').split()
+        for field, values in (
+                ('unknownTransition', [dict(origin=o, phase=p) for o in origins for p in (None, 'prepare', 'apply')]),
+                ('applyRejection', checks),
+                ('nativeFailure', [dict(category=c, phase=p) for c in categories for p in ('prepare', 'apply')])):
+            for value in values:
+                detail = self._cli_return_failure()
+                detail['gitReadFailure']['cliOriginalReturn'][field] = value
+                row = A.project_selection_row(detail, 'git-cli-original-contract', 'GitCli(Terminal)')
+                self.assertEqual(A.M.failure_context(b'', row, A.M.GIT_CLI.INDEX), detail)
+                with self.assertRaises(A.M.Refused):
+                    A.M.parse_result(b'', row, A.BINDING, A.M.GIT_CLI.INDEX)
+        detail = self._cli_return_failure()
+        detail['gitReadFailure']['cliOriginalReturn'].update(
+            unknownTransition=dict(origin='native-retirement-unknown', phase='apply'),
+            applyRejection='publisher-finished',
+            nativeFailure=dict(category='context-changed', phase='apply'))
+        row = A.project_selection_row(detail, 'git-cli-original-contract', 'GitCli(Terminal)')
+        fixtures = A.InertFixtures()
+        fixtures.case, fixtures.stage, fixtures.inflight = A.M.GIT_CLI.INDEX, 'invocation', True
+        fixtures.inner_failure_context = A.M.failure_context(b'', row, A.M.GIT_CLI.INDEX)
+        fixtures.inner_diagnostic_source = 'original-exception-buffer'
+        report = A.M.diagnostic(A.M.Refused('original-deadline'), None, fixtures)
+        self.assertEqual(report['innerFailureContext'], detail)
+        self.assertEqual((report['originalCallReturned'], report['appReturncode'], report['invocationFinality']),
+                         (False, None, 'unknown'))
+
+    def test_original_transition_diagnostics_reject_private_unbounded_or_foreign_data(self):
+        for field, valid in (
+                ('unknownTransition', dict(origin='claim-returned-armed-error', phase='apply')),
+                ('nativeFailure', dict(category='cleanup-unknown', phase='apply'))):
+            invalids = [None, [], 1, True, 'CANARY_PRIVATE', dict(valid, extra='CANARY_PRIVATE'),
+                        dict(valid, phase='CANARY_PRIVATE'), dict(valid, phase=True)]
+            for key in valid:
+                omitted = dict(valid); del omitted[key]; invalids.append(omitted)
+                invalids.append(dict(valid, **{key: 'CANARY_PRIVATE'}))
+            for value in invalids:
+                detail = self._cli_return_failure()
+                detail['gitReadFailure']['cliOriginalReturn'][field] = value
+                row = A.project_selection_row(detail, 'git-cli-original-contract', 'GitCli(Terminal)')
+                self.assertIsNone(A.M.failure_context(b'', row, A.M.GIT_CLI.INDEX))
+        for value in (None, [], {}, 1, True, 'CANARY_PRIVATE', 'review-clock', 'publisher-finished\n'):
+            detail = self._cli_return_failure()
+            detail['gitReadFailure']['cliOriginalReturn']['applyRejection'] = value
+            row = A.project_selection_row(detail, 'git-cli-original-contract', 'GitCli(Terminal)')
+            self.assertIsNone(A.M.failure_context(b'', row, A.M.GIT_CLI.INDEX))
+        detail = self._cli_return_failure()
+        detail['gitReadFailure']['cliOriginalReturn']['applyRejection'] = 'publisher-finished'
+        row = A.project_selection_row(detail, 'git-cli-original-contract', 'GitCli(Prepared)')
+        self.assertIsNone(A.M.failure_context(b'', row, A.M.GIT_CLI.INDEX))
+
     def _durable_runtime_record_boundary(self, fault=None):
         # Inert protected-record DATA plus the real runtime admission method.
         # Stop after its record/inventory join, before runtime/app execution.

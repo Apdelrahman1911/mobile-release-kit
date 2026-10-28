@@ -37,6 +37,10 @@ pub(super) struct Invocation {
     pub(super) gate:crate::asset_session::GitLocalGate,
     pub(super) context:wire::Context,pub(super) action:wire::Action,pub(super) phase:wire::Phase,
     pub(super) receipt:Arc<Mutex<GitLocalReceipt>>,
+    #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation",
+        not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"),
+        target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+    first_native_failure:std::sync::OnceLock<crate::service_git_requests::InstalledNativeFailure>,
     request:Mutex<Option<Arc<wire::Request>>>,child_reply:Mutex<Option<wire::Terminal>>,
     candidate:Mutex<Option<Arc<wire::Candidate>>>,ack_returned:AtomicBool,control_closed:Mutex<Option<ControlClosed>>,
     publication:Mutex<Option<GitLocalPublication>>,
@@ -188,7 +192,16 @@ impl GitLocalTicket {
     pub(crate) fn agent_stop_at(&self,at:Instant) {
         let mut state=lock(&self.owner.state);if state.terminal {return;}
         state.fail_at(BridgeError::new("cancelled","The original local Git action was stopped."),at);
-        drop(state);self.owner.stop.send_replace(true);self.owner.changed.notify_waiters();
+        #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation",
+            not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"),
+            target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+        let git_failure=self.owner.git_local.as_ref().and_then(|local|state.error.as_ref().map(|e|local.installed_capture_native_failure(&e.code)));
+        drop(state);
+        #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation",
+            not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"),
+            target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+        if let (Some(local),Some(category))=(&self.owner.git_local,git_failure) {local.gate.installed_native_failure(category);}
+        self.owner.stop.send_replace(true);self.owner.changed.notify_waiters();
     }
     pub(crate) fn receipt(&self)->GitLocalReceipt {lock(&self.receipt).clone()}
     pub(crate) fn settled(&self)->bool {matches!(&*lock(&self.receipt),GitLocalReceipt::Settled {was_unknown:false,..})}
@@ -208,6 +221,10 @@ impl GitLocalAdmission {
             slots.reserve_once().map_err(|_|BridgeError::unavailable("The bounded local Git storage is unavailable."))?;
             let slots=Arc::new(Mutex::new(slots));
             Ok(Self {invocation:Invocation {context:gate.context(),gate,action,phase,
+                #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation",
+                    not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"),
+                    target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+                first_native_failure:std::sync::OnceLock::new(),
                 receipt:Arc::new(Mutex::new(GitLocalReceipt::Pending)),request:Mutex::new(None),child_reply:Mutex::new(None),
                 candidate:Mutex::new(None),ack_returned:AtomicBool::new(false),control_closed:Mutex::new(None),publication:Mutex::new(None),
                 fetch_keep:Mutex::new(None),upstream_ack:Mutex::new(None),fetch_go_claimed:AtomicBool::new(false),
@@ -274,6 +291,14 @@ fn state_error(error:StateError)->BridgeError {
     } else {host_error(error.code)}
 }
 impl Invocation {
+    #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation",
+        not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"),
+        target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+    pub(super) fn installed_capture_native_failure(&self,code:&str)->crate::service_git_requests::InstalledNativeFailure {
+        // Called under the original OwnerState lock. No second lock or IO;
+        // delayed publishers all carry this SAME first immutable category.
+        *self.first_native_failure.get_or_init(||crate::service_git_requests::InstalledNativeFailure::from_code(code))
+    }
     fn observation_stderr(&self,id:&str,bytes:&[u8])->bool {
         #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
         if let Some(c)=self.push_observation.get(){return c.stderr_allowed(id,bytes)}
