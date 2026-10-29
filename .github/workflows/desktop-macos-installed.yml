@@ -1274,90 +1274,10 @@ jobs:
           # This second digest only binds the already-completed output of this
           # authorized build into its one-shot installer; it grants no runtime,
           # GUI, distribution, update or arbitrary adjacent-file authority.
-      - name: Run only the five reviewed nonroot regressions (exact groups 2, 1, 2)
-        if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == 'refs/heads/verify/desktop-macos-installed')
+      - name: "Run only the five reviewed nonroot regressions (exact groups 2, 1, 2)"
+        if: "github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == 'refs/heads/verify/desktop-macos-installed')"
         timeout-minutes: 12
-        shell: bash
-        run: |
-          set -euo pipefail
-          set -o noclobber
-          umask 077
-          [[ "$(/usr/bin/id -u)" != 0 && "$MRK_MACOS_INSTALL_SOURCE_COMMIT" == "$GITHUB_SHA" ]] || exit 1
-          [[ "$MRK_MACOS_INSTALL_INVENTORY_SHA256" =~ ^[0-9a-f]{64}$ ]] || exit 1
-          # Keep the original Cargo/tee/tail statuses, including on failure.
-          # The retained tail is at most 128 KiB per fixed invocation. No retry.
-          run_focused() {
-            local label="$1"
-            shift
-            local -a statuses
-            set +e
-            "$@" 2>&1 | /usr/bin/tee /dev/null | /usr/bin/tail -c 131072 > "$MRK_MACOS_WORK/$label.log"
-            statuses=("${PIPESTATUS[@]}")
-            set -e
-            printf '%s\n' "${statuses[*]}" > "$MRK_MACOS_WORK/$label.status"
-            [[ ${#statuses[@]} == 3 ]] || exit 1
-            if (( statuses[0] != 0 )); then return "${statuses[0]}"; fi
-            (( statuses[1] == 0 && statuses[2] == 0 )) || return 1
-          }
-          # Multiple FULL names belong after Cargo's --; libtest --exact is not a prefix filter.
-          PATH="/Users/runner/.rustup/toolchains/${RUSTUP_TOOLCHAIN}-$MRK_MACOS_TARGET/bin:/usr/bin:/bin:/usr/sbin:/sbin" RUSTC="/Users/runner/.rustup/toolchains/${RUSTUP_TOOLCHAIN}-$MRK_MACOS_TARGET/bin/rustc" RUSTUP_TOOLCHAIN="$RUSTUP_TOOLCHAIN" RUSTUP_AUTO_INSTALL=0 CARGO_HOME=/Users/runner/.cargo RUSTUP_HOME=/Users/runner/.rustup run_focused dialog-regressions "/Users/runner/.rustup/toolchains/${RUSTUP_TOOLCHAIN}-$MRK_MACOS_TARGET/bin/cargo" test --manifest-path desktop/src-tauri/Cargo.toml \
-            --locked --release --no-default-features --features desktop-shell,custom-protocol \
-            --target "$MRK_MACOS_TARGET" --lib -- --exact --test-threads=1 --color=never --format=pretty \
-            shell::owned_macos::tests::native_unknown_blocks_dispatch_and_outcome_despite_first_user_refusal \
-            shell::owned_macos::tests::response_mapping_preserves_other_and_missing_facts_poison_dispatch
-          PATH="/Users/runner/.rustup/toolchains/${RUSTUP_TOOLCHAIN}-$MRK_MACOS_TARGET/bin:/usr/bin:/bin:/usr/sbin:/sbin" RUSTC="/Users/runner/.rustup/toolchains/${RUSTUP_TOOLCHAIN}-$MRK_MACOS_TARGET/bin/rustc" RUSTUP_TOOLCHAIN="$RUSTUP_TOOLCHAIN" RUSTUP_AUTO_INSTALL=0 CARGO_HOME=/Users/runner/.cargo RUSTUP_HOME=/Users/runner/.rustup run_focused installer-finalizer-regression "/Users/runner/.rustup/toolchains/${RUSTUP_TOOLCHAIN}-$MRK_MACOS_TARGET/bin/cargo" test --manifest-path desktop/src-tauri/Cargo.toml \
-            --locked --release --no-default-features --features macos-installed-installer \
-            --target "$MRK_MACOS_TARGET" --bin mrk-macos-install -- --exact --test-threads=1 --color=never --format=pretty \
-            installer::tests::original_final_deadline_vetoes_late_known_closes_without_erasing_first_error
-          PATH="/Users/runner/.rustup/toolchains/${RUSTUP_TOOLCHAIN}-$MRK_MACOS_TARGET/bin:/usr/bin:/bin:/usr/sbin:/sbin" RUSTC="/Users/runner/.rustup/toolchains/${RUSTUP_TOOLCHAIN}-$MRK_MACOS_TARGET/bin/rustc" RUSTUP_TOOLCHAIN="$RUSTUP_TOOLCHAIN" RUSTUP_AUTO_INSTALL=0 CARGO_HOME=/Users/runner/.cargo RUSTUP_HOME=/Users/runner/.rustup run_focused native-abi-regression "/Users/runner/.rustup/toolchains/${RUSTUP_TOOLCHAIN}-$MRK_MACOS_TARGET/bin/cargo" test --manifest-path desktop/src-tauri/Cargo.toml \
-            --locked --release --target "$MRK_MACOS_TARGET" \
-            --package mrk-macos-installed-native --lib -- --exact --test-threads=1 --color=never --format=pretty \
-            tests::only_explicit_user_appkit_responses_can_be_accept_or_decline \
-            tests::bulk_directory_records_preserve_full_ids_and_refuse_malformed_batches
-          "$MRK_PYTHON" -I -S -B - <<'PY'
-          import hashlib, json, os, re, stat
-          root = os.environ["MRK_MACOS_WORK"]
-          groups = {
-              "dialog-regressions": ["shell::owned_macos::tests::native_unknown_blocks_dispatch_and_outcome_despite_first_user_refusal",
-                                     "shell::owned_macos::tests::response_mapping_preserves_other_and_missing_facts_poison_dispatch"],
-              "installer-finalizer-regression": ["installer::tests::original_final_deadline_vetoes_late_known_closes_without_erasing_first_error"],
-              "native-abi-regression": ["tests::only_explicit_user_appkit_responses_can_be_accept_or_decline",
-                                        "tests::bulk_directory_records_preserve_full_ids_and_refuse_malformed_batches"],
-          }
-          def read(name, limit):
-              fd = os.open(os.path.join(root, name), os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
-              try:
-                  before = os.fstat(fd)
-                  if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1 or before.st_size > limit: raise ValueError("regression output refused")
-                  data = os.read(fd, limit + 1)
-                  after = os.fstat(fd)
-                  sig = lambda s: (s.st_dev,s.st_ino,s.st_mode,s.st_nlink,s.st_uid,s.st_gid,s.st_size,s.st_mtime_ns,s.st_ctime_ns)
-                  if sig(before) != sig(after) or len(data) != before.st_size: raise ValueError("regression output changed")
-                  return data
-              finally: os.close(fd)
-          results = []
-          for label, names in groups.items():
-              data = read(label + ".log", 131072)
-              if read(label + ".status", 32) != b"0 0 0\n": raise ValueError("original regression pipeline failed")
-              lines = data.decode("utf-8", "strict").splitlines()
-              selected = [line for line in lines if line.startswith("test ") and not line.startswith("test result:")]
-              if sorted(selected) != sorted("test " + name + " ... ok" for name in names): raise ValueError("exact successful regression names refused")
-              count = len(names)
-              if [line for line in lines if re.fullmatch(r"running [0-9]+ tests?", line)] != [f"running {count} test" + ("s" if count != 1 else "")]: raise ValueError("executed regression count refused")
-              summaries = [line for line in lines if line.startswith("test result:")]
-              if len(summaries) != 1 or not re.fullmatch(rf"test result: ok\. {count} passed; 0 failed; 0 ignored; 0 measured; [0-9]+ filtered out; finished in [0-9.]+s", summaries[0]): raise ValueError("regression summary refused")
-              results.append({"names": names, "executed": count, "pipelineStatuses": [0, 0, 0], "log": label + ".log", "bytes": len(data), "sha256": hashlib.sha256(data).hexdigest()})
-          value = {"schemaVersion": 1, "source": os.environ["GITHUB_SHA"], "workflowSource": os.environ["GITHUB_WORKFLOW_SHA"],
-                   "runId": os.environ["GITHUB_RUN_ID"], "runAttempt": os.environ["GITHUB_RUN_ATTEMPT"],
-                   "runtimeManifestSha256": os.environ["MRK_BUNDLED_RUNTIME_MANIFEST_SHA256"],
-                   "inventorySha256": os.environ["MRK_MACOS_INSTALL_INVENTORY_SHA256"], "groups": results,
-                   "scope": "five-selected-regressions-only-not-Installer-or-Aqua-qualification"}
-          fd = os.open(os.path.join(root, "focused-regressions.json"), os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
-          with os.fdopen(fd, "wb") as stream:
-              stream.write(json.dumps(value, sort_keys=True, separators=(",", ":")).encode() + b"\n")
-              stream.flush()
-              os.fsync(stream.fileno())
-          PY
+        uses: "./.github/actions/macos-candidate-recipes/run-only-the-five-reviewed-nonroot-regressions-exact"
       - name: Build the separate fixed eight-case Installer package from the same completed input
         if: github.ref != 'refs/heads/verify/desktop-macos-candidate' && (github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref != 'refs/heads/verify/desktop-macos-removal-lifecycle' && github.ref != 'refs/heads/verify/desktop-macos-app-absence-fixture' && github.ref != 'refs/heads/verify/desktop-macos-positive-update'))
         timeout-minutes: 8
@@ -2736,125 +2656,13 @@ jobs:
         env:
           DEVELOPER_DIR: "/Applications/Xcode.app/Contents/Developer"
         uses: "./.github/actions/macos-candidate-recipes/normal_project_ui_result"
-      - name: Exercise synthetic encrypted credentials through the ordinary Mac UI
-        id: normal_persistence_ui_test
-        if: (github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == 'refs/heads/verify/desktop-macos-preview' && steps.normal_ui_result.outcome == 'success')) || (github.ref == 'refs/heads/verify/desktop-macos-installed' && env.MRK_MACOS_PACKAGE_ROLE == 'ordinary-image' && env.MRK_MACOS_REMOVAL_CASE == 'disabled' && env.MRK_MACOS_ANDROID_UI_SCOPE == 'disabled' && env.MRK_MACOS_IOS_UI_SCOPE == 'ios-unsigned-archive' && env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'ordinary-seven' && steps.normal_ui_build.outcome == 'success' && steps.package_install.outcome == 'success' && steps.finalize_image.outcome == 'success' && steps.p0_carrier_stage.outcome == 'success' && steps.p0_carrier_upload.outcome == 'success' && steps.normal_ios_ui_test.outcome == 'success' && steps.normal_ios_ui_summary.outcome == 'success' && steps.normal_project_ui_result.outcome == 'success')
+      - name: "Exercise synthetic encrypted credentials through the ordinary Mac UI"
+        id: "normal_persistence_ui_test"
+        if: "(github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == 'refs/heads/verify/desktop-macos-preview' && steps.normal_ui_result.outcome == 'success')) || (github.ref == 'refs/heads/verify/desktop-macos-installed' && env.MRK_MACOS_PACKAGE_ROLE == 'ordinary-image' && env.MRK_MACOS_REMOVAL_CASE == 'disabled' && env.MRK_MACOS_ANDROID_UI_SCOPE == 'disabled' && env.MRK_MACOS_IOS_UI_SCOPE == 'ios-unsigned-archive' && env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'ordinary-seven' && steps.normal_ui_build.outcome == 'success' && steps.package_install.outcome == 'success' && steps.finalize_image.outcome == 'success' && steps.p0_carrier_stage.outcome == 'success' && steps.p0_carrier_upload.outcome == 'success' && steps.normal_ios_ui_test.outcome == 'success' && steps.normal_ios_ui_summary.outcome == 'success' && steps.normal_project_ui_result.outcome == 'success')"
         timeout-minutes: 11
-        shell: bash
         env:
-          DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
-        run: |
-          set -euo pipefail
-          set -o noclobber
-          umask 077
-          # Finite per-file logical size only; not RAM, total disk, service limits or finality.
-          set +e
-          ulimit -f 1048576
-          file_limit_status=$?
-          set -e
-          printf '%s\n' "$file_limit_status" > "$MRK_MACOS_WORK/normal-ui/persistence-test-file-limit.status" || exit $?
-          [[ "$file_limit_status" == 0 ]] || exit "$file_limit_status"
-          set +e
-          "$MRK_PYTHON" -I -S -B - <<'PY_UI_FILE_BUDGET'
-          import json, os, resource
-          expected = 1024 * 1024 * 1024
-          actual = resource.getrlimit(resource.RLIMIT_FSIZE)
-          source = os.environ["GITHUB_SHA"]
-          if source != os.environ["GITHUB_WORKFLOW_SHA"] or source != os.environ["MRK_EXPECTED_SHA"]:
-              raise ValueError("ordinary XCTest file-budget source binding differs")
-          admitted = actual == (expected, expected)
-          value = {"schemaVersion": 1, "scope": "ordinary-xctest-shell-child-file-budget-only",
-                   "sourceCommit": source, "workflowSourceCommit": os.environ["GITHUB_WORKFLOW_SHA"],
-                   "runId": os.environ["GITHUB_RUN_ID"], "runAttempt": os.environ["GITHUB_RUN_ATTEMPT"],
-                   "phase": "persistence-test", "expectedBytes": expected, "softBytes": actual[0], "hardBytes": actual[1],
-                   "admitted": admitted, "nativeSuccessInferred": False, "serviceLimitsObserved": False,
-                   "productQualified": False}
-          data = json.dumps(value, sort_keys=True, separators=(",", ":")).encode() + b"\n"
-          if len(data) > 4096: raise ValueError("ordinary XCTest file-budget fact bound")
-          fd = os.open(os.path.join(os.environ["MRK_MACOS_WORK"], "normal-ui/persistence-test-file-budget.json"),
-                       os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
-          try:
-              with os.fdopen(fd, "wb", closefd=False) as output:
-                  output.write(data); output.flush(); os.fsync(fd)
-          finally: os.close(fd)
-          if not admitted:
-              raise ValueError("actual ordinary XCTest file allowance differs from the finite reviewed budget")
-          PY_UI_FILE_BUDGET
-          file_budget_status=$?
-          set -e
-          printf '%s\n' "$file_budget_status" > "$MRK_MACOS_WORK/normal-ui/persistence-test-file-budget.status" || exit $?
-          [[ "$file_budget_status" == 0 ]] || exit "$file_budget_status"
-          clean() {
-            /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME=/Users/runner \
-              USER=runner LOGNAME=runner "TMPDIR=$MRK_MACOS_WORK/normal-ui/tmp/" \
-              LANG=en_US.UTF-8 TZ=UTC LC_ALL=en_US.UTF-8 "DEVELOPER_DIR=$DEVELOPER_DIR" \
-              "TEST_RUNNER_MRK_NORMAL_UI_HOSTED_JOB=$MRK_MACOS_HOSTED_JOB" \
-              "TEST_RUNNER_MRK_NORMAL_UI_APPLICATION_SOURCE=$GITHUB_SHA" \
-              "TEST_RUNNER_MRK_NORMAL_UI_HARNESS_SOURCE=$GITHUB_SHA" "$@"
-          }
-          # The default app-data absence is admitted by the original test BEFORE launch.
-          # Real ordinary controls; no observer argument, Keychain repair or retry.
-          set +e
-          clean "$MRK_PYTHON" -I -S -B desktop/tools/macos_normal_ui_runner.py --target "$MRK_MACOS_TARGET" test-without-building \
-            -project desktop/native/macos-normal-ui/MRKNormalAppUI.xcodeproj -scheme MRKNormalAppUI \
-            -configuration Debug -destination "platform=macOS,arch=$MRK_MACOS_MACHINE" -destination-timeout 15 \
-            -derivedDataPath "$MRK_MACOS_WORK/normal-ui/DerivedData" \
-            -resultBundlePath "$MRK_MACOS_WORK/normal-ui/persistence-test.xcresult" \
-            -only-testing:MRKNormalAppUITests/NormalAppUITests/testSyntheticPersistentCredentials \
-            -parallel-testing-enabled NO -test-timeouts-enabled YES \
-            -default-test-execution-time-allowance 300 -maximum-test-execution-time-allowance 300 \
-            -disableAutomaticPackageResolution \
-            > "$MRK_MACOS_WORK/normal-ui/persistence-test.log" 2>&1
-          test_status=$?
-          set -e
-          printf '%s\n' "$test_status" > "$MRK_MACOS_WORK/normal-ui/persistence-test.status"
-          # Never export the raw XCTest tail: it can contain secure-field keystrokes.
-          # These finite stage/count facts are diagnostics, not test/finality receipts.
-          "$MRK_PYTHON" -I -S -B - <<'PY_PERSISTENCE_DIAGNOSTICS'
-          import json, os, re, stat
-          from pathlib import Path
-          root = Path(os.environ["MRK_MACOS_WORK"]) / "normal-ui"
-          path = root / "persistence-test.log"
-          fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
-          try:
-              before = os.fstat(fd)
-              if (not stat.S_ISREG(before.st_mode) or before.st_uid != os.getuid() or before.st_nlink != 1
-                      or before.st_mode & 0o022 or not 0 <= before.st_size <= 16 * 1024 * 1024):
-                  raise ValueError("fixed UI diagnostic log shape refused")
-              offset = max(0, before.st_size - 262144)
-              os.lseek(fd, offset, os.SEEK_SET)
-              with os.fdopen(fd, "rb", closefd=False) as stream: data = stream.read(262145)
-              identity = lambda s: (s.st_dev, s.st_ino, s.st_mode, s.st_uid, s.st_gid, s.st_nlink,
-                                    s.st_size, s.st_mtime_ns, s.st_ctime_ns)
-              if (len(data) != before.st_size - offset or identity(before) != identity(os.fstat(fd))
-                      or identity(before) != identity(os.stat(path, follow_symlinks=False))):
-                  raise ValueError("fixed UI diagnostic log changed")
-          finally: os.close(fd)
-          stages = {"persistence-" + name for name in ("admission", "launch", "project-and-initialize",
-              "save-and-bind-p12", "save-and-bind-profile", "context-invalidation", "lock-reopen-rebind",
-              "replacement-cancel", "replace-current-record", "delete-and-quit",
-              "restart-launch", "restart-unlock", "restart-rebind-and-quit")}
-          events = []
-          for raw in data.splitlines():
-              match = re.fullmatch(rb"MRK_NORMAL_PROJECT_STAGE=([a-z0-9-]+);result=(started|passed|failed)(;laterStages=not-run)?", raw.strip())
-              if match and match[1].decode("ascii") in stages:
-                  events.append({"stage": match[1].decode("ascii"), "result": match[2].decode("ascii")})
-              match = re.fullmatch(rb"MRK_NORMAL_PROJECT_QUERY=stage:([a-z0-9-]+);buttons:([0-9]{1,3});textFields:([0-9]{1,3});comboBoxes:([0-9]{1,3});sheets:([0-9]{1,2})", raw.strip())
-              if match and match[1].decode("ascii") in stages:
-                  counts = list(map(int, match.groups()[1:]))
-                  if all(value <= 256 for value in counts[:3]) and counts[3] <= 16:
-                      events.append({"stage": match[1].decode("ascii"), "roleCounts": counts})
-              if len(events) > 64: raise ValueError("fixed UI diagnostic event bound")
-          result = {"schemaVersion": 1, "scope": "normal-persistence-ui-diagnostics-only",
-                    "boundedTailBytes": len(data), "originalLogBytes": before.st_size, "events": events,
-                    "nativeSuccessInferred": False, "rawTextExported": False}
-          fd = os.open(root / "persistence-diagnostics.json", os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
-          try:
-              with os.fdopen(fd, "w", closefd=False) as output:
-                  json.dump(result, output, sort_keys=True); output.write("\n"); output.flush(); os.fsync(fd)
-          finally: os.close(fd)
-          PY_PERSISTENCE_DIAGNOSTICS
-          [[ "$test_status" == 0 ]] || exit "$test_status"
+          DEVELOPER_DIR: "/Applications/Xcode.app/Contents/Developer"
+        uses: "./.github/actions/macos-candidate-recipes/normal_persistence_ui_test"
       - name: "Bind the single persistence journey to original XCTest and app-helper evidence"
         id: "normal_persistence_ui_result"
         if: "(github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == 'refs/heads/verify/desktop-macos-preview' && steps.normal_persistence_ui_test.outcome == 'success')) || (github.ref == 'refs/heads/verify/desktop-macos-installed' && env.MRK_MACOS_PACKAGE_ROLE == 'ordinary-image' && env.MRK_MACOS_REMOVAL_CASE == 'disabled' && env.MRK_MACOS_ANDROID_UI_SCOPE == 'disabled' && env.MRK_MACOS_IOS_UI_SCOPE == 'ios-unsigned-archive' && env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'ordinary-seven' && steps.normal_ui_build.outcome == 'success' && steps.package_install.outcome == 'success' && steps.finalize_image.outcome == 'success' && steps.p0_carrier_stage.outcome == 'success' && steps.p0_carrier_upload.outcome == 'success' && steps.normal_ios_ui_test.outcome == 'success' && steps.normal_ios_ui_summary.outcome == 'success' && steps.normal_persistence_ui_test.outcome == 'success')"
@@ -2862,124 +2670,13 @@ jobs:
         env:
           DEVELOPER_DIR: "/Applications/Xcode.app/Contents/Developer"
         uses: "./.github/actions/macos-candidate-recipes/normal_persistence_ui_result"
-      - name: Observe one original build-tool diagnostics report through the ordinary Mac UI
-        id: normal_diagnostics_ui_test
-        if: (github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == 'refs/heads/verify/desktop-macos-preview' && steps.normal_persistence_ui_result.outcome == 'success')) || (github.ref == 'refs/heads/verify/desktop-macos-installed' && env.MRK_MACOS_PACKAGE_ROLE == 'ordinary-image' && env.MRK_MACOS_REMOVAL_CASE == 'disabled' && env.MRK_MACOS_ANDROID_UI_SCOPE == 'disabled' && env.MRK_MACOS_IOS_UI_SCOPE == 'ios-unsigned-archive' && env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'ordinary-seven' && steps.normal_ui_build.outcome == 'success' && steps.package_install.outcome == 'success' && steps.finalize_image.outcome == 'success' && steps.p0_carrier_stage.outcome == 'success' && steps.p0_carrier_upload.outcome == 'success' && steps.normal_ios_ui_test.outcome == 'success' && steps.normal_ios_ui_summary.outcome == 'success' && steps.normal_persistence_ui_result.outcome == 'success')
+      - name: "Observe one original build-tool diagnostics report through the ordinary Mac UI"
+        id: "normal_diagnostics_ui_test"
+        if: "(github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == 'refs/heads/verify/desktop-macos-preview' && steps.normal_persistence_ui_result.outcome == 'success')) || (github.ref == 'refs/heads/verify/desktop-macos-installed' && env.MRK_MACOS_PACKAGE_ROLE == 'ordinary-image' && env.MRK_MACOS_REMOVAL_CASE == 'disabled' && env.MRK_MACOS_ANDROID_UI_SCOPE == 'disabled' && env.MRK_MACOS_IOS_UI_SCOPE == 'ios-unsigned-archive' && env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'ordinary-seven' && steps.normal_ui_build.outcome == 'success' && steps.package_install.outcome == 'success' && steps.finalize_image.outcome == 'success' && steps.p0_carrier_stage.outcome == 'success' && steps.p0_carrier_upload.outcome == 'success' && steps.normal_ios_ui_test.outcome == 'success' && steps.normal_ios_ui_summary.outcome == 'success' && steps.normal_persistence_ui_result.outcome == 'success')"
         timeout-minutes: 11
-        shell: bash
         env:
-          DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
-        run: |
-          set -euo pipefail
-          set -o noclobber
-          umask 077
-          # Finite per-file logical size only; not RAM, total disk, service limits or finality.
-          set +e
-          ulimit -f 1048576
-          file_limit_status=$?
-          set -e
-          printf '%s\n' "$file_limit_status" > "$MRK_MACOS_WORK/normal-ui/diagnostics-test-file-limit.status" || exit $?
-          [[ "$file_limit_status" == 0 ]] || exit "$file_limit_status"
-          set +e
-          "$MRK_PYTHON" -I -S -B - <<'PY_UI_FILE_BUDGET'
-          import json, os, resource
-          expected = 1024 * 1024 * 1024
-          actual = resource.getrlimit(resource.RLIMIT_FSIZE)
-          source = os.environ["GITHUB_SHA"]
-          if source != os.environ["GITHUB_WORKFLOW_SHA"] or source != os.environ["MRK_EXPECTED_SHA"]:
-              raise ValueError("ordinary XCTest file-budget source binding differs")
-          admitted = actual == (expected, expected)
-          value = {"schemaVersion": 1, "scope": "ordinary-xctest-shell-child-file-budget-only",
-                   "sourceCommit": source, "workflowSourceCommit": os.environ["GITHUB_WORKFLOW_SHA"],
-                   "runId": os.environ["GITHUB_RUN_ID"], "runAttempt": os.environ["GITHUB_RUN_ATTEMPT"],
-                   "phase": "diagnostics-test", "expectedBytes": expected, "softBytes": actual[0], "hardBytes": actual[1],
-                   "admitted": admitted, "nativeSuccessInferred": False, "serviceLimitsObserved": False,
-                   "productQualified": False}
-          data = json.dumps(value, sort_keys=True, separators=(",", ":")).encode() + b"\n"
-          if len(data) > 4096: raise ValueError("ordinary XCTest file-budget fact bound")
-          fd = os.open(os.path.join(os.environ["MRK_MACOS_WORK"], "normal-ui/diagnostics-test-file-budget.json"),
-                       os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
-          try:
-              with os.fdopen(fd, "wb", closefd=False) as output:
-                  output.write(data); output.flush(); os.fsync(fd)
-          finally: os.close(fd)
-          if not admitted:
-              raise ValueError("actual ordinary XCTest file allowance differs from the finite reviewed budget")
-          PY_UI_FILE_BUDGET
-          file_budget_status=$?
-          set -e
-          printf '%s\n' "$file_budget_status" > "$MRK_MACOS_WORK/normal-ui/diagnostics-test-file-budget.status" || exit $?
-          [[ "$file_budget_status" == 0 ]] || exit "$file_budget_status"
-          clean() {
-            /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME=/Users/runner \
-              USER=runner LOGNAME=runner "TMPDIR=$MRK_MACOS_WORK/normal-ui/tmp/" \
-              LANG=en_US.UTF-8 TZ=UTC LC_ALL=en_US.UTF-8 "DEVELOPER_DIR=$DEVELOPER_DIR" \
-              "TEST_RUNNER_MRK_NORMAL_UI_HOSTED_JOB=$MRK_MACOS_HOSTED_JOB" \
-              "TEST_RUNNER_MRK_NORMAL_UI_APPLICATION_SOURCE=$GITHUB_SHA" \
-              "TEST_RUNNER_MRK_NORMAL_UI_HARNESS_SOURCE=$GITHUB_SHA" "$@"
-          }
-          # Public XCTest APIs only. Never grant permissions, auto-consent, retry, or change the app.
-          # One 300s journey, after the accepted persistence gate; outer ceiling420s.
-          set +e
-          clean "$MRK_PYTHON" -I -S -B desktop/tools/macos_normal_ui_runner.py --target "$MRK_MACOS_TARGET" test-without-building \
-            -project desktop/native/macos-normal-ui/MRKNormalAppUI.xcodeproj -scheme MRKNormalAppUI \
-            -configuration Debug -destination "platform=macOS,arch=$MRK_MACOS_MACHINE" -destination-timeout 15 \
-            -derivedDataPath "$MRK_MACOS_WORK/normal-ui/DerivedData" \
-            -resultBundlePath "$MRK_MACOS_WORK/normal-ui/diagnostics-test.xcresult" \
-            -only-testing:MRKNormalAppUITests/NormalAppUITests/testSyntheticProjectBuildToolDiagnostics \
-            -parallel-testing-enabled NO -test-timeouts-enabled YES \
-            -default-test-execution-time-allowance 300 -maximum-test-execution-time-allowance 300 \
-            -disableAutomaticPackageResolution \
-            > "$MRK_MACOS_WORK/normal-ui/diagnostics-test.log" 2>&1
-          test_status=$?
-          set -e
-          printf '%s\n' "$test_status" > "$MRK_MACOS_WORK/normal-ui/diagnostics-test.status"
-          # Never export the raw XCTest tail: do not publish arbitrary UI labels or host output.
-          # These finite stage/count facts are diagnostics, not test/finality receipts.
-          "$MRK_PYTHON" -I -S -B - <<'PY_DIAGNOSTICS_SAFE_FACTS'
-          import json, os, re, stat
-          from pathlib import Path
-          root = Path(os.environ["MRK_MACOS_WORK"]) / "normal-ui"
-          path = root / "diagnostics-test.log"
-          fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
-          try:
-              before = os.fstat(fd)
-              if (not stat.S_ISREG(before.st_mode) or before.st_uid != os.getuid() or before.st_nlink != 1
-                      or before.st_mode & 0o022 or not 0 <= before.st_size <= 16 * 1024 * 1024):
-                  raise ValueError("fixed UI diagnostic log shape refused")
-              offset = max(0, before.st_size - 262144)
-              os.lseek(fd, offset, os.SEEK_SET)
-              with os.fdopen(fd, "rb", closefd=False) as stream: data = stream.read(262145)
-              identity = lambda s: (s.st_dev, s.st_ino, s.st_mode, s.st_uid, s.st_gid, s.st_nlink,
-                                    s.st_size, s.st_mtime_ns, s.st_ctime_ns)
-              if (len(data) != before.st_size - offset or identity(before) != identity(os.fstat(fd))
-                      or identity(before) != identity(os.stat(path, follow_symlinks=False))):
-                  raise ValueError("fixed UI diagnostic log changed")
-          finally: os.close(fd)
-          stages = {"diagnostics-" + name for name in ("launch", "fixture", "project-open", "context", "original-report", "readback-and-quit")}
-          events = []
-          for raw in data.splitlines():
-              match = re.fullmatch(rb"MRK_NORMAL_PROJECT_STAGE=([a-z0-9-]+);result=(started|passed|failed)(;laterStages=not-run)?", raw.strip())
-              if match and match[1].decode("ascii") in stages:
-                  events.append({"stage": match[1].decode("ascii"), "result": match[2].decode("ascii")})
-              match = re.fullmatch(rb"MRK_NORMAL_PROJECT_QUERY=stage:([a-z0-9-]+);buttons:([0-9]{1,3});textFields:([0-9]{1,3});comboBoxes:([0-9]{1,3});sheets:([0-9]{1,2})", raw.strip())
-              if match and match[1].decode("ascii") in stages:
-                  counts = list(map(int, match.groups()[1:]))
-                  if all(value <= 256 for value in counts[:3]) and counts[3] <= 16:
-                      events.append({"stage": match[1].decode("ascii"), "roleCounts": counts})
-              if len(events) > 64: raise ValueError("fixed UI diagnostic event bound")
-          result = {"schemaVersion": 1, "scope": "normal-build-tool-check-ui-diagnostics-only",
-                    "sourceCommit": os.environ["GITHUB_SHA"], "workflowSourceCommit": os.environ["GITHUB_WORKFLOW_SHA"],
-                    "runId": os.environ["GITHUB_RUN_ID"], "runAttempt": os.environ["GITHUB_RUN_ATTEMPT"],
-                    "boundedTailBytes": len(data), "originalLogBytes": before.st_size, "events": events,
-                    "nativeSuccessInferred": False, "rawTextExported": False}
-          fd = os.open(root / "diagnostics-safe-facts.json", os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
-          try:
-              with os.fdopen(fd, "w", closefd=False) as output:
-                  json.dump(result, output, sort_keys=True); output.write("\n"); output.flush(); os.fsync(fd)
-          finally: os.close(fd)
-          PY_DIAGNOSTICS_SAFE_FACTS
-          [[ "$test_status" == 0 ]] || exit "$test_status"
+          DEVELOPER_DIR: "/Applications/Xcode.app/Contents/Developer"
+        uses: "./.github/actions/macos-candidate-recipes/normal_diagnostics_ui_test"
       - name: "Bind the single diagnostics journey to original XCTest and the same ordinary package"
         id: "normal_diagnostics_ui_result"
         if: "(github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == 'refs/heads/verify/desktop-macos-preview' && steps.normal_diagnostics_ui_test.outcome == 'success')) || (github.ref == 'refs/heads/verify/desktop-macos-installed' && env.MRK_MACOS_PACKAGE_ROLE == 'ordinary-image' && env.MRK_MACOS_REMOVAL_CASE == 'disabled' && env.MRK_MACOS_ANDROID_UI_SCOPE == 'disabled' && env.MRK_MACOS_IOS_UI_SCOPE == 'ios-unsigned-archive' && env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'ordinary-seven' && steps.normal_ui_build.outcome == 'success' && steps.package_install.outcome == 'success' && steps.finalize_image.outcome == 'success' && steps.p0_carrier_stage.outcome == 'success' && steps.p0_carrier_upload.outcome == 'success' && steps.normal_ios_ui_test.outcome == 'success' && steps.normal_ios_ui_summary.outcome == 'success' && steps.normal_diagnostics_ui_test.outcome == 'success')"
@@ -2988,128 +2685,13 @@ jobs:
           DEVELOPER_DIR: "/Applications/Xcode.app/Contents/Developer"
         uses: "./.github/actions/macos-candidate-recipes/normal_diagnostics_ui_result"
 
-      - name: Observe saved offline checks and empty build-input inspection through the ordinary Mac UI
-        id: normal_saved_checks_ui_test
-        if: (github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == 'refs/heads/verify/desktop-macos-preview' && steps.normal_diagnostics_ui_result.outcome == 'success' && (env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'ordinary-seven' || env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'remaining-three'))) || (github.ref == 'refs/heads/verify/desktop-macos-installed' && env.MRK_MACOS_PACKAGE_ROLE == 'ordinary-image' && env.MRK_MACOS_REMOVAL_CASE == 'disabled' && env.MRK_MACOS_ANDROID_UI_SCOPE == 'disabled' && env.MRK_MACOS_IOS_UI_SCOPE == 'ios-unsigned-archive' && env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'ordinary-seven' && steps.normal_ui_build.outcome == 'success' && steps.package_install.outcome == 'success' && steps.finalize_image.outcome == 'success' && steps.p0_carrier_stage.outcome == 'success' && steps.p0_carrier_upload.outcome == 'success' && steps.normal_ios_ui_test.outcome == 'success' && steps.normal_ios_ui_summary.outcome == 'success' && steps.normal_diagnostics_ui_result.outcome == 'success')
+      - name: "Observe saved offline checks and empty build-input inspection through the ordinary Mac UI"
+        id: "normal_saved_checks_ui_test"
+        if: "(github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == 'refs/heads/verify/desktop-macos-preview' && steps.normal_diagnostics_ui_result.outcome == 'success' && (env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'ordinary-seven' || env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'remaining-three'))) || (github.ref == 'refs/heads/verify/desktop-macos-installed' && env.MRK_MACOS_PACKAGE_ROLE == 'ordinary-image' && env.MRK_MACOS_REMOVAL_CASE == 'disabled' && env.MRK_MACOS_ANDROID_UI_SCOPE == 'disabled' && env.MRK_MACOS_IOS_UI_SCOPE == 'ios-unsigned-archive' && env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'ordinary-seven' && steps.normal_ui_build.outcome == 'success' && steps.package_install.outcome == 'success' && steps.finalize_image.outcome == 'success' && steps.p0_carrier_stage.outcome == 'success' && steps.p0_carrier_upload.outcome == 'success' && steps.normal_ios_ui_test.outcome == 'success' && steps.normal_ios_ui_summary.outcome == 'success' && steps.normal_diagnostics_ui_result.outcome == 'success')"
         timeout-minutes: 17
-        shell: bash
         env:
-          DEVELOPER_DIR: /Applications/Xcode.app/Contents/Developer
-        run: |
-          set -euo pipefail
-          set -o noclobber
-          umask 077
-          # Finite per-file logical size only; not RAM, total disk, service limits or finality.
-          set +e
-          ulimit -f 1048576
-          file_limit_status=$?
-          set -e
-          printf '%s\n' "$file_limit_status" > "$MRK_MACOS_WORK/normal-ui/saved-checks-test-file-limit.status" || exit $?
-          [[ "$file_limit_status" == 0 ]] || exit "$file_limit_status"
-          set +e
-          "$MRK_PYTHON" -I -S -B - <<'PY_UI_FILE_BUDGET'
-          import json, os, resource
-          expected = 1024 * 1024 * 1024
-          actual = resource.getrlimit(resource.RLIMIT_FSIZE)
-          source = os.environ["GITHUB_SHA"]
-          if source != os.environ["GITHUB_WORKFLOW_SHA"] or source != os.environ["MRK_EXPECTED_SHA"]:
-              raise ValueError("ordinary XCTest file-budget source binding differs")
-          admitted = actual == (expected, expected)
-          value = {"schemaVersion": 1, "scope": "ordinary-xctest-shell-child-file-budget-only",
-                   "sourceCommit": source, "workflowSourceCommit": os.environ["GITHUB_WORKFLOW_SHA"],
-                   "runId": os.environ["GITHUB_RUN_ID"], "runAttempt": os.environ["GITHUB_RUN_ATTEMPT"],
-                   "phase": "saved-checks-test", "expectedBytes": expected, "softBytes": actual[0], "hardBytes": actual[1],
-                   "admitted": admitted, "nativeSuccessInferred": False, "serviceLimitsObserved": False,
-                   "productQualified": False}
-          data = json.dumps(value, sort_keys=True, separators=(",", ":")).encode() + b"\n"
-          if len(data) > 4096: raise ValueError("ordinary XCTest file-budget fact bound")
-          fd = os.open(os.path.join(os.environ["MRK_MACOS_WORK"], "normal-ui/saved-checks-test-file-budget.json"),
-                       os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
-          try:
-              with os.fdopen(fd, "wb", closefd=False) as output:
-                  output.write(data); output.flush(); os.fsync(fd)
-          finally: os.close(fd)
-          if not admitted:
-              raise ValueError("actual ordinary XCTest file allowance differs from the finite reviewed budget")
-          PY_UI_FILE_BUDGET
-          file_budget_status=$?
-          set -e
-          printf '%s\n' "$file_budget_status" > "$MRK_MACOS_WORK/normal-ui/saved-checks-test-file-budget.status" || exit $?
-          [[ "$file_budget_status" == 0 ]] || exit "$file_budget_status"
-          clean() {
-            /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME=/Users/runner \
-              USER=runner LOGNAME=runner "TMPDIR=$MRK_MACOS_WORK/normal-ui/tmp/" \
-              LANG=en_US.UTF-8 TZ=UTC LC_ALL=en_US.UTF-8 "DEVELOPER_DIR=$DEVELOPER_DIR" \
-              "TEST_RUNNER_MRK_NORMAL_UI_HOSTED_JOB=$MRK_MACOS_HOSTED_JOB" \
-              "TEST_RUNNER_MRK_NORMAL_UI_APPLICATION_SOURCE=$GITHUB_SHA" \
-              "TEST_RUNNER_MRK_NORMAL_UI_HARNESS_SOURCE=$GITHUB_SHA" "$@"
-          }
-          # Public XCTest APIs only. Never grant permissions, auto-consent, retry, or change the app.
-          # Two independent 300s journeys, after the accepted diagnostics gate; outer ceiling720s.
-          set +e
-          clean "$MRK_PYTHON" -I -S -B desktop/tools/macos_normal_ui_runner.py --target "$MRK_MACOS_TARGET" test-without-building \
-            -project desktop/native/macos-normal-ui/MRKNormalAppUI.xcodeproj -scheme MRKNormalAppUI \
-            -configuration Debug -destination "platform=macOS,arch=$MRK_MACOS_MACHINE" -destination-timeout 15 \
-            -derivedDataPath "$MRK_MACOS_WORK/normal-ui/DerivedData" \
-            -resultBundlePath "$MRK_MACOS_WORK/normal-ui/saved-checks-test.xcresult" \
-            -only-testing:MRKNormalAppUITests/NormalAppUITests/testSyntheticProjectSavedOfflineChecks \
-            -only-testing:MRKNormalAppUITests/NormalAppUITests/testSyntheticProjectEmptyBuildInputInspection \
-            -parallel-testing-enabled NO -test-timeouts-enabled YES \
-            -default-test-execution-time-allowance 300 -maximum-test-execution-time-allowance 300 \
-            -disableAutomaticPackageResolution \
-            > "$MRK_MACOS_WORK/normal-ui/saved-checks-test.log" 2>&1
-          test_status=$?
-          set -e
-          printf '%s\n' "$test_status" > "$MRK_MACOS_WORK/normal-ui/saved-checks-test.status"
-          # Never export the raw XCTest tail: do not publish arbitrary UI labels or host output.
-          # These finite stage/count facts are diagnostics, not test/finality receipts.
-          "$MRK_PYTHON" -I -S -B - <<'PY_SAVED_CHECKS_SAFE_FACTS'
-          import json, os, re, stat
-          from pathlib import Path
-          root = Path(os.environ["MRK_MACOS_WORK"]) / "normal-ui"
-          path = root / "saved-checks-test.log"
-          fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
-          try:
-              before = os.fstat(fd)
-              if (not stat.S_ISREG(before.st_mode) or before.st_uid != os.getuid() or before.st_nlink != 1
-                      or before.st_mode & 0o022 or not 0 <= before.st_size <= 16 * 1024 * 1024):
-                  raise ValueError("fixed UI diagnostic log shape refused")
-              offset = max(0, before.st_size - 262144)
-              os.lseek(fd, offset, os.SEEK_SET)
-              with os.fdopen(fd, "rb", closefd=False) as stream: data = stream.read(262145)
-              identity = lambda s: (s.st_dev, s.st_ino, s.st_mode, s.st_uid, s.st_gid, s.st_nlink,
-                                    s.st_size, s.st_mtime_ns, s.st_ctime_ns)
-              if (len(data) != before.st_size - offset or identity(before) != identity(os.fstat(fd))
-                      or identity(before) != identity(os.stat(path, follow_symlinks=False))):
-                  raise ValueError("fixed UI diagnostic log changed")
-          finally: os.close(fd)
-          stages = {"offline-launch", "offline-fixture", "offline-project-open", "offline-review-and-start",
-                    "offline-original-report", "offline-readback-and-quit",
-                    "recovery-idle-launch", "recovery-idle-fixture", "recovery-idle-project-open", "recovery-idle-inspect",
-                    "recovery-idle-original-report", "recovery-idle-readback-and-quit"}
-          events = []
-          for raw in data.splitlines():
-              match = re.fullmatch(rb"MRK_NORMAL_PROJECT_STAGE=([a-z0-9-]+);result=(started|passed|failed)(;laterStages=not-run)?", raw.strip())
-              if match and match[1].decode("ascii") in stages:
-                  events.append({"stage": match[1].decode("ascii"), "result": match[2].decode("ascii")})
-              match = re.fullmatch(rb"MRK_NORMAL_PROJECT_QUERY=stage:([a-z0-9-]+);buttons:([0-9]{1,3});textFields:([0-9]{1,3});comboBoxes:([0-9]{1,3});sheets:([0-9]{1,2})", raw.strip())
-              if match and match[1].decode("ascii") in stages:
-                  counts = list(map(int, match.groups()[1:]))
-                  if all(value <= 256 for value in counts[:3]) and counts[3] <= 16:
-                      events.append({"stage": match[1].decode("ascii"), "roleCounts": counts})
-              if len(events) > 64: raise ValueError("fixed UI diagnostic event bound")
-          result = {"schemaVersion": 1, "scope": "normal-saved-offline-and-empty-recovery-ui-diagnostics-only",
-                    "sourceCommit": os.environ["GITHUB_SHA"], "workflowSourceCommit": os.environ["GITHUB_WORKFLOW_SHA"],
-                    "runId": os.environ["GITHUB_RUN_ID"], "runAttempt": os.environ["GITHUB_RUN_ATTEMPT"],
-                    "boundedTailBytes": len(data), "originalLogBytes": before.st_size, "events": events,
-                    "nativeSuccessInferred": False, "rawTextExported": False}
-          fd = os.open(root / "saved-checks-safe-facts.json", os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
-          try:
-              with os.fdopen(fd, "w", closefd=False) as output:
-                  json.dump(result, output, sort_keys=True); output.write("\n"); output.flush(); os.fsync(fd)
-          finally: os.close(fd)
-          PY_SAVED_CHECKS_SAFE_FACTS
-          [[ "$test_status" == 0 ]] || exit "$test_status"
+          DEVELOPER_DIR: "/Applications/Xcode.app/Contents/Developer"
+        uses: "./.github/actions/macos-candidate-recipes/normal_saved_checks_ui_test"
       - name: "Bind both saved-check journeys to original XCTest and the same ordinary package"
         id: "normal_saved_checks_ui_result"
         if: "(github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == 'refs/heads/verify/desktop-macos-preview' && steps.normal_saved_checks_ui_test.outcome == 'success')) || (github.ref == 'refs/heads/verify/desktop-macos-installed' && env.MRK_MACOS_PACKAGE_ROLE == 'ordinary-image' && env.MRK_MACOS_REMOVAL_CASE == 'disabled' && env.MRK_MACOS_ANDROID_UI_SCOPE == 'disabled' && env.MRK_MACOS_IOS_UI_SCOPE == 'ios-unsigned-archive' && env.MRK_MACOS_SAVED_FILE_UI_SCOPE == 'ordinary-seven' && steps.normal_ui_build.outcome == 'success' && steps.package_install.outcome == 'success' && steps.finalize_image.outcome == 'success' && steps.p0_carrier_stage.outcome == 'success' && steps.p0_carrier_upload.outcome == 'success' && steps.normal_ios_ui_test.outcome == 'success' && steps.normal_ios_ui_summary.outcome == 'success' && steps.normal_saved_checks_ui_test.outcome == 'success')"
@@ -3946,7 +3528,7 @@ jobs:
         run: |
           "${{ steps.python.outputs.python-path }}" -B -m unittest tests.desktop.test_macos_candidate_parts tests.desktop.test_macos_candidate_part_transport tests.desktop.test_macos_candidate_parts_workflow tests.desktop.test_macos_candidate_stages.FixedSigningFailureDiagnosticTests
   candidate-tool26-prepare:
-    name: "macOS part (Tool26 / prepare)"
+    name: "${{ matrix.native_scope == 'tool-setup' && 'macOS part (Tool26 / prepare)' || 'macOS part (Git27 / prepare)' }}"
     if: "github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-macos-candidate'"
     runs-on: "${{ matrix.runner }}"
     timeout-minutes: 90
@@ -4004,7 +3586,102 @@ jobs:
         timeout-minutes: "${{ ((matrix.native_scope == 'project-identity-native' || matrix.native_scope == 'tool-setup' || matrix.native_scope == 'git-native') || github.ref == 'refs/heads/verify/desktop-macos-app-signature') && 1 || 350 }}"
         env:
           RUNNER_ENVIRONMENT: "${{ runner.environment }}"
-        uses: "./.github/actions/macos-candidate-recipes/admit-only-this-exact-disposable-hosted-source-route"
+        shell: "bash"
+        run: |
+          set -euo pipefail
+          [[ "$RUNNER_ENVIRONMENT" == github-hosted && "$RUNNER_OS" == macOS ]] || exit 1
+          case "$MRK_MACOS_NATIVE_SCOPE" in
+            disabled) [[ "$MRK_MACOS_PACKAGE_ROLE" == ordinary-image ]] || exit 1 ;;
+            project-identity-native|tool-setup|git-native)
+              [[ "$GITHUB_REF" == refs/heads/verify/desktop-macos-candidate && "$MRK_MACOS_TARGET" == aarch64-apple-darwin && "$MRK_MACOS_PACKAGE_ROLE" == installed-shell-observation ]] || exit 1
+              [[ "$MRK_MACOS_SAME_PACKAGE_SCOPE" == disabled && "$MRK_MACOS_REMOVAL_CASE" == disabled && "$MRK_MACOS_ANDROID_UI_SCOPE" == disabled && "$MRK_MACOS_IOS_UI_SCOPE" == disabled && "$MRK_MACOS_SAVED_FILE_UI_SCOPE" == ordinary-seven ]] || exit 1
+              [[ "${MRK_MACOS_AQUA_SCOPE:-disabled}" == disabled && "${MRK_MACOS_XCODE_SETUP_SCOPE:-disabled}" == disabled ]] || exit 1
+              ;;
+            *) exit 1 ;;
+          esac
+          case "$MRK_MACOS_SAME_PACKAGE_SCOPE" in
+            disabled) ;;
+            same-package-noop) [[ "$GITHUB_REF" == refs/heads/verify/desktop-macos-preview ]] || exit 1 ;;
+            *) exit 1 ;;
+          esac
+          case "$MRK_MACOS_ANDROID_UI_SCOPE" in
+            disabled|android-signed-build) ;;
+            *) exit 1 ;;
+          esac
+          case "$MRK_MACOS_IOS_UI_SCOPE" in
+            disabled) ;;
+            ios-unsigned-archive|ios-pending-recovery)
+              [[ "$GITHUB_REF" == refs/heads/verify/desktop-macos-installed && "$MRK_MACOS_ANDROID_UI_SCOPE" == disabled && "$MRK_MACOS_SAVED_FILE_UI_SCOPE" == ordinary-seven ]] || exit 1
+              ;;
+            *) exit 1 ;;
+          esac
+          case "$MRK_MACOS_TARGET" in
+            aarch64-apple-darwin)
+              [[ "$RUNNER_ARCH" == ARM64 && "$MRK_MACOS_MACHINE" == arm64 && "$(/usr/bin/uname -m)" == arm64 ]] || exit 1
+              case "$MRK_MACOS_RUNNER:$MRK_MACOS_HOSTED_JOB" in
+                macos-26:github-hosted-macos26-arm64) expected_host_major=26 ;;
+                xcode-27:github-hosted-xcode27-arm64)
+                  # Separate source-only matrix selection; never a tool or
+                  # ordinary image fallback, and never a Git nomination.
+                  [[ "$MRK_MACOS_NATIVE_SCOPE" == git-native && "$MRK_MACOS_PACKAGE_ROLE" == installed-shell-observation && "$GITHUB_REF" == refs/heads/verify/desktop-macos-candidate ]] || exit 1
+                  expected_host_major=27
+                  ;;
+                *) exit 1 ;;
+              esac
+              expected_supplier_receipt=e6b23316078020c513ab1b05b3b55e4f87b8d15908a8dee022ad5ee03b8f763e
+              expected_supplier_tar=ead75b364118139561a34da6aa48e3c54791e152154ab32c46196b0223962359
+              expected_supplier_source=c6551aa07d0673436aa9587b3a039889d22449c3
+              expected_supplier_run=40473858216
+              expected_supplier_attempt=1
+              expected_supplier_artifact=12719943283
+              ;;
+            x86_64-apple-darwin)
+              [[ "$MRK_MACOS_RUNNER" == macos-26-intel && "$RUNNER_ARCH" == X64 && "$MRK_MACOS_MACHINE" == x86_64 && "$MRK_MACOS_HOSTED_JOB" == github-hosted-macos26-x86_64 && "$(/usr/bin/uname -m)" == x86_64 ]] || exit 1
+              expected_host_major=26
+              expected_supplier_receipt=afba303207b19692b73fb1288b56afcd73378fc29b0b0ede4ff10eb2e0f949b8
+              expected_supplier_tar=ff976626b48e95abc414d46ff91f1ebb183416356bb4706b8e673b7c9018ca9c
+              expected_supplier_source=a2f7a10b4c86305f5ee65c6779ceaf6b128cd8fa
+              expected_supplier_run=38343340695
+              expected_supplier_attempt=1
+              expected_supplier_artifact=11787588635
+              ;;
+            *) exit 1 ;;
+          esac
+          [[ "$GITHUB_EVENT_NAME" == push && ( "$GITHUB_REF" == refs/heads/verify/desktop-macos-installed || "$GITHUB_REF" == refs/heads/verify/desktop-macos-preview || "$GITHUB_REF" == refs/heads/verify/desktop-macos-removal-lifecycle || "$GITHUB_REF" == refs/heads/verify/desktop-macos-app-signature || "$GITHUB_REF" == refs/heads/verify/desktop-macos-app-absence-fixture || "$GITHUB_REF" == refs/heads/verify/desktop-macos-positive-update || "$GITHUB_REF" == refs/heads/verify/desktop-macos-candidate ) ]] || exit 1
+          if [[ "$GITHUB_REF" == refs/heads/verify/desktop-macos-app-absence-fixture || "$GITHUB_REF" == refs/heads/verify/desktop-macos-positive-update ]]; then
+            [[ "$MRK_MACOS_SAME_PACKAGE_SCOPE" == disabled && "$MRK_MACOS_ANDROID_UI_SCOPE" == disabled && "$MRK_MACOS_IOS_UI_SCOPE" == disabled && "$MRK_MACOS_SAVED_FILE_UI_SCOPE" == ordinary-seven ]] || exit 1
+          fi
+          if [[ "$GITHUB_REF" == refs/heads/verify/desktop-macos-app-signature ]]; then
+            [[ "$MRK_MACOS_ANDROID_UI_SCOPE" == disabled && "$MRK_MACOS_IOS_UI_SCOPE" == disabled && "$MRK_MACOS_SAVED_FILE_UI_SCOPE" == ordinary-seven ]] || exit 1
+          fi
+          if [[ "$GITHUB_REF" == refs/heads/verify/desktop-macos-removal-lifecycle ]]; then
+            [[ "$MRK_MACOS_ANDROID_UI_SCOPE" == disabled && "$MRK_MACOS_IOS_UI_SCOPE" == disabled && "$MRK_MACOS_SAVED_FILE_UI_SCOPE" == ordinary-seven ]] || exit 1
+            case "$MRK_MACOS_REMOVAL_CASE" in ordinary|abrupt) ;; *) exit 1 ;; esac
+          else
+            [[ "$MRK_MACOS_REMOVAL_CASE" == disabled ]] || exit 1
+          fi
+          case "$MRK_MACOS_SAVED_FILE_UI_SCOPE" in
+            ordinary-seven) ;;
+            saved-version-recovery|workflow-refusal|release-evidence|remaining-three) [[ "$GITHUB_REF" == refs/heads/verify/desktop-macos-preview ]] || exit 1 ;;
+            *) exit 1 ;;
+          esac
+          [[ "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ && "$MRK_EXPECTED_SHA" == "$GITHUB_SHA" && "$MRK_MACOS_INSTALL_SOURCE_COMMIT" == "$GITHUB_SHA" && "$GITHUB_WORKFLOW_SHA" == "$GITHUB_SHA" ]] || exit 1
+          [[ "$GITHUB_WORKFLOW_REF" == "$GITHUB_REPOSITORY/.github/workflows/desktop-macos-installed.yml@$GITHUB_REF" ]] || exit 1
+          # Fresh supplier pins never replace the separate current-core source binding.
+          [[ "$MRK_BUNDLED_RUNTIME_SOURCE_SHA256" =~ ^[0-9a-f]{64}$ && "$MRK_BUNDLED_RUNTIME_SOURCE_SHA256" == 10d3f2cf13155335444c8376a346d89581c03a43f0ae642e67401e379745dca2 ]] || exit 1
+          [[ "$GITHUB_REPOSITORY" == Apdelrahman1911/mobile-release-kit ]] || exit 1
+          [[ "$MRK_MACOS_RUNTIME_SUPPLIER" == fresh-public-source ]] || exit 1
+          [[ "$MRK_MACOS_PYTHON_SUPPLIER_SHA256" =~ ^[0-9a-f]{64}$ && "$MRK_MACOS_PYTHON_SUPPLIER_SHA256" == "$expected_supplier_receipt" ]] || exit 1
+          [[ "$MRK_MACOS_PYTHON_SUPPLIER_TAR_SHA256" =~ ^[0-9a-f]{64}$ && "$MRK_MACOS_PYTHON_SUPPLIER_TAR_SHA256" == "$expected_supplier_tar" ]] || exit 1
+          [[ "$MRK_MACOS_PYTHON_SUPPLIER_SOURCE_COMMIT" =~ ^[0-9a-f]{40}$ && "$MRK_MACOS_PYTHON_SUPPLIER_SOURCE_COMMIT" == "$expected_supplier_source" ]] || exit 1
+          [[ "$MRK_MACOS_PYTHON_SUPPLIER_RUN_ID" =~ ^[1-9][0-9]{0,15}$ && "$MRK_MACOS_PYTHON_SUPPLIER_RUN_ID" -le 9007199254740991 && "$MRK_MACOS_PYTHON_SUPPLIER_RUN_ID" == "$expected_supplier_run" ]] || exit 1
+          [[ "$MRK_MACOS_PYTHON_SUPPLIER_RUN_ATTEMPT" =~ ^[1-9][0-9]{0,15}$ && "$MRK_MACOS_PYTHON_SUPPLIER_RUN_ATTEMPT" -le 9007199254740991 && "$MRK_MACOS_PYTHON_SUPPLIER_RUN_ATTEMPT" == "$expected_supplier_attempt" ]] || exit 1
+          [[ "$MRK_MACOS_PYTHON_SUPPLIER_ARTIFACT_ID" =~ ^[1-9][0-9]{0,15}$ && "$MRK_MACOS_PYTHON_SUPPLIER_ARTIFACT_ID" -le 9007199254740991 && "$MRK_MACOS_PYTHON_SUPPLIER_ARTIFACT_ID" == "$expected_supplier_artifact" ]] || exit 1
+          [[ "$MRK_BUNDLED_PROTOCOL_SHA256" =~ ^[0-9a-f]{64}$ && "$MRK_BUNDLED_PROTOCOL_SHA256" == 083e6afae3e329c4e0d81bad00dd0c9920f77491b38ce0d23aa602996f4c4bf5 ]] || exit 1
+          [[ "$MRK_GITHUB_PREFLIGHT_TOOLING_SHA" =~ ^[0-9a-f]{40}$ && "$MRK_GITHUB_PREFLIGHT_TOOLING_SHA" == d4a639b396eaa60385b223a154710e99a2862e67 ]] || exit 1
+          [[ "$MRK_GITHUB_RELEASE_TOOLING_SHA" =~ ^[0-9a-f]{40}$ && "$MRK_GITHUB_RELEASE_TOOLING_SHA" == d4a639b396eaa60385b223a154710e99a2862e67 ]] || exit 1
+          [[ "$(/usr/bin/sw_vers -productVersion)" == "$expected_host_major".* ]] || exit 1
+          [[ "$(/usr/bin/id -u)" != 0 && -d "$DEVELOPER_DIR" ]] || exit 1
       - name: "Check out exact reviewed source without retained credentials"
         timeout-minutes: "${{ ((matrix.native_scope == 'project-identity-native' || matrix.native_scope == 'tool-setup' || matrix.native_scope == 'git-native') || github.ref == 'refs/heads/verify/desktop-macos-app-signature') && 3 || 350 }}"
         uses: "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"
@@ -4252,7 +3929,7 @@ jobs:
           compression-level: 0
           overwrite: false
   candidate-tool26-resident:
-    name: "macOS part (Tool26 / resident)"
+    name: "${{ matrix.native_scope == 'tool-setup' && 'macOS part (Tool26 / resident)' || 'macOS part (Git27 / resident)' }}"
     if: "github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-macos-candidate'"
     runs-on: "${{ matrix.runner }}"
     timeout-minutes: 90
@@ -4370,7 +4047,7 @@ jobs:
           compression-level: 0
           overwrite: false
   candidate-tool26-vault:
-    name: "macOS part (Tool26 / vault)"
+    name: "${{ matrix.native_scope == 'tool-setup' && 'macOS part (Tool26 / vault)' || 'macOS part (Git27 / vault)' }}"
     if: "github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-macos-candidate'"
     runs-on: "${{ matrix.runner }}"
     timeout-minutes: 90
@@ -4488,7 +4165,7 @@ jobs:
           compression-level: 0
           overwrite: false
   candidate-tool26-frontend:
-    name: "macOS part (Tool26 / frontend)"
+    name: "${{ matrix.native_scope == 'tool-setup' && 'macOS part (Tool26 / frontend)' || 'macOS part (Git27 / frontend)' }}"
     if: "github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-macos-candidate'"
     runs-on: "${{ matrix.runner }}"
     timeout-minutes: 90
@@ -4602,7 +4279,7 @@ jobs:
           compression-level: 0
           overwrite: false
   candidate-tool26-observer:
-    name: "macOS part (Tool26 / observer)"
+    name: "${{ matrix.native_scope == 'tool-setup' && 'macOS part (Tool26 / observer)' || 'macOS part (Git27 / observer)' }}"
     if: "github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-macos-candidate'"
     runs-on: "${{ matrix.runner }}"
     timeout-minutes: 120
@@ -4730,7 +4407,7 @@ jobs:
           compression-level: 0
           overwrite: false
   candidate-tool26-remover:
-    name: "macOS part (Tool26 / remover)"
+    name: "${{ matrix.native_scope == 'tool-setup' && 'macOS part (Tool26 / remover)' || 'macOS part (Git27 / remover)' }}"
     if: "github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-macos-candidate'"
     runs-on: "${{ matrix.runner }}"
     timeout-minutes: 90
@@ -4856,7 +4533,7 @@ jobs:
           compression-level: 0
           overwrite: false
   candidate-tool26-cli:
-    name: "macOS part (Tool26 / cli)"
+    name: "${{ matrix.native_scope == 'tool-setup' && 'macOS part (Tool26 / cli)' || 'macOS part (Git27 / cli)' }}"
     if: "github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-macos-candidate'"
     runs-on: "${{ matrix.runner }}"
     timeout-minutes: 90
@@ -4982,7 +4659,7 @@ jobs:
           compression-level: 0
           overwrite: false
   candidate-tool26-sign-remover:
-    name: "macOS part (Tool26 / sign-remover)"
+    name: "${{ matrix.native_scope == 'tool-setup' && 'macOS part (Tool26 / sign-remover)' || 'macOS part (Git27 / sign-remover)' }}"
     if: "github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-macos-candidate'"
     runs-on: "${{ matrix.runner }}"
     timeout-minutes: 90
@@ -5097,7 +4774,7 @@ jobs:
           compression-level: 0
           overwrite: false
   candidate-tool26-sign-cli:
-    name: "macOS part (Tool26 / sign-cli)"
+    name: "${{ matrix.native_scope == 'tool-setup' && 'macOS part (Tool26 / sign-cli)' || 'macOS part (Git27 / sign-cli)' }}"
     if: "github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-macos-candidate'"
     runs-on: "${{ matrix.runner }}"
     timeout-minutes: 90
@@ -5212,7 +4889,7 @@ jobs:
           compression-level: 0
           overwrite: false
   candidate-tool26-assemble:
-    name: "macOS part (Tool26 / assemble)"
+    name: "${{ matrix.native_scope == 'tool-setup' && 'macOS part (Tool26 / assemble)' || 'macOS part (Git27 / assemble)' }}"
     if: "github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-macos-candidate'"
     runs-on: "${{ matrix.runner }}"
     timeout-minutes: 90
@@ -5341,7 +5018,7 @@ jobs:
           compression-level: 0
           overwrite: false
   candidate-tool26-notarize-payload:
-    name: "macOS part (Tool26 / notarize-payload)"
+    name: "${{ matrix.native_scope == 'tool-setup' && 'macOS part (Tool26 / notarize-payload)' || 'macOS part (Git27 / notarize-payload)' }}"
     if: "github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-macos-candidate'"
     runs-on: "${{ matrix.runner }}"
     timeout-minutes: 90
@@ -5466,7 +5143,7 @@ jobs:
           compression-level: 0
           overwrite: false
   candidate-tool26-installer:
-    name: "macOS part (Tool26 / installer)"
+    name: "${{ matrix.native_scope == 'tool-setup' && 'macOS part (Tool26 / installer)' || 'macOS part (Git27 / installer)' }}"
     if: "github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-macos-candidate'"
     runs-on: "${{ matrix.runner }}"
     timeout-minutes: 90
@@ -5589,7 +5266,7 @@ jobs:
           compression-level: 0
           overwrite: false
   candidate-tool26-scripts-package:
-    name: "macOS part (Tool26 / scripts-package)"
+    name: "${{ matrix.native_scope == 'tool-setup' && 'macOS part (Tool26 / scripts-package)' || 'macOS part (Git27 / scripts-package)' }}"
     if: "github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-macos-candidate'"
     runs-on: "${{ matrix.runner }}"
     timeout-minutes: 90
@@ -5714,7 +5391,7 @@ jobs:
           compression-level: 0
           overwrite: false
   candidate-tool26-final-package:
-    name: "Build signed candidate (Tool26)"
+    name: "${{ matrix.native_scope == 'tool-setup' && 'Build signed candidate (Tool26)' || 'Build signed candidate (Git27)' }}"
     if: "github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-macos-candidate'"
     runs-on: "${{ matrix.runner }}"
     timeout-minutes: 90
@@ -5894,7 +5571,7 @@ jobs:
         timeout-minutes: 3
         uses: "./.github/actions/macos-candidate-recipes/candidate_compiler_retire"
   candidate-git27-prepare:
-    name: "macOS part (Git27 / prepare)"
+    name: "${{ matrix.native_scope == 'tool-setup' && 'macOS part (Tool26 / prepare)' || 'macOS part (Git27 / prepare)' }}"
     if: "github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-macos-candidate'"
     runs-on: "${{ matrix.runner }}"
     timeout-minutes: 90
@@ -5952,7 +5629,102 @@ jobs:
         timeout-minutes: "${{ ((matrix.native_scope == 'project-identity-native' || matrix.native_scope == 'tool-setup' || matrix.native_scope == 'git-native') || github.ref == 'refs/heads/verify/desktop-macos-app-signature') && 1 || 350 }}"
         env:
           RUNNER_ENVIRONMENT: "${{ runner.environment }}"
-        uses: "./.github/actions/macos-candidate-recipes/admit-only-this-exact-disposable-hosted-source-route"
+        shell: "bash"
+        run: |
+          set -euo pipefail
+          [[ "$RUNNER_ENVIRONMENT" == github-hosted && "$RUNNER_OS" == macOS ]] || exit 1
+          case "$MRK_MACOS_NATIVE_SCOPE" in
+            disabled) [[ "$MRK_MACOS_PACKAGE_ROLE" == ordinary-image ]] || exit 1 ;;
+            project-identity-native|tool-setup|git-native)
+              [[ "$GITHUB_REF" == refs/heads/verify/desktop-macos-candidate && "$MRK_MACOS_TARGET" == aarch64-apple-darwin && "$MRK_MACOS_PACKAGE_ROLE" == installed-shell-observation ]] || exit 1
+              [[ "$MRK_MACOS_SAME_PACKAGE_SCOPE" == disabled && "$MRK_MACOS_REMOVAL_CASE" == disabled && "$MRK_MACOS_ANDROID_UI_SCOPE" == disabled && "$MRK_MACOS_IOS_UI_SCOPE" == disabled && "$MRK_MACOS_SAVED_FILE_UI_SCOPE" == ordinary-seven ]] || exit 1
+              [[ "${MRK_MACOS_AQUA_SCOPE:-disabled}" == disabled && "${MRK_MACOS_XCODE_SETUP_SCOPE:-disabled}" == disabled ]] || exit 1
+              ;;
+            *) exit 1 ;;
+          esac
+          case "$MRK_MACOS_SAME_PACKAGE_SCOPE" in
+            disabled) ;;
+            same-package-noop) [[ "$GITHUB_REF" == refs/heads/verify/desktop-macos-preview ]] || exit 1 ;;
+            *) exit 1 ;;
+          esac
+          case "$MRK_MACOS_ANDROID_UI_SCOPE" in
+            disabled|android-signed-build) ;;
+            *) exit 1 ;;
+          esac
+          case "$MRK_MACOS_IOS_UI_SCOPE" in
+            disabled) ;;
+            ios-unsigned-archive|ios-pending-recovery)
+              [[ "$GITHUB_REF" == refs/heads/verify/desktop-macos-installed && "$MRK_MACOS_ANDROID_UI_SCOPE" == disabled && "$MRK_MACOS_SAVED_FILE_UI_SCOPE" == ordinary-seven ]] || exit 1
+              ;;
+            *) exit 1 ;;
+          esac
+          case "$MRK_MACOS_TARGET" in
+            aarch64-apple-darwin)
+              [[ "$RUNNER_ARCH" == ARM64 && "$MRK_MACOS_MACHINE" == arm64 && "$(/usr/bin/uname -m)" == arm64 ]] || exit 1
+              case "$MRK_MACOS_RUNNER:$MRK_MACOS_HOSTED_JOB" in
+                macos-26:github-hosted-macos26-arm64) expected_host_major=26 ;;
+                xcode-27:github-hosted-xcode27-arm64)
+                  # Separate source-only matrix selection; never a tool or
+                  # ordinary image fallback, and never a Git nomination.
+                  [[ "$MRK_MACOS_NATIVE_SCOPE" == git-native && "$MRK_MACOS_PACKAGE_ROLE" == installed-shell-observation && "$GITHUB_REF" == refs/heads/verify/desktop-macos-candidate ]] || exit 1
+                  expected_host_major=27
+                  ;;
+                *) exit 1 ;;
+              esac
+              expected_supplier_receipt=e6b23316078020c513ab1b05b3b55e4f87b8d15908a8dee022ad5ee03b8f763e
+              expected_supplier_tar=ead75b364118139561a34da6aa48e3c54791e152154ab32c46196b0223962359
+              expected_supplier_source=c6551aa07d0673436aa9587b3a039889d22449c3
+              expected_supplier_run=40473858216
+              expected_supplier_attempt=1
+              expected_supplier_artifact=12719943283
+              ;;
+            x86_64-apple-darwin)
+              [[ "$MRK_MACOS_RUNNER" == macos-26-intel && "$RUNNER_ARCH" == X64 && "$MRK_MACOS_MACHINE" == x86_64 && "$MRK_MACOS_HOSTED_JOB" == github-hosted-macos26-x86_64 && "$(/usr/bin/uname -m)" == x86_64 ]] || exit 1
+              expected_host_major=26
+              expected_supplier_receipt=afba303207b19692b73fb1288b56afcd73378fc29b0b0ede4ff10eb2e0f949b8
+              expected_supplier_tar=ff976626b48e95abc414d46ff91f1ebb183416356bb4706b8e673b7c9018ca9c
+              expected_supplier_source=a2f7a10b4c86305f5ee65c6779ceaf6b128cd8fa
+              expected_supplier_run=38343340695
+              expected_supplier_attempt=1
+              expected_supplier_artifact=11787588635
+              ;;
+            *) exit 1 ;;
+          esac
+          [[ "$GITHUB_EVENT_NAME" == push && ( "$GITHUB_REF" == refs/heads/verify/desktop-macos-installed || "$GITHUB_REF" == refs/heads/verify/desktop-macos-preview || "$GITHUB_REF" == refs/heads/verify/desktop-macos-removal-lifecycle || "$GITHUB_REF" == refs/heads/verify/desktop-macos-app-signature || "$GITHUB_REF" == refs/heads/verify/desktop-macos-app-absence-fixture || "$GITHUB_REF" == refs/heads/verify/desktop-macos-positive-update || "$GITHUB_REF" == refs/heads/verify/desktop-macos-candidate ) ]] || exit 1
+          if [[ "$GITHUB_REF" == refs/heads/verify/desktop-macos-app-absence-fixture || "$GITHUB_REF" == refs/heads/verify/desktop-macos-positive-update ]]; then
+            [[ "$MRK_MACOS_SAME_PACKAGE_SCOPE" == disabled && "$MRK_MACOS_ANDROID_UI_SCOPE" == disabled && "$MRK_MACOS_IOS_UI_SCOPE" == disabled && "$MRK_MACOS_SAVED_FILE_UI_SCOPE" == ordinary-seven ]] || exit 1
+          fi
+          if [[ "$GITHUB_REF" == refs/heads/verify/desktop-macos-app-signature ]]; then
+            [[ "$MRK_MACOS_ANDROID_UI_SCOPE" == disabled && "$MRK_MACOS_IOS_UI_SCOPE" == disabled && "$MRK_MACOS_SAVED_FILE_UI_SCOPE" == ordinary-seven ]] || exit 1
+          fi
+          if [[ "$GITHUB_REF" == refs/heads/verify/desktop-macos-removal-lifecycle ]]; then
+            [[ "$MRK_MACOS_ANDROID_UI_SCOPE" == disabled && "$MRK_MACOS_IOS_UI_SCOPE" == disabled && "$MRK_MACOS_SAVED_FILE_UI_SCOPE" == ordinary-seven ]] || exit 1
+            case "$MRK_MACOS_REMOVAL_CASE" in ordinary|abrupt) ;; *) exit 1 ;; esac
+          else
+            [[ "$MRK_MACOS_REMOVAL_CASE" == disabled ]] || exit 1
+          fi
+          case "$MRK_MACOS_SAVED_FILE_UI_SCOPE" in
+            ordinary-seven) ;;
+            saved-version-recovery|workflow-refusal|release-evidence|remaining-three) [[ "$GITHUB_REF" == refs/heads/verify/desktop-macos-preview ]] || exit 1 ;;
+            *) exit 1 ;;
+          esac
+          [[ "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ && "$MRK_EXPECTED_SHA" == "$GITHUB_SHA" && "$MRK_MACOS_INSTALL_SOURCE_COMMIT" == "$GITHUB_SHA" && "$GITHUB_WORKFLOW_SHA" == "$GITHUB_SHA" ]] || exit 1
+          [[ "$GITHUB_WORKFLOW_REF" == "$GITHUB_REPOSITORY/.github/workflows/desktop-macos-installed.yml@$GITHUB_REF" ]] || exit 1
+          # Fresh supplier pins never replace the separate current-core source binding.
+          [[ "$MRK_BUNDLED_RUNTIME_SOURCE_SHA256" =~ ^[0-9a-f]{64}$ && "$MRK_BUNDLED_RUNTIME_SOURCE_SHA256" == 10d3f2cf13155335444c8376a346d89581c03a43f0ae642e67401e379745dca2 ]] || exit 1
+          [[ "$GITHUB_REPOSITORY" == Apdelrahman1911/mobile-release-kit ]] || exit 1
+          [[ "$MRK_MACOS_RUNTIME_SUPPLIER" == fresh-public-source ]] || exit 1
+          [[ "$MRK_MACOS_PYTHON_SUPPLIER_SHA256" =~ ^[0-9a-f]{64}$ && "$MRK_MACOS_PYTHON_SUPPLIER_SHA256" == "$expected_supplier_receipt" ]] || exit 1
+          [[ "$MRK_MACOS_PYTHON_SUPPLIER_TAR_SHA256" =~ ^[0-9a-f]{64}$ && "$MRK_MACOS_PYTHON_SUPPLIER_TAR_SHA256" == "$expected_supplier_tar" ]] || exit 1
+          [[ "$MRK_MACOS_PYTHON_SUPPLIER_SOURCE_COMMIT" =~ ^[0-9a-f]{40}$ && "$MRK_MACOS_PYTHON_SUPPLIER_SOURCE_COMMIT" == "$expected_supplier_source" ]] || exit 1
+          [[ "$MRK_MACOS_PYTHON_SUPPLIER_RUN_ID" =~ ^[1-9][0-9]{0,15}$ && "$MRK_MACOS_PYTHON_SUPPLIER_RUN_ID" -le 9007199254740991 && "$MRK_MACOS_PYTHON_SUPPLIER_RUN_ID" == "$expected_supplier_run" ]] || exit 1
+          [[ "$MRK_MACOS_PYTHON_SUPPLIER_RUN_ATTEMPT" =~ ^[1-9][0-9]{0,15}$ && "$MRK_MACOS_PYTHON_SUPPLIER_RUN_ATTEMPT" -le 9007199254740991 && "$MRK_MACOS_PYTHON_SUPPLIER_RUN_ATTEMPT" == "$expected_supplier_attempt" ]] || exit 1
+          [[ "$MRK_MACOS_PYTHON_SUPPLIER_ARTIFACT_ID" =~ ^[1-9][0-9]{0,15}$ && "$MRK_MACOS_PYTHON_SUPPLIER_ARTIFACT_ID" -le 9007199254740991 && "$MRK_MACOS_PYTHON_SUPPLIER_ARTIFACT_ID" == "$expected_supplier_artifact" ]] || exit 1
+          [[ "$MRK_BUNDLED_PROTOCOL_SHA256" =~ ^[0-9a-f]{64}$ && "$MRK_BUNDLED_PROTOCOL_SHA256" == 083e6afae3e329c4e0d81bad00dd0c9920f77491b38ce0d23aa602996f4c4bf5 ]] || exit 1
+          [[ "$MRK_GITHUB_PREFLIGHT_TOOLING_SHA" =~ ^[0-9a-f]{40}$ && "$MRK_GITHUB_PREFLIGHT_TOOLING_SHA" == d4a639b396eaa60385b223a154710e99a2862e67 ]] || exit 1
+          [[ "$MRK_GITHUB_RELEASE_TOOLING_SHA" =~ ^[0-9a-f]{40}$ && "$MRK_GITHUB_RELEASE_TOOLING_SHA" == d4a639b396eaa60385b223a154710e99a2862e67 ]] || exit 1
+          [[ "$(/usr/bin/sw_vers -productVersion)" == "$expected_host_major".* ]] || exit 1
+          [[ "$(/usr/bin/id -u)" != 0 && -d "$DEVELOPER_DIR" ]] || exit 1
       - name: "Check out exact reviewed source without retained credentials"
         timeout-minutes: "${{ ((matrix.native_scope == 'project-identity-native' || matrix.native_scope == 'tool-setup' || matrix.native_scope == 'git-native') || github.ref == 'refs/heads/verify/desktop-macos-app-signature') && 3 || 350 }}"
         uses: "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1"
@@ -6200,7 +5972,7 @@ jobs:
           compression-level: 0
           overwrite: false
   candidate-git27-resident:
-    name: "macOS part (Git27 / resident)"
+    name: "${{ matrix.native_scope == 'tool-setup' && 'macOS part (Tool26 / resident)' || 'macOS part (Git27 / resident)' }}"
     if: "github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-macos-candidate'"
     runs-on: "${{ matrix.runner }}"
     timeout-minutes: 90
@@ -6318,7 +6090,7 @@ jobs:
           compression-level: 0
           overwrite: false
   candidate-git27-vault:
-    name: "macOS part (Git27 / vault)"
+    name: "${{ matrix.native_scope == 'tool-setup' && 'macOS part (Tool26 / vault)' || 'macOS part (Git27 / vault)' }}"
     if: "github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-macos-candidate'"
     runs-on: "${{ matrix.runner }}"
     timeout-minutes: 90
@@ -6436,7 +6208,7 @@ jobs:
           compression-level: 0
           overwrite: false
   candidate-git27-frontend:
-    name: "macOS part (Git27 / frontend)"
+    name: "${{ matrix.native_scope == 'tool-setup' && 'macOS part (Tool26 / frontend)' || 'macOS part (Git27 / frontend)' }}"
     if: "github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-macos-candidate'"
     runs-on: "${{ matrix.runner }}"
     timeout-minutes: 90
@@ -6550,7 +6322,7 @@ jobs:
           compression-level: 0
           overwrite: false
   candidate-git27-observer:
-    name: "macOS part (Git27 / observer)"
+    name: "${{ matrix.native_scope == 'tool-setup' && 'macOS part (Tool26 / observer)' || 'macOS part (Git27 / observer)' }}"
     if: "github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-macos-candidate'"
     runs-on: "${{ matrix.runner }}"
     timeout-minutes: 120
@@ -6678,7 +6450,7 @@ jobs:
           compression-level: 0
           overwrite: false
   candidate-git27-remover:
-    name: "macOS part (Git27 / remover)"
+    name: "${{ matrix.native_scope == 'tool-setup' && 'macOS part (Tool26 / remover)' || 'macOS part (Git27 / remover)' }}"
     if: "github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-macos-candidate'"
     runs-on: "${{ matrix.runner }}"
     timeout-minutes: 90
@@ -6804,7 +6576,7 @@ jobs:
           compression-level: 0
           overwrite: false
   candidate-git27-cli:
-    name: "macOS part (Git27 / cli)"
+    name: "${{ matrix.native_scope == 'tool-setup' && 'macOS part (Tool26 / cli)' || 'macOS part (Git27 / cli)' }}"
     if: "github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-macos-candidate'"
     runs-on: "${{ matrix.runner }}"
     timeout-minutes: 90
@@ -6930,7 +6702,7 @@ jobs:
           compression-level: 0
           overwrite: false
   candidate-git27-sign-remover:
-    name: "macOS part (Git27 / sign-remover)"
+    name: "${{ matrix.native_scope == 'tool-setup' && 'macOS part (Tool26 / sign-remover)' || 'macOS part (Git27 / sign-remover)' }}"
     if: "github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-macos-candidate'"
     runs-on: "${{ matrix.runner }}"
     timeout-minutes: 90
@@ -7045,7 +6817,7 @@ jobs:
           compression-level: 0
           overwrite: false
   candidate-git27-sign-cli:
-    name: "macOS part (Git27 / sign-cli)"
+    name: "${{ matrix.native_scope == 'tool-setup' && 'macOS part (Tool26 / sign-cli)' || 'macOS part (Git27 / sign-cli)' }}"
     if: "github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-macos-candidate'"
     runs-on: "${{ matrix.runner }}"
     timeout-minutes: 90
@@ -7160,7 +6932,7 @@ jobs:
           compression-level: 0
           overwrite: false
   candidate-git27-assemble:
-    name: "macOS part (Git27 / assemble)"
+    name: "${{ matrix.native_scope == 'tool-setup' && 'macOS part (Tool26 / assemble)' || 'macOS part (Git27 / assemble)' }}"
     if: "github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-macos-candidate'"
     runs-on: "${{ matrix.runner }}"
     timeout-minutes: 90
@@ -7289,7 +7061,7 @@ jobs:
           compression-level: 0
           overwrite: false
   candidate-git27-notarize-payload:
-    name: "macOS part (Git27 / notarize-payload)"
+    name: "${{ matrix.native_scope == 'tool-setup' && 'macOS part (Tool26 / notarize-payload)' || 'macOS part (Git27 / notarize-payload)' }}"
     if: "github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-macos-candidate'"
     runs-on: "${{ matrix.runner }}"
     timeout-minutes: 90
@@ -7414,7 +7186,7 @@ jobs:
           compression-level: 0
           overwrite: false
   candidate-git27-installer:
-    name: "macOS part (Git27 / installer)"
+    name: "${{ matrix.native_scope == 'tool-setup' && 'macOS part (Tool26 / installer)' || 'macOS part (Git27 / installer)' }}"
     if: "github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-macos-candidate'"
     runs-on: "${{ matrix.runner }}"
     timeout-minutes: 90
@@ -7537,7 +7309,7 @@ jobs:
           compression-level: 0
           overwrite: false
   candidate-git27-scripts-package:
-    name: "macOS part (Git27 / scripts-package)"
+    name: "${{ matrix.native_scope == 'tool-setup' && 'macOS part (Tool26 / scripts-package)' || 'macOS part (Git27 / scripts-package)' }}"
     if: "github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-macos-candidate'"
     runs-on: "${{ matrix.runner }}"
     timeout-minutes: 90
@@ -7662,7 +7434,7 @@ jobs:
           compression-level: 0
           overwrite: false
   candidate-git27-final-package:
-    name: "Build signed candidate (Git27)"
+    name: "${{ matrix.native_scope == 'tool-setup' && 'Build signed candidate (Tool26)' || 'Build signed candidate (Git27)' }}"
     if: "github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-macos-candidate'"
     runs-on: "${{ matrix.runner }}"
     timeout-minutes: 90

@@ -1,0 +1,88 @@
+name: "Run only the five reviewed nonroot regressions (exact groups 2, 1, 2)"
+description: "Shared original recipe; job retains its original result and timeout"
+runs:
+  using: "composite"
+  steps:
+    - name: "Run only the five reviewed nonroot regressions (exact groups 2, 1, 2)"
+      id: "recipe"
+      shell: "bash"
+      run: |
+        set -euo pipefail
+        set -o noclobber
+        umask 077
+        [[ "$(/usr/bin/id -u)" != 0 && "$MRK_MACOS_INSTALL_SOURCE_COMMIT" == "$GITHUB_SHA" ]] || exit 1
+        [[ "$MRK_MACOS_INSTALL_INVENTORY_SHA256" =~ ^[0-9a-f]{64}$ ]] || exit 1
+        # Keep the original Cargo/tee/tail statuses, including on failure.
+        # The retained tail is at most 128 KiB per fixed invocation. No retry.
+        run_focused() {
+          local label="$1"
+          shift
+          local -a statuses
+          set +e
+          "$@" 2>&1 | /usr/bin/tee /dev/null | /usr/bin/tail -c 131072 > "$MRK_MACOS_WORK/$label.log"
+          statuses=("${PIPESTATUS[@]}")
+          set -e
+          printf '%s\n' "${statuses[*]}" > "$MRK_MACOS_WORK/$label.status"
+          [[ ${#statuses[@]} == 3 ]] || exit 1
+          if (( statuses[0] != 0 )); then return "${statuses[0]}"; fi
+          (( statuses[1] == 0 && statuses[2] == 0 )) || return 1
+        }
+        # Multiple FULL names belong after Cargo's --; libtest --exact is not a prefix filter.
+        PATH="/Users/runner/.rustup/toolchains/${RUSTUP_TOOLCHAIN}-$MRK_MACOS_TARGET/bin:/usr/bin:/bin:/usr/sbin:/sbin" RUSTC="/Users/runner/.rustup/toolchains/${RUSTUP_TOOLCHAIN}-$MRK_MACOS_TARGET/bin/rustc" RUSTUP_TOOLCHAIN="$RUSTUP_TOOLCHAIN" RUSTUP_AUTO_INSTALL=0 CARGO_HOME=/Users/runner/.cargo RUSTUP_HOME=/Users/runner/.rustup run_focused dialog-regressions "/Users/runner/.rustup/toolchains/${RUSTUP_TOOLCHAIN}-$MRK_MACOS_TARGET/bin/cargo" test --manifest-path desktop/src-tauri/Cargo.toml \
+          --locked --release --no-default-features --features desktop-shell,custom-protocol \
+          --target "$MRK_MACOS_TARGET" --lib -- --exact --test-threads=1 --color=never --format=pretty \
+          shell::owned_macos::tests::native_unknown_blocks_dispatch_and_outcome_despite_first_user_refusal \
+          shell::owned_macos::tests::response_mapping_preserves_other_and_missing_facts_poison_dispatch
+        PATH="/Users/runner/.rustup/toolchains/${RUSTUP_TOOLCHAIN}-$MRK_MACOS_TARGET/bin:/usr/bin:/bin:/usr/sbin:/sbin" RUSTC="/Users/runner/.rustup/toolchains/${RUSTUP_TOOLCHAIN}-$MRK_MACOS_TARGET/bin/rustc" RUSTUP_TOOLCHAIN="$RUSTUP_TOOLCHAIN" RUSTUP_AUTO_INSTALL=0 CARGO_HOME=/Users/runner/.cargo RUSTUP_HOME=/Users/runner/.rustup run_focused installer-finalizer-regression "/Users/runner/.rustup/toolchains/${RUSTUP_TOOLCHAIN}-$MRK_MACOS_TARGET/bin/cargo" test --manifest-path desktop/src-tauri/Cargo.toml \
+          --locked --release --no-default-features --features macos-installed-installer \
+          --target "$MRK_MACOS_TARGET" --bin mrk-macos-install -- --exact --test-threads=1 --color=never --format=pretty \
+          installer::tests::original_final_deadline_vetoes_late_known_closes_without_erasing_first_error
+        PATH="/Users/runner/.rustup/toolchains/${RUSTUP_TOOLCHAIN}-$MRK_MACOS_TARGET/bin:/usr/bin:/bin:/usr/sbin:/sbin" RUSTC="/Users/runner/.rustup/toolchains/${RUSTUP_TOOLCHAIN}-$MRK_MACOS_TARGET/bin/rustc" RUSTUP_TOOLCHAIN="$RUSTUP_TOOLCHAIN" RUSTUP_AUTO_INSTALL=0 CARGO_HOME=/Users/runner/.cargo RUSTUP_HOME=/Users/runner/.rustup run_focused native-abi-regression "/Users/runner/.rustup/toolchains/${RUSTUP_TOOLCHAIN}-$MRK_MACOS_TARGET/bin/cargo" test --manifest-path desktop/src-tauri/Cargo.toml \
+          --locked --release --target "$MRK_MACOS_TARGET" \
+          --package mrk-macos-installed-native --lib -- --exact --test-threads=1 --color=never --format=pretty \
+          tests::only_explicit_user_appkit_responses_can_be_accept_or_decline \
+          tests::bulk_directory_records_preserve_full_ids_and_refuse_malformed_batches
+        "$MRK_PYTHON" -I -S -B - <<'PY'
+        import hashlib, json, os, re, stat
+        root = os.environ["MRK_MACOS_WORK"]
+        groups = {
+            "dialog-regressions": ["shell::owned_macos::tests::native_unknown_blocks_dispatch_and_outcome_despite_first_user_refusal",
+                                   "shell::owned_macos::tests::response_mapping_preserves_other_and_missing_facts_poison_dispatch"],
+            "installer-finalizer-regression": ["installer::tests::original_final_deadline_vetoes_late_known_closes_without_erasing_first_error"],
+            "native-abi-regression": ["tests::only_explicit_user_appkit_responses_can_be_accept_or_decline",
+                                      "tests::bulk_directory_records_preserve_full_ids_and_refuse_malformed_batches"],
+        }
+        def read(name, limit):
+            fd = os.open(os.path.join(root, name), os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+            try:
+                before = os.fstat(fd)
+                if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1 or before.st_size > limit: raise ValueError("regression output refused")
+                data = os.read(fd, limit + 1)
+                after = os.fstat(fd)
+                sig = lambda s: (s.st_dev,s.st_ino,s.st_mode,s.st_nlink,s.st_uid,s.st_gid,s.st_size,s.st_mtime_ns,s.st_ctime_ns)
+                if sig(before) != sig(after) or len(data) != before.st_size: raise ValueError("regression output changed")
+                return data
+            finally: os.close(fd)
+        results = []
+        for label, names in groups.items():
+            data = read(label + ".log", 131072)
+            if read(label + ".status", 32) != b"0 0 0\n": raise ValueError("original regression pipeline failed")
+            lines = data.decode("utf-8", "strict").splitlines()
+            selected = [line for line in lines if line.startswith("test ") and not line.startswith("test result:")]
+            if sorted(selected) != sorted("test " + name + " ... ok" for name in names): raise ValueError("exact successful regression names refused")
+            count = len(names)
+            if [line for line in lines if re.fullmatch(r"running [0-9]+ tests?", line)] != [f"running {count} test" + ("s" if count != 1 else "")]: raise ValueError("executed regression count refused")
+            summaries = [line for line in lines if line.startswith("test result:")]
+            if len(summaries) != 1 or not re.fullmatch(rf"test result: ok\. {count} passed; 0 failed; 0 ignored; 0 measured; [0-9]+ filtered out; finished in [0-9.]+s", summaries[0]): raise ValueError("regression summary refused")
+            results.append({"names": names, "executed": count, "pipelineStatuses": [0, 0, 0], "log": label + ".log", "bytes": len(data), "sha256": hashlib.sha256(data).hexdigest()})
+        value = {"schemaVersion": 1, "source": os.environ["GITHUB_SHA"], "workflowSource": os.environ["GITHUB_WORKFLOW_SHA"],
+                 "runId": os.environ["GITHUB_RUN_ID"], "runAttempt": os.environ["GITHUB_RUN_ATTEMPT"],
+                 "runtimeManifestSha256": os.environ["MRK_BUNDLED_RUNTIME_MANIFEST_SHA256"],
+                 "inventorySha256": os.environ["MRK_MACOS_INSTALL_INVENTORY_SHA256"], "groups": results,
+                 "scope": "five-selected-regressions-only-not-Installer-or-Aqua-qualification"}
+        fd = os.open(os.path.join(root, "focused-regressions.json"), os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+        with os.fdopen(fd, "wb") as stream:
+            stream.write(json.dumps(value, sort_keys=True, separators=(",", ":")).encode() + b"\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        PY

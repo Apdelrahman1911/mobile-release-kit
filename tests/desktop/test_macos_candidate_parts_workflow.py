@@ -22,8 +22,13 @@ class CandidatePartsWorkflowTests(unittest.TestCase):
         jobs=yaml(P.WORKFLOW)['jobs']
         checked=set()
         for job in jobs.values():
+            checkout=False
             for step in job.get('steps',[]):
                 route=step.get('uses','')
+                if route.startswith('actions/checkout@'):
+                    checkout=True
+                if route.startswith('./'):
+                    self.assertTrue(checkout,'source-owned actions require the exact checkout first')
                 if not route.startswith('./.github/actions/macos-candidate-recipes/'):
                     continue
                 action=yaml(route[2:]+'/action.yml')
@@ -50,6 +55,7 @@ class CandidatePartsWorkflowTests(unittest.TestCase):
             cuts = []
             for part in P.PARTS:
                 job = jobs[prefix + '-' + part]
+                self.assertIn('matrix.native_scope',job['name'])
                 self.assertEqual(job['strategy']['matrix']['include'][0]['native_scope'],scope)
                 self.assertEqual(job['strategy']['matrix']['include'][0]['runner'],runner)
                 self.assertFalse(job['strategy']['fail-fast'])
@@ -66,6 +72,10 @@ class CandidatePartsWorkflowTests(unittest.TestCase):
                 if part in ('sign-remover','sign-cli'):
                     self.assertNotIn('Build the current nonshipping observer',names)
                     self.assertFalse(any('macos_installed_app_build.sh' in s.get('run','') for s in job['steps']))
+                if part=='prepare':
+                    self.assertIn('run',job['steps'][0])
+                    self.assertEqual(job['steps'][0]['name'],'Admit only this exact disposable-hosted source route')
+                    self.assertTrue(job['steps'][1]['uses'].startswith('actions/checkout@'))
             self.assertEqual(len(cuts),17);self.assertEqual(len(set(cuts)),17)
         auto=jobs['candidate-tests']
         self.assertEqual(auto['needs'],['engineering-install','candidate-tool26-final-package','candidate-git27-final-package'])
