@@ -64,10 +64,12 @@ class CandidatePartTransportTests(unittest.TestCase):
     def signed_app_fixture(self):
         origin = fixture('assemble')[0]['origin']
         bodies = {T.S.ENTRY_BINARY: b'inert signed entry\n', T.S.APP_BINARY: b'inert signed payload\n'}
-        for name, body in bodies.items():
-            path = self.work / 'app' / T.S.APP_NAME / name
-            path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-            T.write(path, body, 0o555)
+        app = self.work / 'app' / T.S.APP_NAME
+        app.parent.mkdir(mode=0o700)
+        # Exercise the unchanged original app writer with its original modes.
+        # These inert bytes establish no Mach-O/signing/native authority.
+        T.S.write_tree(app, {name: (body, 0o755) for name, body in bodies.items()},
+                       root_mode=0o755, app_signing=True)
         T.write(self.work / 'app-result.json', b'{}\n', 0o444)
         receipts = {}
         for phase in T.RECEIPTS['assemble']:
@@ -98,17 +100,60 @@ class CandidatePartTransportTests(unittest.TestCase):
                                  'MRK_MACOS_SIGNED_PAYLOAD_SHA256': T.P.sha(bodies[T.S.APP_BINARY])})
         self.assertFalse(manifest['nativeAuthority'] or manifest['installed'] or manifest['productReady'])
 
+    def test_original_app_constructor_and_writer_keep_signed_originals_0755(self):
+        S = T.S
+        bodies = {name: (name + ' inert bytes\n').encode() for name in
+                  ('observer', 'entry', 'vault', 'remover', 'cli', 'icon', 'messages')}
+        args = SimpleNamespace(target=T.P.TARGET, package_role='installed-shell-observation',
+            binary='observer', expected_app_binary=T.P.sha(bodies['observer']),
+            observer_cargo_messages='messages', observer_cargo_target_dir='inert-target',
+            remover='remover', expected_remover=T.P.sha(bodies['remover']),
+            remover_cargo_messages='messages', remover_cargo_target_dir='inert-remover-target',
+            installed_cli='cli', expected_installed_cli=T.P.sha(bodies['cli']),
+            installed_cli_cargo_messages='messages', installed_cli_cargo_target_dir='inert-cli-target',
+            vault_helper='vault', expected_vault_helper=T.P.sha(bodies['vault']),
+            entry_binary='entry', expected_entry=T.P.sha(bodies['entry']),
+            android_helper='inert-android', resident_image='inert-resident',
+            output=self.work / 'app' / S.APP_NAME)
+        args.output.parent.mkdir(mode=0o700)
+        def inert_read(path, *_):
+            return bodies['icon'] if path == S.DESKTOP / 'src-tauri/icons/icon.png' else bodies[path]
+        selection = SimpleNamespace(package_version='0.1.3', release='inert-source-layout')
+        with patch.object(S, 'source_build_selection', return_value=selection), \
+             patch.object(S, 'read', side_effect=inert_read), \
+             patch.object(S, 'observer_cargo_artifact', return_value={}), \
+             patch.object(S, 'remover_cargo_artifact', return_value={}), \
+             patch.object(S, 'installed_cli_cargo_artifact', return_value={}), \
+             patch.object(S, 'macho', return_value=None), \
+             patch.object(S, 'entry_macho', return_value=None), \
+             patch.object(S, 'source_entry_info', return_value=b'inert entry info'), \
+             patch.object(S, 'source_app_info', return_value=b'inert payload info'), \
+             patch.object(S, 'android_support_files', return_value=('1' * 64, {})), \
+             patch.object(S, 'android_service_files', return_value={
+                 S.ANDROID_HELPER: (b'inert helper', 0o555), S.RESIDENT_IMAGE: (b'inert image', 0o555),
+                 S.ANDROID_SERVICE_PLIST: (b'inert service plist', 0o644)}), \
+             patch.object(S, 'applications_launcher_files', return_value={}):
+            # The original constructor, digest predicates, and writer execute;
+            # only compiler/format/source DATA ports are explicitly inert.
+            S.app_with_github_seal(args, {})
+        for leaf, body in ((S.ENTRY_BINARY, bodies['entry']), (S.APP_BINARY, bodies['observer'])):
+            self.assertEqual(T.read(args.output / leaf, len(body)), body)
+            self.assertEqual(stat.S_IMODE((args.output / leaf).stat().st_mode), 0o755)
+            with self.assertRaises(S.Refused):
+                S.write_tree(self.root / ('refused-' + Path(leaf).name), {leaf: (body, 0o555)},
+                             root_mode=0o755, app_signing=True)
+
     def test_signed_hash_data_requires_same_original_receipts_and_fresh_bytes(self):
         origin, bodies, receipts = self.signed_app_fixture()
         for name, body in bodies.items():
             path = self.work / 'app' / T.S.APP_NAME / name
-            path.unlink(); T.write(path, b'changed signed bytes\n', 0o555)
+            path.unlink(); T.write(path, b'changed signed bytes\n', 0o755)
             with self.subTest(leaf=name), self.assertRaisesRegex(ValueError, '^part-signed-app-correspondence$'):
                 T.signed_app_bindings(self.work, origin)
             with patch.object(T, 'current', return_value=origin), \
                  self.assertRaisesRegex(ValueError, '^part-signed-app-correspondence$'):
                 T.freeze('assemble', self.work, self.workspace)
-            path.unlink(); T.write(path, body, 0o555)
+            path.unlink(); T.write(path, body, 0o755)
         path = self.work / 'android-helper-sign-root-app.json'
         for key, value in (('passed', False), ('originalClosesKnown', False), ('targetRetired', False),
                            ('runAttempt', '9'), ('source', '3' * 40)):
@@ -117,10 +162,14 @@ class CandidatePartTransportTests(unittest.TestCase):
             with self.subTest(field=key), self.assertRaisesRegex(ValueError, '^part-original-owner-completion$'):
                 T.signed_app_bindings(self.work, origin)
         path.unlink(); T.write(path, T.P.canonical(receipts['sign-root-app']), 0o444)
-        binary = self.work / 'app' / T.S.APP_NAME / T.S.ENTRY_BINARY
-        binary.chmod(0o444)
-        with self.assertRaisesRegex(ValueError, '^part-signed-app-correspondence$'):
-            T.signed_app_bindings(self.work, origin)
+        for leaf in bodies:
+            binary = self.work / 'app' / T.S.APP_NAME / leaf
+            for mode in (0o444, 0o555, 0o700, 0o777):
+                binary.chmod(mode)
+                with self.subTest(leaf=leaf, mode=mode), \
+                     self.assertRaisesRegex(ValueError, '^part-signed-app-correspondence$'):
+                    T.signed_app_bindings(self.work, origin)
+            binary.chmod(0o755)
 
     def test_original_notary_first_signature_predicate_keeps_missing_or_wrong_hashes_strict(self):
         # Execute the unchanged original consumer through its first signed-byte
@@ -135,7 +184,7 @@ class CandidatePartTransportTests(unittest.TestCase):
                  S.PAYLOAD_CONTENTS + 'Resources/icon.png', 'Contents/_CodeSignature/CodeResources',
                  S.PAYLOAD_CONTENTS + '_CodeSignature/CodeResources'}
         app = {name: (b'inert\n', 0o555) for name in names}
-        app.update({name: (body, 0o555) for name, body in bodies.items()})
+        app.update({name: (body, 0o755) for name, body in bodies.items()})
         app['Contents/Info.plist'] = (b'inert entry info', 0o644)
         app[S.PAYLOAD_INFO] = (b'inert payload info', 0o644)
         args = SimpleNamespace(target=T.P.TARGET, package_role='installed-shell-observation', current_runtime=True,

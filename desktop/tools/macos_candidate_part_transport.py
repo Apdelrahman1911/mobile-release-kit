@@ -234,7 +234,9 @@ def signed_app_bindings(work, origin):
         row = json.loads(read(work / ('android-helper-' + phase + '.json'), 16384))
         with original(work / 'app' / S.APP_NAME / leaf, P.MEMBER_LIMIT) as (stream, info):
             digest = hashlib.file_digest(stream, 'sha256').hexdigest()
-            need(stat.S_IMODE(info.st_mode) == 0o555 and P.hex_data(row.get('signedBytesSha256'))
+            # The original app constructor/writer creates these signed originals
+            # as 0755. Only the later, fresh Installer input copy becomes 0555.
+            need(stat.S_IMODE(info.st_mode) == 0o755 and P.hex_data(row.get('signedBytesSha256'))
                  and digest == row['signedBytesSha256'], 'part-signed-app-correspondence')
         values[variable] = digest
     return values
