@@ -31,10 +31,11 @@ def load(name):
 P = load('macos_candidate_parts')
 S = load('stage_macos_installed')
 need = P.need
+HISTORY_RECEIPT = 'work/history-provider-capsule/tool-signed-receipt.json'
 # Explicit output namespaces, not the whole task root, targets, home or cache.
 ROSTER = {
     'prepare': ('work/runtime', 'work/runtime-binding.json', 'work/signed-python-capsule/python-signed-receipt.json',
-                'work/signed-android-transport', 'work/github-seal-capsule'),
+                'work/signed-android-transport', 'work/github-seal-capsule', HISTORY_RECEIPT),
     'resident': ('work/libmrk_resident_image.dylib', 'work/mrk-macos-entry', 'work/mobile-release-kit-desktop',
                  'work/mrk-android-register', 'work/android-helper-prepare.json'),
     'vault': ('work/vault-helper-target/aarch64-apple-darwin/release/mrk-vault-keychain',
@@ -61,7 +62,7 @@ ROSTER = {
                         'work/package-tar.status', 'work/package-xar.status',
                         'work/android-helper-sign-root-installer.json'),
 }
-OPTIONAL = frozenset({'work/github-seal-capsule'})
+OPTIONAL = frozenset({'work/github-seal-capsule', HISTORY_RECEIPT})
 # The one original Cargo alias may have two links, which must be both known.
 ALIASES = {
     'work/vault-helper-target/aarch64-apple-darwin/release/mrk-vault-keychain': 'mrk_vault_keychain-',
@@ -170,6 +171,12 @@ def observer_name(work):
 def selected_files(part, work, workspace):
     files, directories = {}, {}
     observer = observer_name(work) if part == 'observer' else None
+    if part == 'prepare':
+        # The original verifier independently admits this exact signed receipt
+        # alongside runtime/tools/gh. Neither byte set replaces the other.
+        need(os.path.lexists(work / 'runtime/tools/gh')
+             == os.path.lexists(destination(HISTORY_RECEIPT, work, workspace)),
+             'part-history-capsule-pair')
     def visit(name):
         path = destination(name, work, workspace)
         info = path.lstat()

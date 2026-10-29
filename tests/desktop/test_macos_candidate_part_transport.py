@@ -50,6 +50,16 @@ class CandidatePartTransportTests(unittest.TestCase):
         path = self.root / name; T.write(path, body)
         return path
 
+    def prepare_fixture(self):
+        runtime = self.work / 'runtime'; runtime.mkdir(mode=0o700)
+        T.write(runtime / 'manifest.json', b'inert\n', 0o444)
+        T.write(self.work / 'runtime-binding.json', b'{}\n', 0o444)
+        capsule = self.work / 'signed-python-capsule'; capsule.mkdir(mode=0o700)
+        T.write(capsule / 'python-signed-receipt.json', b'{}\n')
+        android = self.work / 'signed-android-transport'; android.mkdir(mode=0o700)
+        T.write(android / 'receipt.json', b'{}\n')
+        return runtime
+
     def test_completed_bytes_are_freshly_admitted_with_original_modes_and_hashes(self):
         manifest = fixture()[0]
         path = self.saved(self.archive(manifest))
@@ -166,13 +176,7 @@ class CandidatePartTransportTests(unittest.TestCase):
         # The preceding context itself must reject the changed held original.
 
     def test_export_selects_only_completed_output_roster_and_no_compiler_cache(self):
-        runtime = self.work / 'runtime'; runtime.mkdir(mode=0o700)
-        T.write(runtime / 'manifest.json', b'inert\n', 0o444)
-        T.write(self.work / 'runtime-binding.json', b'{}\n', 0o444)
-        capsule = self.work / 'signed-python-capsule'; capsule.mkdir(mode=0o700)
-        T.write(capsule / 'python-signed-receipt.json', b'{}\n')
-        android = self.work / 'signed-android-transport'; android.mkdir(mode=0o700)
-        T.write(android / 'receipt.json', b'{}\n')
+        self.prepare_fixture()
         T.write(self.work / 'unrelated-keychain-secret', b'inert private bytes')
         compiler = self.work / 'cargo-target'; compiler.mkdir(mode=0o700)
         T.write(compiler / 'opaque-cache', b'compiler cache')
@@ -185,6 +189,43 @@ class CandidatePartTransportTests(unittest.TestCase):
         path = self.root / 'export.zip'
         T.encode_archive(path, manifest, files, self.work, self.workspace)
         self.assertEqual(T.archive_manifest(path), manifest)
+
+    def test_original_history_receipt_survives_export_and_fresh_projection(self):
+        runtime = self.prepare_fixture()
+        tools = runtime / 'tools'; tools.mkdir(mode=0o700)
+        T.write(tools / 'gh', b'inert tool bytes\n', 0o555)
+        capsule = self.work / 'history-provider-capsule'; capsule.mkdir(mode=0o700)
+        receipt = b'{"inert":"original receipt bytes, never signing authority"}\n'
+        T.write(capsule / 'tool-signed-receipt.json', receipt, 0o444)
+        T.write(capsule / 'unrelated-output', b'not a selected output\n')
+        files, dirs = T.selected_files('prepare', self.work, self.workspace)
+        self.assertIn(T.HISTORY_RECEIPT, files)
+        self.assertNotIn('work/history-provider-capsule/unrelated-output', files)
+        manifest = fixture()[0]
+        manifest['members'] = [files[n] for n in sorted(files)]
+        manifest['directories'] = [dict(path=n, mode=m) for n,m in sorted(dirs.items())]
+        path = self.root / 'history-export.zip'
+        T.encode_archive(path, manifest, files, self.work, self.workspace)
+        self.assertEqual(T.archive_manifest(path), manifest)
+        parent = self.root / 'fresh-owner'; parent.mkdir(mode=0o700)
+        fresh = parent / self.work.name; fresh.mkdir(mode=0o700)
+        T.project_archive(path, manifest, fresh, self.workspace, {n: 'prepare' for n in files})
+        self.assertEqual(T.read(fresh / 'history-provider-capsule/tool-signed-receipt.json', 4096), receipt)
+        self.assertEqual(T.read(fresh / 'runtime/tools/gh', 4096), b'inert tool bytes\n')
+        self.assertEqual(stat.S_IMODE((fresh / 'history-provider-capsule/tool-signed-receipt.json').stat().st_mode), 0o444)
+        self.assertFalse(manifest['nativeAuthority'] or manifest['installed'] or manifest['productReady'])
+
+    def test_missing_history_tool_receipt_pair_refuses_during_preparation(self):
+        runtime = self.prepare_fixture()
+        tools = runtime / 'tools'; tools.mkdir(mode=0o700)
+        T.write(tools / 'gh', b'inert tool bytes\n', 0o555)
+        with self.assertRaisesRegex(ValueError, '^part-history-capsule-pair$'):
+            T.selected_files('prepare', self.work, self.workspace)
+        (tools / 'gh').unlink()
+        capsule = self.work / 'history-provider-capsule'; capsule.mkdir(mode=0o700)
+        T.write(capsule / 'tool-signed-receipt.json', b'inert receipt\n', 0o444)
+        with self.assertRaisesRegex(ValueError, '^part-history-capsule-pair$'):
+            T.selected_files('prepare', self.work, self.workspace)
 
     def test_failed_or_unclosed_owner_receipt_is_not_reusable(self):
         origin = fixture('sign-cli')[0]['origin']
