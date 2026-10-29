@@ -151,6 +151,30 @@ impl ControlSlot {
         self.wake.notify_all();
         Ok(Publisher { slot: self.clone(), index, serial, at, accepted: false, finished: false })
     }
+    /// Optional status reconciliation yields to already reserved originals.
+    /// Check and reserve under the SAME ControlBook lock, before Document.
+    /// Actual mutation/lock/quit/cancel reservations keep their original policy.
+    pub(crate) fn reserve_reconciliation(self: &Arc<Self>) -> Result<Publisher, BridgeError> {
+        let mut book = match self.book.lock() {
+            Ok(book) => book,
+            Err(error) => { drop(error.into_inner()); self.poisoned(); return Err(BridgeError::cleanup_unknown()); },
+        };
+        if self.is_unknown() { return Err(BridgeError::cleanup_unknown()); }
+        if Self::pending(&book) {
+            return Err(BridgeError::new("busy", "Wait for the original lifecycle projection."));
+        }
+        // All ten publisher records and the dedicated cancel lane are empty.
+        // This is the same bounded General record, with no new owner or slot.
+        let index = 0;
+        let Some(serial) = book.next.checked_add(1) else {
+            drop(book); self.poisoned(); return Err(BridgeError::cleanup_unknown());
+        };
+        book.next = serial; book.pending[index] = Some(PendingPublisher { serial, accepted: false });
+        drop(book);
+        let at = Instant::now(); // AFTER reservation, BEFORE Document.
+        self.wake.notify_all();
+        Ok(Publisher { slot: self.clone(), index, serial, at, accepted: false, finished: false })
+    }
     fn counted(original: &Arc<Control>) -> Option<ControlLatch> {
         original.latches.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_add(1)).ok()?;
         Some(ControlLatch { control: original.clone() })
@@ -419,6 +443,55 @@ impl ControlSlot {
         assert_eq!(R::from_try_lock(&poisoned), R::BookPoisoned);
         let busy: TryLockError<()> = TryLockError::WouldBlock;
         assert_eq!(R::from_try_lock(&busy), R::BookWouldBlock);
+        Self::assert_reconciliation_yields_to_original_publishers();
+    }
+    fn assert_reconciliation_yields_to_original_publishers() {
+        use crate::error::InstalledGitEpochRejection as R;
+        let slot = Arc::new(ControlSlot::default());
+        let mut original = slot.reserve(PublisherKind::General, false).unwrap();
+        // Reproduce the original strict rejection using a real bounded memory
+        // publisher. No Document, Host, source, receipt or native work exists.
+        let intrusive = slot.reserve(PublisherKind::General, false).unwrap();
+        assert_eq!(original.git_local_epoch().unwrap_err().installed_git_epoch_rejection(), Some(R::OtherPublisherPending));
+        intrusive.reject();
+        assert_eq!(original.git_local_epoch().unwrap(), 0);
+        let before = slot.book.lock().unwrap().next;
+        let deferred = slot.reserve_reconciliation();
+        let refused = matches!(&deferred, Err(error) if error.code == "busy");
+        if let Ok(publisher) = deferred { publisher.reject(); }
+        assert!(refused);
+        assert_eq!(slot.book.lock().unwrap().next, before);
+        assert_eq!(original.git_local_epoch().unwrap(), 0);
+        original.accept(wire::Reason::ContextChanged).unwrap();
+        assert!(matches!(slot.reserve_reconciliation(), Err(error) if error.code == "busy"));
+        assert_eq!(original.git_local_epoch().unwrap(), 1);
+        original.finish();
+        assert_eq!(slot.epoch().unwrap(), 1);
+        let projection = slot.reserve_reconciliation().unwrap();
+        assert_eq!(projection.git_local_epoch().unwrap(), 1);
+        // Real mutations still reserve and reject strict Apply while this
+        // optional projection is present; no general publisher policy widens.
+        let later = slot.reserve(PublisherKind::General, false).unwrap();
+        assert_eq!(later.git_local_epoch().unwrap_err().installed_git_epoch_rejection(), Some(R::OtherPublisherPending));
+        later.reject(); projection.reject();
+        assert_eq!(slot.epoch().unwrap(), 1);
+        for kind in [PublisherKind::CredentialLock, PublisherKind::Quit] {
+            let pending = slot.reserve(kind, false).unwrap();
+            let before = slot.book.lock().unwrap().next;
+            assert!(matches!(slot.reserve_reconciliation(), Err(error) if error.code == "busy"));
+            assert_eq!(slot.book.lock().unwrap().next, before);
+            pending.reject();
+        }
+        slot.book.lock().unwrap().cancel = Some(PendingCancel { serial: 99, original: Weak::new(), reviewed: None });
+        assert!(matches!(slot.reserve_reconciliation(), Err(error) if error.code == "busy"));
+        slot.book.lock().unwrap().cancel = None;
+        slot.unknown.store(true, Ordering::SeqCst);
+        assert!(matches!(slot.reserve_reconciliation(), Err(error) if error == BridgeError::cleanup_unknown()));
+        slot.unknown.store(false, Ordering::SeqCst);
+        assert_eq!(slot.epoch().unwrap(), 1);
+        slot.book.lock().unwrap().next = u64::MAX;
+        assert!(matches!(slot.reserve_reconciliation(), Err(error) if error == BridgeError::cleanup_unknown()));
+        assert!(slot.is_unknown());
     }
 }
 

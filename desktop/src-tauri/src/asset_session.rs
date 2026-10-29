@@ -3922,7 +3922,7 @@ impl DocumentBinding {
     }
     pub(crate) fn android_tool_sources_status(&self) -> Result<crate::android_tool_sources::Status, BridgeError> {
         self.reconcile();
-        let mut publisher = self.inner.android_registration_control.reserve(RegistrationPublisherKind::General, false).ok();
+        let mut publisher = self.inner.android_registration_control.reserve_reconciliation().ok();
         let result = (|| {
             let mut state = self.lock(); self.expire(&mut state, Instant::now());
             if let Some(publisher) = publisher.as_mut() { self.android_registration_mismatch_locked(&mut state, publisher)?; }
@@ -4007,7 +4007,7 @@ impl DocumentBinding {
         if let Some(publisher)=publisher{finish_registration_publisher(publisher);}
     }
     pub(crate) fn android_build_status(&self) -> Result<crate::android_build_protocol::Status, BridgeError> {
-        let mut publisher = self.inner.android_registration_control.reserve(RegistrationPublisherKind::General, false).ok();
+        let mut publisher = self.inner.android_registration_control.reserve_reconciliation().ok();
         let result = (|| {
             let mut state = self.lock();
             if let Some(publisher) = publisher.as_mut() { self.android_registration_mismatch_locked(&mut state, publisher)?; }
@@ -5903,10 +5903,11 @@ impl DocumentBinding {
     fn reconcile_scope(&self, evidence_family: Option<bool>) { self.reconcile_checked(evidence_family, None); }
     fn reconcile_installation(&self, id: u32) { self.reconcile_checked(None, Some(id)); }
     fn reconcile_checked(&self, evidence_family: Option<bool>, installation_id: Option<u32>) {
-        let mut publisher=match self.inner.android_registration_control.reserve(RegistrationPublisherKind::General,false) {
+        let mut publisher=match self.inner.android_registration_control.reserve_reconciliation() {
             Ok(publisher)=>Some(publisher),
             // Polling is optional. Leave already-owned closed DATA staged for
-            // the next original poll; saturation is not an invented loss event.
+            // the next original poll; an existing publisher or saturation is
+            // not an invented loss event or permission to interrupt Apply.
             Err(error) if error.code=="busy"=>return,
             Err(_)=>None,
         };
