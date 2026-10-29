@@ -3526,7 +3526,7 @@ jobs:
           MRK_PART_TEST_ROOT: "${{ runner.temp }}"
         shell: "bash"
         run: |
-          "${{ steps.python.outputs.python-path }}" -B -m unittest tests.desktop.test_macos_candidate_parts tests.desktop.test_macos_candidate_part_transport tests.desktop.test_macos_candidate_parts_workflow tests.desktop.test_macos_candidate_stages.FixedSigningFailureDiagnosticTests
+          "${{ steps.python.outputs.python-path }}" -B -m unittest tests.desktop.test_macos_candidate_parts tests.desktop.test_macos_candidate_part_transport tests.desktop.test_macos_candidate_parts_workflow tests.desktop.test_macos_candidate_stages
   candidate-tool26-prepare:
     name: "${{ matrix.native_scope == 'tool-setup' && 'macOS part (Tool26 / prepare)' || 'macOS part (Git27 / prepare)' }}"
     if: "github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-macos-candidate'"

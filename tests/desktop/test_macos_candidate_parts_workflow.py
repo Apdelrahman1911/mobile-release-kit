@@ -50,6 +50,9 @@ class CandidatePartsWorkflowTests(unittest.TestCase):
 
     def test_actual_jobs_preserve_each_original_cut_and_only_the_failed_part_retries(self):
         workflow = yaml(P.WORKFLOW); jobs = workflow['jobs']
+        data_command=jobs['candidate-parts-data']['steps'][-1]['run']
+        self.assertIn('tests.desktop.test_macos_candidate_stages\n',data_command)
+        self.assertNotIn('test_macos_candidate_stages.FixedSigningFailureDiagnosticTests',data_command)
         for scope,(profile,runner) in P.PROFILES.items():
             prefix = 'candidate-' + profile.lower()
             cuts = []

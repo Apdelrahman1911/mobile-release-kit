@@ -1110,7 +1110,11 @@ class CandidateWorkflowTests(unittest.TestCase):
 
     def test_every_group_is_an_independent_fresh_runner_and_has_no_app_build_or_notary(self):
         job=self.saved_test_job()
-        self.assertEqual(self.workflow['jobs']['candidate-tests']['needs'],'engineering-install')
+        caller=self.workflow['jobs']['candidate-tests']
+        self.assertEqual(caller['needs'],['engineering-install',
+            'candidate-tool26-final-package','candidate-git27-final-package'])
+        self.assertIn("needs.candidate-tool26-final-package.result == 'success'",caller['if'])
+        self.assertIn("needs.candidate-git27-final-package.result == 'success'",caller['if'])
         self.assertIs(job['strategy']['fail-fast'],False)
         expression=job['strategy']['matrix']['include']
         literals=re.findall(r"fromJSON\('([^']+)'\)",expression)
