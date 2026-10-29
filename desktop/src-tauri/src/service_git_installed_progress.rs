@@ -1,13 +1,31 @@
 //! Nonshipping, bounded DATA only. No Entry, native owner, source, identifier,
 //! callback or operation authority is reachable from this object.
 use super::{InstalledNativeFailure, NativeLink, Phase};
-use std::sync::atomic::{AtomicU8, AtomicU32, Ordering};
+use std::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 
 #[derive(Default)]
 pub(crate) struct ApplyProgress {
-    mask: AtomicU32,
-    control_mask: AtomicU32,
+    // One original word keeps these two closed progress masks at the same
+    // observation instant. It still carries no coherent native owner status.
+    milestones: AtomicU64,
     first_error: AtomicU8,
+}
+// Shared only with the original OwnerState. This contains bounded DATA, never
+// an Entry, NativeLink, callback or native owner. Central failure recording can
+// freeze the category without taking another application lock.
+pub(crate) struct FailureLatch {
+    first: std::sync::OnceLock<InstalledNativeFailure>,
+    progress: Option<std::sync::Arc<ApplyProgress>>,
+}
+impl FailureLatch {
+    pub(crate) fn new(progress: Option<std::sync::Arc<ApplyProgress>>) -> Self {
+        Self { first: std::sync::OnceLock::new(), progress }
+    }
+    pub(crate) fn capture(&self, code: &str) -> InstalledNativeFailure {
+        let category = *self.first.get_or_init(|| InstalledNativeFailure::from_code(code));
+        if let Some(progress) = &self.progress { progress.first_error(category); }
+        category
+    }
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
 #[serde(rename_all="camelCase")]
@@ -46,19 +64,19 @@ pub(crate) enum Control {
 }
 impl ApplyProgress {
     pub(crate) fn control(&self, point: Control) {
-        self.control_mask.fetch_or(1u32 << point as u8,Ordering::Release);
+        self.milestones.fetch_or(1u64 << (32+point as u8),Ordering::Release);
     }
     pub(crate) fn job(&self, job: Job, point: Point) {
         let index=match job {Job::Publisher=>0,Job::Host=>1,Job::Open=>2,Job::Preparing=>3,
             Job::Candidate=>4,Job::Finish=>5,Job::RetireUse=>6,Job::FinishPublisher=>7};
         let offset=match point {Point::Registered=>0,Point::Entered=>1,Point::JoinReturned=>2};
-        self.mask.fetch_or(1 << (3*index+offset),Ordering::Release);
+        self.milestones.fetch_or(1u64 << (3*index+offset),Ordering::Release);
     }
     pub(crate) fn boundary(&self, boundary: Boundary) {
         let offset=match boundary {Boundary::StartupEntered=>24,Boundary::HostTicketRequested=>25,
             Boundary::HostTicketReturned=>26,Boundary::ReadyHandoffRequested=>27,Boundary::ReadyHandoffReturned=>28,
             Boundary::FinalizeEntered=>29,Boundary::RetireEntered=>30,Boundary::OwnerArmed=>31};
-        self.mask.fetch_or(1 << offset,Ordering::Release);
+        self.milestones.fetch_or(1u64 << offset,Ordering::Release);
     }
     pub(crate) fn first_error(&self, category: InstalledNativeFailure) {
         // The caller already froze this SAME category under OwnerState. This
@@ -69,15 +87,40 @@ impl ApplyProgress {
         let _=self.first_error.compare_exchange(0,byte,Ordering::Release,Ordering::Relaxed);
     }
     pub(crate) fn snapshot(&self) -> Facts {
-        // Separate closed atomics, not a coherent owner status or a join proof.
+        // One atomic snapshot for both masks. The first error remains separate
+        // closed DATA; neither observation is owner status or a join proof.
         use InstalledNativeFailure as F;
-        let mask=self.mask.load(Ordering::Acquire);
-        let control_mask=self.control_mask.load(Ordering::Acquire);
+        let milestones=self.milestones.load(Ordering::Acquire);
+        let mask=milestones as u32;
+        let control_mask=(milestones>>32) as u32;
         let first_error=match self.first_error.load(Ordering::Acquire) {1=>Some(F::CleanupUnknown),2=>Some(F::ContextChanged),
             3=>Some(F::Busy),4=>Some(F::Cancelled),5=>Some(F::ShuttingDown),6=>Some(F::QueryTimeout),
             7=>Some(F::GitLocalRefused),8=>Some(F::InvalidRequest),9=>Some(F::ProtocolError),10=>Some(F::Other),_=>None};
         Facts {mask,control_mask,first_error}
     }
+}
+#[cfg(all(test,debug_assertions,feature="desktop-shell",feature="custom-protocol",feature="macos-installed-observation",
+    not(feature="development-runtime"),not(feature="ubuntu-runtime-publisher"),not(feature="macos-installed-installer"),
+    target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64")))]
+pub(super) fn snapshot_pair_contract_data() {
+    // This standalone object has no Entry/NativeLink/owner. Complementary
+    // halves exercise same-word reads while another DATA thread writes; no
+    // scheduler timing, native work, source, identifier or callback is adopted.
+    let data=std::sync::Arc::new(ApplyProgress::default());
+    data.milestones.store((u32::MAX as u64)<<32,Ordering::Release);
+    let writer=data.clone();
+    let joined=std::thread::spawn(move || {
+        for mask in 0..4096u32 {
+            writer.milestones.store((((!mask) as u64)<<32)|(mask as u64),Ordering::Release);
+        }
+    });
+    for _ in 0..8192 {
+        let facts=data.snapshot();
+        assert_eq!(facts.control_mask,!facts.mask);
+        assert_eq!(facts.first_error,None);
+    }
+    joined.join().expect("the inert progress writer returned");
+    assert_eq!(data.snapshot().mask,4095);
 }
 impl NativeLink {
     pub(crate) fn installed_apply_progress(&self) -> Option<&ApplyProgress> {

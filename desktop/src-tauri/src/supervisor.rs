@@ -323,6 +323,10 @@ struct OwnerState {
     github_device_endpoints: Option<github_device::Endpoints>,
     git_read_endpoints: Option<git_read::Endpoints>,
     git_local_endpoints: Option<git_local::Endpoints>,
+    #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation",
+        not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"),
+        target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+    installed_git_failure: Option<Arc<crate::service_git_requests::installed_progress::FailureLatch>>,
     version_allocation_source_endpoints: Option<version_allocation::Endpoints>,
     terminal: bool, unknown: bool,
     #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
@@ -625,6 +629,10 @@ impl OwnerState {
     }
     fn with_reply(endpoint: Instant, reply: Option<PassiveReply>) -> Self {
         Self { endpoint, cleanup_endpoint: None, error: None, history_endpoints: None, gh_auth_endpoints: None, github_device_endpoints: None, git_read_endpoints: None, git_local_endpoints: None, version_allocation_source_endpoints: None, terminal: false, unknown: false, reply,
+            #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation",
+                not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"),
+                target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+            installed_git_failure: None,
             #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
             native_unknown_pending: false,
             driver_join: ManagementJoin::Pending, watchdog_join: ManagementJoin::Pending,
@@ -649,6 +657,15 @@ impl OwnerState {
             || now.min(self.endpoint) + CLEANUP_TIME, |original| original.first_failure(now)), |original| original.first_failure(now)), |original| original.first_failure(now)), |original| original.first_failure(now)), |original| original.first_failure(now));
         let end = self.github_device_endpoints.map_or(end, |original| original.first_failure(now));
         if self.error.is_none() || self.cleanup_endpoint.is_some_and(|prior| end < prior) { self.error = Some(error); }
+        #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation",
+            not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"),
+            target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+        if let (Some(latch), Some(error)) = (&self.installed_git_failure, &self.error) {
+            // Every original failure path, including clock and management
+            // returns, freezes the same bounded category under OwnerState.
+            // This pure DATA latch cannot publish into Entry or wait on it.
+            latch.capture(&error.code);
+        }
         self.cleanup_endpoint = Some(self.cleanup_endpoint.map_or(end, |prior| prior.min(end)));
     }
     fn management_ready(&self) -> bool {
@@ -708,7 +725,28 @@ pub(crate) fn common_acl_owner_data_check() -> bool {
     if !state.unknown || state.cleanup_endpoint != Some(early + CLEANUP_TIME) { return false; }
     let mut deadline = OwnerState::new(endpoint, None);
     deadline.fail_at(BridgeError::timeout(), endpoint + CLEANUP_TIME);
-    deadline.cleanup_endpoint == Some(endpoint + CLEANUP_TIME)
+    if deadline.cleanup_endpoint != Some(endpoint + CLEANUP_TIME) { return false; }
+    #[cfg(all(debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation",
+        not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer")))]
+    {
+        use crate::service_git_requests::{installed_progress::{ApplyProgress,FailureLatch},InstalledNativeFailure};
+        let progress=Arc::new(ApplyProgress::default());
+        let latch=Arc::new(FailureLatch::new(Some(progress.clone())));
+        let mut original=OwnerState::new(endpoint,None);
+        original.installed_git_failure=Some(latch.clone());
+        // SAME original state-only deadline path, no Invocation, Entry,
+        // native book, task, callback or replacement clock. Publication may
+        // be delayed past an earlier-detected subsequent failure.
+        original.fail_at(BridgeError::timeout(),late);
+        if latch.capture("busy")!=InstalledNativeFailure::QueryTimeout {return false;}
+        original.fail_at(BridgeError::unavailable("DATA"),early);
+        if original.error.as_ref().is_none_or(|e|e.code!=BridgeError::unavailable("DATA").code)
+            || original.cleanup_endpoint!=Some(early+CLEANUP_TIME)
+            || original.endpoint!=endpoint || original.unknown {return false;}
+        if serde_json::to_value(progress.snapshot()).ok()!=Some(serde_json::json!({"mask":0,"controlMask":0,"firstError":"query-timeout"})) {return false;}
+        if latch.capture("CANARY_PRIVATE")!=InstalledNativeFailure::QueryTimeout {return false;}
+    }
+    true
 }
 
 // The SAME acquisition's error return, not another owner or receipt. The raw
@@ -1686,6 +1724,10 @@ impl Supervisor {
             None=>(None,None,None),
         };
         let (stop, _) = watch::channel(false);
+        #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation",
+            not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"),
+            target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+        let installed_git_failure=git_local.as_ref().map(git_local::Invocation::installed_failure_latch);
         let owner = Arc::new(Owner {
             key, id, profile, github_receipt, preflight_receipt, preflight_request, preflight_gate, release_receipt, release_request, release_gate, setup_receipt, setup_request, setup_gate,
             publication_receipt,publication_request,publication_gate,
@@ -1696,7 +1738,12 @@ impl Supervisor {
             github_activity_receipt,github_activity_request,github_activity_gate,
             setup_material, setup_first_bound, secret_sealed: Mutex::new(secret_cipher),
             history_nomination,history_gate,history_receipt,history_endpoints, gh_auth, gh_auth_endpoints, github_device, github_device_read_gate:device_read_end.map(|(_,gate)|gate), github_device_endpoints, git_read, git_read_endpoints, git_local, git_local_endpoints, version_allocation_source, version_allocation_source_endpoints, version_enrollment,
-            preflight_go_claimed: AtomicBool::new(false), state: Mutex::new({let mut state=OwnerState::with_reply(endpoint,reply);state.history_endpoints=history_endpoints;state.gh_auth_endpoints=gh_auth_endpoints;state.github_device_endpoints=github_device_endpoints;state.git_read_endpoints=git_read_endpoints;state.git_local_endpoints=git_local_endpoints;state.version_allocation_source_endpoints=version_allocation_source_endpoints;state}),
+            preflight_go_claimed: AtomicBool::new(false), state: Mutex::new({let mut state=OwnerState::with_reply(endpoint,reply);state.history_endpoints=history_endpoints;state.gh_auth_endpoints=gh_auth_endpoints;state.github_device_endpoints=github_device_endpoints;state.git_read_endpoints=git_read_endpoints;state.git_local_endpoints=git_local_endpoints;state.version_allocation_source_endpoints=version_allocation_source_endpoints;
+                #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation",
+                    not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"),
+                    target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+                {state.installed_git_failure=installed_git_failure;}
+                state}),
             resources: AsyncMutex::new(Resources {
                 #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]
                 passive: if passive_selected(profile) {

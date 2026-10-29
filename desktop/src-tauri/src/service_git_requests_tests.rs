@@ -42,6 +42,22 @@ pub(super) fn installed_cli_native_progress_data()->Arc<installed_progress::Appl
         assert_eq!(serde_json::to_value(all.snapshot()).unwrap(),serde_json::json!({"mask":0,"controlMask":expected,"firstError":null}));
     }
     assert_eq!(expected,u32::MAX);
+    let jobs=[Job::Publisher,Job::Host,Job::Open,Job::Preparing,Job::Candidate,Job::Finish,Job::RetireUse,Job::FinishPublisher];
+    let boundaries=[Boundary::StartupEntered,Boundary::HostTicketRequested,Boundary::HostTicketReturned,
+        Boundary::ReadyHandoffRequested,Boundary::ReadyHandoffReturned,Boundary::FinalizeEntered,Boundary::RetireEntered,Boundary::OwnerArmed];
+    let mut expected_mask=0u32;
+    for (index,job) in jobs.into_iter().enumerate() {
+        for (offset,point) in [Point::Registered,Point::Entered,Point::JoinReturned].into_iter().enumerate() {
+            all.job(job,point);all.job(job,point);expected_mask|=1u32<<(3*index+offset);
+            assert_eq!(serde_json::to_value(all.snapshot()).unwrap(),serde_json::json!({"mask":expected_mask,"controlMask":u32::MAX,"firstError":null}));
+        }
+    }
+    for (index,boundary) in boundaries.into_iter().enumerate() {
+        all.boundary(boundary);all.boundary(boundary);expected_mask|=1u32<<(24+index);
+        assert_eq!(serde_json::to_value(all.snapshot()).unwrap(),serde_json::json!({"mask":expected_mask,"controlMask":u32::MAX,"firstError":null}));
+    }
+    assert_eq!(expected_mask,u32::MAX);
+    installed_progress::snapshot_pair_contract_data();
     data
 }
 

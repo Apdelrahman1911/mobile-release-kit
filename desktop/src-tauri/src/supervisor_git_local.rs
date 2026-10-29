@@ -40,7 +40,7 @@ pub(super) struct Invocation {
     #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation",
         not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"),
         target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
-    first_native_failure:std::sync::OnceLock<crate::service_git_requests::InstalledNativeFailure>,
+    first_native_failure:Arc<crate::service_git_requests::installed_progress::FailureLatch>,
     request:Mutex<Option<Arc<wire::Request>>>,child_reply:Mutex<Option<wire::Terminal>>,
     candidate:Mutex<Option<Arc<wire::Candidate>>>,ack_returned:AtomicBool,control_closed:Mutex<Option<ControlClosed>>,
     publication:Mutex<Option<GitLocalPublication>>,
@@ -220,11 +220,15 @@ impl GitLocalAdmission {
             let mut slots=crate::installed_runtime::GitLocalRuntimeSlots::new();
             slots.reserve_once().map_err(|_|BridgeError::unavailable("The bounded local Git storage is unavailable."))?;
             let slots=Arc::new(Mutex::new(slots));
+            #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation",
+                not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"),
+                target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+            let first_native_failure=Arc::new(crate::service_git_requests::installed_progress::FailureLatch::new(gate.installed_apply_progress_data()));
             Ok(Self {invocation:Invocation {context:gate.context(),gate,action,phase,
                 #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation",
                     not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"),
                     target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
-                first_native_failure:std::sync::OnceLock::new(),
+                first_native_failure,
                 receipt:Arc::new(Mutex::new(GitLocalReceipt::Pending)),request:Mutex::new(None),child_reply:Mutex::new(None),
                 candidate:Mutex::new(None),ack_returned:AtomicBool::new(false),control_closed:Mutex::new(None),publication:Mutex::new(None),
                 fetch_keep:Mutex::new(None),upstream_ack:Mutex::new(None),fetch_go_claimed:AtomicBool::new(false),
@@ -297,9 +301,13 @@ impl Invocation {
     pub(super) fn installed_capture_native_failure(&self,code:&str)->crate::service_git_requests::InstalledNativeFailure {
         // Called under the original OwnerState lock. No second lock or IO;
         // delayed publishers all carry this SAME first immutable category.
-        let category=*self.first_native_failure.get_or_init(||crate::service_git_requests::InstalledNativeFailure::from_code(code));
-        if let Some(progress)=self.gate.installed_apply_progress() {progress.first_error(category);}
-        category
+        self.first_native_failure.capture(code)
+    }
+    #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation",
+        not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"),
+        target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+    pub(super) fn installed_failure_latch(&self)->Arc<crate::service_git_requests::installed_progress::FailureLatch> {
+        self.first_native_failure.clone()
     }
     fn observation_stderr(&self,id:&str,bytes:&[u8])->bool {
         #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation", not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"), target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
