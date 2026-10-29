@@ -238,7 +238,7 @@ def encode_archive(path, manifest, files, work, workspace):
     exclusive(path, writer, 0o444)
 
 
-def archive_entries(stream, length, *, maximum_members):
+def archive_entries(stream, length, *, maximum_members, service_descriptor=False):
     need(22 <= length <= P.TOTAL_LIMIT + P.MANIFEST_LIMIT + 16 * 1024 * 1024, 'part-archive-bound')
     stream.seek(length - 22)
     footer = struct.unpack('<4s4H2LH', stream.read(22))
@@ -256,18 +256,29 @@ def archive_entries(stream, length, *, maximum_members):
              + len(i.extra) + len(i.comment) for i in infos) == footer[5], 'part-central-exact-span')
     offset, entries = 0, {}
     for info in infos:
+        descriptor = service_descriptor and info.flag_bits in (8, 0x808)
         need(info.header_offset == offset and info.compress_type in (0, 8)
-             and info.flag_bits in (0, 0x800) and not info.extra and not info.comment
+             and (info.flag_bits in (0, 0x800) or descriptor) and not info.extra and not info.comment
              and info.volume == 0 and not info.is_dir() and not stat.S_ISLNK(info.external_attr >> 16), 'part-zip-member')
         stream.seek(offset)
         header = struct.unpack('<4s5H3L2H', stream.read(30))
         encoded = info.filename.encode('utf-8' if info.flag_bits & 0x800 else 'ascii')
         need(header[0] == b'PK\x03\x04' and header[2] == info.flag_bits and header[3] == info.compress_type
-             and header[6:9] == (info.CRC, info.compress_size, info.file_size)
+             and header[6:9] == ((0, 0, 0) if descriptor else (info.CRC, info.compress_size, info.file_size))
              and header[9:] == (len(encoded), 0) and stream.read(len(encoded)) == encoded,
              'part-local-central-correspondence')
         start = offset + 30 + len(encoded)
         offset = start + info.compress_size
+        if descriptor:
+            # The actual GitHub wrapper streams one signed 16-byte descriptor.
+            # Match every field to the central original; never infer sizes/CRC
+            # from an empty local header or scan for a payload signature.
+            need(offset + 16 <= footer[6], 'part-service-descriptor-span')
+            stream.seek(offset)
+            need(stream.read(16) == struct.pack('<4s3L', b'PK\x07\x08', info.CRC,
+                                              info.compress_size, info.file_size),
+                 'part-service-descriptor-correspondence')
+            offset += 16
         need(offset <= footer[6], 'part-zip-member-span')
         entries[info.filename] = (info, start)
     need(offset == footer[6], 'part-zip-span-roster')
@@ -463,7 +474,7 @@ def restore(part, work, workspace):
         with original(outer, artifact['size_in_bytes']) as (stream, info):
             need(info.st_size == artifact['size_in_bytes'] and 'sha256:' + hashlib.file_digest(stream, 'sha256').hexdigest()
                  == artifact.get('digest'), 'part-service-original-digest')
-            entries = archive_entries(stream, info.st_size, maximum_members=1)
+            entries = archive_entries(stream, info.st_size, maximum_members=1, service_descriptor=True)
             need(set(entries) == {'PART.zip'}, 'part-service-wrapper-roster')
             exclusive(inner, lambda out: stream_member(stream, entries['PART.zip'], P.TOTAL_LIMIT, out), 0o444)
         manifest = archive_manifest(inner)

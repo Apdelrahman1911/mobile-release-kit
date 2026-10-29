@@ -115,6 +115,36 @@ class CandidatePartTransportTests(unittest.TestCase):
             with self.subTest(change=change), self.assertRaises(ValueError):
                 T.stream_member(stream, (wrong, start), len(body), io.BytesIO())
 
+    def test_actual_service_streamed_descriptor_matches_central_and_payload_crc(self):
+        class Unseekable(io.BytesIO):
+            def seekable(self): return False
+            def seek(self,*args): raise OSError('inert nonseekable service writer')
+        body=b'fixed inert part bytes\n'*100
+        for codec in (zipfile.ZIP_STORED,zipfile.ZIP_DEFLATED):
+            archive=Unseekable()
+            with zipfile.ZipFile(archive,'w',compression=codec) as out:
+                out.writestr('PART.zip',body)
+            raw=archive.getvalue()
+            self.assertEqual(struct.unpack_from('<H',raw,6)[0],8)
+            self.assertEqual(raw[14:26],b'\0'*12)
+            with self.assertRaises(ValueError):
+                T.archive_entries(io.BytesIO(raw),len(raw),maximum_members=1)
+            entries=T.archive_entries(io.BytesIO(raw),len(raw),maximum_members=1,service_descriptor=True)
+            out=io.BytesIO()
+            self.assertEqual(T.stream_member(io.BytesIO(raw),entries['PART.zip'],len(body),out),hashlib.sha256(body).hexdigest())
+            self.assertEqual(out.getvalue(),body)
+            descriptor=raw.index(b'PK\x07\x08')
+            for field in (0,4,8,12):
+                bad=bytearray(raw);bad[descriptor+field]^=1
+                with self.subTest(codec=codec,field=field),self.assertRaises(ValueError):
+                    T.archive_entries(io.BytesIO(bad),len(bad),maximum_members=1,service_descriptor=True)
+            bad=bytearray(raw);bad[14]=1
+            with self.assertRaises(ValueError):
+                T.archive_entries(io.BytesIO(bad),len(bad),maximum_members=1,service_descriptor=True)
+            info,start=entries['PART.zip'];bad=bytearray(raw);bad[start]^=1
+            with self.assertRaises((ValueError,__import__('zlib').error)):
+                T.stream_member(io.BytesIO(bad),entries['PART.zip'],len(body),io.BytesIO())
+
     def test_links_attributes_unknown_closes_and_changed_originals_never_publish_success(self):
         path = self.saved(b'fixed\n', 'original')
         alias = self.root / 'alias'; os.link(path, alias)
