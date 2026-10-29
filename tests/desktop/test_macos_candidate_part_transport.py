@@ -14,6 +14,7 @@ import stat
 import struct
 import tempfile
 import sys
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 import zipfile
@@ -59,6 +60,105 @@ class CandidatePartTransportTests(unittest.TestCase):
         android = self.work / 'signed-android-transport'; android.mkdir(mode=0o700)
         T.write(android / 'receipt.json', b'{}\n')
         return runtime
+
+    def signed_app_fixture(self):
+        origin = fixture('assemble')[0]['origin']
+        bodies = {T.S.ENTRY_BINARY: b'inert signed entry\n', T.S.APP_BINARY: b'inert signed payload\n'}
+        for name, body in bodies.items():
+            path = self.work / 'app' / T.S.APP_NAME / name
+            path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+            T.write(path, body, 0o555)
+        T.write(self.work / 'app-result.json', b'{}\n', 0o444)
+        receipts = {}
+        for phase in T.RECEIPTS['assemble']:
+            row = dict(phase=phase, source=origin['source'], workflowSource=origin['source'],
+                       runId=origin['runId'], runAttempt=origin['runAttempt'], target=T.P.TARGET,
+                       passed=True, targetRetired=True, originalClosesKnown=True)
+            if phase in ('sign-root-app', 'sign-desktop-payload'):
+                leaf = T.S.ENTRY_BINARY if phase == 'sign-root-app' else T.S.APP_BINARY
+                row['signedBytesSha256'] = T.P.sha(bodies[leaf])
+            receipts[phase] = row
+            T.write(self.work / ('android-helper-' + phase + '.json'), T.P.canonical(row), 0o444)
+        return origin, bodies, receipts
+
+    def test_signed_app_hashes_survive_archive_and_fresh_projection(self):
+        origin, bodies, _ = self.signed_app_fixture()
+        files, dirs = T.selected_files('assemble', self.work, self.workspace)
+        manifest = fixture('assemble')[0]
+        manifest['members'] = [files[n] for n in sorted(files)]
+        manifest['directories'] = [dict(path=n, mode=m) for n, m in sorted(dirs.items())]
+        path = self.root / 'signed-app.zip'
+        T.encode_archive(path, manifest, files, self.work, self.workspace)
+        self.assertEqual(T.archive_manifest(path), manifest)
+        parent = self.root / 'fresh-signed-owner'; parent.mkdir(mode=0o700)
+        fresh = parent / self.work.name; fresh.mkdir(mode=0o700)
+        T.project_archive(path, manifest, fresh, self.workspace, {n: 'assemble' for n in files})
+        values = T.signed_app_bindings(fresh, origin)
+        self.assertEqual(values, {'MRK_MACOS_SIGNED_ENTRY_SHA256': T.P.sha(bodies[T.S.ENTRY_BINARY]),
+                                 'MRK_MACOS_SIGNED_PAYLOAD_SHA256': T.P.sha(bodies[T.S.APP_BINARY])})
+        self.assertFalse(manifest['nativeAuthority'] or manifest['installed'] or manifest['productReady'])
+
+    def test_signed_hash_data_requires_same_original_receipts_and_fresh_bytes(self):
+        origin, bodies, receipts = self.signed_app_fixture()
+        for name, body in bodies.items():
+            path = self.work / 'app' / T.S.APP_NAME / name
+            path.unlink(); T.write(path, b'changed signed bytes\n', 0o555)
+            with self.subTest(leaf=name), self.assertRaisesRegex(ValueError, '^part-signed-app-correspondence$'):
+                T.signed_app_bindings(self.work, origin)
+            with patch.object(T, 'current', return_value=origin), \
+                 self.assertRaisesRegex(ValueError, '^part-signed-app-correspondence$'):
+                T.freeze('assemble', self.work, self.workspace)
+            path.unlink(); T.write(path, body, 0o555)
+        path = self.work / 'android-helper-sign-root-app.json'
+        for key, value in (('passed', False), ('originalClosesKnown', False), ('targetRetired', False),
+                           ('runAttempt', '9'), ('source', '3' * 40)):
+            wrong = dict(receipts['sign-root-app'], **{key: value})
+            path.unlink(); T.write(path, T.P.canonical(wrong), 0o444)
+            with self.subTest(field=key), self.assertRaisesRegex(ValueError, '^part-original-owner-completion$'):
+                T.signed_app_bindings(self.work, origin)
+        path.unlink(); T.write(path, T.P.canonical(receipts['sign-root-app']), 0o444)
+        binary = self.work / 'app' / T.S.APP_NAME / T.S.ENTRY_BINARY
+        binary.chmod(0o444)
+        with self.assertRaisesRegex(ValueError, '^part-signed-app-correspondence$'):
+            T.signed_app_bindings(self.work, origin)
+
+    def test_original_notary_first_signature_predicate_keeps_missing_or_wrong_hashes_strict(self):
+        # Execute the unchanged original consumer through its first signed-byte
+        # predicate using inert DATA ports, stopping before further parsing.
+        # This is not a complete original input/notary/native qualification.
+        origin, bodies, _ = self.signed_app_fixture()
+        values = T.signed_app_bindings(self.work, origin)
+        S = T.S
+        names = {S.ENTRY_BINARY, S.APP_BINARY, S.VAULT_HELPER, S.ANDROID_HELPER, S.ANDROID_SERVICE_PLIST,
+                 S.RESIDENT_IMAGE, S.REMOVER, S.INSTALLED_CLI, 'Contents/Info.plist', S.PAYLOAD_INFO,
+                 'Contents/PkgInfo', S.PAYLOAD_CONTENTS + 'PkgInfo', 'Contents/Resources/icon.png',
+                 S.PAYLOAD_CONTENTS + 'Resources/icon.png', 'Contents/_CodeSignature/CodeResources',
+                 S.PAYLOAD_CONTENTS + '_CodeSignature/CodeResources'}
+        app = {name: (b'inert\n', 0o555) for name in names}
+        app.update({name: (body, 0o555) for name, body in bodies.items()})
+        app['Contents/Info.plist'] = (b'inert entry info', 0o644)
+        app[S.PAYLOAD_INFO] = (b'inert payload info', 0o644)
+        args = SimpleNamespace(target=T.P.TARGET, package_role='installed-shell-observation', current_runtime=True,
+                               expected_resident_image='1' * 64, expected_android_helper='2' * 64,
+                               runtime=self.work / 'runtime', expected_manifest='3' * 64, app=self.work / 'app')
+        class OriginalPredicatePassed(Exception): pass
+        with patch.object(S, 'command_target', return_value=T.P.TARGET), \
+             patch.object(S, 'source_build_selection', return_value=None), \
+             patch.object(S, 'runtime_tree', return_value={}), patch.object(S, 'tree', return_value=app), \
+             patch.object(S, 'android_support_manifest', return_value=('4' * 64, [])), \
+             patch.object(S, 'source_entry_info', return_value=b'inert entry info'), \
+             patch.object(S, 'source_app_info', return_value=b'inert payload info'), \
+             patch.object(S, 'applications_launcher_files', return_value={}), \
+             patch.object(S, 'ticket_input_names', return_value=set()), \
+             patch.object(S, 'entry_macho', side_effect=OriginalPredicatePassed):
+            entry, payload = values['MRK_MACOS_SIGNED_ENTRY_SHA256'], values['MRK_MACOS_SIGNED_PAYLOAD_SHA256']
+            for pair in ((None, None), (None, payload), (entry, None), ('5' * 64, payload), (entry, '6' * 64)):
+                args.expected_entry, args.expected_app_binary = pair
+                with self.subTest(pair=pair), self.assertRaisesRegex(S.Refused, '^final-entry-payload-signature-bytes-changed$'):
+                    S.input_with_github_seal(args, {})
+            args.expected_entry, args.expected_app_binary = entry, payload
+            with self.assertRaises(OriginalPredicatePassed):
+                S.input_with_github_seal(args, {})
 
     def test_completed_bytes_are_freshly_admitted_with_original_modes_and_hashes(self):
         manifest = fixture()[0]

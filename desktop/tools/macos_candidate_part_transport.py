@@ -224,6 +224,22 @@ def receipt_checks(part, work, origin):
              'part-original-caller-zero')
 
 
+def signed_app_bindings(work, origin):
+    """Recompute fixed signed-byte DATA; never copy a producer environment."""
+    receipt_checks('assemble', work, origin)
+    values = {}
+    for variable, leaf, phase in (
+            ('MRK_MACOS_SIGNED_ENTRY_SHA256', S.ENTRY_BINARY, 'sign-root-app'),
+            ('MRK_MACOS_SIGNED_PAYLOAD_SHA256', S.APP_BINARY, 'sign-desktop-payload')):
+        row = json.loads(read(work / ('android-helper-' + phase + '.json'), 16384))
+        with original(work / 'app' / S.APP_NAME / leaf, P.MEMBER_LIMIT) as (stream, info):
+            digest = hashlib.file_digest(stream, 'sha256').hexdigest()
+            need(stat.S_IMODE(info.st_mode) == 0o555 and P.hex_data(row.get('signedBytesSha256'))
+                 and digest == row['signedBytesSha256'], 'part-signed-app-correspondence')
+        values[variable] = digest
+    return values
+
+
 def encode_archive(path, manifest, files, work, workspace):
     body = P.canonical(P.manifest_data(manifest))
     def writer(stream):
@@ -436,6 +452,8 @@ def resource(work, amount):
 def freeze(part, work, workspace):
     origin = current(part, work)
     receipt_checks(part, work, origin)
+    if part == 'assemble':
+        signed_app_bindings(work, origin)
     files, directories = selected_files(part, work, workspace)
     dependencies = P.decode(read(work / 'part-dependencies.json', P.MANIFEST_LIMIT)) if part != 'prepare' else []
     manifest = dict(schemaVersion=1, scope=P.SCOPE, part=part, origin=origin, workName=work.name,
@@ -521,6 +539,8 @@ def restore(part, work, workspace):
         name = observer_name(work); path = work / 'cargo-target' / P.TARGET / 'debug/deps' / name
         with original(path, P.MEMBER_LIMIT) as (stream, info): values['MRK_MACOS_OBSERVER_SHA256'] = hashlib.file_digest(stream, 'sha256').hexdigest()
         values['MRK_MACOS_OBSERVER_BINARY'] = str(path)
+    if 'assemble' in manifests:
+        values.update(signed_app_bindings(work, manifests['assemble']['origin']))
     if os.path.lexists(work / 'input-result.json'):
         values['MRK_MACOS_INSTALL_INVENTORY_SHA256'] = json.loads(read(work / 'input-result.json', 2048))['inventorySha256']
         need(P.hex_data(values['MRK_MACOS_INSTALL_INVENTORY_SHA256']), 'part-inventory-data')
