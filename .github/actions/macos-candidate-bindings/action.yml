@@ -1,0 +1,112 @@
+name: "Current runtime and packaging SOURCE bindings"
+description: "Fresh source binding with unchanged original runtime and packaging checks"
+outputs:
+  history-enabled:
+    description: "Closed SOURCE nomination"
+    value: "${{ steps.github_tools.outputs.history-enabled }}"
+  seal-enabled:
+    description: "Closed SOURCE nomination"
+    value: "${{ steps.github_tools.outputs.seal-enabled }}"
+runs:
+  using: "composite"
+  steps:
+    - name: "Latch the same computed runtime binding before any application compilation"
+      shell: "bash"
+      run: |
+        set -euo pipefail
+        set -o noclobber
+        umask 077
+        /usr/bin/env -i PATH=/usr/bin:/bin HOME="$MRK_MACOS_WORK" TMPDIR="$MRK_MACOS_WORK" LANG=C LC_ALL=C TZ=UTC \
+          "$MRK_PYTHON" -I -S -B desktop/tools/stage_macos_installed.py finalize-runtime-binding \
+          --target "$MRK_MACOS_TARGET" --work-root "$MRK_MACOS_WORK" > "$MRK_MACOS_WORK/runtime-binding-result.json"
+        "$MRK_PYTHON" -I -S -B - <<'PY_COMPOSED_BINDING'
+        import json, os, re, stat
+        root = os.environ["MRK_MACOS_WORK"]
+        fd = os.open(root + "/runtime-binding-result.json", os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+        try:
+            info = os.fstat(fd)
+            if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_size > 4096:
+                raise ValueError("computed runtime result original")
+            value = json.loads(os.read(fd, 4097))
+        finally: os.close(fd)
+        keys = {"sourceInputsSha256": "MRK_BUNDLED_RUNTIME_SOURCE_SHA256",
+                "runtimeManifestSha256": "MRK_BUNDLED_RUNTIME_MANIFEST_SHA256",
+                "runtimeBindingSha256": "MRK_MACOS_RUNTIME_BINDING_SHA256"}
+        if type(value) is not dict or set(value) != set(keys): raise ValueError("computed runtime binding shape")
+        if any(type(v) is not str or not re.fullmatch(r"[0-9a-f]{64}", v) or v == "0" * 64 for v in value.values()):
+            raise ValueError("computed runtime binding digest")
+        fd = os.open(os.environ["GITHUB_ENV"], os.O_WRONLY | os.O_APPEND | os.O_NOFOLLOW | os.O_CLOEXEC)
+        try:
+            info = os.fstat(fd)
+            if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1 or info.st_uid != os.getuid():
+                raise ValueError("workflow environment original")
+            body = "".join(keys[k] + "=" + value[k] + "\n" for k in keys).encode("ascii")
+            while body:
+                written = os.write(fd, body)
+                if written <= 0: raise OSError("workflow binding write")
+                body = body[written:]
+            os.fsync(fd)
+        finally: os.close(fd)
+        PY_COMPOSED_BINDING
+    - name: "Select only SOURCE-enrolled current signed GitHub tools"
+      id: "github_tools"
+      shell: "bash"
+      env:
+        RUNNER_ENVIRONMENT: "${{ runner.environment }}"
+      run: |
+        set -euo pipefail
+        umask 077
+        selection=$("$MRK_PYTHON" -I -S -B desktop/tools/macos_android_helper_package.py select-github-tools-signed --target "$MRK_MACOS_TARGET")
+        [[ ${#selection} -le 16384 ]] || exit 1
+        "$MRK_PYTHON" -I -S -B - "$selection" <<'PY_TOOL_SELECTION'
+        import json, os, re, sys
+        value = json.loads(sys.argv[1]); output = {}; environment = {}
+        for purpose, key in [('history-provider', 'history'), ('github-seal', 'seal')]:
+            row = value['tools'][purpose]; output[key + '-enabled'] = 'false' if row is None else 'true'
+            if row is not None:
+                signed = row['signed']
+                for field, suffix in [('runId', 'run-id'), ('artifactId', 'artifact-id')]:
+                    item = signed[field]
+                    if type(item) is not str or not re.fullmatch(r'[1-9][0-9]{0,15}', item): raise ValueError('tool transport binding')
+                    output[key + '-' + suffix] = item
+                if key == 'seal':
+                    environment['MRK_MACOS_GITHUB_SEAL_SHA256'] = signed['signedSha256']
+                    environment['MRK_MACOS_GITHUB_SEAL_BYTES'] = str(signed['signedBytes'])
+        with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='ascii') as out:
+            for key, value in output.items(): out.write(key + '=' + value + '\n')
+        with open(os.environ['GITHUB_ENV'], 'a', encoding='ascii') as out:
+            for key, value in environment.items(): out.write(key + '=' + value + '\n')
+        PY_TOOL_SELECTION
+    - name: "Require the fixed SOURCE producer identity and release before ordinary signing"
+      id: "app_selection"
+      shell: "bash"
+      run: |
+        set -euo pipefail
+        set -o noclobber
+        umask 077
+        # Public SOURCE DATA only. This is not a signature/purpose verdict or
+        # a credential source; the native producer/parent verify independently.
+        "$MRK_PYTHON" -I -S -B desktop/tools/stage_macos_installed.py packaging-selection \
+          --target "$MRK_MACOS_TARGET" > "$MRK_MACOS_WORK/packaging-selection.json"
+        "$MRK_PYTHON" -I -S -B - <<'PY_PACKAGING_SELECTION'
+        import json, os, re
+        from pathlib import Path
+        body = (Path(os.environ["MRK_MACOS_WORK"]) / "packaging-selection.json").read_bytes()
+        if not 0 < len(body) <= 4096: raise ValueError("SOURCE selection bound")
+        row = json.loads(body)
+        if (type(row) is not dict or row.get("schemaVersion") != 1
+                or row.get("kind") != "source-packaging-selection-data"
+                or row.get("target") != os.environ["MRK_MACOS_TARGET"] or row.get("nativeAuthority") is not False
+                or not isinstance(row.get("leafCertificateSha1"), str)
+                or re.fullmatch(r"[0-9a-f]{40}", row["leafCertificateSha1"]) is None
+                or row["leafCertificateSha1"] == "0" * 40
+                or not isinstance(row.get("packageVersion"), str)
+                or len(row["packageVersion"]) > 32
+                or re.fullmatch(r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)", row["packageVersion"]) is None
+                or any(int(part) > 0xffffffff for part in row["packageVersion"].split("."))
+                or row["packageVersion"] == "0.1.0"):
+            raise ValueError("fixed SOURCE selection")
+        with open(os.environ["GITHUB_ENV"], "a", encoding="ascii") as output:
+            output.write("MRK_MACOS_SOURCE_SIGNER_SHA1=" + row["leafCertificateSha1"] + "\n")
+            output.write("MRK_MACOS_SOURCE_PACKAGE_VERSION=" + row["packageVersion"] + "\n")
+        PY_PACKAGING_SELECTION

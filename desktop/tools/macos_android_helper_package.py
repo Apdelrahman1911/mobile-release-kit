@@ -2305,7 +2305,9 @@ _APP_ABSENCE_BASELINE_REASONS = frozenset((
     "app-absence-baseline-parent-original", "app-absence-baseline-volume",
 ))
 
-_FAILURE_REASONS = frozenset((*_APP_ABSENCE_BASELINE_REASONS, *_FAILURE_SETUP_REASONS, *_FAILURE_PRODUCT_REASONS, *("original-nonzero-" + role for role in _FAILURE_SETUP_ROLES + _FAILURE_FIXTURE_ROLES),
+_FIXED_SIGNING_DIAGNOSTIC_ROLES = SIGNING_PHASES + tuple(phase + "-verify" for phase in SIGNING_PHASES)
+
+_FAILURE_REASONS = frozenset((*_APP_ABSENCE_BASELINE_REASONS, *_FAILURE_SETUP_REASONS, *_FAILURE_PRODUCT_REASONS, *("original-nonzero-" + role for role in _FAILURE_SETUP_ROLES + _FAILURE_FIXTURE_ROLES + _FIXED_SIGNING_DIAGNOSTIC_ROLES),
     "candidate-fixture-terminal", "candidate-fixture-helper-source", "candidate-fixture-build-selection", "candidate-fixture-source-finality",
     *_FAILURE_NOTARY_REASONS, *FINAL_IMAGE_STAPLE_REASONS, *DISTRIBUTION_STAGER_REASONS, *FINAL_IMAGE_INPUT_STAGER_REASONS,
     *( 'original-nonzero-' + role for role in _PACKAGE_DIAGNOSTIC_ROLES),
@@ -2745,6 +2747,42 @@ def remove_producer_refusal_data(phase, record):
     return None
 
 
+_FIXED_SIGNING_TEXT_HINTS = (
+    ("security-internal-component-text", b"errSecInternalComponent"),
+    ("timestamp-service-unavailable-text", b"The timestamp service is not available"),
+    ("timestamp-missing-text", b"A timestamp was expected but was not found"),
+    ("keychain-item-missing-text", b"The specified item could not be found in the keychain"),
+    ("interaction-disallowed-text", b"User interaction is not allowed"),
+    ("certificate-untrusted-text", b"CSSMERR_TP_NOT_TRUSTED"),
+    ("certificate-expired-text", b"CSSMERR_TP_CERT_EXPIRED"),
+    ("certificate-chain-text", b"unable to build chain to self-signed root"),
+    ("resource-attributes-text", b"resource fork, Finder information, or similar detritus not allowed"),
+)
+
+
+def fixed_signing_text_hints(stdout, stderr):
+    """Closed stderr observations only, never signing success or cause proof."""
+    if type(stdout) is not bytes or type(stderr) is not bytes or len(stdout) + len(stderr) > 65536:
+        return None
+    return [label for label, text in _FIXED_SIGNING_TEXT_HINTS if text in stderr]
+
+
+def fixed_signing_failure_data(phase, record):
+    if (type(phase) is not str or phase not in SIGNING_PHASES or type(record) is not dict
+            or type(record.get("role")) is not str or record["role"] not in (phase, phase + "-verify")
+            or not all(record.get(key) is True for key in ("entered", "returned", "capturesSettled"))
+            or type(record.get("returncode")) is not int
+            or not -65536 <= record["returncode"] <= 65535 or record["returncode"] == 0):
+        return None
+    hints = record.get("fixedSigningTextHints")
+    labels = tuple(label for label, _ in _FIXED_SIGNING_TEXT_HINTS)
+    if (type(hints) is not list or len(hints) > len(labels)
+            or any(type(label) is not str or label not in labels for label in hints)
+            or hints != [label for label in labels if label in hints]):
+        return None
+    return list(hints)
+
+
 def failure_diagnostic(error, *, phase=None, target=None, main_stage=None, operation=None, stager=None):
     """Bounded passive DATA; no owner callbacks, file reads, or state changes."""
     def row(value):
@@ -2859,9 +2897,10 @@ def failure_diagnostic(error, *, phase=None, target=None, main_stage=None, opera
             "errno": integer(captured.get("errno", original.get("errno")), 1, 65535),
         },
         "lastRecordedNative": {
+            "fixedSigningTextHints": fixed_signing_failure_data(state.get("phase"), native),
             "removeProducerReason": remove_producer_refusal_data(state.get("phase"), native),
             "notarySubmitDiagnostic": notary_submit_diagnostic_data(state.get("phase"), native),
-            "role": token(native.get("role"), ("resident-fetch",) + PREPARE_ROLES + notary_roles(True) + _PACKAGE_DIAGNOSTIC_ROLES + _FAILURE_SETUP_ROLES + _FAILURE_FIXTURE_ROLES),
+            "role": token(native.get("role"), ("resident-fetch",) + PREPARE_ROLES + notary_roles(True) + _PACKAGE_DIAGNOSTIC_ROLES + _FAILURE_SETUP_ROLES + _FAILURE_FIXTURE_ROLES + _FIXED_SIGNING_DIAGNOSTIC_ROLES),
             **{key: flag(native.get(key)) for key in ("entered", "returned", "capturesSettled", "dispatched", "contained", "cleanup_complete")},
             "returncode": integer(native.get("returncode"), -65536, 65535),
             "originalFailure": {"available": flag(owned.get("available")),
@@ -3797,6 +3836,11 @@ class Operation:
         if self.phase == "package-install" and role == "installer":
             self.publish("installer-output.txt", result.stdout + result.stderr)
         record["capturesSettled"] = True  # All original output/readback/closes returned.
+        if self.phase in SIGNING_PHASES and role in (self.phase, self.phase + "-verify") and result.returncode != 0:
+            try:
+                record["fixedSigningTextHints"] = fixed_signing_text_hints(result.stdout, result.stderr)
+            except BaseException:
+                pass  # Passive DATA cannot replace the same original nonzero or affect cleanup.
         if self.phase == "package-remove" and role == "producer-emitter" and result.returncode == 78:
             try:
                 record["removeProducerReason"] = remove_producer_refusal(result.stdout, result.stderr)

@@ -314,6 +314,106 @@ class GitCliNativeProgressDiagnosticTests(unittest.TestCase):
                              (False, None, 'unknown'))
 
 
+class FixedSigningFailureDiagnosticTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        _, cls.stage, cls.helper = real_modules()
+
+    def returned_call(self, status=1, stderr=b'errSecInternalComponent PRIVATE_SIGNING_INPUT\n'):
+        h = self.helper
+        outputs = []
+        original = []
+        def owned(argv, **kwargs):
+            result = subprocess.CompletedProcess(argv, status, b'', stderr)
+            original.append(result)
+            return result
+        env = dict(GITHUB_SHA='a' * 40, GITHUB_WORKFLOW_SHA='a' * 40,
+                   GITHUB_WORKFLOW_REF='inert', GITHUB_RUN_ID='41', GITHUB_RUN_ATTEMPT='1',
+                   MRK_MACOS_PACKAGE_ROLE='installed-shell-observation')
+        op = h.Operation(SimpleNamespace(run_owned=owned), ROOT, ROOT, 'sign-installed-cli', env, self.stage)
+        op.signing_mutation_pending = True
+        op.stage = op.phase
+        with mock.patch.object(op, 'publish', side_effect=lambda name, body, **kwargs: outputs.append((name, body))):
+            try:
+                value = op.call(op.phase, ['/usr/bin/codesign', 'INERT'], {}, cwd=ROOT, timeout=30, limit=65536)
+            except h.Refused as error:
+                op.receipt['failure'] = {'stage': op.phase}
+                op.diagnostic_failure = h.failure_exception(error)
+                return op, error, original, outputs
+        return op, value, original, outputs
+
+    def test_same_failed_original_signing_return_keeps_nonzero_captures_and_closed_diagnostic(self):
+        h = self.helper
+        op, error, originals, outputs = self.returned_call()
+        self.assertEqual(error.args, ('original-nonzero-sign-installed-cli',))
+        self.assertEqual(len(originals), 1)
+        self.assertEqual(originals[0].returncode, 1)
+        self.assertEqual([body for _, body in outputs], [b'', originals[0].stderr, b'1\n'])
+        self.assertTrue(op.calls[0]['returned'] and op.calls[0]['capturesSettled'])
+        self.assertTrue(op.signing_mutation_pending)
+        before = copy.deepcopy(op.receipt)
+        value = h.failure_diagnostic(error, phase=op.phase, operation=op)
+        self.assertEqual(value['terminal']['reason'], error.args[0])
+        self.assertEqual(value['lastRecordedNative']['role'], 'sign-installed-cli')
+        self.assertEqual(value['lastRecordedNative']['fixedSigningTextHints'], ['security-internal-component-text'])
+        self.assertFalse(value['productReady'])
+        self.assertEqual(op.receipt, before)
+        self.assertNotIn('PRIVATE_SIGNING_INPUT', json.dumps(value))
+        self.assertLess(len(json.dumps(value, sort_keys=True, separators=(',', ':'))), 4096)
+
+    def test_signing_text_hints_are_bounded_canonical_data_without_raw_values(self):
+        h = self.helper
+        private = b'PRIVATE_SIGNING_INPUT /private/identity.keychain-db'
+        hints = h.fixed_signing_text_hints(b'', private + b' errSecInternalComponent The timestamp service is not available\n')
+        self.assertEqual(hints, ['security-internal-component-text', 'timestamp-service-unavailable-text'])
+        self.assertEqual(h.fixed_signing_text_hints(private, b''), [])
+        self.assertEqual(h.fixed_signing_text_hints(b'errSecInternalComponent', b''), [])
+        for stdout, stderr in ((b'x' * 65536, b'x'), (b'', b'x' * 65537), (None, b''),
+                               (b'', bytearray(b'errSecInternalComponent')), ('', b'')):
+            self.assertIsNone(h.fixed_signing_text_hints(stdout, stderr))
+        class HostileBytes(bytes):
+            def __len__(self): raise AssertionError('no foreign accessors')
+        self.assertIsNone(h.fixed_signing_text_hints(b'', HostileBytes(b'errSecInternalComponent')))
+        self.assertNotIn('PRIVATE_SIGNING_INPUT', json.dumps(hints))
+
+    def test_signing_projection_requires_same_failed_settled_role_and_rejects_foreign_rows(self):
+        h = self.helper
+        base = dict(role='sign-installed-cli', entered=True, returned=True, capturesSettled=True,
+                    returncode=1, fixedSigningTextHints=['security-internal-component-text'])
+        self.assertEqual(h.fixed_signing_failure_data('sign-installed-cli', base), base['fixedSigningTextHints'])
+        for phase, field, wrong in (('prepare', 'role', 'sign-installed-cli'),
+                                   ('sign-remover', 'role', 'sign-installed-cli'),
+                                   ('sign-installed-cli', 'role', 'PRIVATE_SIGNING_INPUT'),
+                                   ('sign-installed-cli', 'entered', False),
+                                   ('sign-installed-cli', 'returned', False),
+                                   ('sign-installed-cli', 'capturesSettled', False),
+                                   ('sign-installed-cli', 'returncode', 0),
+                                   ('sign-installed-cli', 'returncode', True),
+                                   ('sign-installed-cli', 'returncode', 65536),
+                                   ('sign-installed-cli', 'fixedSigningTextHints', ['PRIVATE_SIGNING_INPUT']),
+                                   ('sign-installed-cli', 'fixedSigningTextHints', ['security-internal-component-text'] * 2),
+                                   ('sign-installed-cli', 'fixedSigningTextHints', ['timestamp-service-unavailable-text', 'security-internal-component-text'])):
+            self.assertIsNone(h.fixed_signing_failure_data(phase, dict(base, **{field: wrong})))
+        op, result, originals, outputs = self.returned_call(status=0)
+        self.assertIs(result, originals[0])
+        self.assertNotIn('fixedSigningTextHints', op.calls[0])
+        self.assertIsNone(h.fixed_signing_failure_data(op.phase, op.calls[0]))
+        for phase in h.SIGNING_PHASES:
+            for role in (phase, phase + '-verify'):
+                self.assertEqual(h.fixed_signing_failure_data(phase, dict(base, role=role)), base['fixedSigningTextHints'])
+
+    def test_diagnostic_exception_does_not_replace_same_original_signing_refusal(self):
+        h = self.helper
+        with mock.patch.object(h, 'fixed_signing_text_hints', side_effect=KeyboardInterrupt('PRIVATE_SIGNING_INPUT')):
+            op, error, originals, outputs = self.returned_call()
+        self.assertEqual(error.args, ('original-nonzero-sign-installed-cli',))
+        self.assertEqual(len(originals), 1)
+        self.assertEqual(op.calls[0]['returncode'], 1)
+        self.assertTrue(op.calls[0]['capturesSettled'] and op.signing_mutation_pending)
+        self.assertNotIn('fixedSigningTextHints', op.calls[0])
+        self.assertEqual(len(outputs), 3)
+
+
 class CandidateCheckpointTests(unittest.TestCase):
     @staticmethod
     def _cli_return_failure():
