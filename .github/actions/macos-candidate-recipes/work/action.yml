@@ -1,0 +1,130 @@
+name: "Reserve fresh work and record exact source and actual tool bindings"
+description: "Shared original recipe; job retains its original result and timeout"
+outputs:
+  root:
+    description: "Original selected step output"
+    value: "${{ steps.recipe.outputs.root }}"
+runs:
+  using: "composite"
+  steps:
+    - name: "Reserve fresh work and record exact source and actual tool bindings"
+      id: "recipe"
+      shell: "bash"
+      run: |
+        set -euo pipefail
+        umask 077
+        [[ "$RUNNER_TEMP" == /Users/runner/work/_temp && "$GITHUB_WORKSPACE" == /Users/runner/work/mobile-release-kit/mobile-release-kit ]] || exit 1
+        [[ ! -e desktop/node_modules && ! -L desktop/node_modules && ! -e desktop/dist && ! -L desktop/dist ]] || exit 1
+        root=$(/usr/bin/mktemp -d "$RUNNER_TEMP/mrk-macos-installed.XXXXXXXX")
+        printf 'root=%s\n' "$root" >> "$GITHUB_OUTPUT"
+        printf 'MRK_MACOS_WORK=%s\nMRK_PYTHON=%s\nCARGO_TARGET_DIR=%s/cargo-target\n' "$root" "$MRK_PYTHON" "$root" >> "$GITHUB_ENV"
+        "$MRK_PYTHON" -I -S -B - "$root/source-admission.json" <<'PY'
+        import json, os, subprocess, sys
+        build_target = os.environ["MRK_MACOS_TARGET"]
+        supplier_routes = {
+            "aarch64-apple-darwin": (".github/workflows/desktop-macos-cpython-source-build.yml", "refs/heads/verify/desktop-macos-cpython-source-build"),
+            "x86_64-apple-darwin": (".github/workflows/desktop-macos-cpython-source-build-intel.yml", "refs/heads/verify/desktop-macos-cpython-source-build-intel"),
+        }
+        if build_target not in supplier_routes: raise ValueError("source-binding-target")
+        tools = {}
+        for name, command in (
+            ("cltSdkPath", ["/usr/bin/xcrun", "--sdk", "macosx", "--show-sdk-path"]),
+            ("cltSdkVersion", ["/usr/bin/xcrun", "--sdk", "macosx", "--show-sdk-version"]),
+            ("cltSdkBuild", ["/usr/bin/xcrun", "--sdk", "macosx", "--show-sdk-build-version"]),
+            ("cltCompiler", ["/usr/bin/xcrun", "--sdk", "macosx", "clang", "--version"]),
+            ("node", ["node", "--version"]),
+            ("python", [sys.executable, "-I", "-S", "-B", "--version"]),
+        ):
+            result = subprocess.run(command, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, check=True, timeout=15)
+            if not result.stdout or len(result.stdout) > 4096: raise ValueError("tool version output refused")
+            tools[name] = {"command": command, "output": result.stdout.decode("utf-8", "strict").strip()}
+        work_info = os.stat(os.path.dirname(sys.argv[1]), follow_symlinks=False)
+        source_tree = subprocess.run(["git", "-c", "core.fsmonitor=false", "rev-parse", "HEAD^{tree}"], check=True, stdout=subprocess.PIPE, timeout=15).stdout.decode().strip()
+        value = {"schemaVersion": 1, "source": os.environ["GITHUB_SHA"], "workflowSource": os.environ["GITHUB_WORKFLOW_SHA"],
+                 "tree": source_tree, "workDirectory": [work_info.st_dev, work_info.st_ino, work_info.st_uid],
+                 "packageRole": os.environ["MRK_MACOS_PACKAGE_ROLE"], "target": build_target,
+                 "frontendAbsentAtAdmission": True,
+                 "runId": os.environ["GITHUB_RUN_ID"], "runAttempt": os.environ["GITHUB_RUN_ATTEMPT"],
+                 "runtimeManifestSha256": os.environ["MRK_BUNDLED_RUNTIME_MANIFEST_SHA256"],
+                 "runtimeSourceInputsSha256": os.environ["MRK_BUNDLED_RUNTIME_SOURCE_SHA256"],
+                 "protocolSha256": os.environ["MRK_BUNDLED_PROTOCOL_SHA256"],
+                 "githubPreflightToolingSha": os.environ["MRK_GITHUB_PREFLIGHT_TOOLING_SHA"],
+                 "githubReleaseToolingSha": os.environ["MRK_GITHUB_RELEASE_TOOLING_SHA"],
+                 "signedPythonDerivation": {
+                     "nominationSha256": os.environ["MRK_MACOS_SIGNING_BINDING_SHA256"],
+                     "signingSourceCommit": os.environ["MRK_MACOS_SIGNING_SOURCE_COMMIT"],
+                     "runId": os.environ["MRK_MACOS_SIGNING_RUN_ID"],
+                     "runAttempt": os.environ["MRK_MACOS_SIGNING_RUN_ATTEMPT"],
+                     "artifactId": os.environ["MRK_MACOS_SIGNING_ARTIFACT_ID"],
+                     "signedPythonSha256": os.environ["MRK_MACOS_SIGNED_PYTHON_SHA256"],
+                     "signingReceiptSha256": os.environ["MRK_MACOS_SIGNING_RECEIPT_SHA256"],
+                     "producerProfileSha256": os.environ["MRK_MACOS_SIGNING_PRODUCER_PROFILE_SHA256"],
+                     "serviceProfileSha256": os.environ["MRK_MACOS_SIGNING_SERVICE_PROFILE_SHA256"],
+                 },
+                 "freshPythonSupplier": {
+                     "origin": os.environ["MRK_MACOS_RUNTIME_SUPPLIER"],
+                     "repository": "Apdelrahman1911/mobile-release-kit",
+                     "workflow": supplier_routes[build_target][0],
+                     "ref": supplier_routes[build_target][1],
+                     "source": os.environ["MRK_MACOS_PYTHON_SUPPLIER_SOURCE_COMMIT"],
+                     "runId": os.environ["MRK_MACOS_PYTHON_SUPPLIER_RUN_ID"],
+                     "runAttempt": os.environ["MRK_MACOS_PYTHON_SUPPLIER_RUN_ATTEMPT"],
+                     "artifactId": os.environ["MRK_MACOS_PYTHON_SUPPLIER_ARTIFACT_ID"],
+                     "receiptSha256": os.environ["MRK_MACOS_PYTHON_SUPPLIER_SHA256"],
+                     "tarSha256": os.environ["MRK_MACOS_PYTHON_SUPPLIER_TAR_SHA256"],
+                 },
+                 "scope": "engineering-acl-probe-five-regressions-fixed-fixture-package-install-only", "fixedFixtureCases": 8,
+                 "aclPrimitiveCases": 6,
+                 "selectedRegressionGroups": [2, 1, 2], "developerDir": os.environ["DEVELOPER_DIR"], "tools": tools,
+                 "actualAquaSaveGate": "pending"}
+        if os.environ["GITHUB_REF"] == "refs/heads/verify/desktop-macos-app-signature":
+            value.update(scope="whole-app-signature-only", fixedFixtureCases=0, aclPrimitiveCases=0,
+                selectedRegressionGroups=[], instrumented=False, applicationLaunched=False,
+                fullUIQualified=False, distributionQualified=False, actualAquaSaveGate="not-selected")
+        if os.environ["GITHUB_REF"] == "refs/heads/verify/desktop-macos-candidate":
+            value.update(scope="current-macos-candidate", fixedFixtureCases=0, aclPrimitiveCases=0,
+                selectedRegressionGroups=[], instrumented=False, applicationLaunched=False,
+                fullUIQualified=False, distributionQualified=False, actualAquaSaveGate="not-selected")
+        if os.environ["MRK_MACOS_NATIVE_SCOPE"] in ("project-identity-native", "tool-setup", "git-native"):
+            # Preparation only: actual launch/Apply/recovery is not yet observed.
+            value.update(instrumented=True, applicationLaunched=False)
+        if os.environ["GITHUB_REF"] == "refs/heads/verify/desktop-macos-installed":
+            # Source-admission facts for the ordinary, separately built app;
+            # never a completed launch, UI, distribution or consumer verdict.
+            value.update(instrumented=False, applicationLaunched=False,
+                         fullUIQualified=False, distributionQualified=False)
+        if os.environ["GITHUB_REF"] == "refs/heads/verify/desktop-macos-positive-update":
+            value.update(scope="positive-macos-update-distribution", fixedFixtureCases=0, aclPrimitiveCases=0,
+                selectedRegressionGroups=[], instrumented=False, applicationLaunched=False,
+                fullUIQualified=False, distributionQualified=False, actualAquaSaveGate="not-selected")
+        if os.environ["GITHUB_REF"] == "refs/heads/verify/desktop-macos-preview":
+            value.update({"scope": "normal-macos-early-preview", "fixedFixtureCases": 8, "aclPrimitiveCases": 0,
+                          "selectedRegressionGroups": [], "instrumented": False, "applicationLaunched": False,
+                          "fullUIQualified": False, "distributionQualified": False})
+        if os.environ["GITHUB_REF"] == "refs/heads/verify/desktop-macos-removal-lifecycle":
+            case = os.environ["MRK_MACOS_REMOVAL_CASE"]
+            if build_target not in supplier_routes or case not in ("ordinary", "abrupt"):
+                raise ValueError("removal fixed source case")
+            correlation = os.urandom(16).hex()
+            if correlation == "0" * 32: raise ValueError("removal fresh correlation")
+            value.update(scope="same-package-removal-lifecycle-preparation-only", removalCase=case,
+                removalCorrelation=correlation, fixedFixtureCases=0, aclPrimitiveCases=0,
+                selectedRegressionGroups=[], instrumented=case == "abrupt", applicationLaunched=False,
+                fullUIQualified=False, removalQualified=False, powerLossQualified=False, distributionQualified=False)
+            with open(os.environ["GITHUB_ENV"], "a", encoding="ascii") as environment:
+                environment.write("MRK_MACOS_REMOVAL_CORRELATION=" + correlation + "\n")
+        # The final source binding does not exist until the one actual Store
+        # composition has supplied its immutable S/M. Never overwrite it.
+        del value["runtimeManifestSha256"], value["runtimeSourceInputsSha256"]
+        value["runtimeCompositionPending"] = True
+        data = json.dumps(value, sort_keys=True, separators=(",", ":")).encode() + b"\n"
+        if len(data) > 65536: raise ValueError("source/tool binding size refused")
+        fd = os.open(sys.argv[1], os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+        try:
+            while data:
+                n = os.write(fd, data)
+                if not n: raise RuntimeError("write refused")
+                data = data[n:]
+            os.fsync(fd)
+        finally: os.close(fd)
+        PY

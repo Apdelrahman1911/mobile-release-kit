@@ -1,0 +1,38 @@
+name: "Require the fixed SOURCE producer identity and release before ordinary signing"
+description: "Shared original recipe; job retains its original result and timeout"
+runs:
+  using: "composite"
+  steps:
+    - name: "Require the fixed SOURCE producer identity and release before ordinary signing"
+      id: "recipe"
+      shell: "bash"
+      run: |
+        set -euo pipefail
+        set -o noclobber
+        umask 077
+        # Public SOURCE DATA only. This is not a signature/purpose verdict or
+        # a credential source; the native producer/parent verify independently.
+        "$MRK_PYTHON" -I -S -B desktop/tools/stage_macos_installed.py packaging-selection \
+          --target "$MRK_MACOS_TARGET" > "$MRK_MACOS_WORK/packaging-selection.json"
+        "$MRK_PYTHON" -I -S -B - <<'PY_PACKAGING_SELECTION'
+        import json, os, re
+        from pathlib import Path
+        body = (Path(os.environ["MRK_MACOS_WORK"]) / "packaging-selection.json").read_bytes()
+        if not 0 < len(body) <= 4096: raise ValueError("SOURCE selection bound")
+        row = json.loads(body)
+        if (type(row) is not dict or row.get("schemaVersion") != 1
+                or row.get("kind") != "source-packaging-selection-data"
+                or row.get("target") != os.environ["MRK_MACOS_TARGET"] or row.get("nativeAuthority") is not False
+                or not isinstance(row.get("leafCertificateSha1"), str)
+                or re.fullmatch(r"[0-9a-f]{40}", row["leafCertificateSha1"]) is None
+                or row["leafCertificateSha1"] == "0" * 40
+                or not isinstance(row.get("packageVersion"), str)
+                or len(row["packageVersion"]) > 32
+                or re.fullmatch(r"(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)\.(?:0|[1-9][0-9]*)", row["packageVersion"]) is None
+                or any(int(part) > 0xffffffff for part in row["packageVersion"].split("."))
+                or row["packageVersion"] == "0.1.0"):
+            raise ValueError("fixed SOURCE selection")
+        with open(os.environ["GITHUB_ENV"], "a", encoding="ascii") as output:
+            output.write("MRK_MACOS_SOURCE_SIGNER_SHA1=" + row["leafCertificateSha1"] + "\n")
+            output.write("MRK_MACOS_SOURCE_PACKAGE_VERSION=" + row["packageVersion"] + "\n")
+        PY_PACKAGING_SELECTION

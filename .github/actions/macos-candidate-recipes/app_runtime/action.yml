@@ -1,0 +1,54 @@
+name: "Prepare the current payload from the independently accepted fresh Python supplier"
+description: "Shared original recipe; job retains its original result and timeout"
+inputs:
+  binding-1:
+    description: "Exact current original step binding"
+    required: true
+  binding-2:
+    description: "Exact current original step binding"
+    required: true
+runs:
+  using: "composite"
+  steps:
+    - name: "Prepare the current payload from the independently accepted fresh Python supplier"
+      id: "recipe"
+      shell: "bash"
+      run: |
+        set -euo pipefail
+        set -o noclobber
+        umask 077
+        # Only this fixed SOURCE-selected observer image carries all four
+        # nonshipping entries. Ordinary/tool/singleton behavior is not inferred
+        # from adjacent files, raw environment values or a changed child scope.
+        git_observation_arguments=()
+        [[ "$MRK_MACOS_NATIVE_SCOPE" == '${{ inputs.binding-1 }}' ]] || exit 1
+        case "$MRK_MACOS_NATIVE_SCOPE" in
+          git-native)
+            [[ "$GITHUB_REF" == refs/heads/verify/desktop-macos-candidate && "$MRK_MACOS_TARGET" == aarch64-apple-darwin && "$MRK_MACOS_PACKAGE_ROLE" == installed-shell-observation ]] || exit 1
+            git_observation_arguments=(--package-role installed-shell-observation --native-scope git-native)
+            ;;
+          disabled|project-identity-native|tool-setup) ;;
+          *) exit 1 ;;
+        esac
+        history_provider_arguments=()
+        if [[ '${{ inputs.binding-2 }}' == true ]]; then
+          history_provider_arguments=(--history-provider "$MRK_MACOS_WORK/history-provider-capsule/gh")
+        fi
+        /usr/bin/env -i PATH=/usr/bin:/bin HOME="$MRK_MACOS_WORK" TMPDIR="$MRK_MACOS_WORK" LANG=C LC_ALL=C TZ=UTC \
+          "$MRK_PYTHON" -I -S -B desktop/tools/stage_macos_installed.py compose-store-runtime \
+          --target "$MRK_MACOS_TARGET" ${history_provider_arguments[@]+"${history_provider_arguments[@]}"} \
+          ${git_observation_arguments[@]+"${git_observation_arguments[@]}"} \
+          --python-root "$MRK_MACOS_WORK/fresh-python-supplier" \
+          --supplier-receipt "$MRK_MACOS_WORK/fresh-python-receipt/supplier-receipt.json" \
+          --expected-supplier "$MRK_MACOS_PYTHON_SUPPLIER_SHA256" \
+          --signed-store-root "$MRK_MACOS_WORK/signed-store-component" \
+          --binding-output "$MRK_MACOS_WORK/runtime-binding.json" \
+          --signed-python "$MRK_MACOS_WORK/signed-python-capsule/python3" \
+          --signing-receipt "$MRK_MACOS_WORK/signed-python-capsule/python-signed-receipt.json" \
+          --expected-signed-python "$MRK_MACOS_SIGNED_PYTHON_SHA256" \
+          --expected-signing-receipt "$MRK_MACOS_SIGNING_RECEIPT_SHA256" \
+          --expected-signing-source "$MRK_MACOS_SIGNING_SOURCE_COMMIT" \
+          --expected-signing-run "$MRK_MACOS_SIGNING_RUN_ID" \
+          --expected-signing-attempt "$MRK_MACOS_SIGNING_RUN_ATTEMPT" \
+          --work "$MRK_MACOS_WORK/current-runtime-preparation" \
+          --output "$MRK_MACOS_WORK/runtime" > "$MRK_MACOS_WORK/runtime-result.json"

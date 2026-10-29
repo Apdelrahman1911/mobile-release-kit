@@ -1,0 +1,21 @@
+name: "Project the pinned fresh Python transport without executing it"
+description: "Shared original recipe; job retains its original result and timeout"
+runs:
+  using: "composite"
+  steps:
+    - name: "Project the pinned fresh Python transport without executing it"
+      id: "recipe"
+      shell: "bash"
+      run: |
+        set -euo pipefail
+        set -o noclobber
+        umask 077
+        /usr/bin/env -i PATH=/usr/bin:/bin HOME="$MRK_MACOS_WORK" TMPDIR="$MRK_MACOS_WORK" LANG=C LC_ALL=C TZ=UTC \
+          "$MRK_PYTHON" -I -S -B desktop/tools/macos_python_supplier_transport.py \
+          --target "$MRK_MACOS_TARGET" \
+          --transport-root "$MRK_MACOS_WORK/fresh-python-transport" \
+          --expected-supplier "$MRK_MACOS_PYTHON_SUPPLIER_SHA256" \
+          --expected-tar "$MRK_MACOS_PYTHON_SUPPLIER_TAR_SHA256" \
+          --python-output "$MRK_MACOS_WORK/fresh-python-supplier" \
+          --receipt-root "$MRK_MACOS_WORK/fresh-python-receipt" \
+          > "$MRK_MACOS_WORK/fresh-python-transport-result.json"

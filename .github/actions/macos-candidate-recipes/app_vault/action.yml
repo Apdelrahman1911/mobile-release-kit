@@ -1,0 +1,59 @@
+name: "Build and sign the separate fixed vault helper before binding the app"
+description: "Shared original recipe; job retains its original result and timeout"
+runs:
+  using: "composite"
+  steps:
+    - name: "Build and sign the separate fixed vault helper before binding the app"
+      id: "recipe"
+      shell: "bash"
+      run: |
+        set +x
+        set +a
+        export -n MRK_MACOS_DEVELOPER_ID_P12_BASE64 MRK_MACOS_DEVELOPER_ID_P12_PASSWORD
+        set -euo pipefail
+        set -o noclobber
+        umask 077
+        set +e
+        PATH="/Users/runner/.rustup/toolchains/${RUSTUP_TOOLCHAIN}-$MRK_MACOS_TARGET/bin:/usr/bin:/bin:/usr/sbin:/sbin" RUSTC="/Users/runner/.rustup/toolchains/${RUSTUP_TOOLCHAIN}-$MRK_MACOS_TARGET/bin/rustc" RUSTUP_TOOLCHAIN="$RUSTUP_TOOLCHAIN" RUSTUP_AUTO_INSTALL=0 CARGO_HOME=/Users/runner/.cargo RUSTUP_HOME=/Users/runner/.rustup CARGO_TARGET_DIR="$MRK_MACOS_WORK/vault-helper-target" "/Users/runner/.rustup/toolchains/${RUSTUP_TOOLCHAIN}-$MRK_MACOS_TARGET/bin/cargo" build \
+          --manifest-path desktop/helpers/macos-vault-helper/Cargo.toml --locked --release \
+          --target "$MRK_MACOS_TARGET" --message-format=json \
+          > "$MRK_MACOS_WORK/vault-helper-build.jsonl" 2> "$MRK_MACOS_WORK/vault-helper-build.stderr"
+        status=$?
+        set -e
+        printf '%s\n' "$status" > "$MRK_MACOS_WORK/vault-helper-build.status"
+        if [[ $status != 0 ]]; then
+          printf 'Fixed vault helper compiler failed with original status %s; originals remain local.\n' "$status" >&2 || :
+          exit "$status"
+        fi
+        helper="$MRK_MACOS_WORK/vault-helper-target/$MRK_MACOS_TARGET/release/mrk-vault-keychain"
+        MRK_MACOS_DEVELOPER_ID_P12_BASE64="$MRK_MACOS_DEVELOPER_ID_P12_BASE64" \
+        MRK_MACOS_DEVELOPER_ID_P12_PASSWORD="$MRK_MACOS_DEVELOPER_ID_P12_PASSWORD" \
+          "$MRK_PYTHON" -I -S -B desktop/tools/macos_android_helper_package.py sign-vault-helper --target "$MRK_MACOS_TARGET"
+        /usr/bin/codesign --verify --strict "$helper"
+        "$MRK_PYTHON" -I -S -B - <<'PY_HELPER'
+        import hashlib, json, os, pathlib, stat
+        path = pathlib.Path(os.environ["MRK_MACOS_WORK"]) / "vault-helper-target" / os.environ["MRK_MACOS_TARGET"] / "release/mrk-vault-keychain"
+        with path.open("rb") as stream:
+            before = os.fstat(stream.fileno())
+            if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1 or not 0 < before.st_size <= 32 * 1024 * 1024:
+                raise ValueError("fixed helper compiler/signing output")
+            body = stream.read(32 * 1024 * 1024 + 1)
+            after = os.fstat(stream.fileno())
+            if (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns, before.st_ctime_ns) != (
+                    after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns, after.st_ctime_ns) or len(body) != before.st_size:
+                raise ValueError("fixed signed helper changed")
+        record = {"schemaVersion": 1, "source": os.environ["GITHUB_SHA"],
+                  "workflowSource": os.environ["GITHUB_WORKFLOW_SHA"],
+                  "workflow": os.environ["GITHUB_WORKFLOW_REF"], "runId": os.environ["GITHUB_RUN_ID"],
+                  "runAttempt": os.environ["GITHUB_RUN_ATTEMPT"],
+                  "toolchain": {"aarch64-apple-darwin": "1.98.1", "x86_64-apple-darwin": "1.98.0"}[os.environ["MRK_MACOS_TARGET"]],
+                  "helperSha256": hashlib.sha256(body).hexdigest(), "helperBytes": len(body),
+                  "signing": "source-selected-leaf-runtime-empty-entitlements-strictly-verified",
+                  "nativeCallerAndKeychainQualified": False, "developerIdOrNotarizationQualified": False}
+        with (path.parents[3] / "vault-helper-signing.json").open("x", encoding="utf-8") as output:
+            json.dump(record, output, sort_keys=True); output.write("\n")
+        with open(os.environ["GITHUB_ENV"], "a") as output:
+            output.write("MRK_MACOS_VAULT_HELPER_SHA256=" + hashlib.sha256(body).hexdigest() + "\n")
+            output.write("MRK_MACOS_VAULT_HELPER_BYTES=" + str(len(body)) + "\n")
+        PY_HELPER
+        unset MRK_MACOS_DEVELOPER_ID_P12_BASE64 MRK_MACOS_DEVELOPER_ID_P12_PASSWORD

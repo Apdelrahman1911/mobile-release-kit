@@ -17,6 +17,32 @@ def yaml(path):
 
 
 class CandidatePartsWorkflowTests(unittest.TestCase):
+    def test_workflow_fits_github_limit_and_shared_recipe_bindings_are_complete(self):
+        self.assertLess((ROOT/P.WORKFLOW).stat().st_size,500000)
+        jobs=yaml(P.WORKFLOW)['jobs']
+        checked=set()
+        for job in jobs.values():
+            for step in job.get('steps',[]):
+                route=step.get('uses','')
+                if not route.startswith('./.github/actions/macos-candidate-recipes/'):
+                    continue
+                action=yaml(route[2:]+'/action.yml')
+                self.assertEqual(action['runs']['using'],'composite')
+                self.assertEqual(len(action['runs']['steps']),1)
+                recipe=action['runs']['steps'][0]
+                self.assertEqual(recipe['id'],'recipe')
+                self.assertNotIn('timeout-minutes',recipe)
+                self.assertEqual(set(step.get('with',{})),set(action.get('inputs',{})))
+                for name,definition in action.get('inputs',{}).items():
+                    self.assertTrue(definition['required'])
+                    self.assertIn('${{ inputs.'+name+' }}',recipe['run'])
+                    self.assertTrue(step['with'][name].startswith('${{ '))
+                self.assertNotIn('${{ steps.',recipe['run'])
+                for name,definition in action.get('outputs',{}).items():
+                    self.assertEqual(definition['value'],'${{ steps.recipe.outputs.'+name+' }}')
+                checked.add(route)
+        self.assertGreater(len(checked),0)
+
     def test_actual_jobs_preserve_each_original_cut_and_only_the_failed_part_retries(self):
         workflow = yaml(P.WORKFLOW); jobs = workflow['jobs']
         for scope,(profile,runner) in P.PROFILES.items():

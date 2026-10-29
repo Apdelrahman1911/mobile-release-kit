@@ -1,0 +1,227 @@
+name: "Bind the single persistence journey to original XCTest and app-helper evidence"
+description: "Shared original recipe; job retains its original result and timeout"
+runs:
+  using: "composite"
+  steps:
+    - name: "Bind the single persistence journey to original XCTest and app-helper evidence"
+      id: "recipe"
+      shell: "bash"
+      run: |
+        set -euo pipefail
+        set -o noclobber
+        umask 077
+        # Each summary has its own finite one-GiB file limit and original owner phase.
+        ulimit -f 1048576
+        set +e
+        /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME=/Users/runner USER=runner LOGNAME=runner \
+          "TMPDIR=$MRK_MACOS_WORK/normal-ui/tmp/" LANG=en_US.UTF-8 LC_ALL=en_US.UTF-8 TZ=UTC \
+          "DEVELOPER_DIR=$DEVELOPER_DIR" "TEST_RUNNER_MRK_NORMAL_UI_HOSTED_JOB=$MRK_MACOS_HOSTED_JOB" \
+          "TEST_RUNNER_MRK_NORMAL_UI_APPLICATION_SOURCE=$GITHUB_SHA" \
+          "TEST_RUNNER_MRK_NORMAL_UI_HARNESS_SOURCE=$GITHUB_SHA" \
+          "$MRK_PYTHON" -I -S -B desktop/tools/macos_normal_ui_runner.py --target "$MRK_MACOS_TARGET" --normal-summary persistence-test.xcresult \
+          > "$MRK_MACOS_WORK/normal-ui/persistence-summary.raw.json" 2> "$MRK_MACOS_WORK/normal-ui/persistence-summary.stderr"
+        summary_status=$?
+        set -e
+        printf '%s\n' "$summary_status" > "$MRK_MACOS_WORK/normal-ui/persistence-summary.status"
+        [[ "$summary_status" == 0 ]] || exit "$summary_status"
+        /usr/bin/env -i PATH=/usr/bin:/bin LANG=C LC_ALL=C TZ=UTC \
+          "MRK_MACOS_WORK=$MRK_MACOS_WORK" "MRK_MACOS_TARGET=$MRK_MACOS_TARGET" \
+          "GITHUB_SHA=$GITHUB_SHA" "GITHUB_WORKFLOW_SHA=$GITHUB_WORKFLOW_SHA" \
+          "GITHUB_RUN_ID=$GITHUB_RUN_ID" "GITHUB_RUN_ATTEMPT=$GITHUB_RUN_ATTEMPT" \
+          "MRK_MACOS_VAULT_HELPER_BYTES=$MRK_MACOS_VAULT_HELPER_BYTES" "MRK_MACOS_VAULT_HELPER_SHA256=$MRK_MACOS_VAULT_HELPER_SHA256" \
+          "GITHUB_WORKFLOW_REF=$GITHUB_WORKFLOW_REF" \
+          "$MRK_PYTHON" -I -S -B - <<'PY_PERSISTENCE_RESULT'
+        import hashlib, json, os, re, stat
+        from pathlib import Path
+        root = Path(os.environ["MRK_MACOS_WORK"])
+        def read(path, limit):
+            fd = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+            try:
+                before = os.fstat(fd)
+                if (not stat.S_ISREG(before.st_mode) or before.st_uid != os.getuid() or before.st_nlink != 1
+                        or before.st_mode & 0o022 or not 0 <= before.st_size <= limit):
+                    raise ValueError("persistence result input shape refused")
+                with os.fdopen(fd, "rb", closefd=False) as stream: data = stream.read(limit + 1)
+                identity = lambda s: (s.st_dev, s.st_ino, s.st_mode, s.st_uid, s.st_gid, s.st_nlink,
+                                      s.st_size, s.st_mtime_ns, s.st_ctime_ns)
+                if (len(data) != before.st_size or identity(before) != identity(os.fstat(fd))
+                        or identity(before) != identity(os.stat(path, follow_symlinks=False))):
+                    raise ValueError("persistence result input changed")
+                return data
+            finally: os.close(fd)
+        def unique(pairs):
+            value = {}
+            for key, item in pairs:
+                if key in value: raise ValueError("duplicate result field")
+                value[key] = item
+            return value
+        def document(path, limit=65536):
+            return json.loads(read(root / path, limit), object_pairs_hook=unique)
+        build_target = os.environ["MRK_MACOS_TARGET"]
+        platforms = {"aarch64-apple-darwin": "macOS26-arm64", "x86_64-apple-darwin": "macOS26-x86_64"}
+        if build_target not in platforms: raise ValueError("normal-result-target")
+        def normal_ui_descriptor_path(workflow_ref):
+            # Two exact trusted contexts, never an inherited arbitrary path/ref.
+            if workflow_ref == "Apdelrahman1911/mobile-release-kit/.github/workflows/desktop-macos-installed.yml@refs/heads/verify/desktop-macos-installed":
+                return "p0-carrier-input/PREVIEW.json"
+            if workflow_ref == "Apdelrahman1911/mobile-release-kit/.github/workflows/desktop-macos-installed.yml@refs/heads/verify/desktop-macos-preview":
+                return "preview/PREVIEW.json"
+            raise ValueError("normal-ui-descriptor-workflow-ref")
+        preview = document(normal_ui_descriptor_path(os.environ.get("GITHUB_WORKFLOW_REF")))
+        if (preview["scope"] != "normal-macos-early-preview" or preview["sourceCommit"] != os.environ["GITHUB_SHA"]
+                or preview["sourceCommit"] != os.environ["GITHUB_WORKFLOW_SHA"]
+                or preview["runId"] != os.environ["GITHUB_RUN_ID"] or preview["runAttempt"] != os.environ["GITHUB_RUN_ATTEMPT"]
+                or preview["platform"] != platforms[build_target] or preview["instrumented"] is not False
+                or any(preview[key] != "passed" for key in ("normalBuild", "packageAudit", "installationReadback"))):
+            raise ValueError("persistence UI result is not bound to this original normal package")
+        basic = document("normal-ui/result.json")
+        if type(basic) is not dict or basic.get("target") != build_target:
+            raise ValueError("normal-prior-target")
+        if (basic["scope"] != "normal-app-launch-cancel-navigation-quit-ui-only"
+                or basic["applicationSourceCommit"] != preview["sourceCommit"] or basic["harnessSourceCommit"] != preview["sourceCommit"]
+                or basic["runId"] != preview["runId"] or basic["runAttempt"] != preview["runAttempt"]
+                or basic["signedAppBinarySha256"] != preview["signedAppBinarySha256"]
+                or basic["packageSha256"] != preview["packageSha256"]
+                or basic["launchRenderCancelNavigationQuitUI"] != "passed"
+                or basic["testIdentifier"] != "MRKNormalAppUITests/NormalAppUITests/testLaunchCancelAndQuit"):
+            raise ValueError("persistence journey requires this original accepted basic UI gate")
+        helper = document("vault-helper-signing.json")
+        app = document("app-result.json")
+        if (helper["source"] != preview["sourceCommit"] or helper["workflowSource"] != preview["sourceCommit"]
+                or helper["runId"] != preview["runId"] or helper["runAttempt"] != preview["runAttempt"]
+                or helper["helperSha256"] != os.environ["MRK_MACOS_VAULT_HELPER_SHA256"]
+                or not re.fullmatch(r"[0-9a-f]{64}", helper["helperSha256"])
+                or type(helper["helperBytes"]) is not int or not 0 < helper["helperBytes"] <= 32 * 1024 * 1024
+                or str(helper["helperBytes"]) != os.environ["MRK_MACOS_VAULT_HELPER_BYTES"]
+                or app["vaultHelperSha256"] != helper["helperSha256"]
+                or app["appBinarySha256BeforeSigning"] != preview["normalBinaryBeforeSigningSha256"]):
+            raise ValueError("persistence UI helper differs from this original app build and package")
+        for name in ("build", "persistence-test", "persistence-summary"):
+            if read(root / ("normal-ui/" + name + ".status"), 16) != b"0\n":
+                raise ValueError("original persistence native command did not pass")
+        summary_bytes = read(root / "normal-ui/persistence-summary.raw.json", 262144)
+        summary = json.loads(summary_bytes, object_pairs_hook=unique)
+        expected = {"totalTestCount": 1, "passedTests": 1, "failedTests": 0, "skippedTests": 0, "expectedFailures": 0}
+        if type(summary) is not dict or any(type(summary.get(key)) is not int or summary[key] != value for key, value in expected.items()):
+            raise ValueError("exact one-pass, zero-failure/skip/expected-failure XCTest result required")
+        # Read only the bounded task-local original. Never export raw XCTest
+        # text: it can contain synthetic secure-field keystrokes. Stage/count
+        # diagnostics are not authority for the following terminal checks.
+        log_bytes = read(root / "normal-ui/persistence-test.log", 16 * 1024 * 1024)
+        log = log_bytes.decode("utf-8", "strict")
+        lines = log.splitlines()
+        selected = "-[MRKNormalAppUITests.NormalAppUITests testSyntheticPersistentCredentials]"
+        start = "Test Case '" + selected + "' started."
+        test_events = [(index, line) for index, line in enumerate(lines) if line.startswith("Test Case '")]
+        if (len(test_events) != 2 or test_events[0][1] != start
+                or re.fullmatch(r"Test Case '" + re.escape(selected) + r"' passed \([0-9.]+ seconds\)\.", test_events[1][1]) is None):
+            raise ValueError("one exact selected persistence XCTest start/pass without retry required")
+        lifetime = (";outerRequest=1;completion=1;body=1;handoff=1;payloadIdentity=1;originalTerminated=1;"
+                    "gateFree=1;gateClosed=1;failureCleanup=0;caseDeadlineMet=1")
+        required_markers = ["MRK_MACOS_PERSISTENCE_LIFETIME=phase=" + str(phase) + lifetime for phase in (1, 2)]
+        required_markers.append("MRK_MACOS_NORMAL_PERSISTENCE_UI=initialize-save-assess-bind-context-lock-reopen-rebind-replace-delete-restart-unlock-reassess-rebind;appRestart=passed;ordinaryLifetimes=2;cleanExitStatus=unavailable;allWorkerFinality=unavailable;fixtures=retained-for-disposable-job-retirement")
+        terminal_events = [(index, line) for index, line in enumerate(lines)
+                           if line.startswith(("MRK_MACOS_PERSISTENCE_LIFETIME=", "MRK_MACOS_NORMAL_PERSISTENCE_UI="))]
+        if ([line for _, line in terminal_events] != required_markers
+                or "MRK_MACOS_UI_FAILURE_CLEANUP=" in log or "MRK_MACOS_UI_ORIGINAL=" in log
+                or not test_events[0][0] < terminal_events[0][0] < terminal_events[-1][0] < test_events[1][0]):
+            raise ValueError("two ordered normal lifetimes and final restart marker without failure cleanup required")
+        # A persisted receipt is not finality: the original helper zero status above
+        # also gates its consuming receipt close and final nonrenewable clock check.
+        def checked_admission(name, phase, bundle, seconds, roles):
+            raw = read(root / ("normal-ui/" + name), 32768)
+            value = json.loads(raw, object_pairs_hook=unique)
+            scope = "actual-generated-xctrunner-admission-only" if phase == "test" else "normal-ui-original-command-admission-only"
+            limit = 32 * 1024**3 if phase == "build" else 1024**3
+            if (type(value) is not dict or type(value.get("schemaVersion")) is not int or value["schemaVersion"] != 1
+                    or value.get("scope") != scope or value.get("sourceCommit") != os.environ["GITHUB_SHA"]
+                    or value.get("target") != build_target
+                    or value.get("normalPhase" if phase == "test" else "phase") != phase or value.get("resultBundle") != bundle
+                    or value.get("sourcePrePostMatched") is not True or value.get("originalCommandReturned") is not True
+                    or type(value.get("sourceRosterSha256")) is not str or re.fullmatch(r"[0-9a-f]{64}", value["sourceRosterSha256"]) is None
+                    or type(value.get("fileLimitBytes")) is not list or value["fileLimitBytes"] != [limit, limit]
+                    or any(type(n) is not int for n in value["fileLimitBytes"])
+                    or value.get("receiptPolicy") != "exclusive0600-readback-consuming-close"):
+                raise ValueError("normal original command admission refused")
+            code = value.get("originalTestReturncode" if phase == "test" else "originalReturncode")
+            if type(code) is not int or code != 0:
+                raise ValueError("normal original command did not return zero")
+            clock = value.get("phaseClock")
+            if (type(clock) is not dict or set(clock) != {"startNs", "deadlineNs", "beforePublicationNs", "postCloseDeadlineRequired"}
+                    or clock["postCloseDeadlineRequired"] is not True
+                    or any(type(clock[k]) is not str or re.fullmatch(r"0|[1-9][0-9]{0,19}", clock[k]) is None
+                           for k in ("startNs", "deadlineNs", "beforePublicationNs"))):
+                raise ValueError("normal fixed phase clock refused")
+            start, end, before_close = (int(clock[k]) for k in ("startNs", "deadlineNs", "beforePublicationNs"))
+            if end - start != seconds * 1_000_000_000 or not start <= before_close < end:
+                raise ValueError("normal phase deadline binding differs")
+            commands = value.get("commands")
+            if type(commands) is not list or len(commands) != len(roles):
+                raise ValueError("normal original command roster refused")
+            for command, (role, cap, output_limit) in zip(commands, roles):
+                if (type(command) is not dict or command.get("role") != role
+                        or type(command.get("returncode")) is not int or command["returncode"] != 0
+                        or type(command.get("roleCapSeconds")) is not int or command["roleCapSeconds"] != cap
+                        or type(command.get("timeoutSeconds")) is not int or not 1 <= command["timeoutSeconds"] <= cap
+                        or type(command.get("outputLimitBytes")) is not int or command["outputLimitBytes"] != output_limit
+                        or any(type(command.get(k)) is not int or not 0 <= command[k] <= output_limit for k in ("stdoutBytes", "stderrBytes"))
+                        or command["stdoutBytes"] + command["stderrBytes"] > output_limit
+                        or any(type(command.get(k)) is not str or re.fullmatch(r"[0-9a-f]{64}", command[k]) is None
+                               for k in ("argvSha256", "stdoutSha256", "stderrSha256"))):
+                    raise ValueError("normal original command fact refused")
+            if phase != "test" and value.get("originalCommandRole") != roles[-2][0]:
+                raise ValueError("normal original command role differs")
+            return value, raw
+        roster = ("normal-ui-source-roster", 15, 1048576)
+        build, build_bytes = checked_admission("build.command-admission.json", "build", None, 450,
+            [roster, ("normal-toolchain-xcode", 15, 4096), ("normal-toolchain-sdkPath", 15, 4096),
+             ("normal-toolchain-sdkVersion", 15, 4096), ("normal-toolchain-sdkBuild", 15, 4096),
+             ("normal-ui-build", 240, 1048576), roster])
+        runner, runner_bytes = checked_admission("persistence-test.runner-admission.json", "test", "persistence-test.xcresult", 585,
+            [roster, ("verify-generated-runner", 30, 1048576), ("generated-runner-entitlements", 30, 1048576),
+             ("one-admitted-ui-test", 420, 1048576), roster])
+        summary_admission, summary_admission_bytes = checked_admission("persistence-summary.command-admission.json", "summary", "persistence-test.xcresult", 90,
+            [roster, ("normal-ui-summary", 30, 262144), roster])
+        if (runner.get("appSandboxEntitlement") not in ("absent", "false")
+                or runner.get("strictCodesignOriginalZero") is not True or runner.get("originalProductsPrePostMatched") is not True
+                or runner.get("originalClosesCompleted") is not True or runner.get("reSignedOrRepaired") is not False
+                or not build["sourceRosterSha256"] == runner["sourceRosterSha256"] == summary_admission["sourceRosterSha256"]
+                or summary_admission["commands"][1]["stdoutSha256"] != hashlib.sha256(summary_bytes).hexdigest()
+                or summary_admission["commands"][1]["stdoutBytes"] != len(summary_bytes)):
+            raise ValueError("own generated runner and build/summary original admissions did not close successfully")
+        toolchain = {}
+        for index, (key, name) in enumerate((("xcode", "xcode-version.txt"), ("sdkPath", "sdk-path.txt"),
+                                            ("sdkVersion", "sdk-version.txt"), ("sdkBuild", "sdk-build.txt")), 1):
+            raw = read(root / ("normal-ui/" + name), 4096)
+            query = build["commands"][index]
+            if len(raw) != query["stdoutBytes"] or hashlib.sha256(raw).hexdigest() != query["stdoutSha256"]:
+                raise ValueError("native tool observation differs from its original owned query")
+            toolchain[key] = raw.decode("ascii", "strict").strip()
+        if any(not value for value in toolchain.values()): raise ValueError("native tool binding is incomplete")
+        result = {"schemaVersion": 1, "scope": "normal-app-synthetic-persistent-credentials-ui",
+                  "applicationSourceCommit": preview["sourceCommit"], "harnessSourceCommit": os.environ["GITHUB_SHA"],
+                  "sourceTree": preview["sourceTree"], "workflow": ".github/workflows/desktop-macos-installed.yml",
+                  "runId": preview["runId"], "runAttempt": preview["runAttempt"], "target": build_target, "platform": preview["platform"],
+                  "packageSha256": preview["packageSha256"], "packageSize": preview["packageSize"],
+                  "runtimeManifestSha256": preview["runtimeManifestSha256"], "installerInventorySha256": preview["installerInventorySha256"],
+                  "normalBinaryBeforeSigningSha256": preview["normalBinaryBeforeSigningSha256"],
+                  "signedAppBinarySha256": preview["signedAppBinarySha256"],
+                  "vaultHelperSha256": helper["helperSha256"], "vaultHelperBytes": helper["helperBytes"], "toolchain": toolchain,
+                  "generatedRunnerAdmissionSha256": hashlib.sha256(runner_bytes).hexdigest(),
+                  "buildCommandAdmissionSha256": hashlib.sha256(build_bytes).hexdigest(),
+                  "summaryCommandAdmissionSha256": hashlib.sha256(summary_admission_bytes).hexdigest(),
+                  "originalCommandStatuses": {"sharedBuild": 0, "persistenceTest": 0, "persistenceSummary": 0},
+                  "testIdentifier": "MRKNormalAppUITests/NormalAppUITests/testSyntheticPersistentCredentials",
+                  "testCounts": expected, "nativeSummarySha256": hashlib.sha256(summary_bytes).hexdigest(),
+                  "normalPersistenceSelected": True, "syntheticPersistenceCRUDUI": "passed",
+                  "applicationStateAfterNormalQuit": "notRunning", "applicationRestart": "passed",
+                  "ordinaryApplicationLifetimes": 2, "originalReferenceAndGateTerminalObserved": True,
+                  "cleanExitStatus": None, "allWorkerFinality": "not-established-by-XCTest-UI-state",
+                  "signingOrStoreValidated": False, "fullUIQualified": False, "distributionQualified": False, "productReady": False}
+        fd = os.open(root / "normal-ui/persistence-result.json", os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+        try:
+            with os.fdopen(fd, "w", closefd=False) as output:
+                json.dump(result, output, sort_keys=True); output.write("\n"); output.flush(); os.fsync(fd)
+        finally: os.close(fd)
+        print("One synthetic persistence XCTest passed across two ordinary app lifetimes; upgrade, signing and all-worker finality remain unproved.")
+        PY_PERSISTENCE_RESULT

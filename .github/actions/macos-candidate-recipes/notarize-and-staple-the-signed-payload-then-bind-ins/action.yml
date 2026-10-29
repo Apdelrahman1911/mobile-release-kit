@@ -1,0 +1,39 @@
+name: "Notarize and staple the signed payload, then bind Installer inputs"
+description: "Shared original recipe; job retains its original result and timeout"
+runs:
+  using: "composite"
+  steps:
+    - name: "Notarize and staple the signed payload, then bind Installer inputs"
+      id: "recipe"
+      shell: "bash"
+      run: |
+        set +x
+        set +a
+        export -n MRK_MACOS_NOTARY_API_KEY_BASE64
+        set -euo pipefail
+        set -o noclobber
+        umask 077
+        MRK_MACOS_NOTARY_API_KEY_BASE64="$MRK_MACOS_NOTARY_API_KEY_BASE64" \
+          "$MRK_PYTHON" -I -S -B desktop/tools/macos_android_helper_package.py notarize-payload --target "$MRK_MACOS_TARGET" > "$MRK_MACOS_WORK/input-result.json"
+        unset MRK_MACOS_NOTARY_API_KEY_BASE64
+        inventory=$("$MRK_PYTHON" -I -S -B - "$MRK_MACOS_WORK/input-result.json" <<'PY'
+        import json, os, re, stat, sys
+        fd = os.open(sys.argv[1], os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC)
+        try:
+            before = os.fstat(fd)
+            if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1 or before.st_size > 2048: raise ValueError("receipt refused")
+            data = os.read(fd, 2049)
+            after = os.fstat(fd)
+            sig = lambda s: (s.st_dev,s.st_ino,s.st_mode,s.st_nlink,s.st_uid,s.st_gid,s.st_size,s.st_mtime_ns,s.st_ctime_ns)
+            if sig(before) != sig(after) or len(data) != before.st_size: raise ValueError("receipt changed")
+        finally: os.close(fd)
+        value = json.loads(data)["inventorySha256"]
+        if not isinstance(value, str) or not re.fullmatch(r"[0-9a-f]{64}", value): raise ValueError("receipt digest")
+        print(value)
+        PY
+        )
+        printf 'MRK_MACOS_INSTALL_INVENTORY_SHA256=%s\n' "$inventory" >> "$GITHUB_ENV"
+        # The app/runtime manifest anchor above was independently reviewed.
+        # This second digest only binds the already-completed output of this
+        # authorized build into its one-shot installer; it grants no runtime,
+        # GUI, distribution, update or arbitrary adjacent-file authority.

@@ -1,0 +1,17 @@
+name: "Check actual Git and Library flags before the expensive candidate build"
+description: "Shared original recipe; job retains its original result and timeout"
+runs:
+  using: "composite"
+  steps:
+    - name: "Check actual Git and Library flags before the expensive candidate build"
+      id: "recipe"
+      shell: "bash"
+      run: |
+        set -euo pipefail
+        umask 077
+        [[ "$(/usr/bin/id -u)" != 0 && "$HOME" == /Users/runner ]] || exit 1
+        [[ ! -e "$MRK_MACOS_WORK/git-flags-smoke" && ! -L "$MRK_MACOS_WORK/git-flags-smoke" ]] || exit 1
+        "/Users/runner/.rustup/toolchains/${RUSTUP_TOOLCHAIN}-$MRK_MACOS_TARGET/bin/rustc" \
+          --edition=2021 --test tests/desktop/macos_git_flags_smoke.rs -o "$MRK_MACOS_WORK/git-flags-smoke"
+        "$MRK_MACOS_WORK/git-flags-smoke" --test-threads=1 --nocapture | /usr/bin/tee "$MRK_MACOS_WORK/git-flags-smoke.log"
+        /usr/bin/grep -F 'test result: ok. 5 passed; 0 failed; 0 ignored;' "$MRK_MACOS_WORK/git-flags-smoke.log"

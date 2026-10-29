@@ -1,0 +1,158 @@
+name: "Build genuine frontend and the fixed shipping facade without launching it"
+description: "Shared original recipe; job retains its original result and timeout"
+runs:
+  using: "composite"
+  steps:
+    - name: "Build genuine frontend and the fixed shipping facade without launching it"
+      id: "recipe"
+      shell: "bash"
+      run: |
+        set -euo pipefail
+        set +x
+        set +a
+        umask 077
+        MRK_SHIPPING_SOURCE_BODY="$(
+          "$MRK_PYTHON" -I -S -B - <<'PY_SHIPPING_SOURCE_ADMISSION'
+        import hashlib, json, os, re, stat, sys, time
+        from pathlib import Path
+        
+        SCRIPT_PATH = 'desktop/tools/macos_shipping_image_compile.sh'
+        SCRIPT_LIMIT = 64 * 1024  # Actual current Git inventory supplies size and digest.
+        
+        def shipping_source_bytes(checkout, work, source, run_id, run_attempt, *, clock=time.monotonic):
+            """Fixed public SOURCE admission only; no build, native owner or output file."""
+            deadline = clock() + 10
+            originals = []
+            first = None
+            result = None
+            flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK
+            def need(value):
+                if not value: raise ValueError('shipping-source-admission')
+            def cut():
+                need(clock() < deadline)
+            def identity(info):
+                return (info.st_dev, info.st_ino, info.st_mode, info.st_uid, info.st_gid,
+                        info.st_nlink, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+            def opened(path, parent=None, name=None, directory=False):
+                cut()
+                fd = os.open(str(path) if parent is None else name,
+                             flags | (os.O_DIRECTORY if directory else 0), dir_fd=parent)
+                row = dict(fd=fd, parent=parent, name=name, path=path, identity=None)
+                originals.append(row)  # Same original is enrolled before fallible inspection.
+                info = os.fstat(fd)
+                named = os.stat(path if parent is None else name, dir_fd=parent, follow_symlinks=False)
+                need(identity(info) == identity(named) and info.st_uid in (0, os.getuid()))
+                if directory:
+                    need(stat.S_ISDIR(info.st_mode))
+                else:
+                    need(stat.S_ISREG(info.st_mode) and info.st_uid == os.getuid()
+                         and info.st_nlink == 1 and not info.st_mode & 0o022)
+                row['identity'] = identity(info)
+                return row
+            def directory(path):
+                need(type(path) is type(Path('/')) and path.is_absolute()
+                     and all(part not in ('', '.', '..') for part in path.parts[1:]))
+                row = opened(Path('/'), directory=True)
+                for part in path.parts[1:]:
+                    row = opened(row['path'] / part, row['fd'], part, True)
+                return row
+            def post(row):
+                cut()
+                named = os.stat(row['path'] if row['parent'] is None else row['name'],
+                                dir_fd=row['parent'], follow_symlinks=False)
+                need(row['identity'] == identity(os.fstat(row['fd'])) == identity(named))
+            def read(parent, name, limit):
+                row = opened(parent['path'] / name, parent['fd'], name)
+                size = row['identity'][6]
+                need(0 <= size <= limit)
+                data = bytearray()
+                while len(data) < size:
+                    cut()
+                    block = os.pread(row['fd'], min(65536, size - len(data)), len(data))
+                    need(bool(block)); data.extend(block)
+                cut(); need(not os.pread(row['fd'], 1, len(data))); post(row)
+                return bytes(data)
+            def unique(rows):
+                value = {}
+                for key, item in rows:
+                    need(key not in value); value[key] = item
+                return value
+            def document(raw):
+                def bad(_): raise ValueError('shipping-source-admission')
+                value = json.loads(raw, object_pairs_hook=unique, parse_constant=bad)
+                need(type(value) is dict)
+                return value
+            try:
+                need(type(source) is str and re.fullmatch(r'[0-9a-f]{40}', source) is not None
+                     and source != '0' * 40 and all(type(v) is str and re.fullmatch(r'[1-9][0-9]{0,19}', v)
+                                                  for v in (run_id, run_attempt)))
+                checkout_parent = directory(checkout)
+                need(not os.fstat(checkout_parent['fd']).st_mode & 0o022)
+                work_parent = directory(work)
+                info = os.fstat(work_parent['fd'])
+                need(stat.S_IMODE(info.st_mode) == 0o700 and info.st_uid == os.getuid())
+                binding = document(read(work_parent, 'compile-binding.json', 16384))
+                need(set(binding) == {'schemaVersion', 'source', 'workflowSource', 'runId', 'runAttempt',
+                                      'workDirectory', 'frontendAbsentAtAdmission', 'pythonController'}
+                     and type(binding['schemaVersion']) is int and binding['schemaVersion'] == 1
+                     and binding['source'] == binding['workflowSource'] == source
+                     and binding['runId'] == run_id and binding['runAttempt'] == run_attempt
+                     and binding['workDirectory'] == [info.st_dev, info.st_ino, info.st_uid]
+                     and binding['frontendAbsentAtAdmission'] is True and type(binding['pythonController']) is dict)
+                inventory = document(read(work_parent, 'source-inventory.json', 2 * 1024 * 1024))
+                need(set(inventory) == {'source', 'tree', 'files'} and inventory['source'] == source
+                     and type(inventory['tree']) is str and re.fullmatch(r'[0-9a-f]{40}', inventory['tree']) is not None
+                     and type(inventory['files']) is list and 0 < len(inventory['files']) < 4096)
+                rows = [row for row in inventory['files'] if type(row) is dict and row.get('path') == SCRIPT_PATH]
+                need(len(rows) == 1 and set(rows[0]) == {'path', 'gitMode', 'blob', 'size', 'sha256'})
+                row = rows[0]
+                need(row['gitMode'] == '100644' and type(row['size']) is int and 0 < row['size'] <= SCRIPT_LIMIT
+                     and type(row['sha256']) is str and re.fullmatch(r'[0-9a-f]{64}', row['sha256']) is not None
+                     and type(row['blob']) is str
+                     and re.fullmatch(r'[0-9a-f]{40}', row['blob']) is not None)
+                parent = checkout_parent
+                for name in ('desktop', 'tools'):
+                    parent = opened(parent['path'] / name, parent['fd'], name, True)
+                    need(not os.fstat(parent['fd']).st_mode & 0o022)
+                data = read(parent, 'macos_shipping_image_compile.sh', row['size'])
+                need(len(data) == row['size'] and hashlib.sha256(data).hexdigest() == row['sha256']
+                     and hashlib.sha1(b'blob ' + str(len(data)).encode() + b'\0' + data).hexdigest() == row['blob']
+                     and data.endswith(b'\n') and not data.endswith(b'\n\n') and b'\0' not in data)
+                for original in originals: post(original)
+                result = data
+            except BaseException as error:
+                first = error
+            finally:
+                for original in reversed(originals):
+                    fd, original['fd'] = original['fd'], None
+                    try: os.close(fd)
+                    except BaseException:
+                        if first is None: first = ValueError('shipping-source-close-unknown')
+                        else: first.add_note('shipping source original close unknown')
+            if first is not None: raise first
+            cut()  # Known original closes precede code handoff and share the same deadline.
+            return result
+        
+        checkout = Path('/Users/runner/work/mobile-release-kit/mobile-release-kit')
+        work = Path(os.environ['MRK_MACOS_WORK'])
+        source = os.environ['GITHUB_SHA']
+        ref = 'refs/heads/verify/desktop-macos-image-compile'
+        expected = dict(GITHUB_ACTIONS='true', RUNNER_ENVIRONMENT='github-hosted', RUNNER_OS='macOS', RUNNER_ARCH='ARM64',
+                        GITHUB_EVENT_NAME='push', GITHUB_REPOSITORY='Apdelrahman1911/mobile-release-kit', GITHUB_REF=ref,
+                        GITHUB_WORKFLOW_REF='Apdelrahman1911/mobile-release-kit/.github/workflows/desktop-macos-installed.yml@' + ref,
+                        GITHUB_WORKFLOW_SHA=source, GITHUB_WORKSPACE=str(checkout), MRK_MACOS_TARGET='aarch64-apple-darwin')
+        if (sys.platform != 'darwin' or os.getuid() == 0 or os.getuid() != os.geteuid()
+                or sys.version_info[:3] != (3, 14, 7) or not sys.flags.isolated or not sys.flags.no_site
+                or not sys.dont_write_bytecode or os.environ.get('MRK_PYTHON') != sys.executable
+                or sys.executable != str(work / 'python-controller/bin/python3.14')
+                or not re.fullmatch(r'/Users/runner/work/_temp/mrk-macos-image-compile\.[A-Za-z0-9_]+', str(work))
+                or any(os.environ.get(key) != value for key, value in expected.items())):
+            raise ValueError('shipping-source-context')
+        data = shipping_source_bytes(checkout, work, source, os.environ['GITHUB_RUN_ID'], os.environ['GITHUB_RUN_ATTEMPT'])
+        # Exact one-LF/NUL contract makes Bash command-substitution + here-string reversible.
+        if sys.stdout.buffer.write(data) != len(data): raise ValueError('shipping-source-handoff')
+        sys.stdout.buffer.flush()
+        PY_SHIPPING_SOURCE_ADMISSION
+        )"
+        readonly MRK_SHIPPING_SOURCE_BODY
+        builtin source /dev/stdin <<<"$MRK_SHIPPING_SOURCE_BODY"

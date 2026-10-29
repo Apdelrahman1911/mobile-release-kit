@@ -1,0 +1,51 @@
+name: "Select only SOURCE-enrolled current signed GitHub tools"
+description: "Shared original recipe; job retains its original result and timeout"
+outputs:
+  history-enabled:
+    description: "Original selected step output"
+    value: "${{ steps.recipe.outputs.history-enabled }}"
+  history-artifact-id:
+    description: "Original selected step output"
+    value: "${{ steps.recipe.outputs.history-artifact-id }}"
+  history-run-id:
+    description: "Original selected step output"
+    value: "${{ steps.recipe.outputs.history-run-id }}"
+  seal-enabled:
+    description: "Original selected step output"
+    value: "${{ steps.recipe.outputs.seal-enabled }}"
+  seal-artifact-id:
+    description: "Original selected step output"
+    value: "${{ steps.recipe.outputs.seal-artifact-id }}"
+  seal-run-id:
+    description: "Original selected step output"
+    value: "${{ steps.recipe.outputs.seal-run-id }}"
+runs:
+  using: "composite"
+  steps:
+    - name: "Select only SOURCE-enrolled current signed GitHub tools"
+      id: "recipe"
+      shell: "bash"
+      run: |
+        set -euo pipefail
+        umask 077
+        selection=$("$MRK_PYTHON" -I -S -B desktop/tools/macos_android_helper_package.py select-github-tools-signed --target "$MRK_MACOS_TARGET")
+        [[ ${#selection} -le 16384 ]] || exit 1
+        "$MRK_PYTHON" -I -S -B - "$selection" <<'PY_TOOL_SELECTION'
+        import json, os, re, sys
+        value = json.loads(sys.argv[1]); output = {}; environment = {}
+        for purpose, key in [('history-provider', 'history'), ('github-seal', 'seal')]:
+            row = value['tools'][purpose]; output[key + '-enabled'] = 'false' if row is None else 'true'
+            if row is not None:
+                signed = row['signed']
+                for field, suffix in [('runId', 'run-id'), ('artifactId', 'artifact-id')]:
+                    item = signed[field]
+                    if type(item) is not str or not re.fullmatch(r'[1-9][0-9]{0,15}', item): raise ValueError('tool transport binding')
+                    output[key + '-' + suffix] = item
+                if key == 'seal':
+                    environment['MRK_MACOS_GITHUB_SEAL_SHA256'] = signed['signedSha256']
+                    environment['MRK_MACOS_GITHUB_SEAL_BYTES'] = str(signed['signedBytes'])
+        with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='ascii') as out:
+            for key, value in output.items(): out.write(key + '=' + value + '\n')
+        with open(os.environ['GITHUB_ENV'], 'a', encoding='ascii') as out:
+            for key, value in environment.items(): out.write(key + '=' + value + '\n')
+        PY_TOOL_SELECTION

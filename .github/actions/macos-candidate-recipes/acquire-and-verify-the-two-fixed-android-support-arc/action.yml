@@ -1,0 +1,33 @@
+name: "Acquire and verify the two fixed Android support archives as DATA"
+description: "Shared original recipe; job retains its original result and timeout"
+inputs:
+  binding-1:
+    description: "Exact current original step binding"
+    required: true
+  binding-2:
+    description: "Exact current original step binding"
+    required: true
+  binding-3:
+    description: "Exact current original step binding"
+    required: true
+runs:
+  using: "composite"
+  steps:
+    - name: "Acquire and verify the two fixed Android support archives as DATA"
+      id: "recipe"
+      shell: "/usr/bin/env -i /bin/bash --noprofile --norc -e -o pipefail {0}"
+      run: |
+        cd /Users/runner/work/mobile-release-kit/mobile-release-kit
+        set -o noclobber
+        umask 077
+        work='${{ inputs.binding-1 }}'
+        target='${{ inputs.binding-2 }}'
+        [[ "$work" == /Users/runner/work/_temp/mrk-macos-installed.* && -d "$work" && ! -L "$work" ]] || exit 1
+        # No native execution or credentials in DATA admission. Exact SOURCE
+        # joins all three originals to the successful once-signed producer.
+        /usr/bin/env -i PATH=/usr/bin:/bin HOME="$work" TMPDIR="$work" LANG=C LC_ALL=C TZ=UTC \
+          '${{ inputs.binding-3 }}' -I -S -B desktop/tools/stage_macos_installed.py android-support --target "$target" \
+          --bundletool-archive "$work/signed-android-transport/bundletool-all-1.18.3.jar" \
+          --aapt2-archive "$work/signed-android-transport/aapt2-8.9.2-12782657-osx.jar" \
+          --android-support-signed-receipt "$work/signed-android-transport/android-support-signed-receipt.json" \
+          > "$work/android-support-result.json"

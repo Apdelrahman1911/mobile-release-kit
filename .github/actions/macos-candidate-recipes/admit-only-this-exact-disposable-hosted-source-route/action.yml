@@ -1,0 +1,103 @@
+name: "Admit only this exact disposable-hosted source route"
+description: "Shared original recipe; job retains its original result and timeout"
+runs:
+  using: "composite"
+  steps:
+    - name: "Admit only this exact disposable-hosted source route"
+      id: "recipe"
+      shell: "bash"
+      run: |
+        set -euo pipefail
+        [[ "$RUNNER_ENVIRONMENT" == github-hosted && "$RUNNER_OS" == macOS ]] || exit 1
+        case "$MRK_MACOS_NATIVE_SCOPE" in
+          disabled) [[ "$MRK_MACOS_PACKAGE_ROLE" == ordinary-image ]] || exit 1 ;;
+          project-identity-native|tool-setup|git-native)
+            [[ "$GITHUB_REF" == refs/heads/verify/desktop-macos-candidate && "$MRK_MACOS_TARGET" == aarch64-apple-darwin && "$MRK_MACOS_PACKAGE_ROLE" == installed-shell-observation ]] || exit 1
+            [[ "$MRK_MACOS_SAME_PACKAGE_SCOPE" == disabled && "$MRK_MACOS_REMOVAL_CASE" == disabled && "$MRK_MACOS_ANDROID_UI_SCOPE" == disabled && "$MRK_MACOS_IOS_UI_SCOPE" == disabled && "$MRK_MACOS_SAVED_FILE_UI_SCOPE" == ordinary-seven ]] || exit 1
+            [[ "${MRK_MACOS_AQUA_SCOPE:-disabled}" == disabled && "${MRK_MACOS_XCODE_SETUP_SCOPE:-disabled}" == disabled ]] || exit 1
+            ;;
+          *) exit 1 ;;
+        esac
+        case "$MRK_MACOS_SAME_PACKAGE_SCOPE" in
+          disabled) ;;
+          same-package-noop) [[ "$GITHUB_REF" == refs/heads/verify/desktop-macos-preview ]] || exit 1 ;;
+          *) exit 1 ;;
+        esac
+        case "$MRK_MACOS_ANDROID_UI_SCOPE" in
+          disabled|android-signed-build) ;;
+          *) exit 1 ;;
+        esac
+        case "$MRK_MACOS_IOS_UI_SCOPE" in
+          disabled) ;;
+          ios-unsigned-archive|ios-pending-recovery)
+            [[ "$GITHUB_REF" == refs/heads/verify/desktop-macos-installed && "$MRK_MACOS_ANDROID_UI_SCOPE" == disabled && "$MRK_MACOS_SAVED_FILE_UI_SCOPE" == ordinary-seven ]] || exit 1
+            ;;
+          *) exit 1 ;;
+        esac
+        case "$MRK_MACOS_TARGET" in
+          aarch64-apple-darwin)
+            [[ "$RUNNER_ARCH" == ARM64 && "$MRK_MACOS_MACHINE" == arm64 && "$(/usr/bin/uname -m)" == arm64 ]] || exit 1
+            case "$MRK_MACOS_RUNNER:$MRK_MACOS_HOSTED_JOB" in
+              macos-26:github-hosted-macos26-arm64) expected_host_major=26 ;;
+              xcode-27:github-hosted-xcode27-arm64)
+                # Separate source-only matrix selection; never a tool or
+                # ordinary image fallback, and never a Git nomination.
+                [[ "$MRK_MACOS_NATIVE_SCOPE" == git-native && "$MRK_MACOS_PACKAGE_ROLE" == installed-shell-observation && "$GITHUB_REF" == refs/heads/verify/desktop-macos-candidate ]] || exit 1
+                expected_host_major=27
+                ;;
+              *) exit 1 ;;
+            esac
+            expected_supplier_receipt=e6b23316078020c513ab1b05b3b55e4f87b8d15908a8dee022ad5ee03b8f763e
+            expected_supplier_tar=ead75b364118139561a34da6aa48e3c54791e152154ab32c46196b0223962359
+            expected_supplier_source=c6551aa07d0673436aa9587b3a039889d22449c3
+            expected_supplier_run=40473858216
+            expected_supplier_attempt=1
+            expected_supplier_artifact=12719943283
+            ;;
+          x86_64-apple-darwin)
+            [[ "$MRK_MACOS_RUNNER" == macos-26-intel && "$RUNNER_ARCH" == X64 && "$MRK_MACOS_MACHINE" == x86_64 && "$MRK_MACOS_HOSTED_JOB" == github-hosted-macos26-x86_64 && "$(/usr/bin/uname -m)" == x86_64 ]] || exit 1
+            expected_host_major=26
+            expected_supplier_receipt=afba303207b19692b73fb1288b56afcd73378fc29b0b0ede4ff10eb2e0f949b8
+            expected_supplier_tar=ff976626b48e95abc414d46ff91f1ebb183416356bb4706b8e673b7c9018ca9c
+            expected_supplier_source=a2f7a10b4c86305f5ee65c6779ceaf6b128cd8fa
+            expected_supplier_run=38343340695
+            expected_supplier_attempt=1
+            expected_supplier_artifact=11787588635
+            ;;
+          *) exit 1 ;;
+        esac
+        [[ "$GITHUB_EVENT_NAME" == push && ( "$GITHUB_REF" == refs/heads/verify/desktop-macos-installed || "$GITHUB_REF" == refs/heads/verify/desktop-macos-preview || "$GITHUB_REF" == refs/heads/verify/desktop-macos-removal-lifecycle || "$GITHUB_REF" == refs/heads/verify/desktop-macos-app-signature || "$GITHUB_REF" == refs/heads/verify/desktop-macos-app-absence-fixture || "$GITHUB_REF" == refs/heads/verify/desktop-macos-positive-update || "$GITHUB_REF" == refs/heads/verify/desktop-macos-candidate ) ]] || exit 1
+        if [[ "$GITHUB_REF" == refs/heads/verify/desktop-macos-app-absence-fixture || "$GITHUB_REF" == refs/heads/verify/desktop-macos-positive-update ]]; then
+          [[ "$MRK_MACOS_SAME_PACKAGE_SCOPE" == disabled && "$MRK_MACOS_ANDROID_UI_SCOPE" == disabled && "$MRK_MACOS_IOS_UI_SCOPE" == disabled && "$MRK_MACOS_SAVED_FILE_UI_SCOPE" == ordinary-seven ]] || exit 1
+        fi
+        if [[ "$GITHUB_REF" == refs/heads/verify/desktop-macos-app-signature ]]; then
+          [[ "$MRK_MACOS_ANDROID_UI_SCOPE" == disabled && "$MRK_MACOS_IOS_UI_SCOPE" == disabled && "$MRK_MACOS_SAVED_FILE_UI_SCOPE" == ordinary-seven ]] || exit 1
+        fi
+        if [[ "$GITHUB_REF" == refs/heads/verify/desktop-macos-removal-lifecycle ]]; then
+          [[ "$MRK_MACOS_ANDROID_UI_SCOPE" == disabled && "$MRK_MACOS_IOS_UI_SCOPE" == disabled && "$MRK_MACOS_SAVED_FILE_UI_SCOPE" == ordinary-seven ]] || exit 1
+          case "$MRK_MACOS_REMOVAL_CASE" in ordinary|abrupt) ;; *) exit 1 ;; esac
+        else
+          [[ "$MRK_MACOS_REMOVAL_CASE" == disabled ]] || exit 1
+        fi
+        case "$MRK_MACOS_SAVED_FILE_UI_SCOPE" in
+          ordinary-seven) ;;
+          saved-version-recovery|workflow-refusal|release-evidence|remaining-three) [[ "$GITHUB_REF" == refs/heads/verify/desktop-macos-preview ]] || exit 1 ;;
+          *) exit 1 ;;
+        esac
+        [[ "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ && "$MRK_EXPECTED_SHA" == "$GITHUB_SHA" && "$MRK_MACOS_INSTALL_SOURCE_COMMIT" == "$GITHUB_SHA" && "$GITHUB_WORKFLOW_SHA" == "$GITHUB_SHA" ]] || exit 1
+        [[ "$GITHUB_WORKFLOW_REF" == "$GITHUB_REPOSITORY/.github/workflows/desktop-macos-installed.yml@$GITHUB_REF" ]] || exit 1
+        # Fresh supplier pins never replace the separate current-core source binding.
+        [[ "$MRK_BUNDLED_RUNTIME_SOURCE_SHA256" =~ ^[0-9a-f]{64}$ && "$MRK_BUNDLED_RUNTIME_SOURCE_SHA256" == 10d3f2cf13155335444c8376a346d89581c03a43f0ae642e67401e379745dca2 ]] || exit 1
+        [[ "$GITHUB_REPOSITORY" == Apdelrahman1911/mobile-release-kit ]] || exit 1
+        [[ "$MRK_MACOS_RUNTIME_SUPPLIER" == fresh-public-source ]] || exit 1
+        [[ "$MRK_MACOS_PYTHON_SUPPLIER_SHA256" =~ ^[0-9a-f]{64}$ && "$MRK_MACOS_PYTHON_SUPPLIER_SHA256" == "$expected_supplier_receipt" ]] || exit 1
+        [[ "$MRK_MACOS_PYTHON_SUPPLIER_TAR_SHA256" =~ ^[0-9a-f]{64}$ && "$MRK_MACOS_PYTHON_SUPPLIER_TAR_SHA256" == "$expected_supplier_tar" ]] || exit 1
+        [[ "$MRK_MACOS_PYTHON_SUPPLIER_SOURCE_COMMIT" =~ ^[0-9a-f]{40}$ && "$MRK_MACOS_PYTHON_SUPPLIER_SOURCE_COMMIT" == "$expected_supplier_source" ]] || exit 1
+        [[ "$MRK_MACOS_PYTHON_SUPPLIER_RUN_ID" =~ ^[1-9][0-9]{0,15}$ && "$MRK_MACOS_PYTHON_SUPPLIER_RUN_ID" -le 9007199254740991 && "$MRK_MACOS_PYTHON_SUPPLIER_RUN_ID" == "$expected_supplier_run" ]] || exit 1
+        [[ "$MRK_MACOS_PYTHON_SUPPLIER_RUN_ATTEMPT" =~ ^[1-9][0-9]{0,15}$ && "$MRK_MACOS_PYTHON_SUPPLIER_RUN_ATTEMPT" -le 9007199254740991 && "$MRK_MACOS_PYTHON_SUPPLIER_RUN_ATTEMPT" == "$expected_supplier_attempt" ]] || exit 1
+        [[ "$MRK_MACOS_PYTHON_SUPPLIER_ARTIFACT_ID" =~ ^[1-9][0-9]{0,15}$ && "$MRK_MACOS_PYTHON_SUPPLIER_ARTIFACT_ID" -le 9007199254740991 && "$MRK_MACOS_PYTHON_SUPPLIER_ARTIFACT_ID" == "$expected_supplier_artifact" ]] || exit 1
+        [[ "$MRK_BUNDLED_PROTOCOL_SHA256" =~ ^[0-9a-f]{64}$ && "$MRK_BUNDLED_PROTOCOL_SHA256" == 083e6afae3e329c4e0d81bad00dd0c9920f77491b38ce0d23aa602996f4c4bf5 ]] || exit 1
+        [[ "$MRK_GITHUB_PREFLIGHT_TOOLING_SHA" =~ ^[0-9a-f]{40}$ && "$MRK_GITHUB_PREFLIGHT_TOOLING_SHA" == d4a639b396eaa60385b223a154710e99a2862e67 ]] || exit 1
+        [[ "$MRK_GITHUB_RELEASE_TOOLING_SHA" =~ ^[0-9a-f]{40}$ && "$MRK_GITHUB_RELEASE_TOOLING_SHA" == d4a639b396eaa60385b223a154710e99a2862e67 ]] || exit 1
+        [[ "$(/usr/bin/sw_vers -productVersion)" == "$expected_host_major".* ]] || exit 1
+        [[ "$(/usr/bin/id -u)" != 0 && -d "$DEVELOPER_DIR" ]] || exit 1

@@ -1,0 +1,22 @@
+name: "Exercise projected signed Store native CRC32 and Fastlane without a Store lane"
+description: "Shared original recipe; job retains its original result and timeout"
+runs:
+  using: "composite"
+  steps:
+    - name: "Exercise projected signed Store native CRC32 and Fastlane without a Store lane"
+      id: "recipe"
+      shell: "bash"
+      run: |
+        set -euo pipefail
+        set -o noclobber
+        umask 077
+        /bin/mkdir -m 700 "$MRK_MACOS_WORK/store-smoke"
+        # No tokens, signing material, Store credentials or ambient Ruby/Gem configuration.
+        /usr/bin/env -i PATH="$MRK_MACOS_WORK/runtime/store/bin:/usr/bin:/bin" \
+          HOME="$MRK_MACOS_WORK/store-smoke" TMPDIR="$MRK_MACOS_WORK/store-smoke" \
+          LANG=C.UTF-8 LC_ALL=C.UTF-8 TZ=UTC CI=true FASTLANE_SKIP_UPDATE_CHECK=1 \
+          FASTLANE_OPT_OUT_USAGE=1 FASTLANE_HIDE_CHANGELOG=1 \
+          "$MRK_MACOS_WORK/runtime/store/bin/bundle" exec ruby \
+          "$GITHUB_WORKSPACE/desktop/tools/verify_macos_store_runtime.rb" \
+          "$MRK_MACOS_WORK/runtime/store" "$MRK_MACOS_MACHINE" projected-smoke \
+          > "$MRK_MACOS_WORK/store-smoke/result.txt"

@@ -1,0 +1,31 @@
+name: "Refuse unconfigured update before any artifact download or native preparation"
+description: "Shared original recipe; job retains its original result and timeout"
+runs:
+  using: "composite"
+  steps:
+    - name: "Refuse unconfigured update before any artifact download or native preparation"
+      id: "recipe"
+      shell: "bash"
+      run: |
+        set -euo pipefail
+        umask 077
+        selection=$("$MRK_PYTHON" -I -S -B desktop/tools/macos_update_verification.py select --target "$MRK_MACOS_TARGET")
+        [[ ${#selection} -le 1024 && "$HOME" == /* ]] || exit 1
+        "$MRK_PYTHON" -I -S -B - "$selection" <<'PY_UPDATE_SELECT'
+        import json, os, re, sys
+        value = json.loads(sys.argv[1])
+        if set(value) != {"artifactId", "runId", "artifactBytes", "additionalDiskBytes"}: raise ValueError("update selection")
+        rows = {}
+        for field, key in (("artifactId", "MRK_UPDATE_ARTIFACT_ID"), ("runId", "MRK_UPDATE_RUN_ID")):
+            v = value[field]
+            if type(v) is not str or re.fullmatch(r"[1-9][0-9]{0,19}", v) is None: raise ValueError("update identity")
+            rows[key] = v
+        for key in ("artifactBytes", "additionalDiskBytes"):
+            if type(value[key]) is not int or not 0 < value[key] <= 8 * 1024**3: raise ValueError("update quote")
+        rows["MRK_UPDATE_DISK_BYTES"] = str(value["additionalDiskBytes"])
+        home = os.environ["HOME"]
+        if not home.startswith("/") or any(c in home for c in "\r\n\0"): raise ValueError("update GUI home")
+        rows["MRK_MACOS_GUI_HOME"] = home
+        with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as output:
+            for key, value in rows.items(): output.write(key + "=" + value + "\n")
+        PY_UPDATE_SELECT
