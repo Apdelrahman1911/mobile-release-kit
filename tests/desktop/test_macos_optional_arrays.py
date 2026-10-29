@@ -1,5 +1,6 @@
 """Actual workflow argv checks; local Bash is not macOS build evidence."""
 from pathlib import Path
+import json
 import shlex
 import subprocess
 import unittest
@@ -11,7 +12,34 @@ class MacOSOptionalArraysTests(unittest.TestCase):
         with path.open("rb") as stream:
             body = stream.read(512 * 1024 + 1)
         self.assertLessEqual(len(body), 512 * 1024)
-        source = body.decode("utf-8", "strict")
+        root=path.parents[2]
+        def yaml(p):
+            return json.loads(subprocess.run(['ruby','-ryaml','-rjson','-e',
+                'puts JSON.generate(YAML.safe_load(File.read(ARGV[0]),aliases:true))',str(p)],
+                check=True,capture_output=True,timeout=10).stdout)
+        workflow=yaml(path)
+        actions={}
+        def runs(step):
+            if 'run' in step:return [step['run']]
+            route=step.get('uses','')
+            if not route.startswith('./.github/actions/'):return []
+            action_path=root/route/'action.yml'
+            self.assertTrue(action_path.resolve().is_relative_to(root/'.github/actions'))
+            self.assertLessEqual(action_path.stat().st_size,512*1024)
+            if route not in actions:actions[route]=yaml(action_path)
+            action=actions[route]
+            self.assertEqual(action['runs']['using'],'composite')
+            result=[]
+            for inner in action['runs']['steps']:
+                for text in runs(inner):
+                    for name,value in step.get('with',{}).items():
+                        text=text.replace('${{ inputs.'+name+' }}',value)
+                    result.append(text)
+            return result
+        # Keep the original exact counts on the original engineering recipe.
+        # Inspect the actual expanded candidate recipes as well.
+        original=workflow['jobs']['engineering-install']['steps']
+        source='\n'.join(text for step in original for text in runs(step))
         forms = {name: '${' + name + '[@]+"${' + name + '[@]}"}' for name in
                  ("history_provider_arguments", "removal_arguments", "github_seal_arguments")}
         for name, count in (("history_provider_arguments", 1), ("removal_arguments", 3), ("github_seal_arguments", 1)):
@@ -19,15 +47,24 @@ class MacOSOptionalArraysTests(unittest.TestCase):
             self.assertNotIn('"${' + name + '[@]}"', source.replace(forms[name], ""))
         # Display labels vary between the ordinary app and native observer.
         # Select the existing stable step ID, then still test its real argv.
-        start = source.index("        id: app_assemble\n")
-        assembly = source[start:source.index("      - name:", start + 1)]
-        self.assertIn("          set -euo pipefail\n", assembly)
-        prefix = '          "$MRK_PYTHON" -I -S -B desktop/tools/stage_macos_installed.py app --target "$MRK_MACOS_TARGET" '
-        calls = [line for line in assembly.splitlines() if line.startswith(prefix)]
-        self.assertEqual(len(calls), 1)
-        self.assertTrue(calls[0].endswith(" \\") )
-        actual = calls[0][len(prefix):-2]
-        self.assertEqual(actual, forms["removal_arguments"] + " " + forms["github_seal_arguments"])
+        prefix = '"$MRK_PYTHON" -I -S -B desktop/tools/stage_macos_installed.py app --target "$MRK_MACOS_TARGET" '
+        assemblies=[]
+        for job in workflow['jobs'].values():
+            steps=job.get('steps',[])
+            for step in steps:
+                texts=runs(step)
+                text='\n'.join(texts)
+                for name,form in forms.items():
+                    self.assertNotIn('"${'+name+'[@]}"',text.replace(form,''))
+                if step.get('id')=='app_assemble':assemblies.append(text)
+        self.assertEqual(len(assemblies),3)
+        for assembly in assemblies:
+            self.assertIn("set -euo pipefail\n",assembly)
+            calls=[line.strip() for line in assembly.splitlines() if line.strip().startswith(prefix)]
+            self.assertEqual(len(calls),1)
+            self.assertTrue(calls[0].endswith(" \\") )
+            actual=calls[0][len(prefix):-2]
+            self.assertEqual(actual,forms['removal_arguments']+' '+forms['github_seal_arguments'])
         script = ["set -euo pipefail", "emit_argv() { builtin printf '%s\\0' \"$@\"; }"]
         expected = []
 
