@@ -196,6 +196,7 @@ unsafe extern "C" {
     fn mrk_acl_empty(fd: c_int, phase: *mut c_int, call_result: *mut c_int, native_errno: *mut c_int,
         free_result: *mut c_int, free_errno: *mut c_int) -> c_int;
     fn mrk_no_xattrs(fd: c_int) -> c_int;
+    fn mrk_existing_app_macl(fd: c_int, bytes: *mut u8, capacity: usize, used: *mut usize) -> c_int;
     fn mrk_entries(fd: c_int, bytes: *mut u8, capacity: usize, used: *mut usize) -> c_int;
     fn mrk_sync(fd: c_int, file: c_int) -> c_int;
     fn mrk_publish(from: c_int, source: *const c_char, to: c_int, destination: *const c_char) -> c_int;
@@ -274,6 +275,17 @@ pub fn empty_acl(fd: BorrowedFd<'_>) -> io::Result<()> {
 pub fn no_xattrs(fd: BorrowedFd<'_>) -> io::Result<()> {
     // SAFETY: borrowed live descriptor, metadata only.
     result(unsafe { mrk_no_xattrs(fd.as_raw_fd()) })
+}
+/// Read only the opaque tag on a borrowed existing directory original. The
+/// installer must authenticate that original and retain its own snapshot.
+/// No interpretation, copying, mutation or file-access authority is provided.
+pub fn existing_app_macl(fd: BorrowedFd<'_>, bytes: &mut [u8; 1024]) -> io::Result<usize> {
+    let mut used = 0;
+    // SAFETY: live borrowed FD and exact writable bounded buffer. The shim
+    // verifies the complete attribute roster and original metadata before/after.
+    result(unsafe { mrk_existing_app_macl(fd.as_raw_fd(), bytes.as_mut_ptr(), bytes.len(), &mut used) })?;
+    if used > bytes.len() { return Err(io::ErrorKind::InvalidData.into()); }
+    Ok(used)
 }
 pub fn directory_block(fd: BorrowedFd<'_>, buffer: &mut [u8]) -> io::Result<usize> {
     if buffer.len() != 65536 { return Err(io::ErrorKind::InvalidInput.into()); }

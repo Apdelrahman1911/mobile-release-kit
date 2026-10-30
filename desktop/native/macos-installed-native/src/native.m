@@ -201,6 +201,52 @@ int mrk_no_xattrs(int fd) {
     ssize_t count = flistxattr(fd, NULL, 0, 0);
     return count < 0 ? (errno ? errno : EIO) : count == 0 ? 0 : EPERM;
 }
+// Bounded read only. Never remove, interpret or copy an OS permission tag.
+// The caller separately authenticates the recorded existing app and conserves
+// its first digest on this same original. All incoming objects use mrk_no_xattrs.
+int mrk_existing_app_macl(int fd, uint8_t *bytes, size_t capacity, size_t *used) {
+    static const char tag[] = "com.apple.macl";
+    if (!bytes || !used || capacity != 1024) return EINVAL;
+    *used = 0;
+    struct stat before, after;
+    if (fstat(fd, &before)) return errno ? errno : EIO;
+    if (!S_ISDIR(before.st_mode)) return EPERM;
+    ssize_t names_size = flistxattr(fd, NULL, 0, 0);
+    if (names_size < 0) return errno ? errno : EIO;
+    size_t length = 0;
+    if (names_size != 0) {
+        char names[sizeof(tag)];
+        if (names_size != sizeof(tag)) return EPERM;
+        ssize_t listed = flistxattr(fd, names, sizeof(names), 0);
+        if (listed < 0) return errno ? errno : EIO;
+        if (listed != sizeof(tag) || memcmp(names, tag, sizeof(tag))) return EPERM;
+        ssize_t size = fgetxattr(fd, tag, NULL, 0, 0, 0);
+        if (size < 0) return errno ? errno : EIO;
+        if (size == 0 || (size_t)size > capacity) return EPERM;
+        ssize_t got = fgetxattr(fd, tag, bytes, (size_t)size, 0, 0);
+        if (got < 0) return errno ? errno : EIO;
+        if (got != size) return EPERM;
+        length = (size_t)got;
+        listed = flistxattr(fd, names, sizeof(names), 0);
+        if (listed < 0) return errno ? errno : EIO;
+        if (listed != sizeof(tag) || memcmp(names, tag, sizeof(tag))) return EPERM;
+    } else {
+        ssize_t listed = flistxattr(fd, NULL, 0, 0);
+        if (listed < 0) return errno ? errno : EIO;
+        if (listed != 0) return EPERM;
+    }
+    if (fstat(fd, &after)) return errno ? errno : EIO;
+    if (before.st_dev != after.st_dev || before.st_ino != after.st_ino
+        || before.st_mode != after.st_mode || before.st_uid != after.st_uid
+        || before.st_gid != after.st_gid || before.st_nlink != after.st_nlink
+        || before.st_size != after.st_size || before.st_flags != after.st_flags
+        || before.st_mtimespec.tv_sec != after.st_mtimespec.tv_sec
+        || before.st_mtimespec.tv_nsec != after.st_mtimespec.tv_nsec
+        || before.st_ctimespec.tv_sec != after.st_ctimespec.tv_sec
+        || before.st_ctimespec.tv_nsec != after.st_ctimespec.tv_nsec) return EPERM;
+    *used = length;
+    return 0;
+}
 #ifndef MRK_ENTRY_METADATA_ONLY
 // Public bulk attributes are four-byte packed, NOT a padded C struct.
 // The same pure decoder is exercised by the native crate's cfg(test) FFI.

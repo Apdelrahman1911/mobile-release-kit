@@ -141,7 +141,11 @@ mod installer {
         fn same_object(self, other: Self) -> bool { self.dev == other.dev && self.ino == other.ino
             && self.mode & 0o170000 == other.mode & 0o170000 && self.uid == other.uid && self.gid == other.gid }
     }
-    struct Original { fd: Option<OwnedFd>, state: State, role: Role, parent: Option<usize>, name: String, identity: Option<Identity> }
+    struct Original { fd: Option<OwnedFd>, state: State, role: Role, parent: Option<usize>, name: String, identity: Option<Identity>,
+        // Native-only first snapshot on an authenticated recorded app root.
+        // Kept with the original through renames/posts/closes, never serialized.
+        // Existing sizeof::<Original>() storage quotes include this field.
+        existing_app_metadata: Option<mobile_release_desktop::macos_existing_app_metadata::SnapshotData> }
     // A mkdir effect gets its own record BEFORE the call, including effects
     // that returned successfully but whose subsequent open/verification failed.
     struct Creation { parent: usize, name: String, state: &'static str, identity: Option<Identity> }
@@ -398,7 +402,7 @@ mod installer {
         fn reserve(&mut self, parent: Option<usize>, name: &str, role: Role) -> Result<usize> {
             self.clock()?; check(self.originals.len() < self.original_limit(), "export-original-bound")?;
             let n = self.originals.len(); self.originals.push(Original { fd:None, state:State::Reserved, role,
-                parent, name:name.into(), identity:None }); Ok(n)
+                parent, name:name.into(), identity:None, existing_app_metadata:None }); Ok(n)
         }
         fn named(&self, n: usize) -> Result<Identity> {
             self.clock()?; let original = &self.originals[n];
@@ -599,7 +603,7 @@ mod installer {
             let extra = (if self.worker_deadline.is_some() { worker::EXTRA_LIVE } else { 0 })
                 + self.removal_live_reserved;
             check(self.originals.len() < installation_record::ORIGINAL_LIMIT && self.originals.iter().filter(|r| r.fd.is_some()).count() + extra < 96, "original-bound")?;
-            let n = self.originals.len(); self.originals.push(Original { fd: None, state: State::Reserved, role, parent, name: name.into(), identity: None }); Ok(n)
+            let n = self.originals.len(); self.originals.push(Original { fd: None, state: State::Reserved, role, parent, name: name.into(), identity: None, existing_app_metadata:None }); Ok(n)
         }
         fn named(&self, parent: Option<usize>, name: &str) -> nix::Result<FileStat> {
             if let Some(parent) = parent {
@@ -685,7 +689,36 @@ mod installer {
             let original = &self.originals[n]; let expected = self.identity(n)?;
             let actual = Identity::of(&stat::fstat(self.fd(n)?).map_err(|_| "original-stat")?);
             let named = Identity::of(&self.named(original.parent, &original.name).map_err(|_| "original-name")?);
-            check(actual == named && if exact { actual == expected } else { expected.same_object(actual) }, "original-correspondence")
+            check(actual == named && if exact { actual == expected } else { expected.same_object(actual) }, "original-correspondence")?;
+            if original.existing_app_metadata.is_some() {
+                self.existing_app_metadata_post(n,"maintenance-app-attributes")?;
+                // The added metadata read must finish before the SAME FD/name
+                // POST; a pre-read name match cannot cover a later replacement.
+                let actual=Identity::of(&stat::fstat(self.fd(n)?).map_err(|_|"original-stat")?);
+                let named=Identity::of(&self.named(original.parent,&original.name).map_err(|_|"original-name")?);
+                check(actual==named && if exact {actual==expected}else{expected.same_object(actual)},"original-correspondence")?;
+                self.clock()?;
+            }
+            Ok(())
+        }
+        fn read_existing_app_metadata(&self,n:usize,reason:&'static str)
+            ->Result<mobile_release_desktop::macos_existing_app_metadata::SnapshotData> {
+            use mobile_release_desktop::macos_existing_app_metadata::{MACL_BYTES_LIMIT,SnapshotData};
+            self.clock()?;
+            let mut bytes=zeroize::Zeroizing::new([0u8;MACL_BYTES_LIMIT]);
+            let used=native::existing_app_macl(self.fd(n)?.as_fd(),&mut bytes).map_err(|_|reason)?;
+            self.clock()?;
+            SnapshotData::from_observed_bytes_data(&bytes[..used]).ok_or(reason)
+        }
+        fn existing_app_metadata_post(&self,n:usize,reason:&'static str)->Result<()> {
+            if let Some(first)=self.originals[n].existing_app_metadata {
+                check(first==self.read_existing_app_metadata(n,reason)?,reason)?;
+            }
+            Ok(())
+        }
+        fn app_attributes(&self,n:usize,reason:&'static str)->Result<()> {
+            if self.originals[n].existing_app_metadata.is_some() {self.existing_app_metadata_post(n,reason)}
+            else {native::no_xattrs(self.fd(n)?.as_fd()).map_err(|_|reason)?;self.clock()}
         }
         fn protected(&self, n: usize, directory: bool, mode: Option<u32>) -> Result<()> {
             self.protected_as(n, directory, mode, AclRole::Other)
@@ -769,6 +802,10 @@ mod installer {
             self.persist(parent, false)?; Ok(n)
         }
         fn close(&mut self, n: usize) -> bool {
+            // Even a failed last metadata POST must consume the original close.
+            // It vetoes success without leaving the live descriptor behind.
+            let metadata_ok=self.originals[n].fd.is_none() || self.originals[n].existing_app_metadata.is_none()
+                || self.check_name(n,true).is_ok();
             let r = &mut self.originals[n];
             match r.state {
                 State::Reserved => r.state = State::NoHandle,
@@ -779,6 +816,7 @@ mod installer {
                 }
                 State::Closed | State::NoHandle => {}, _ => self.unknown = true,
             }
+            if !metadata_ok { self.unknown=true; }
             !self.unknown
         }
         fn forward_close(&mut self, n: usize, reason: &'static str) -> Result<()> {
@@ -10046,7 +10084,13 @@ mod installer {
         }
         fn app_identity(book: &Install, original: usize) -> Result<AppIdentityData> {
             book.check_name(original, true)?; book.protected(original, true, Some(0o555))?;
-            native::no_xattrs(book.fd(original)?.as_fd()).map_err(|_| "maintenance-app-attributes")?;
+            book.app_attributes(original,"maintenance-app-attributes")?;
+            app_identity_fields(book,original)
+        }
+        // Only audit_generation_mode uses fields before enrolling the recorded
+        // existing original. Ordinary new-app identity retains strict attrs above.
+        fn app_identity_fields(book:&Install,original:usize)->Result<AppIdentityData> {
+            book.check_name(original,true)?;book.protected(original,true,Some(0o555))?;
             let stat = stat::fstat(book.fd(original)?).map_err(|_| "maintenance-app-stat")?;
             let uuid=mobile_release_desktop::macos_persistent_identity::observe_volume(book.fd(original)?.as_fd())
                 .map_err(|_|"maintenance-app-volume-uuid")?;
@@ -10073,7 +10117,8 @@ mod installer {
             mut resume:Option<&mut RemovalRemainingPlan>)->Result<()> {
             check(payload_depth_data(prefix,depth,true) && index.directories.contains(prefix), "maintenance-tree-depth")?;
             book.protected(root, true, Some(0o555))?;
-            native::no_xattrs(book.fd(root)?.as_fd()).map_err(|_| "maintenance-payload-attributes")?;
+            if prefix=="app" && depth==0 { book.app_attributes(root,"maintenance-payload-attributes")?; }
+            else { native::no_xattrs(book.fd(root)?.as_fd()).map_err(|_| "maintenance-payload-attributes")?; }
             check(stat::fstat(book.fd(root)?).map_err(|_| "maintenance-payload-stat")?.st_flags == 0,
                 "maintenance-payload-flags")?;
             let wanted: BTreeSet<String> = index.files.keys().chain(index.directories.iter()).filter_map(|name|
@@ -10115,18 +10160,18 @@ mod installer {
         }
         fn audit_generation(book: &mut Install, destination: usize, versions: usize, generation: &GenerationData,
             allow_missing_app: bool, keep: bool) -> Result<(Option<usize>, usize, GenerationCostData, u64)> {
-            audit_generation_mode(book,destination,versions,generation,allow_missing_app,keep,None,false)
+            audit_generation_mode(book,destination,versions,generation,allow_missing_app,keep,None,false,true)
         }
         // Only the selected Current-State current+retained loop uses this
         // entry. Historical prefix/archive audits use the ordinary wrapper;
         // they still run completely but are not extra selected generations.
         fn audit_selected_generation(book: &mut Install, destination: usize, versions: usize, generation: &GenerationData,
             allow_missing_app: bool, keep: bool) -> Result<(Option<usize>, usize, GenerationCostData, u64)> {
-            audit_generation_mode(book,destination,versions,generation,allow_missing_app,keep,None,true)
+            audit_generation_mode(book,destination,versions,generation,allow_missing_app,keep,None,true,true)
         }
         fn audit_generation_mode(book:&mut Install,destination:usize,versions:usize,generation:&GenerationData,
             allow_missing_app:bool,keep:bool,mut resume:Option<(worker::RemovalResumeRead<'_>,&mut RemovalRemainingPlan)>,
-            selected_current_history:bool) ->Result<(Option<usize>,usize,GenerationCostData,u64)> {
+            selected_current_history:bool,allow_existing_macl:bool) ->Result<(Option<usize>,usize,GenerationCostData,u64)> {
             let binding = generation.release_data().binding_data();
             let release = book.open(Some(versions), binding.release, true)?;
             let (raw,descriptor)=if let Some((source,_))=resume.as_ref() {
@@ -10200,10 +10245,33 @@ mod installer {
                 Err(_) => return Err("maintenance-app-missing-or-refused"),
                 Ok(_) => {
                     let original = book.open(Some(app_parent), app_leaf, true)?;
-                    let observed_app=app_identity(book,original)?;
+                    let observed_app=app_identity_fields(book,original)?;
                     let recorded_app=generation.app_identity_data();
                     check(recorded_app==observed_app || legacy.is_some_and(|legacy|
                         recorded_app.matches_legacy_binding_data(&observed_app,legacy)),"maintenance-app-original")?;
+                    // Record/inventory/history and SAME original identity matched.
+                    // A prior observation of this inode freezes the expectation;
+                    // reopening it may not adopt changed or disappeared metadata.
+                    let identity=book.identity(original)?;
+                    // A fresh app published by this invocation stays strict,
+                    // including the parent's joined-worker readback. A created
+                    // directory cannot enroll an OS tag as existing metadata.
+                    let existing=allow_existing_macl && !book.creations.iter()
+                        .any(|effect|effect.identity.is_some_and(|id|id.same_object(identity)));
+                    if !existing {native::no_xattrs(book.fd(original)?.as_fd()).map_err(|_|"maintenance-app-attributes")?;}
+                    let captured=book.read_existing_app_metadata(original,"maintenance-app-attributes")?;
+                    if !existing {check(captured==mobile_release_desktop::macos_existing_app_metadata::SnapshotData::from_observed_bytes_data(&[])
+                        .ok_or("maintenance-app-attributes")?,"maintenance-app-attributes")?;}
+                    book.check_name(original,true)?;
+                    let identity=book.identity(original)?;
+                    for prior in &book.originals {
+                        if prior.identity.is_some_and(|id|id.same_object(identity)) {
+                            check(mobile_release_desktop::macos_existing_app_metadata::SnapshotData::conserve_data(
+                                prior.existing_app_metadata,captured).is_some(),"maintenance-app-attributes")?;
+                        }
+                    }
+                    book.originals[original].existing_app_metadata=Some(captured);
+                    book.check_name(original,true)?;
                     if let Some((_,plan))=resume.as_mut(){
                         if generation.retained_invocation_data().is_none(){plan.current_app=Some(book.identity(original)?);}
                         audit_tree_mode(book,original,"app",&index,0,Some(&mut **plan))?;
@@ -10684,7 +10752,7 @@ mod installer {
                 let path=format!("versions/{}/{}",binding.release,installation_record::INVENTORY_NAME);
                 plan.transient=removal_resume_inventory_quote_data(source.genesis_control_data(book,&path)?.len_data())
                     .ok_or("removal-resume-inventory-memory")?;plan.memory_with_book(book,0)?;
-                let (_,_,cost,_)=audit_generation_mode(book,root,versions,&generation,false,false,Some((source,&mut plan)),true)?;
+                let (_,_,cost,_)=audit_generation_mode(book,root,versions,&generation,false,false,Some((source,&mut plan)),true,true)?;
                 plan.transient=0;plan.memory_with_book(book,0)?;
                 payload=payload.checked_add(cost.bytes).ok_or("removal-resume-storage")?;
                 let (_,bytes)=generation_controls(book,root,&generation,selected,&mut controls_wanted,false)?;
@@ -11876,7 +11944,7 @@ mod installer {
             book.originals[original].identity = Some(Identity::of(&actual));
             let directory = actual.st_mode & SFlag::S_IFMT.bits() == SFlag::S_IFDIR.bits();
             book.protected(original,directory,Some(if directory { 0o555 } else { 0o444 }))?;
-            native::no_xattrs(book.fd(original)?.as_fd()).map_err(|_| "maintenance-renamed-attributes")?;
+            book.app_attributes(original,"maintenance-renamed-attributes")?;
             book.check_name(original,true)
         }
         struct RenameReturn { returned: ReturnedData, result: Result<()> }
@@ -12273,8 +12341,8 @@ mod installer {
             }
             // Fresh originals, exact descriptor and complete current payload;
             // never make a worker-selected tuple the parent's expected release.
-            let _ = audit_generation(book,observed.prepared.destination,observed.prepared.versions,
-                &state.current_data(),false,false)?;
+            let _ = audit_generation_mode(book,observed.prepared.destination,observed.prepared.versions,
+                &state.current_data(),false,false,None,false,inverse || observed.action==ActionData::SamePackageNoop)?;
             if let Some(noop)=&observed.noop {noop.after_join(book,observed.history.as_ref().ok_or("noop-recovery-history")?,
                 &observed.selected,intent)?;}
             if let Some(restore)=&observed.restore {

@@ -5,6 +5,8 @@ import re
 import subprocess
 import tomllib
 import unittest
+import os
+import tempfile
 
 from desktop.tools import macos_candidate_parts as P
 
@@ -19,6 +21,40 @@ def yaml(path):
 
 
 class CandidatePartsWorkflowTests(unittest.TestCase):
+    def test_existing_app_macl_original_reader_with_inert_filesystem_returns(self):
+        native=(ROOT/'desktop/native/macos-installed-native/src/native.m').read_text()
+        start=native.index('int mrk_no_xattrs(')
+        end=native.index('\n#ifndef MRK_ENTRY_METADATA_ONLY',start)
+        fixture=(ROOT/'tests/desktop/fixtures/existing_app_macl_data.c').read_text()
+        self.assertEqual(fixture.count('/* MRK_EXISTING_APP_MACL_ORIGINAL */'),1)
+        body=fixture.replace('/* MRK_EXISTING_APP_MACL_ORIGINAL */',native[start:end])
+        with tempfile.TemporaryDirectory(dir=os.environ.get('MRK_PART_TEST_ROOT')) as temporary:
+            source=Path(temporary)/'original-data.c'; binary=Path(temporary)/'original-data'
+            source.write_text(body)
+            subprocess.run(['/usr/bin/clang','-x','c','-Wall','-Wextra','-Werror',str(source),'-o',str(binary)],
+                           check=True,capture_output=True,timeout=30)
+            result=subprocess.run([str(binary)],check=True,capture_output=True,timeout=5)
+        self.assertEqual(result.stdout,b'MRK_EXISTING_APP_MACL_DATA=29\n')
+        self.assertEqual(result.stderr,b'')
+
+    def test_existing_app_metadata_callbacks_and_original_conservation_are_connected(self):
+        source=(ROOT/'desktop/src-tauri/src/macos_existing_app_metadata.rs').read_text()
+        observer=(ROOT/'desktop/src-tauri/src/installed_shell_observation_macos.rs').read_text()
+        for name in ('assert_existing_app_metadata_bounds','assert_existing_app_metadata_conservation'):
+            self.assertRegex(source,r'pub fn '+name+r'\(')
+            self.assertIn('crate::macos_existing_app_metadata::'+name+'();',observer)
+        installer=(ROOT/'desktop/src-tauri/src/bin/macos_install.rs').read_text()
+        audit=installer[installer.index('fn audit_generation_mode('):installer.index('// Strict known-control prelude')]
+        self.assertLess(audit.index('"maintenance-app-original"'),audit.index('book.read_existing_app_metadata('))
+        self.assertLess(audit.index('SnapshotData::conserve_data('),audit.index('existing_app_metadata=Some(captured)'))
+        self.assertIn('let existing=allow_existing_macl && !book.creations.iter()',audit)
+        self.assertIn('if !existing {native::no_xattrs(',audit)
+        self.assertIn('None,false,inverse || observed.action==ActionData::SamePackageNoop',installer)
+        self.assertIn('if prefix=="app" && depth==0',installer)
+        self.assertIn('book.app_attributes(original,"maintenance-renamed-attributes")',installer)
+        self.assertIn('if !metadata_ok { self.unknown=true; }',installer)
+        self.assertNotIn('setxattr',source)
+
     def test_custom_observer_data_callbacks_are_available_without_libtest(self):
         manifest = tomllib.loads((ROOT/'desktop/src-tauri/Cargo.toml').read_text())
         observer = next(row for row in manifest['test']
