@@ -137,6 +137,7 @@ mod service_version_reserve_requests;
 #[path = "../src/macos_history_inventory.rs"] mod macos_history_inventory;
 #[path = "../src/macos_applications_launcher.rs"] mod macos_applications_launcher;
 #[path = "../src/macos_persistent_identity.rs"] mod macos_persistent_identity;
+#[path = "../src/macos_existing_app_metadata.rs"] mod macos_existing_app_metadata;
 #[path = "../src/macos_remove_record.rs"] mod macos_remove_record;
 #[path = "../src/project_identity_commands.rs"] mod project_identity_commands;
 #[path = "../src/project_identity_edit_protocol.rs"] mod project_identity_edit_protocol;

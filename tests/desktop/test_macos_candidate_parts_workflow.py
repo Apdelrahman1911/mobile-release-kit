@@ -55,6 +55,24 @@ class CandidatePartsWorkflowTests(unittest.TestCase):
         self.assertIn('if !metadata_ok { self.unknown=true; }',installer)
         self.assertNotIn('setxattr',source)
 
+    def test_observer_callback_dependencies_are_declared_in_its_actual_crate(self):
+        manifest = tomllib.loads((ROOT/'desktop/src-tauri/Cargo.toml').read_text())
+        target = next(row for row in manifest['test']
+                      if row['name'] == 'installed-shell-observation')
+        root_path = ROOT/'desktop/src-tauri'/target['path']
+        root = root_path.read_text()
+        observer = (ROOT/'desktop/src-tauri/src/installed_shell_observation_macos.rs').read_text()
+        declared = set(re.findall(r'\bmod\s+([A-Za-z_]\w*)\s*;', root))
+        referenced = set(re.findall(r'\bcrate::([A-Za-z_]\w*)::', observer))
+        self.assertTrue(referenced)
+        self.assertEqual(referenced - declared, set(),
+                         'observer callbacks need modules in the custom test crate, independently of lib.rs')
+        metadata = re.findall(
+            r'#\[path\s*=\s*"([^"]+)"\]\s*mod\s+macos_existing_app_metadata\s*;', root)
+        self.assertEqual(len(metadata), 1)
+        self.assertEqual((root_path.parent/metadata[0]).resolve(),
+                         (ROOT/'desktop/src-tauri/src/macos_existing_app_metadata.rs').resolve())
+
     def test_custom_observer_data_callbacks_are_available_without_libtest(self):
         manifest = tomllib.loads((ROOT/'desktop/src-tauri/Cargo.toml').read_text())
         observer = next(row for row in manifest['test']
