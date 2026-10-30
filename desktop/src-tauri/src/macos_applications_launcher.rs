@@ -161,6 +161,65 @@ impl OriginalIdentityData {
             && (0..1_000_000_000).contains(&self.birth_nanoseconds)
     }
 }
+
+/// Comparison DATA for an immutable historical publication-stage identity.
+/// Native callers must first authenticate the selected generation and enroll
+/// its existing root-volume witness. This neither changes persisted equality
+/// nor grants a witness, file ownership, publication or cleanup authority.
+pub fn recorded_stage_identity_matches_data(recorded: OriginalIdentityData,
+    observed: OriginalIdentityData,
+    bindings: &[Option<crate::macos_persistent_identity::LegacyVolumeBindingData>]) -> bool {
+    recorded.valid_data() && observed.valid_data()
+        && (recorded == observed || bindings.iter().flatten()
+            .any(|binding| recorded.matches_legacy_binding_data(observed, *binding)))
+}
+
+#[cfg(test)]
+pub(crate) fn assert_recorded_stage_identity_data_contract() {
+    use crate::{macos_install_record::DirectoryIdentity,
+        macos_persistent_identity::{LegacyVolumeBindingData, VolumeUuid}};
+    let first = VolumeUuid::from_bytes_data([1; 16]).unwrap();
+    let other = VolumeUuid::from_bytes_data([2; 16]).unwrap();
+    let root = DirectoryIdentity {device: 16777229, inode: 10, mode: 0o040755,
+        uid: 0, gid: 0, flags: 0, volume_uuid: None};
+    let live_root = DirectoryIdentity {device: 16777232, volume_uuid: Some(first), ..root};
+    let binding = LegacyVolumeBindingData::root_data(root, live_root).unwrap();
+    let old = OriginalIdentityData {device: root.device, inode: 20,
+        birth_seconds: 17, birth_nanoseconds: 3, volume_uuid: None};
+    let live = OriginalIdentityData {device: live_root.device, volume_uuid: Some(first), ..old};
+    // Authentic old records still fail ordinary missing/present UUID equality.
+    assert_ne!(old, live);
+    assert!(!recorded_stage_identity_matches_data(old, live, &[]));
+    assert!(!recorded_stage_identity_matches_data(old, live, &[None]));
+    assert!(recorded_stage_identity_matches_data(old, live, &[Some(binding)]));
+    assert_ne!(old, live);
+    assert!(recorded_stage_identity_matches_data(old, old, &[]));
+    assert!(recorded_stage_identity_matches_data(live, live, &[]));
+    assert!(recorded_stage_identity_matches_data(live,
+        OriginalIdentityData {device: 123, ..live}, &[]));
+    for changed in [OriginalIdentityData {inode: live.inode + 1, ..live},
+        OriginalIdentityData {birth_seconds: live.birth_seconds + 1, ..live},
+        OriginalIdentityData {birth_nanoseconds: live.birth_nanoseconds + 1, ..live},
+        OriginalIdentityData {volume_uuid: Some(other), ..live},
+        OriginalIdentityData {device: live.device + 1, ..live},
+        OriginalIdentityData {volume_uuid: None, ..live}] {
+        assert!(!recorded_stage_identity_matches_data(old, changed, &[Some(binding)]));
+    }
+    assert!(!recorded_stage_identity_matches_data(
+        OriginalIdentityData {device: old.device + 1, ..old}, live, &[Some(binding)]));
+    assert!(!recorded_stage_identity_matches_data(
+        OriginalIdentityData {volume_uuid: Some(other), ..old}, live, &[Some(binding)]));
+    for invalid in [OriginalIdentityData {inode: 0, ..old},
+        OriginalIdentityData {birth_seconds: 0, ..old},
+        OriginalIdentityData {birth_nanoseconds: -1, ..old},
+        OriginalIdentityData {birth_nanoseconds: 1_000_000_000, ..old}] {
+        assert!(!recorded_stage_identity_matches_data(invalid, invalid, &[Some(binding)]));
+    }
+    assert!(LegacyVolumeBindingData::root_data(root,
+        DirectoryIdentity {inode: root.inode + 1, ..live_root}).is_none());
+    assert!(LegacyVolumeBindingData::root_data(root, root).is_none());
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 #[serde(rename_all="camelCase",deny_unknown_fields)]
 pub struct PhaseReferenceData {pub stage_instance:String,pub sha256:String}

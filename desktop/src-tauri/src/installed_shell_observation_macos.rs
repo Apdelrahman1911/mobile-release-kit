@@ -5238,6 +5238,7 @@ fn observer_data_checks() -> bool {
     crate::service_git_requests::assert_installed_transition_contracts();
     crate::macos_existing_app_metadata::assert_existing_app_metadata_bounds();
     crate::macos_existing_app_metadata::assert_existing_app_metadata_conservation();
+    crate::macos_applications_launcher::assert_recorded_stage_identity_data_contract();
     // harness=false does not discover private #[test] functions. These exact
     // inert DATA bodies are shared with their ordinary libtest wrappers.
     // Exercise the positive normal-Mac description; no Finder/native call.

@@ -695,7 +695,12 @@ pub(super) fn recorded_phase_post(book:&mut Install,stage:usize,record:&maintena
     check(format!("{:x}",Sha256::digest(&raw))==reference.sha256,"launcher-phase-history-hash")?;
     let phase=PublicationPhaseData::parse_raw(&raw)?;phase.check(&record.intent,&reference.stage_instance)?;
     let expected=if observation.outcome==launcher::OutcomeData::InverseRestored {phase.previous}else{Some(phase.staged)};
-    check(phase.stage==container_identity(book,stage)? && observation.published_identity==expected,
+    // audit_selected_generation already authenticated the complete original
+    // generation before enrolling its bounded legacy root-volume witness.
+    // Keep all stage FD/name/hash/identity and stored capsule checks strict.
+    check(launcher::recorded_stage_identity_matches_data(phase.stage,
+        container_identity(book,stage)?,&book.legacy_volumes)
+        && observation.published_identity==expected,
         "launcher-phase-history-original")?;
     book.check_name(reader,true)?;book.forward_close(reader,"launcher-phase-history-close")?;
     book.check_name(stage,false)?;Ok(raw.len() as u64)
