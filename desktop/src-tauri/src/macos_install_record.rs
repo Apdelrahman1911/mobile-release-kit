@@ -398,8 +398,7 @@ impl Progress {
 mod tests {
     use super::*;
     use serde_json::json;
-    #[test]
-    pub(super) fn selected_inventory_keeps_exact_digest_and_closed_wire_schema() {
+    pub(super) fn selected_inventory_keeps_exact_digest_and_closed_wire_schema_data() {
         let manifest = "c".repeat(64);
         let raw = inventory();
         let selected: ReleaseData = serde_json::from_value(json!({
@@ -427,6 +426,10 @@ mod tests {
         spoofed["release"] = json!(old.binding_data().release);
         spoofed["runtimeManifestSha256"] = json!(old.binding_data().runtime_manifest_sha256);
         assert!(Inventory::parse_for_selected_release(&serde_json::to_vec(&spoofed).unwrap(), &old).is_err());
+    }
+    #[test]
+    fn selected_inventory_keeps_exact_digest_and_closed_wire_schema() {
+        selected_inventory_keeps_exact_digest_and_closed_wire_schema_data();
     }
     #[test]
     fn installed_control_reservations_keep_original_document_backing() {
@@ -736,6 +739,6 @@ mod tests {
 #[cfg(test)]
 pub(crate) fn assert_installation_record_data_contract() {
     tests::all();
-    tests::selected_inventory_keeps_exact_digest_and_closed_wire_schema();
+    tests::selected_inventory_keeps_exact_digest_and_closed_wire_schema_data();
     crate::macos_store_runtime::assert_approved_predecessor_store_contract_data();
 }

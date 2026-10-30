@@ -1,7 +1,9 @@
 """Verify the actual job graph preserves completed builds on a failed-job rerun."""
 import json
 from pathlib import Path
+import re
 import subprocess
+import tomllib
 import unittest
 
 from desktop.tools import macos_candidate_parts as P
@@ -17,6 +19,39 @@ def yaml(path):
 
 
 class CandidatePartsWorkflowTests(unittest.TestCase):
+    def test_custom_observer_data_callbacks_are_available_without_libtest(self):
+        manifest = tomllib.loads((ROOT/'desktop/src-tauri/Cargo.toml').read_text())
+        observer = next(row for row in manifest['test']
+                        if row['name'] == 'installed-shell-observation')
+        self.assertFalse(observer['harness'])
+        source = (ROOT/'desktop/src-tauri/src/macos_install_record.rs').read_text()
+        callback = re.search(
+            r'pub\(crate\) fn assert_installation_record_data_contract\(\)\s*\{([^}]+)\}',
+            source)
+        self.assertIsNotNone(callback)
+        calls = set(re.findall(r'\btests::([A-Za-z_]\w*)\s*\(', callback.group(1)))
+        self.assertTrue(calls)
+        declarations = list(re.finditer(
+            r'(?m)^[ \t]*(?P<inline>(?:#\[[^\n]+?\][ \t]*)*)'
+            r'(?:pub(?:\([^)]*\))?[ \t]+)?fn[ \t]+(?P<name>[A-Za-z_]\w*)\s*\(',
+            source))
+        for name in calls:
+            matches = [row for row in declarations if row.group('name') == name]
+            self.assertEqual(len(matches), 1, name)
+            declaration = matches[0]
+            attributes = [declaration.group('inline')]
+            for line in reversed(source[:declaration.start()].splitlines()):
+                stripped = line.strip()
+                if not stripped or stripped.startswith('//'):
+                    continue
+                if re.fullmatch(r'#\[[^\n]+\]', stripped):
+                    attributes.append(stripped)
+                    continue
+                break
+            self.assertFalse(any(re.search(r'#\[\s*test\s*\]', row)
+                                 for row in attributes),
+                             f'{name} is only available to the Rust test runner')
+
     def test_workflow_fits_github_limit_and_shared_recipe_bindings_are_complete(self):
         self.assertLess((ROOT/P.WORKFLOW).stat().st_size,500000)
         jobs=yaml(P.WORKFLOW)['jobs']
