@@ -14,8 +14,9 @@ permissions:
 
 jobs:
   candidate-tests:
-    # On a rerun, select the successful producer attempt from the all-attempts
-    # API. Never substitute the consumer's attempt or rebuild its signed app.
+    # On a rerun, nominate the original producer attempt from its unique
+    # retained artifact, then fetch that COMPLETE actual attempt's jobs page.
+    # Never substitute the consumer's attempt or rebuild its signed app.
     if: ${{ !cancelled() && github.ref == 'refs/heads/verify/desktop-macos-candidate' && (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && (github.event.inputs.operation == 'candidate-tests' || github.event.inputs.operation == 'local-carrier'))) }}
     environment: macos-developer-id
     name: ${{ matrix.group == 'local-carrier' && 'Prepare authenticated Tool26 carrier for the owner Mac' || format('Test saved candidate ({0})', matrix.group) }}
@@ -123,8 +124,13 @@ jobs:
           ulimit -c 0
           [[ "$PRODUCER_SOURCE" =~ ^[0-9a-f]{40}$ && "$PRODUCER_RUN" =~ ^[1-9][0-9]{0,19}$ ]] || exit 1
           fetch() { (ulimit -f 16384; gh api "$1" > "$2"); }
-          fetch "repos/$GITHUB_REPOSITORY/actions/runs/$PRODUCER_RUN/jobs?filter=all&per_page=100" "$MRK_MACOS_WORK/prepared-jobs.json"
           fetch "repos/$GITHUB_REPOSITORY/actions/runs/$PRODUCER_RUN/artifacts?per_page=100" "$MRK_MACOS_WORK/prepared-artifacts.json"
+          printf '0\n' > "$MRK_MACOS_WORK/prepared-artifact-api.status"
+          "$MRK_PYTHON" -I -S -B desktop/tools/macos_prepared_package.py producer-attempt --target "$MRK_MACOS_TARGET" \
+            --producer-source "$PRODUCER_SOURCE" --producer-run "$PRODUCER_RUN" > "$MRK_MACOS_WORK/prepared-producer-attempt.txt"
+          IFS= read -r producer_attempt < "$MRK_MACOS_WORK/prepared-producer-attempt.txt"
+          [[ "$producer_attempt" =~ ^[1-9][0-9]{0,19}$ ]] || exit 1
+          fetch "repos/$GITHUB_REPOSITORY/actions/runs/$PRODUCER_RUN/attempts/$producer_attempt/jobs?per_page=100" "$MRK_MACOS_WORK/prepared-jobs.json"
           fetch "repos/$GITHUB_REPOSITORY/git/commits/$PRODUCER_SOURCE" "$MRK_MACOS_WORK/prepared-commit.json"
           printf '0\n' > "$MRK_MACOS_WORK/prepared-api.status"
           unset GH_TOKEN

@@ -600,6 +600,148 @@ class PreparedPackageData(unittest.TestCase):
         self.assertEqual(P.selected_artifact_data(body,manifest['origin']),service['artifact'])
         with self.assertRaises(ValueError):P.selected_artifact_data(P.canonical(dict(total_count=2,artifacts=[service['artifact']]*2)),manifest['origin'])
 
+    def retained_attempt_fixture(self, scope=None, attempt='1'):
+        _, manifest, service, _ = fixture()
+        origin = dict(manifest['origin'], runAttempt=attempt)
+        if scope:
+            origin.update(nativeScope=scope, hostProfile=P.NATIVE_HOSTS[scope])
+        artifact = dict(service['artifact'], name=P.artifact_name(origin))
+        job = dict(service['job'], run_attempt=int(attempt), status='completed', conclusion='success',
+            name=P.NATIVE_JOB_NAMES[scope] if scope else service['job']['name'],
+            steps=[dict(name=name, number=i+1, status='completed', conclusion='success')
+                   for i, name in enumerate(P.NATIVE_PRODUCER_STEPS if scope else P.PRODUCER_STEPS)])
+        return artifact, job
+
+    def test_retained_attempt_nominates_original_not_a_copied_rerun_job(self):
+        for scope, attempt in ((None, '1'), ('git-native', '5'), ('tool-setup', '6')):
+            artifact, job = self.retained_attempt_fixture(scope, attempt)
+            body = P.canonical(dict(total_count=1, artifacts=[artifact]))
+            with self.subTest(scope=scope):
+                self.assertEqual(P.retained_producer_attempt_data(body, '1'*40, '41', P.TARGETS[0],
+                    native_scope=scope), attempt)
+                original_page = P.canonical(dict(total_count=1, jobs=[job]))
+                self.assertEqual(P.selected_job_data(original_page, '1'*40, '41', P.TARGETS[0],
+                    completed=True, native_scope=scope, artifacts=body), job)
+                # Same successful steps copied into a later rerun cannot
+                # replace the artifact's original producer execution.
+                copied = dict(job, id=99, run_attempt=int(attempt)+1)
+                with self.assertRaisesRegex(ValueError, 'prepared-one-target-job'):
+                    P.selected_job_data(P.canonical(dict(total_count=1, jobs=[copied])),
+                        '1'*40, '41', P.TARGETS[0], completed=True, native_scope=scope, artifacts=body)
+                with self.assertRaisesRegex(ValueError, 'prepared-jobs-page-complete'):
+                    P.selected_job_data(P.canonical(dict(total_count=216, jobs=[job])),
+                        '1'*40, '41', P.TARGETS[0], completed=True, native_scope=scope, artifacts=body)
+                failed = copy.deepcopy(job); failed['steps'][0]['conclusion'] = 'failure'
+                with self.assertRaisesRegex(ValueError, 'prepared-one-target-job'):
+                    P.selected_job_data(P.canonical(dict(total_count=1, jobs=[failed])),
+                        '1'*40, '41', P.TARGETS[0], completed=True, native_scope=scope, artifacts=body)
+
+    def test_retained_attempt_refuses_missing_ambiguous_incomplete_and_oversized_pages(self):
+        artifact, _ = self.retained_attempt_fixture('git-native', '5')
+        second = dict(artifact, id=99, name=artifact['name'][:-1]+'6')
+        for rows, total in (([], 0), ([artifact, artifact], 2), ([artifact, second], 2),
+                            ([artifact], 2), ([artifact]*101, 101)):
+            with self.subTest(total=total), self.assertRaises(ValueError):
+                P.retained_producer_attempt_data(P.canonical(dict(total_count=total, artifacts=rows)),
+                    '1'*40, '41', P.TARGETS[0], native_scope='git-native')
+        with self.assertRaisesRegex(ValueError, 'prepared-json-bound'):
+            P.retained_producer_attempt_data(b' '*(8*P.MIB+1), '1'*40, '41', P.TARGETS[0])
+        with self.assertRaisesRegex(ValueError, 'prepared-json-duplicate'):
+            P.retained_producer_attempt_data(b'{"artifacts":[],"total_count":0,"total_count":1}',
+                '1'*40, '41', P.TARGETS[0])
+
+    def test_retained_attempt_refuses_wrong_source_run_expiry_digest_size_and_typed_scope(self):
+        artifact, _ = self.retained_attempt_fixture('tool-setup', '6')
+        mutations = [('id', True), ('expired', True), ('expired', 0), ('size_in_bytes', True),
+            ('size_in_bytes', 21), ('size_in_bytes', P.ARTIFACT_LIMIT+1), ('digest', 'sha256:'+'0'*64),
+            ('digest', 'sha256:'+'5'*63), ('digest', 'sha512:'+'5'*64),
+            ('name', artifact['name'].replace('1'*40, '6'*40)),
+            ('name', artifact['name'].replace('-41-', '-42-')),
+            ('name', artifact['name'][:-1]+'0'), ('name', artifact['name'][:-1]+'06'),
+            ('workflow_run', dict(artifact['workflow_run'], id=True)),
+            ('workflow_run', dict(artifact['workflow_run'], id=42)),
+            ('workflow_run', dict(artifact['workflow_run'], head_sha='6'*40)),
+            ('workflow_run', dict(artifact['workflow_run'], head_branch='main'))]
+        for field, value in mutations:
+            with self.subTest(field=field, value=value), self.assertRaises(ValueError):
+                P.retained_producer_attempt_data(P.canonical(dict(total_count=1,
+                    artifacts=[dict(artifact, **{field:value})])), '1'*40, '41', P.TARGETS[0],
+                    native_scope='tool-setup')
+        body = P.canonical(dict(total_count=1, artifacts=[artifact]))
+        for scope in ([], {}, True, 'unknown'):
+            with self.subTest(scope=scope), self.assertRaisesRegex(ValueError, 'prepared-job-scope'):
+                P.retained_producer_attempt_data(body, '1'*40, '41', P.TARGETS[0], native_scope=scope)
+        with self.assertRaisesRegex(ValueError, 'prepared-job-scope'):
+            P.retained_producer_attempt_data(body, '1'*40, '41', P.TARGETS[1], native_scope='tool-setup')
+
+    def test_retained_attempt_phase_uses_existing_native_host_admission_and_refuses_other_phases(self):
+        helper = SimpleNamespace(admit=mock.Mock(return_value=Path('/inert-work')))
+        environment = dict(GITHUB_EVENT_NAME='workflow_dispatch', MRK_MACOS_PREPARED_RESUME='true',
+            MRK_MACOS_NATIVE_SCOPE='git-native', MRK_MACOS_RUNNER='xcode-27',
+            MRK_MACOS_PACKAGE_ROLE='installed-shell-observation')
+        self.assertEqual(P.admit_host(helper, environment, SimpleNamespace(target=P.TARGETS[0],
+            phase='producer-attempt')), Path('/inert-work'))
+        helper.admit.assert_called_once_with(environment, target=P.TARGETS[0], phase='package-install')
+        with self.assertRaisesRegex(ValueError, 'prepared-native-resume-phase'):
+            P.admit_host(helper, environment, SimpleNamespace(target=P.TARGETS[0], phase='export'))
+
+    def test_actual_lookup_shell_fetches_artifacts_then_only_complete_original_attempt_jobs(self):
+        workflow = (ROOT/'.github/workflows/desktop-macos-candidate-tests.yml').read_text()
+        gate = workflow.split('      - name: Select the one closed upstream target checkpoint', 1)[1]
+        gate = gate.split('\n      - name:', 1)[0]
+        script = textwrap.dedent(gate.split('        run: |\n', 1)[1])
+        for scope, attempt in (('git-native', '5'), ('tool-setup', '6')):
+            artifact, job = self.retained_attempt_fixture(scope, attempt)
+            with self.subTest(scope=scope), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory); work = root/'work'; work.mkdir()
+                (root/'artifacts.json').write_bytes(P.canonical(dict(total_count=1, artifacts=[artifact])))
+                (root/'jobs.json').write_bytes(P.canonical(dict(total_count=1, jobs=[job])))
+                (root/'commit.json').write_bytes(P.canonical(dict(sha='1'*40, tree={'sha':'2'*40})))
+                gh = root/'gh'; gh.write_text('''#!/bin/bash
+set -euo pipefail
+printf '%s\\n' "$2" >> "$TEST_ROOT/routes"
+case "$2" in
+  */artifacts?per_page=100) /bin/cat "$TEST_ROOT/artifacts.json" ;;
+  */attempts/'''+attempt+'''/jobs?per_page=100) /bin/cat "$TEST_ROOT/jobs.json" ;;
+  */git/commits/*) /bin/cat "$TEST_ROOT/commit.json" ;;
+  *) exit 97 ;;
+esac
+'''); gh.chmod(0o700)
+                # Execute the actual workflow shell with the actual DATA
+                # parsers; this shim intentionally grants no hosted/native IO.
+                driver = root/'parser'; driver.write_text('#!'+sys.executable+'\n'+textwrap.dedent('''
+                    import importlib.util, os, pathlib, sys
+                    spec=importlib.util.spec_from_file_location('inert', os.environ['TEST_MODULE'])
+                    p=importlib.util.module_from_spec(spec); spec.loader.exec_module(p)
+                    work=pathlib.Path(os.environ['MRK_MACOS_WORK'])
+                    phase=sys.argv[5]
+                    artifacts=(work/'prepared-artifacts.json').read_bytes()
+                    attempt=p.retained_producer_attempt_data(artifacts, '1'*40, '41', p.TARGETS[0],
+                        native_scope=os.environ['TEST_SCOPE'])
+                    if phase=='producer-attempt': print(attempt)
+                    elif phase=='select':
+                        job=p.selected_job_data((work/'prepared-jobs.json').read_bytes(), '1'*40, '41',
+                            p.TARGETS[0], completed=True, native_scope=os.environ['TEST_SCOPE'], artifacts=artifacts)
+                        assert str(job['run_attempt'])==attempt
+                        print('artifact-id=43\\nproducer-attempt='+attempt+'\\nproducer-source='+'1'*40)
+                    else: raise AssertionError(phase)
+                ''')); driver.chmod(0o700)
+                output=root/'output'
+                result=subprocess.run(['/bin/bash', '-c', script], cwd=ROOT, capture_output=True, text=True,
+                    timeout=10, env=dict(PATH=str(root)+os.pathsep+os.environ['PATH'], TEST_ROOT=str(root),
+                    TEST_SCOPE=scope, TEST_MODULE=str(ROOT/'desktop/tools/macos_prepared_package.py'),
+                    MRK_MACOS_WORK=str(work), MRK_PYTHON=str(driver), MRK_MACOS_TARGET=P.TARGETS[0],
+                    GITHUB_OUTPUT=str(output), GITHUB_REPOSITORY=P.REPOSITORY, PRODUCER_SOURCE='1'*40,
+                    PRODUCER_RUN='41', GH_TOKEN='inert'))
+                self.assertEqual(result.returncode, 0, result.stderr)
+                self.assertEqual((root/'routes').read_text().splitlines(), [
+                    'repos/'+P.REPOSITORY+'/actions/runs/41/artifacts?per_page=100',
+                    'repos/'+P.REPOSITORY+'/actions/runs/41/attempts/'+attempt+'/jobs?per_page=100',
+                    'repos/'+P.REPOSITORY+'/git/commits/'+'1'*40])
+                self.assertIn('producer-attempt='+attempt+'\n', output.read_text())
+                self.assertEqual((work/'prepared-artifact-api.status').read_bytes(), b'0\n')
+                self.assertEqual((work/'prepared-api.status').read_bytes(), b'0\n')
+
     def test_failed_prepared_source_admission_is_inside_actual_execute_cleanup(self):
         T,tool,helper=real_modules()
         values,manifest,service,consumer=fixture()

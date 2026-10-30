@@ -793,6 +793,42 @@ def reclaim_prepared_allocator(op):
     need(status == 0, 'prepared-allocator-reclaim')
 
 
+def retained_producer_attempt_data(body, source, run, target, *, native_scope=None):
+    """Nominate one original attempt from a complete immutable artifact page.
+
+    This finite ordinal grants no producer or native authority. The unchanged
+    selector must subsequently admit the COMPLETE actual jobs page for that
+    attempt, its original producer cuts, and the matching artifact metadata.
+    Never truncate/filter a jobs page or manufacture its total_count.
+    """
+    need(hex_data(source, 40) and decimal(run) and target in TARGETS,
+         'prepared-selection-context')
+    need(native_scope is None or type(native_scope) is str and native_scope in NATIVE_HOSTS
+         and target == 'aarch64-apple-darwin', 'prepared-job-scope')
+    value = decode(body, 8 * MIB)
+    need(type(value) is dict and type(value.get('artifacts')) is list
+         and type(value.get('total_count')) is int
+         and len(value['artifacts']) == value['total_count'] <= 100,
+         'prepared-artifact-page-complete')
+    prefix = ('macos-candidate-package-' + native_scope if native_scope else
+              'mobile-release-kit-macos26-' + target + '-prepared')
+    prefix += '-' + source + '-' + run + '-'
+    rows = [(row, row['name'][len(prefix):]) for row in value['artifacts']
+            if type(row) is dict and type(row.get('name')) is str
+            and row['name'].startswith(prefix) and decimal(row['name'][len(prefix):])]
+    need(len(rows) == 1, 'prepared-one-artifact')
+    row, attempt = rows[0]
+    producer = row.get('workflow_run')
+    need(type(row.get('id')) is int and row['id'] > 0 and row.get('expired') is False
+         and type(row.get('size_in_bytes')) is int and 22 <= row['size_in_bytes'] <= ARTIFACT_LIMIT
+         and type(row.get('digest')) is str and row['digest'].startswith('sha256:')
+         and hex_data(row['digest'][7:]) and type(producer) is dict
+         and type(producer.get('id')) is int and producer['id'] == int(run)
+         and producer.get('head_sha') == source and producer.get('head_branch') == BRANCH,
+         'prepared-service-artifact')
+    return attempt
+
+
 def selected_job_data(body, source, run, target, *, completed, native_scope=None, artifacts=None):
     value = decode(body, 8 * MIB)
     need(type(value) is dict and type(value.get('jobs')) is list and type(value.get('total_count')) is int
@@ -1074,7 +1110,7 @@ def main():
     """Fixed hosted entry; no arbitrary checkout, command or Installer path."""
     import argparse
     parser = argparse.ArgumentParser()
-    parser.add_argument('phase', choices=('select', 'export', 'hydrate', 'package-install', 'finalize-image', 'candidate'))
+    parser.add_argument('phase', choices=('producer-attempt', 'select', 'export', 'hydrate', 'package-install', 'finalize-image', 'candidate'))
     parser.add_argument('--target', required=True, choices=TARGETS)
     parser.add_argument('--producer-source')
     parser.add_argument('--producer-run')
@@ -1095,7 +1131,7 @@ def main():
         need(stager.read(root / '.git/HEAD', 64) == (environment['GITHUB_SHA'] + '\n').encode('ascii'), 'prepared-current-source')
         qualification = helper.load_data(root, 'macos_aqua_qualification.py', '_mrk_prepared_owner_loader')
         owner = qualification.load_owner(root)
-        if args.phase == 'select':
+        if args.phase in ('producer-attempt', 'select'):
             need(hex_data(args.producer_source, 40) and decimal(args.producer_run), 'prepared-selection-context')
             operation = helper.Operation(owner, root, work, 'package-install', environment, stager, target=args.target)
             try:
@@ -1110,24 +1146,35 @@ def main():
                     body = operation.read(entry)
                     operation.package_outputs.append((entry, sha(body)))
                     return body
-                need(small('prepared-api.status') == b'0\n', 'prepared-api-original-status')
+                status_name = 'prepared-artifact-api.status' if args.phase == 'producer-attempt' else 'prepared-api.status'
+                need(small(status_name) == b'0\n', 'prepared-api-original-status')
                 artifact_body = small('prepared-artifacts.json')
-                job = selected_job_data(small('prepared-jobs.json'), args.producer_source, args.producer_run, args.target,
-                    completed=True, native_scope=native_origin(environment).get('nativeScope'), artifacts=artifact_body)
-                commit = decode(small('prepared-commit.json'), 8 * MIB)
-                need(commit.get('sha') == args.producer_source and type(commit.get('tree')) is dict
-                     and hex_data(commit['tree'].get('sha'), 40), 'prepared-selected-tree')
-                origin = origin_data(dict(source=args.producer_source, tree=commit['tree']['sha'], target=args.target,
-                    runId=args.producer_run, runAttempt=str(job['run_attempt']), jobId=str(job['id']), **native_origin(environment)))
-                artifact = selected_artifact_data(artifact_body, origin)
-                directory = operation.package_directory('prepared-service')
-                operation.package_file(directory, 'job.json', canonical(job))
-                operation.package_file(directory, 'artifact.json', canonical(artifact))
-                operation.package_file(directory, 'commit.json', canonical(commit))
+                if args.phase == 'producer-attempt':
+                    producer_attempt = retained_producer_attempt_data(artifact_body, args.producer_source,
+                        args.producer_run, args.target, native_scope=native_origin(environment).get('nativeScope'))
+                else:
+                    job = selected_job_data(small('prepared-jobs.json'), args.producer_source, args.producer_run, args.target,
+                        completed=True, native_scope=native_origin(environment).get('nativeScope'), artifacts=artifact_body)
+                    commit = decode(small('prepared-commit.json'), 8 * MIB)
+                    need(commit.get('sha') == args.producer_source and type(commit.get('tree')) is dict
+                         and hex_data(commit['tree'].get('sha'), 40), 'prepared-selected-tree')
+                    origin = origin_data(dict(source=args.producer_source, tree=commit['tree']['sha'], target=args.target,
+                        runId=args.producer_run, runAttempt=str(job['run_attempt']), jobId=str(job['id']), **native_origin(environment)))
+                    artifact = selected_artifact_data(artifact_body, origin)
+                    need(job['run_attempt'] == int(retained_producer_attempt_data(artifact_body,
+                         args.producer_source, args.producer_run, args.target,
+                         native_scope=native_origin(environment).get('nativeScope'))), 'prepared-job-context')
+                    directory = operation.package_directory('prepared-service')
+                    operation.package_file(directory, 'job.json', canonical(job))
+                    operation.package_file(directory, 'artifact.json', canonical(artifact))
+                    operation.package_file(directory, 'commit.json', canonical(commit))
                 operation.package_post()
             finally:
                 finish_staging(operation, sys.exception())
             # Finite output consumed by Actions; no caller-provided interpolation.
+            if args.phase == 'producer-attempt':
+                print(producer_attempt)
+                return 0
             print('artifact-id=' + str(artifact['id']))
             print('producer-attempt=' + origin['runAttempt'])
             print('producer-source=' + origin['source'])
@@ -1191,12 +1238,12 @@ def main():
 def admit_host(helper, environment, args):
     if environment.get('GITHUB_EVENT_NAME') == 'push' or (
         environment.get('MRK_MACOS_PREPARED_RESUME') == 'true' and native_origin(environment)):
-        need(args.phase in ('select', 'hydrate', 'package-install')
+        need(args.phase in ('producer-attempt', 'select', 'hydrate', 'package-install')
              or environment.get('GITHUB_EVENT_NAME') == 'push', 'prepared-native-resume-phase')
         return helper.admit(environment, target=args.target, phase='package-install')
     # Diagnostic-only current harness. Never change the actual event/source or
     # let ordinary helper.admit accept dispatch/artifact claims as push evidence.
-    need(args.phase in ('select', 'hydrate', 'package-install') and environment.get('GITHUB_EVENT_NAME') == 'workflow_dispatch',
+    need(args.phase in ('producer-attempt', 'select', 'hydrate', 'package-install') and environment.get('GITHUB_EVENT_NAME') == 'workflow_dispatch',
          'prepared-dispatch-install-only')
     machine, arch, _ = helper.build_profile(args.target)
     source = environment.get('GITHUB_SHA')

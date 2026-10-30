@@ -1132,7 +1132,8 @@ class CandidateWorkflowTests(unittest.TestCase):
         rows=[r[0] for r in singles.values()]
         steps=job['steps'];commands='\n'.join(r.get('run','') for r in steps)
         self.assertIn('mktemp -d',commands)
-        self.assertIn('filter=all&per_page=100',commands)
+        self.assertIn('attempts/$producer_attempt/jobs?per_page=100',commands)
+        self.assertNotIn('filter=all&per_page=100',commands)
         self.assertIn('attempts/$PRODUCER_ATTEMPT',commands)
         self.assertIn('macos_prepared_package.py hydrate',commands)
         self.assertIn('macos_prepared_package.py package-install',commands)
