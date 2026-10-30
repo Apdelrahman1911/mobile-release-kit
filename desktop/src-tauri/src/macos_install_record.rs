@@ -90,8 +90,23 @@ impl DirectoryIdentity {
 }
 
 #[derive(Deserialize)]
+#[serde(from = "DecodedInventory")]
+pub struct Inventory {
+    pub schema_version: u32, pub release: String, pub runtime_manifest_sha256: String, pub files: Vec<Entry>,
+    store_contract: crate::macos_store_runtime::InventoryContract,
+}
+// Keep the original four-field wire schema. The internal contract cannot be
+// supplied, even as an ignored extra field, by untrusted inventory JSON.
+#[derive(Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub struct Inventory { pub schema_version: u32, pub release: String, pub runtime_manifest_sha256: String, pub files: Vec<Entry> }
+struct DecodedInventory { schema_version: u32, release: String, runtime_manifest_sha256: String, files: Vec<Entry> }
+impl From<DecodedInventory> for Inventory {
+    fn from(data: DecodedInventory) -> Self {
+        Self { schema_version: data.schema_version, release: data.release,
+            runtime_manifest_sha256: data.runtime_manifest_sha256, files: data.files,
+            store_contract: crate::macos_store_runtime::InventoryContract::Current }
+    }
+}
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Entry { pub path: String, pub sha256: String, pub size: u64, pub executable: bool }
@@ -113,6 +128,16 @@ impl InventoryIndex<'_> {
 impl Inventory {
     pub fn parse(bytes: &[u8], runtime_manifest: &str) -> Result<Self> {
         Self::parse_for_release(bytes, runtime_manifest, paths::RELEASE)
+    }
+    /// The genuine caller retains its selected release and original inventory
+    /// bytes. Match the exact inventory digest before selecting its frozen
+    /// structural contract; native signatures/rosters/POSTs remain independent.
+    pub fn parse_for_selected_release(bytes: &[u8], selected: &ReleaseData) -> Result<Self> {
+        let binding = selected.binding_data();
+        check(digest(bytes) == binding.inventory_sha256, "inventory-selected-release-digest")?;
+        let mut inventory = Self::parse_for_release(bytes, binding.runtime_manifest_sha256, binding.release)?;
+        inventory.store_contract = crate::macos_store_runtime::selected_inventory_contract(binding);
+        Ok(inventory)
     }
     /// The original observer supplies a producer-selected generation, never the
     /// release/runtime strings learned from the inventory being checked. The
@@ -170,8 +195,8 @@ impl Inventory {
         }
         let index = InventoryIndex { files, directories, payload_bytes: total };
         crate::macos_applications_launcher::LauncherInventory::from_index(&index)?;
-        crate::macos_store_runtime::validate(index.files.values().filter_map(|file|
-            file.path.strip_prefix("runtime/").map(|path| (path, file.size))))?;
+        crate::macos_store_runtime::validate_inventory_contract(index.files.values().filter_map(|file|
+            file.path.strip_prefix("runtime/").map(|path| (path, file.size))), self.store_contract)?;
         Ok(index)
     }
 }
@@ -250,14 +275,14 @@ impl Record {
         Ok(bytes)
     }
     pub fn parse_data(bytes: &[u8], inventory: &[u8], expected: &Expected<'_>) -> Result<Self> {
-        Self::parse_bound_data(bytes, inventory, expected, paths::PACKAGE_VERSION, paths::RELEASE, paths::PROTOCOL_SHA,false)
+        Self::parse_bound_data(bytes, inventory, expected, paths::PACKAGE_VERSION, paths::RELEASE, paths::PROTOCOL_SHA,false,None)
     }
     /// Explicit native fixed-root readback compatibility. This accepts only a
     /// complete legacy pair on one recorded device with both exact inodes and
     /// protection fields, reobserved together on one UUID-bearing live volume.
     /// It does not modify the old record or certify native trust/finality.
     pub fn parse_observed_data(bytes: &[u8], inventory: &[u8], expected: &Expected<'_>) -> Result<Self> {
-        Self::parse_bound_data(bytes, inventory, expected, paths::PACKAGE_VERSION, paths::RELEASE, paths::PROTOCOL_SHA,true)
+        Self::parse_bound_data(bytes, inventory, expected, paths::PACKAGE_VERSION, paths::RELEASE, paths::PROTOCOL_SHA,true,None)
     }
     /// Historical DATA remains inventory-recorded, not an old completion
     /// receipt. The caller independently selected this exact release tuple and
@@ -268,17 +293,17 @@ impl Record {
             && binding.package_identifier == paths::PACKAGE_ID
             && binding.bundle_identifier == paths::BUNDLE_ID && digest(inventory) == binding.inventory_sha256,
             "installation-record-selected-release")?;
-        Self::parse_bound_data(bytes, inventory, expected, binding.package_version, binding.release, binding.protocol_sha256,false)
+        Self::parse_bound_data(bytes, inventory, expected, binding.package_version, binding.release, binding.protocol_sha256,false,Some(release))
     }
     pub fn parse_observed_for_release_data(bytes: &[u8], inventory: &[u8], expected: &Expected<'_>, release: &ReleaseData) -> Result<Self> {
         let binding=release.binding_data();
         check(expected.source_commit==binding.source_commit && expected.runtime_manifest==binding.runtime_manifest_sha256
             && binding.package_identifier==paths::PACKAGE_ID && binding.bundle_identifier==paths::BUNDLE_ID
             && digest(inventory)==binding.inventory_sha256,"installation-record-selected-release")?;
-        Self::parse_bound_data(bytes,inventory,expected,binding.package_version,binding.release,binding.protocol_sha256,true)
+        Self::parse_bound_data(bytes,inventory,expected,binding.package_version,binding.release,binding.protocol_sha256,true,Some(release))
     }
     fn parse_bound_data(bytes: &[u8], inventory: &[u8], expected: &Expected<'_>, package_version: &str,
-        release: &str, protocol_sha256: &str, observed_legacy: bool) -> Result<Self> {
+        release: &str, protocol_sha256: &str, observed_legacy: bool, selected: Option<&ReleaseData>) -> Result<Self> {
         check(!bytes.is_empty() && bytes.len() <= RECORD_LIMIT, "installation-record-size")?;
         let value = strict_json(bytes).map_err(|_| "installation-record-json")?;
         check(value.is_object() && ["inventory", "installRoot", "releaseDirectory"].iter()
@@ -313,7 +338,10 @@ impl Record {
         check(!inventory.is_empty() && inventory.len() <= INVENTORY_LIMIT && record.inventory.name == INVENTORY_NAME
             && record.inventory.bytes == inventory.len() as u64 && record.inventory.sha256 == digest(inventory),
             "installation-record-inventory")?;
-        let parsed = Inventory::parse_for_release(inventory, expected.runtime_manifest, release)?;
+        let parsed = match selected {
+            Some(selected) => Inventory::parse_for_selected_release(inventory, selected)?,
+            None => Inventory::parse_for_release(inventory, expected.runtime_manifest, release)?,
+        };
         let indexed = parsed.index()?;
         check(indexed.payload_bytes.checked_add(inventory.len() as u64).and_then(|n| n.checked_add(RECORD_LIMIT as u64))
             .and_then(|n| n.checked_add(paths::MAINTENANCE_GATE_BYTES.len() as u64))
@@ -370,6 +398,36 @@ impl Progress {
 mod tests {
     use super::*;
     use serde_json::json;
+    #[test]
+    pub(super) fn selected_inventory_keeps_exact_digest_and_closed_wire_schema() {
+        let manifest = "c".repeat(64);
+        let raw = inventory();
+        let selected: ReleaseData = serde_json::from_value(json!({
+            "profile":"fixed-macos26-arm64-maintenance-v2", "packageIdentifier":paths::PACKAGE_ID,
+            "bundleIdentifier":paths::BUNDLE_ID, "packageVersion":paths::PACKAGE_VERSION,
+            "release":paths::RELEASE, "sourceCommit":"a".repeat(40),
+            "protocolSha256":paths::PROTOCOL_SHA, "runtimeManifestSha256":manifest,
+            "inventorySha256":digest(&raw), "signingPolicySha256":"b".repeat(64), "packageSha256":"d".repeat(64),
+        })).unwrap();
+        let parsed = Inventory::parse_for_selected_release(&raw, &selected).unwrap();
+        assert_eq!(parsed.store_contract, crate::macos_store_runtime::InventoryContract::Current);
+        assert!(parsed.index().is_ok());
+        let mut changed = raw.clone(); changed.push(b' ');
+        assert!(Inventory::parse_for_selected_release(&changed, &selected).is_err());
+        for field in ["store_contract", "storeContract", "inventoryContract"] {
+            let mut value: serde_json::Value = serde_json::from_slice(&raw).unwrap();
+            value[field] = json!("ApprovedArm64Desktop02");
+            assert!(Inventory::parse_for_release(&serde_json::to_vec(&value).unwrap(), &manifest, paths::RELEASE).is_err());
+        }
+        let predecessor: serde_json::Value = serde_json::from_str(include_str!(
+            "../../macos-installed-inputs/update-predecessors.json")).unwrap();
+        let old: ReleaseData = serde_json::from_value(predecessor["targets"]["aarch64-apple-darwin"]["release"].clone()).unwrap();
+        // Even matching the old labels cannot replace its exact original bytes.
+        let mut spoofed: serde_json::Value = serde_json::from_slice(&raw).unwrap();
+        spoofed["release"] = json!(old.binding_data().release);
+        spoofed["runtimeManifestSha256"] = json!(old.binding_data().runtime_manifest_sha256);
+        assert!(Inventory::parse_for_selected_release(&serde_json::to_vec(&spoofed).unwrap(), &old).is_err());
+    }
     #[test]
     fn installed_control_reservations_keep_original_document_backing() {
         for (count,mib) in [(1,176),(2,288),(3,400)] {
@@ -676,4 +734,8 @@ mod tests {
 }
 /// Shared inert bodies for the already selected normal-profile observer route.
 #[cfg(test)]
-pub(crate) fn assert_installation_record_data_contract() { tests::all(); }
+pub(crate) fn assert_installation_record_data_contract() {
+    tests::all();
+    tests::selected_inventory_keeps_exact_digest_and_closed_wire_schema();
+    crate::macos_store_runtime::assert_approved_predecessor_store_contract_data();
+}

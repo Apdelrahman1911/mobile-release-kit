@@ -1834,7 +1834,7 @@ mod installer {
                 let record=installation_record::Record::parse_observed_for_release_data(&raw[1],&raw[0],&record_expected,expected)?;
                 check(record.instance()==self.generation()?.instance_data()
                     && record.recorded_release_directory_data()==self.generation()?.release_directory_data(),"complete-prefix-instance")?;
-                self.inventory=Some(Inventory::parse_for_release(&raw[0],binding.runtime_manifest_sha256,binding.release)?);
+                self.inventory=Some(Inventory::parse_for_selected_release(&raw[0],expected)?);
                 self.index=Some(worker::reinstall_index_quote_data(self.inventory.as_ref().ok_or("complete-prefix-inventory")?)?);
                 let (files,dirs,index)=self.index.ok_or("complete-prefix-index")?;
                 let (future,workspace)=complete_prefix_cost_data(book.originals.len(),files,dirs,
@@ -6454,7 +6454,8 @@ mod installer {
                 let mut wrong=phase_raw.clone();wrong.push(b' ');
                 assert!(applications::partial_phase_record(&wrong,&intent,identity(1),Some(identity(2)),Some(identity(3)),None,true).is_err());
                 assert_eq!(partial_fresh_retry_original_quote_data(3,2).unwrap(),206);
-                let mut inventory=Inventory{schema_version:1,release:binding.release.into(),runtime_manifest_sha256:binding.runtime_manifest_sha256.into(),files:vec![]};
+                let mut inventory:Inventory=serde_json::from_value(serde_json::json!({"schemaVersion":1,
+                    "release":binding.release,"runtimeManifestSha256":binding.runtime_manifest_sha256,"files":[]})).unwrap();
                 assert_eq!(partial_fresh_inventory_quote_data(3,2,&inventory).unwrap(),206);
                 inventory.files.push(Entry{path:format!("{}/Contents/Info.plist",mobile_release_desktop::macos_applications_launcher::BUNDLE),
                     sha256:"1".repeat(64),size:1,executable:false});
@@ -7528,7 +7529,7 @@ mod installer {
                 check(book.identity(i)?==Identity::of(&before) && inventory_raw.len()==size
                     && <[u8;32]>::from(Sha256::digest(&inventory_raw))==*reference.inventory_sha256_data()
                     && hash(&inventory_raw)==expected.binding_data().inventory_sha256,"removal-conservation-inventory-binding")?;
-                let inventory=Inventory::parse_for_release(&inventory_raw,expected.binding_data().runtime_manifest_sha256,expected.binding_data().release)?;
+                let inventory=Inventory::parse_for_selected_release(&inventory_raw,expected)?;
                 let index=worker::reinstall_index_quote_data(&inventory)?;
                 let value=Self{root,versions,release,originals:[p,s,i],raw:[producer_raw,signature_raw,inventory_raw],descriptor,inventory,index};
                 value.post(book,read)?;Ok(value)
@@ -10160,7 +10161,7 @@ mod installer {
                     || legacy.is_some_and(|legacy|generation.release_directory_data().matches_legacy_binding_data(expected.release_directory,legacy))),
                 "maintenance-release-original")?;
             check(record.instance() == generation.instance_data(), "maintenance-generation-instance")?;
-            let inventory = Inventory::parse_for_release(&raw, binding.runtime_manifest_sha256, binding.release)?;
+            let inventory = Inventory::parse_for_selected_release(&raw, generation.release_data())?;
             let index = inventory.index()?;
             let mut before_present=(0,0);
             if let Some((source,plan))=resume.as_mut(){
@@ -10354,7 +10355,7 @@ mod installer {
                 let extra=removal_resume_inventory_quote_data(span.len_data()).ok_or("removal-resume-inventory-memory")?;
                 check(base.checked_add(extra as u64).is_some_and(|n|n<=(installation_record::CONTROL_LIMIT as u64)),"removal-resume-inventory-memory")?;
                 let raw=source.read_genesis_control(book,&path)?;
-                let inventory=Inventory::parse_for_release(&raw,binding.runtime_manifest_sha256,binding.release)?;
+                let inventory=Inventory::parse_for_selected_release(&raw,generation.release_data())?;
                 let index=inventory.index()?;
                 out.files=out.files.checked_add(index.files.len() as u64).ok_or("removal-resume-count")?;
                 out.directories=out.directories.checked_add(index.directories.len() as u64).ok_or("removal-resume-count")?;
@@ -11311,7 +11312,7 @@ mod installer {
                 source_commit:binding.source_commit,runtime_manifest:binding.runtime_manifest_sha256,
                 install_root:book.recorded_directory(root)?,release_directory:book.recorded_directory(release)? };
             let record=installation_record::Record::parse_observed_for_release_data(&record_bytes,&raw,&expected,selected.current_data())?;
-            let inventory=Inventory::parse_for_release(&raw,binding.runtime_manifest_sha256,binding.release)?;
+            let inventory=Inventory::parse_for_selected_release(&raw,selected.current_data())?;
             let prepared=PreparedFresh { input:root,inventory,inventory_bytes:raw,destination:root,versions };
             let observed=observe_admitted_archives(book,prepared,selected,None,None,None,Some(holder),Some(source))?;
             check(removal_current_only_data(observed.action,[observed.old_app.is_some(),observed.old_release.is_some()],
@@ -21231,9 +21232,10 @@ exec ./mrk-macos-remove --fixture-supervise "$1"
                 edges[0][2]=false;edges[2][1]=false;assert!(reinstall_lineage_tip_data(&[0,1,2],&edges).is_err());
                 assert!(reinstall_lineage_tip_data(&[0,0],&edges).is_err());
                 assert!(reinstall_lineage_tip_data(&[64],&edges).is_err());assert!(reinstall_lineage_tip_data(&[],&edges).is_err());
-                let files=["app/Contents/MacOS/x","app/Contents/Resources/y","runtime/z"].into_iter()
-                    .map(|path|Entry{path:path.into(),sha256:"a".repeat(64),size:1,executable:false}).collect();
-                let mut inventory=Inventory{schema_version:1,release:"r".into(),runtime_manifest_sha256:"a".repeat(64),files};
+                let files:Vec<serde_json::Value>=["app/Contents/MacOS/x","app/Contents/Resources/y","runtime/z"].into_iter()
+                    .map(|path|serde_json::json!({"path":path,"sha256":"a".repeat(64),"size":1,"executable":false})).collect();
+                let mut inventory:Inventory=serde_json::from_value(serde_json::json!({"schemaVersion":1,
+                    "release":"r","runtimeManifestSha256":"a".repeat(64),"files":files})).unwrap();
                 let (f,d,bytes)=reinstall_index_quote_data(&inventory).unwrap();assert_eq!((f,d),(3,5));assert!(bytes>8192);
                 inventory.files.swap(0,1);assert!(reinstall_index_quote_data(&inventory).is_err());
                 let quote=reinstall_record_quote_data(10,2,3,2,8,10,4,5).unwrap();
