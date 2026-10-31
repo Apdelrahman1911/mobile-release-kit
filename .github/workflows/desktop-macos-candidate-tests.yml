@@ -19,7 +19,7 @@ jobs:
     # Never substitute the consumer's attempt or rebuild its signed app.
     if: ${{ !cancelled() && github.ref == 'refs/heads/verify/desktop-macos-candidate' && (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && (github.event.inputs.operation == 'candidate-tests' || github.event.inputs.operation == 'local-carrier' || github.event.inputs.operation == 'git-cli-timing' || github.event.inputs.operation == 'git-cli-process-data'))) }}
     environment: macos-developer-id
-    name: ${{ github.event.inputs.operation == 'git-cli-process-data' && 'Observe only original installed Git process CPU and scheduling (saved Git27)' || github.event.inputs.operation == 'git-cli-timing' && 'Measure only the original installed Git index journey (saved Git27)' || matrix.group == 'local-carrier' && 'Prepare authenticated Tool26 carrier for the owner Mac' || format('Test saved candidate ({0})', matrix.group) }}
+    name: ${{ github.event.inputs.operation == 'git-cli-process-data' && 'Observe only original installed Git process chain (saved Git27)' || github.event.inputs.operation == 'git-cli-timing' && 'Measure only the original installed Git index journey (saved Git27)' || matrix.group == 'local-carrier' && 'Prepare authenticated Tool26 carrier for the owner Mac' || format('Test saved candidate ({0})', matrix.group) }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: ${{ matrix.timeout }}
     strategy:
@@ -482,7 +482,7 @@ jobs:
           if-no-files-found: error
           retention-days: 7
           overwrite: false
-      - name: Observe only original installed Git process CPU and scheduling
+      - name: Observe only original installed Git process chain
         id: git_cli_process_data
         if: github.event.inputs.operation == 'git-cli-process-data' && matrix.group == 'git-local' && steps.package_install.outcome == 'success'
         timeout-minutes: 5
@@ -508,6 +508,7 @@ jobs:
           folder.mkdir(mode=0o700)
           APP = '/Library/Application Support/MobileReleaseKit/Mobile Release Kit.app/Contents/Helpers/MobileReleaseKitPayload.app/Contents/MacOS/mobile-release-kit-desktop'
           GIT = '/Library/Developer/CommandLineTools/usr/bin/git'
+          COMMAND_BOOTSTRAP = '\nimport os, signal, sys\n_self = os.getpid()\n_raise, _kill, _park, _sig = signal.raise_signal, os.kill, signal.pause, signal.SIGKILL\n_role = sys.argv[2]\nif _role == "W":\n    _enter, _stage = True, 0\n    while True:\n        try:\n            if _enter:\n                _enter = False\n                sys.path.insert(0, sys.argv[1])\n                from mobile_release._command_process import helper_main\n                helper_main(sys.argv[2:], None)\n            if _stage == 0:\n                _stage = 1\n                _raise(_sig)\n            if _stage == 1:\n                _stage = 2\n                _kill(_self, _sig)\n            _park()\n        except BaseException:\n            _enter = False\nelse:\n    _policy = None\n    if _role == "C":\n        _policy = 0\n        for _bit, _number in enumerate((signal.SIGINT, signal.SIGTERM, signal.SIGCHLD)):\n            _old = signal.getsignal(_number)\n            if _old == signal.SIG_IGN:\n                _policy |= 1 << _bit\n            elif not (_old == signal.SIG_DFL or _number == signal.SIGINT and _old is signal.default_int_handler):\n                raise SystemExit(70)\n        if _policy & 4:\n            raise SystemExit(70)\n    sys.path.insert(0, sys.argv[1])\n    from mobile_release._command_process import helper_main\n    raise SystemExit(helper_main(sys.argv[2:], _policy))\n'
           ENV = {'PATH': '/usr/bin:/bin:/usr/sbin:/sbin', 'LC_ALL': 'C', 'LANG': 'C'}
 
 
@@ -562,6 +563,28 @@ jobs:
                       'arguments': ps('-ww', '-p', str(pid), '-o', 'args=').strip()}
 
 
+          def original_helper_role(arguments, executable, runtime, expected_parent):
+              # ps text is transient DATA, never launch/source/native authority. Accept
+              # only the SAME original bootstrap's whitespace or Apple printable form.
+              prefix = executable + ' -I -S -B -c '
+              separator = ' ' + runtime + '/core.zip '
+              if not arguments.startswith(prefix) or separator not in arguments:
+                  return None
+              body, suffix = arguments[len(prefix):].rsplit(separator, 1)
+              rendered = (COMMAND_BOOTSTRAP, COMMAND_BOOTSTRAP.replace('\n', '?').replace('\t', '?'))
+              if ' '.join(body.split()) not in {' '.join(v.split()) for v in rendered}:
+                  return None
+              fields = suffix.split()
+              if len(fields) != 9 or fields[0] not in ('C', 'A', 'W'):
+                  return None
+              role, parent, session, group, work, hard, nonce, account, version = fields
+              if not all(v.isdecimal() and 0 < int(v) < 2**63 for v in (parent, session, group, work, hard)):
+                  return None
+              if int(parent) != expected_parent or int(work) >= int(hard) or not re.fullmatch('[0-9a-f]{32}', nonce) or account != '-' or version != '1':
+                  return None
+              return role, nonce
+
+
           def select_processes():
               inventory = []
               for line in ps('-axww', '-o', 'pid=,ppid=,comm=').splitlines():
@@ -589,14 +612,30 @@ jobs:
                   if row['uid'] != original['uid'] or row['parentPid'] != original['pid'] or row['executable'] != executable or role is None:
                       raise RuntimeError('diagnostic-original-fixed-worker-correlation')
                   selected.append((role, row))
-                  commands = [child for child, parent, path in inventory if parent == pid and path == GIT]
-                  if len(commands) > 1:
-                      raise RuntimeError('diagnostic-single-original-git-command')
-                  for child in commands:
+                  parent, nonce = pid, None
+                  for expected, closed in [('C', 'command-custodian'), ('A', 'command-anchor'), ('W', 'command-worker')]:
+                      candidates = [(child, path) for child, ancestor, path in inventory if ancestor == parent and path in (executable, GIT)]
+                      if len(candidates) > 1:
+                          raise RuntimeError('diagnostic-single-original-command-child')
+                      if not candidates:
+                          break
+                      child, path = candidates[0]
                       facts = process_row(child)
-                      if facts['uid'] != original['uid'] or facts['parentPid'] != pid or facts['executable'] != GIT:
-                          raise RuntimeError('diagnostic-original-git-command-correlation')
-                      selected.append(('git-command', facts))
+                      if facts['uid'] != original['uid'] or facts['parentPid'] != parent or facts['executable'] != path:
+                          raise RuntimeError('diagnostic-original-command-child-correlation')
+                      if path == GIT:
+                          if expected != 'W' or not facts['arguments'].startswith(GIT + ' '):
+                              raise RuntimeError('diagnostic-original-command-parent-depth')
+                          selected.append(('git-command', facts))
+                          break
+                      parsed = original_helper_role(facts['arguments'], executable, runtime, parent)
+                      if parsed is None or parsed[0] != expected or (nonce is not None and parsed[1] != nonce):
+                          raise RuntimeError('diagnostic-original-fixed-command-bootstrap')
+                      nonce = parsed[1]  # Original request correlation; never retained.
+                      selected.append((closed, facts))
+                      parent = child
+              if len(selected) > 6:
+                  raise RuntimeError('diagnostic-fixed-six-role-limit')
               return selected
 
 
@@ -736,7 +775,7 @@ jobs:
               identity._load_observer = original_load
               for module, name, original in reversed(restorations):
                   setattr(module, name, original)
-              report = {'schemaVersion': 1, 'scope': 'original-installed-git-index-process-observation-data',
+              report = {'schemaVersion': 2, 'scope': 'original-installed-git-index-process-chain-data',
                         'applicationSource': '86c9337fe82ffd9c110e3700d3d2edb22a0682ea',
                         'producerRun': '41160295904', 'workflowSource': os.environ['GITHUB_SHA'],
                         'runId': os.environ['GITHUB_RUN_ID'], 'runAttempt': os.environ['GITHUB_RUN_ATTEMPT'],

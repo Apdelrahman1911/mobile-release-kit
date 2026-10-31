@@ -1,6 +1,6 @@
 name: Desktop Mac candidate build and independent checks
 run-name: >-
-  ${{ github.event_name == 'workflow_dispatch' && inputs.operation == 'git-cli-process-data' && 'macOS / installed Git process observation / saved Git27' || github.event_name == 'workflow_dispatch' && inputs.operation == 'runtime-filesystem-data' && 'macOS / small original filesystem cost check' || github.event_name == 'workflow_dispatch' && inputs.operation == 'git-cli-timing' && 'macOS / installed Git timing / saved Git27' || github.event_name == 'workflow_dispatch' && inputs.operation == 'candidate-tests' && format('macOS check / {0} / saved build {1}', inputs.test_group, inputs.prepared_run) || format('macOS / {0} / {1}', github.event_name == 'workflow_dispatch' && inputs.operation || 'candidate builds', github.ref_name) }}
+  ${{ github.event_name == 'workflow_dispatch' && inputs.operation == 'git-cli-process-data' && 'macOS / installed Git process chain / saved Git27' || github.event_name == 'workflow_dispatch' && inputs.operation == 'runtime-filesystem-data' && 'macOS / small original filesystem cost check' || github.event_name == 'workflow_dispatch' && inputs.operation == 'git-cli-timing' && 'macOS / installed Git timing / saved Git27' || github.event_name == 'workflow_dispatch' && inputs.operation == 'candidate-tests' && format('macOS check / {0} / saved build {1}', inputs.test_group, inputs.prepared_run) || format('macOS / {0} / {1}', github.event_name == 'workflow_dispatch' && inputs.operation || 'candidate builds', github.ref_name) }}
 
 on:
   workflow_dispatch:
