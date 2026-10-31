@@ -209,6 +209,20 @@ impl GitCliNativeProgressHandle {
 impl GitCliNativeProgressSample {
     fn value(self)->Value {json!({"sample":"same-original-frame-read","phase":"apply","facts":self.facts})}
 }
+#[derive(Clone, Copy)]
+struct GitCliStepTimingSample {
+    step: Step, facts: git_cli::timing::Facts,
+}
+impl GitCliStepTimingSample {
+    fn value(self) -> Value {
+        json!({"sample":"same-original-observer-step-entries","unit":"microseconds",
+            "labels":git_cli::timing::LABELS,
+            "priorStepElapsed":self.facts.prior_step_elapsed_micros,
+            "current":git_cli::timing::LABELS[self.facts.current],
+            "currentElapsed":self.facts.current_elapsed_micros,
+            "nativeReceiptOrInvocationFinality":false})
+    }
+}
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum GitReadOrdinal { BeforeCli, AfterCli }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1363,6 +1377,7 @@ struct FailureSnapshot {
     git_read_failure: Option<GitReadFailureSample>,
     git_cli_wait: Option<GitCliWaitSample>,
     git_cli_native_progress: Option<GitCliNativeProgressSample>,
+    git_cli_step_timing: Option<GitCliStepTimingSample>,
     dom: Option<(u16, Option<ProjectChooserSample>)>,
     original_window: Option<OriginalWindowSample>,
     last_panel: Option<PanelSample>, native_action: Option<NativeActionSample>,
@@ -1378,6 +1393,7 @@ impl FailureSnapshot {
             git_read_failure: r.git_read_failure,
             git_cli_wait: r.git_cli_wait,
             git_cli_native_progress: r.git_cli_native_progress.as_ref().map(GitCliNativeProgressHandle::snapshot),
+            git_cli_step_timing: r.git_cli.as_ref().and_then(|v|v.step_timing(r.step)),
             dom: Some((r.evaluations, r.last_project_chooser)), original_window: r.original_window,
             last_panel: r.last_panel, native_action: r.native_action, accessibility: r.open_sample(), identity_binding: r.identity_binding,
             project_selection: r.project_selection, completion_selection: r.completion_selection,
@@ -1401,6 +1417,7 @@ impl FailureSnapshot {
         self.git_read_failure = None; // Cached panel DATA did not observe this ReadWait failure.
         self.git_cli_wait = None; // A pre-arm cache did not observe this original CLI poll.
         self.git_cli_native_progress = None;
+        self.git_cli_step_timing = None;
         self.project_selection = None; // Never attach fresh return DATA to a pre-arm snapshot.
         self.completion_selection = None;
         self.accessibility = self.accessibility.map(|sample| sample.reconciled(progress));
@@ -1464,6 +1481,9 @@ impl FailureSnapshot {
             && matches!(self.step, Step::GitCli(git_cli::Step::Prepared | git_cli::Step::Terminal)));
         self.git_cli_native_progress = self.git_cli_native_progress.filter(|sample| self.source=="record"
             && reason=="observer-deadline" && self.step==sample.step);
+        self.git_cli_step_timing = self.git_cli_step_timing.filter(|sample| self.source=="record"
+            && matches!(reason,"observer-deadline"|"git-cli-original-contract")
+            && self.step==sample.step && matches!(self.step,Step::GitCli(_)));
         let mut frame = format!("MRK_MACOS_AQUA_FAILURE_STEP={step}\nMRK_MACOS_AQUA_FAILURE_REASON={reason}\nMRK_MACOS_AQUA_FAILURE_CONTEXT=").into_bytes();
         let tail = b"\nMRK_MACOS_AQUA=failed\n";
         let context = bounded_failure_context(failure_context(&self), self.press_timing(), frame.len().checked_add(tail.len())?)?;
@@ -1487,6 +1507,7 @@ fn bounded_failure_context(mut value: Value, timing: Option<mrk_macos_installed_
     let git_read_failure = value.as_object_mut().and_then(|fields| fields.remove("gitReadFailure"));
     let git_cli_wait = value.as_object_mut().and_then(|fields| fields.remove("gitCliWait"));
     let git_cli_native_progress = value.as_object_mut().and_then(|fields| fields.remove("gitCliNativeProgress"));
+    let git_cli_step_timing = value.as_object_mut().and_then(|fields| fields.remove("gitCliStepTiming"));
     let identity_failure = value.get_mut("toolService").and_then(Value::as_object_mut)
         .and_then(|fields| fields.remove("identityFailure"));
     let mut baseline = edit::bounded(&value, 8192).ok()?;
@@ -1524,11 +1545,23 @@ fn bounded_failure_context(mut value: Value, timing: Option<mrk_macos_installed_
     }
     // Serialize baseline FIRST. Optional DATA can cost at most165 context
     // bytes and one additional8192B buffer, never the original failure frame.
-    let Some(diagnostic) = timing.and_then(press_diagnostic_value) else { return Some(baseline); };
-    let Some(accessibility) = value.get_mut("accessibility").and_then(Value::as_object_mut) else { return Some(baseline); };
-    if accessibility.contains_key("pressDiagnostic") { return Some(baseline); }
+    // Preserve every original optional field's priority and bounded baseline.
+    // The last DATA addition uses the same context/frame limits and one more
+    // bounded serialization; overflow returns the complete original baseline.
+    let finish = |mut value: Value, baseline: Vec<u8>| {
+        if let Some(sample) = git_cli_step_timing {
+            value["gitCliStepTiming"] = sample;
+            return Some(edit::bounded(&value,8192).ok()
+                .filter(|bytes|bytes.is_ascii() && fits(bytes)).unwrap_or(baseline));
+        }
+        Some(baseline)
+    };
+    let Some(diagnostic) = timing.and_then(press_diagnostic_value) else { return finish(value,baseline); };
+    let Some(accessibility) = value.get_mut("accessibility").and_then(Value::as_object_mut) else { return finish(value,baseline); };
+    if accessibility.contains_key("pressDiagnostic") { return finish(value,baseline); }
     accessibility.insert("pressDiagnostic".into(), diagnostic);
-    Some(edit::bounded(&value, 8192).ok().filter(|bytes| bytes.is_ascii() && fits(bytes)).unwrap_or(baseline))
+    let baseline = edit::bounded(&value,8192).ok().filter(|bytes|bytes.is_ascii() && fits(bytes)).unwrap_or(baseline);
+    finish(value,baseline)
 }
 fn failure_context(r: &FailureSnapshot) -> Value {
     let pending = r.pending.map(|pending| {
@@ -1569,6 +1602,7 @@ fn failure_context(r: &FailureSnapshot) -> Value {
     if let Some(sample) = r.git_read_failure { value["gitReadFailure"] = sample.value(); }
     if let Some(sample) = r.git_cli_wait { value["gitCliWait"] = sample.value(); }
     if let Some(sample)=r.git_cli_native_progress {value["gitCliNativeProgress"]=sample.value();}
+    if let Some(sample)=r.git_cli_step_timing {value["gitCliStepTiming"]=sample.value();}
     if let Some(completion) = r.completion_selection { value["completionSelection"] = completion.value(); }
     if let Some(selection) = r.project_selection { value["projectSelection"] = selection.value(); }
     if let Some(admitted) = r.input_body_admission { value["inputBodyAdmission"] = json!(admitted); }
@@ -4524,7 +4558,7 @@ fn press_diagnostic_data_check(full: OpenInputSample) -> bool {
         parent_references_panel: Some(true), panel_references_parent: Some(true), panel_visible: Some(true),
         directory_bound: true, directory_returned: true, directory_ready: true, directory_readiness: "ready", wait_location: None };
     let snapshot = FailureSnapshot { source: "record", step: Step::OpenProject, pending: None, native_dispatch: Some(native),
-        input_body_admission: None, bootstrap: None, vault: None, upload:None, tool_service:None, git_read_failure:None, git_cli_wait: None, git_cli_native_progress: None, dom: None, original_window: None, last_panel: Some(panel),
+        input_body_admission: None, bootstrap: None, vault: None, upload:None, tool_service:None, git_read_failure:None, git_cli_wait: None, git_cli_native_progress: None, git_cli_step_timing: None, dom: None, original_window: None, last_panel: Some(panel),
         native_action: None, accessibility: Some(failed), identity_binding: Some(identity),
         completion_selection: None, project_selection: None, field_preparation: None };
     if snapshot.press_timing() != Some(timing) || snapshot.frame("native-default-input").is_none() { return false; }
@@ -4717,14 +4751,85 @@ fn git_read_wait_data_checks() -> bool {
     }
     true
 }
+fn git_cli_step_timing_data_checks(snapshot: FailureSnapshot) -> bool {
+    use std::time::{Duration, Instant};
+    if !git_cli::timing::contract_data() { return false; }
+    let start = Instant::now();
+    let mut timing = git_cli::timing::Timing::default();
+    for (slot, step, count) in [(0, git_cli::Step::Read, 0), (1, git_cli::Step::ReadWait, 0),
+        (2, git_cli::Step::Allow, 1), (3, git_cli::Step::Submitted, 1),
+        (4, git_cli::Step::Prepared, 1), (5, git_cli::Step::Started, 1),
+        (6, git_cli::Step::Terminal, 1)] {
+        let Some(at) = start.checked_add(Duration::from_micros(slot * 10)) else { return false; };
+        timing.observe(step, count, at);
+    }
+    let Some(at) = start.checked_add(Duration::from_micros(65)) else { return false; };
+    let Some(facts) = timing.snapshot(git_cli::Step::Terminal, 1, at) else { return false; };
+    let step = Step::GitCli(git_cli::Step::Terminal);
+    let sample = GitCliStepTimingSample { step, facts };
+    let value = sample.value();
+    if value["current"] != json!("terminal") || value["currentElapsed"] != json!(5)
+        || value["nativeReceiptOrInvocationFinality"] != json!(false)
+        || serde_json::to_vec(&value).map_or(true, |bytes| bytes.len() > 1024 || !bytes.is_ascii()) { return false; }
+    let current = FailureSnapshot { step, git_cli_step_timing: Some(sample), ..snapshot };
+    fn context(snapshot: FailureSnapshot, reason: &'static str) -> Option<Value> {
+        let frame = snapshot.frame(reason)?;
+        let row = frame.split(|byte| *byte == b'\n')
+            .find_map(|row| row.strip_prefix(b"MRK_MACOS_AQUA_FAILURE_CONTEXT="))?;
+        if frame.len() > 8448 || row.len() > 8192 || !frame.is_ascii() { return None; }
+        serde_json::from_slice(row).ok()
+    }
+    for reason in ["observer-deadline", "git-cli-original-contract"] {
+        let Some(context) = context(current, reason) else { return false; };
+        if context.get("gitCliStepTiming") != Some(&value) { return false; }
+        let first = AtomicU8::new(0); let failed = AtomicBool::new(false);
+        latch_failure(&first, &failed, reason);
+        latch_failure(&first, &failed, "observer-invariant");
+        if first_failure_reason(&first) != Some(reason) { return false; }
+    }
+    for (source, step, reason) in [("prearm-open-progress", step, "observer-deadline"),
+        ("record", Step::OpenProject, "observer-deadline"),
+        ("record", snapshot.step, "observer-deadline"),
+        ("record", step, "observer-invariant")] {
+        let Some(context) = context(FailureSnapshot { source, step, ..current }, reason) else { return false; };
+        if context.get("gitCliStepTiming").is_some() { return false; }
+    }
+    let expired = current.at_expiry(OpenProgress { state: "unknown", requested: false, dispatched: false,
+        entered: false, returned: false, joined: false, retired: false, expired: true });
+    if expired.git_cli_step_timing.is_some() { return false; }
+    // The complete original baseline and every older optional field win when
+    // either unchanged bound is full. Added scheduling DATA cannot hide them.
+    let older = json!({"accessibility":{}, "toolService":{"identityFailure":{"phase":"data"}},
+        "gitReadFailure":{"check":"data"}, "gitCliWait":{"facts":[true]},
+        "gitCliNativeProgress":{"facts":{"mask":1}}, "padding":""});
+    let press = mrk_macos_installed_native::OpenPressTiming { installed_allowance_ns: 100_000_000,
+        last_permit_to_return_admission_ns: Some(1) };
+    let Some(base) = bounded_failure_context(older.clone(), Some(press), 256) else { return false; };
+    let mut with = older.clone(); with["gitCliStepTiming"] = value.clone();
+    let Some(added) = bounded_failure_context(with, Some(press), 256) else { return false; };
+    let Ok(mut added_value) = serde_json::from_slice::<Value>(&added) else { return false; };
+    if added_value.as_object_mut().and_then(|v| v.remove("gitCliStepTiming")) != Some(value.clone())
+        || serde_json::to_vec(&added_value).ok() != Some(base.clone()) { return false; }
+    let mut near = older; near["padding"] = json!("x".repeat(8192 - base.len()));
+    let Some(base) = bounded_failure_context(near.clone(), Some(press), 256) else { return false; };
+    if base.len() != 8192 { return false; }
+    near["gitCliStepTiming"] = value.clone();
+    if bounded_failure_context(near, Some(press), 256) != Some(base) { return false; }
+    let mut with = json!({"padding":""});
+    let Some(base) = bounded_failure_context(with.clone(), None, 256) else { return false; };
+    with["gitCliStepTiming"] = value;
+    if bounded_failure_context(with, None, 8448 - base.len()) != Some(base) { return false; }
+    true
+}
 fn git_cli_wait_data_checks() -> bool {
     // Same memory-only original Entry predicate and actual bounded serializer.
     // These facts cannot change the first error, wait, native work or finality.
     let snapshot = FailureSnapshot { source: "record", step: Step::GitCli(git_cli::Step::Prepared),
         pending: None, native_dispatch: None, input_body_admission: None, bootstrap: None, vault: None, upload: None,
-        tool_service: None, git_read_failure: None, git_cli_wait: None, git_cli_native_progress: None, dom: None, original_window: None,
+        tool_service: None, git_read_failure: None, git_cli_wait: None, git_cli_native_progress: None, git_cli_step_timing: None, dom: None, original_window: None,
         last_panel: None, native_action: None, accessibility: None, identity_binding: None,
         completion_selection: None, project_selection: None, field_preparation: None };
+    if !git_cli_step_timing_data_checks(snapshot) { return false; }
     fn frame_has(snapshot: FailureSnapshot, reason: &'static str, sample: Option<Value>) -> bool {
         let Some(frame) = snapshot.frame(reason) else { return false; };
         let Some(row) = frame.split(|byte| *byte == b'\n').find_map(|row| row.strip_prefix(b"MRK_MACOS_AQUA_FAILURE_CONTEXT=")) else { return false; };
@@ -4824,7 +4929,7 @@ fn git_read_failure_data_checks() -> bool {
     }
     let snapshot = FailureSnapshot { source: "record", step: Step::GitCli(git_cli::Step::ReadWait),
         pending: None, native_dispatch: None, input_body_admission: None, bootstrap: None, vault: None, upload: None,
-        tool_service: None, git_read_failure: None, git_cli_wait: None, git_cli_native_progress: None, dom: None, original_window: None, last_panel: None,
+        tool_service: None, git_read_failure: None, git_cli_wait: None, git_cli_native_progress: None, git_cli_step_timing: None, dom: None, original_window: None, last_panel: None,
         native_action: None, accessibility: None, identity_binding: None, completion_selection: None,
         project_selection: None, field_preparation: None };
     let mut p = git_read::Projection { operation_id: "private-operation-never-exported".into(),
@@ -4965,7 +5070,7 @@ fn tool_service_failure_data_checks(sample: tool_setup::ServiceFailureSample, st
     }
     let reason = "tool-setup-original-contract";
     let snapshot = FailureSnapshot { source: "record", step: Step::ToolSetup(steps[0]), pending: None, native_dispatch: None,
-        input_body_admission: None, bootstrap: None, vault: None, upload: None, tool_service: None, git_read_failure: None, git_cli_wait: None, git_cli_native_progress: None, dom: None,
+        input_body_admission: None, bootstrap: None, vault: None, upload: None, tool_service: None, git_read_failure: None, git_cli_wait: None, git_cli_native_progress: None, git_cli_step_timing: None, dom: None,
         original_window: None, last_panel: None, native_action: None, accessibility: None, identity_binding: None,
         completion_selection: None, project_selection: None, field_preparation: None };
     for (i, (step, label)) in steps.into_iter().zip(["ToolService(Request)","ToolService(RequestWait)","ToolService(Check)",
@@ -5025,7 +5130,7 @@ fn bootstrap_diagnostic_data_checks() -> bool {
     latch_bootstrap(&first, &failed, &mut detail, "bootstrap-info-duplicate", later);
     if detail.is_some() || first_failure_reason(&first) != Some("bootstrap-info-methods-shape") { return false; }
     let snapshot = FailureSnapshot { source: "record", step: Step::Bootstrap, pending: None, native_dispatch: None, input_body_admission: None,
-        bootstrap: Some(sample), vault: None, upload:None, tool_service:None, git_read_failure:None, git_cli_wait: None, git_cli_native_progress: None, dom: Some((0, None)), original_window: None, last_panel: None, native_action: None,
+        bootstrap: Some(sample), vault: None, upload:None, tool_service:None, git_read_failure:None, git_cli_wait: None, git_cli_native_progress: None, git_cli_step_timing: None, dom: Some((0, None)), original_window: None, last_panel: None, native_action: None,
         accessibility: None, identity_binding: None, completion_selection: None, project_selection: None, field_preparation: None };
     if snapshot.frame("bootstrap-info-available-count").is_none() || snapshot.frame("observer-invariant").is_some()
         || (FailureSnapshot { source: "prearm-open-progress", ..snapshot }).frame("bootstrap-info-available-count").is_some() { return false; }

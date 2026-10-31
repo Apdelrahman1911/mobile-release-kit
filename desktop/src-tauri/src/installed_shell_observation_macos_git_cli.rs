@@ -289,6 +289,8 @@ pub(super) enum Step {
     Done,
     Finish,
 }
+#[path = "installed_shell_observation_macos_git_cli_timing.rs"]
+pub(super) mod timing;
 #[derive(Clone)]
 struct ReadOriginal {
     id: String,
@@ -330,6 +332,7 @@ struct Terminal {
     status: String,
 }
 pub(super) struct Record {
+    step_timing: timing::Timing,
     files: super::cli::fixture::Files,
     reads: Vec<ReadOriginal>,
     read_count: u8,
@@ -351,8 +354,14 @@ pub(super) struct Record {
     host: Option<usize>,
 }
 impl Record {
+    pub(super) fn step_timing(&self, step: OuterStep) -> Option<super::GitCliStepTimingSample> {
+        let OuterStep::GitCli(local) = step else { return None; };
+        let facts = self.step_timing.snapshot(local, self.read_count, std::time::Instant::now())?;
+        Some(super::GitCliStepTimingSample { step, facts })
+    }
     pub(super) fn new(root: &Path, uid: u32, case: Case) -> Result<Self, ()> {
         Ok(Self {
+            step_timing: timing::Timing::default(),
             files: super::cli::fixture::Files::capture_git(root, uid, case)?,
             reads: Vec::new(),
             read_count: 0,
@@ -614,7 +623,16 @@ impl Observation {
         let outcome:Result<Option<Step>,BridgeError>=async {
             let c=self.git_cli.as_ref().ok_or_else(bad)?;
             if !c.live()||self.case!=OuterCase::GitCli(c.case){return Err(bad());}
-            let project=self.record().and_then(|r|r.project.as_ref().map(|p|p.id.clone())).ok_or_else(bad)?;
+            let project={let mut r=self.record().ok_or_else(bad)?;
+                let project=r.project.as_ref().map(|p|p.id.clone()).ok_or_else(bad)?;
+                // DATA only at the same original Record read. No additional
+                // application/native query, wait, success predicate or timer.
+                if r.step==OuterStep::GitCli(step) {
+                    if let Some(v)=r.git_cli.as_mut() {
+                        v.step_timing.observe(step,v.read_count,std::time::Instant::now());
+                    }
+                }
+                project};
             Ok(match step {
                 Step::Read=>{
                     {let r=self.record().ok_or_else(bad)?;let v=r.git_cli.as_ref().ok_or_else(bad)?;
