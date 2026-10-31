@@ -100,7 +100,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.sha }}
-          fetch-depth: 9
+          fetch-depth: 10
           persist-credentials: false
       - name: Keep every application and native source byte unchanged
         timeout-minutes: 1
@@ -238,11 +238,11 @@ jobs:
               DEVELOPER_DIR='/Library/Developer/CommandLineTools',MACOSX_DEPLOYMENT_TARGET='26.0')
           def signature(value):
               return tuple(getattr(value,name) for name in ('st_dev','st_ino','st_mode','st_uid','st_gid','st_nlink','st_size','st_mtime_ns','st_ctime_ns','st_flags'))
-          def held(path, maximum, *, expected_uid, executable=False):
+          def held(path, maximum, *, expected_uid, executable=False, expected_flags=0):
               fd=os.open(path,os.O_RDONLY|os.O_NOFOLLOW|os.O_CLOEXEC)
               try:
                   s=os.fstat(fd)
-                  if not stat.S_ISREG(s.st_mode) or s.st_uid!=expected_uid or s.st_nlink!=1 or s.st_flags!=0 or not 0<s.st_size<=maximum:
+                  if not stat.S_ISREG(s.st_mode) or s.st_uid!=expected_uid or s.st_nlink!=1 or s.st_flags!=expected_flags or not 0<s.st_size<=maximum:
                       raise AssertionError('original filesystem fixture input policy: kind,uid,links,flags,bytes,expectedUid=' +
                           str((stat.S_IFMT(s.st_mode),s.st_uid,s.st_nlink,s.st_flags,s.st_size,expected_uid)))
                   stager.no_xattrs(fd)
@@ -260,7 +260,19 @@ jobs:
           originals=[]
           pending=False
           try:
-              originals.append(held(compiler,512*1024*1024,expected_uid=0,executable=True))
+              if getattr(stat,'UF_COMPRESSED',None)!=32:
+                  raise AssertionError('original Darwin UF_COMPRESSED constant unavailable')
+              originals.append(held(compiler,512*1024*1024,expected_uid=0,executable=True,expected_flags=stat.UF_COMPRESSED))
+              args=['/usr/bin/codesign','--verify','--strict','--verbose=4','-R=anchor apple',str(compiler)]
+              pending=True
+              signature_result=owner.run_owned(args,environ=environment,cwd=root/'desktop/src-tauri',timeout=30,capture=True,text=False,output_limit=16384)
+              pending=False
+              if type(signature_result) is not subprocess.CompletedProcess or signature_result.args!=args or signature_result.returncode!=0 or signature_result.stdout:
+                  if type(signature_result) is subprocess.CompletedProcess:
+                      print(json.dumps(dict(scope='original-Apple-compiler-signature-failure',returncode=signature_result.returncode,
+                          stdout=signature_result.stdout.decode(errors='replace'),stderr=signature_result.stderr.decode(errors='replace'))),flush=True)
+                  raise AssertionError('original Apple anchored system compiler signature return')
+              for row in originals:post(row)
               for path in paths+[source,fixture]:
                   originals.append(held(path,1024*1024,expected_uid=os.getuid()))
               args=[str(compiler),'-x','objective-c','-std=gnu11','-O0','-fno-objc-arc','-fblocks','-mmacosx-version-min=26.0',
@@ -301,6 +313,7 @@ jobs:
                   originalRuntimeSourceSha256=hashlib.sha256(runtime).hexdigest(),compiler='/Library/Developer/CommandLineTools/usr/bin/clang',
                   optimizationLevel=0,originalEmptyAclPolicy=True,fixtureOriginalFdNamePostAndClosesKnown=True,
                   originalCompilerReturncode=compiled.returncode,originalCheckReturncode=result.returncode,records=rows,
+                  originalSystemCompilerFlags=stat.UF_COMPRESSED,originalSystemCompilerAnchorApplePassed=True,
                   RustBookOrInstalledInputsMeasured=False,nativeOwnershipOrInstalledQualification=False,applicationOrClockOrPredicateChanged=False)
           finally:
               if not pending:
