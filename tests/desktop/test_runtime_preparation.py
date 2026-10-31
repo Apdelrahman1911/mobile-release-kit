@@ -6,9 +6,12 @@ from __future__ import annotations
 
 import hashlib
 import importlib.util
+import io
 import json
+import marshal
 from pathlib import Path
 import stat
+import sys
 import tempfile
 from types import SimpleNamespace
 import unittest
@@ -22,6 +25,117 @@ _SPEC = importlib.util.spec_from_file_location(
 assert _SPEC is not None and _SPEC.loader is not None
 preparation = importlib.util.module_from_spec(_SPEC)
 _SPEC.loader.exec_module(preparation)
+
+
+class MacCoreBytecodeDataTests(unittest.TestCase):
+    """Code objects and inert ZIP bytes only; no payload or native execution."""
+    def setUp(self):
+        self.core = sorted([(name, b'def inert():\n    return 7\n')
+                            for name in preparation.COMMAND_BYTECODE_FILES]
+                           + [("mobile_release/fixture.json", b'{"inert":true}\n'),
+                              ("mobile_release/metadata_images.py", b'# original source filename retained\n')])
+        spec = importlib.util.spec_from_file_location(
+            "mac_bytecode_stager_data", _SOURCE / "desktop/tools/stage_macos_installed.py")
+        self.stager = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(self.stager)
+        self.projection = {"src/" + name: (content, 0o444) for name, content in self.core}
+
+    def zip_bytes(self, rows):
+        buffer = io.BytesIO()
+        with zipfile.ZipFile(buffer, "w", compression=zipfile.ZIP_DEFLATED) as archive:
+            for name, content in rows:
+                info = zipfile.ZipInfo(name, date_time=(1980, 1, 1, 0, 0, 0))
+                info.create_system = 3
+                info.external_attr = (stat.S_IFREG | 0o644) << 16
+                info.compress_type = zipfile.ZIP_DEFLATED
+                archive.writestr(info, content)
+        return buffer.getvalue()
+
+    def compiler_data(self, *, version=(3, 14, 7), optimized=0, implementation="cpython"):
+        # A finite profile-parser branch check. The actual host's compiler
+        # emits all inert code objects; this mock never qualifies CPython 3.14.7.
+        return SimpleNamespace(version_info=version, flags=SimpleNamespace(optimize=optimized),
+                               implementation=SimpleNamespace(name=implementation))
+
+    def test_every_derived_byte_matches_original_source_without_executing_it(self):
+        rows = preparation._checked_core_bytecode(self.core)
+        self.assertEqual(rows, preparation._checked_core_bytecode(self.core))
+        self.assertEqual({name: body for name, body in rows if not name.endswith(".pyc")}, dict(self.core))
+        for name, content in self.core:
+            if name not in preparation.COMMAND_BYTECODE_FILES:
+                continue
+            bytecode = dict(rows)[name[:-3] + ".pyc"]
+            self.assertEqual(bytecode[:4], importlib.util.MAGIC_NUMBER)
+            self.assertEqual(bytecode[4:8], (3).to_bytes(4, "little"))
+            self.assertEqual(bytecode[8:16], importlib.util.source_hash(content))
+            original_code = compile(content, name, "exec", dont_inherit=True, optimize=0)
+            self.assertEqual(bytecode[16:], marshal.dumps(original_code))
+        with patch.object(self.stager, "sys", self.compiler_data()):
+            self.stager.current_core_matches(self.zip_bytes(rows), self.projection, macos_command_bytecode=True)
+        # The original source-only profile never silently accepts derived files.
+        with self.assertRaises(self.stager.Refused):
+            self.stager.current_core_matches(self.zip_bytes(rows), self.projection)
+
+    def test_independent_stager_rejects_missing_extra_foreign_and_source_only_substitutions(self):
+        rows = preparation._checked_core_bytecode(self.core)
+        pyc_name = "mobile_release/_command_process.pyc"
+        bytecode = dict(rows)[pyc_name]
+        for fault in ("missing-source", "missing-bytecode", "extra-bytecode", "foreign-code",
+                      "wrong-source-hash", "wrong-magic", "source-only", "duplicate"):
+            with self.subTest(fault=fault):
+                changed = list(rows)
+                if fault == "missing-source": changed = [(n, b) for n, b in rows if n != "mobile_release/_command_process.py"]
+                elif fault == "missing-bytecode": changed = [(n, b) for n, b in rows if n != pyc_name]
+                elif fault == "extra-bytecode": changed = sorted(rows + [("mobile_release/foreign.pyc", bytecode)])
+                elif fault == "source-only": changed = self.core
+                elif fault == "duplicate": changed = sorted(rows + [(pyc_name, bytecode)])
+                else:
+                    if fault == "foreign-code": modified = bytecode[:16] + marshal.dumps(compile("x = 99", "mobile_release/_command_process.py", "exec", dont_inherit=True, optimize=0))
+                    elif fault == "wrong-source-hash": modified = bytecode[:8] + b"0" * 8 + bytecode[16:]
+                    else: modified = b"0000" + bytecode[4:]
+                    changed = [(n, modified if n == pyc_name else b) for n, b in rows]
+                with patch.object(self.stager, "sys", self.compiler_data()), self.assertRaises(self.stager.Refused):
+                    self.stager.current_core_matches(self.zip_bytes(changed), self.projection, macos_command_bytecode=True)
+
+    def test_generated_input_compiler_profile_and_original_byte_bound_fail_closed(self):
+        for core in (self.core + [("mobile_release/foreign.pyc", b"inert")],
+                     self.core + [self.core[0]], [("mobile_release/../foreign.py", b"inert")]):
+            with self.assertRaises(preparation.PreparationError): preparation._checked_core_bytecode(core)
+        source_bytes = sum(len(content) for _, content in self.core)
+        with patch.object(preparation, "MAX_CORE_BYTES", source_bytes):
+            with self.assertRaises(preparation.PreparationError): preparation._checked_core_bytecode(self.core)
+        for profile in (self.compiler_data(version=(3, 14, 6)), self.compiler_data(optimized=1),
+                        self.compiler_data(implementation="other")):
+            with patch.object(preparation, "sys", profile), self.assertRaises(preparation.PreparationError):
+                preparation._require_core_compiler()
+            with patch.object(self.stager, "sys", profile), self.assertRaises(self.stager.Refused):
+                self.stager.current_core_matches(self.zip_bytes(self.core), self.projection, macos_command_bytecode=True)
+        for target, options in (("x86_64-apple-darwin", dict(history_provider=True, store_component=Path("/inert"))),
+                                ("aarch64-apple-darwin", dict(history_provider=True)),
+                                ("aarch64-apple-darwin", dict(store_component=Path("/inert")))):
+            with self.assertRaises(preparation.PreparationError):
+                preparation.prepare_current(Path("/inert"), Path("/inert"), target, macos_command_bytecode=True, **options)
+
+    @unittest.skipIf(sys.implementation.name != "cpython" or sys.version_info[:3] != (3, 14, 7),
+                     "requires the original fixed CPython 3.14.7 DATA compiler")
+    def test_actual_compiler_derives_and_independently_verifies_the_complete_current_core(self):
+        preparation._require_core_compiler()
+        package = preparation._root(_SOURCE / "src/mobile_release")
+        paths = preparation.files(package)
+        originals, core, size = [], [], 0
+        for path in paths:
+            original = preparation._state(preparation._ordinary(path))
+            content = preparation.read_checked(path, limit=preparation.MAX_CORE_BYTES - size)
+            size += len(content)
+            name = "mobile_release/" + path.relative_to(package).as_posix()
+            core.append((name, content)); originals.append((path, original))
+        generated = preparation._checked_core_bytecode(core)
+        self.assertLessEqual(sum(len(content) for _, content in generated), preparation.MAX_CORE_BYTES)
+        self.assertEqual(len(generated), len(core) + len(preparation.COMMAND_BYTECODE_FILES))
+        projection = {"src/" + name: (content, 0o444) for name, content in core}
+        self.stager.current_core_matches(self.zip_bytes(generated), projection, macos_command_bytecode=True)
+        for path, original in originals:
+            self.assertEqual(preparation._state(preparation._ordinary(path)), original)
 
 
 class RuntimePreparationTests(unittest.TestCase):

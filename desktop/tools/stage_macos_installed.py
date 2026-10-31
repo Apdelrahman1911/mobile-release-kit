@@ -20,6 +20,7 @@ import hashlib
 import importlib.util
 import io
 import json
+import marshal
 import os
 from pathlib import Path
 import plistlib
@@ -155,6 +156,12 @@ CURRENT_BOOTSTRAPS = BOOTSTRAPS | {
 CURRENT_CA_SOURCE = "desktop/cpython-source-inputs/github-ca.pem"
 CURRENT_HELPER_SOURCE = "desktop/tools/prepare_runtime.py"
 CURRENT_CORE_BYTES = 32 * 1024 * 1024
+CURRENT_COMMAND_BYTECODE_FILES = frozenset({
+    "mobile_release/__init__.py", "mobile_release/_command_process.py",
+    "mobile_release/_lifetime_evidence.py", "mobile_release/_native_process.py",
+    "mobile_release/_store_lane_contract.py", "mobile_release/cancellation.py",
+    "mobile_release/errors.py", "mobile_release/owned_process.py",
+})
 LEGACY_MAX_FILES = 2048
 MAX_FILES = 16384
 MAX_ENTRIES = 32768
@@ -1920,9 +1927,34 @@ def current_preparer(captured):
     return module
 
 
-def current_core_matches(body, projection):
+def current_core_matches(body, projection, *, macos_command_bytecode=False):
     expected = {name[len("src/"):]: content for name, (content, _) in projection.items()
                 if name.startswith("src/mobile_release/")}
+    need(type(macos_command_bytecode) is bool, "current-core-bytecode-profile")
+    if macos_command_bytecode:
+        need(sys.implementation.name == "cpython" and sys.version_info[:3] == (3, 14, 7)
+             and sys.flags.optimize == 0, "current-core-bytecode-compiler")
+        # Independently rederive every generated entry from the captured source.
+        # Do not import the packaged modules or accept a cached/generated input.
+        originals = tuple(sorted(expected.items()))
+        need(0 < len(originals) <= LEGACY_MAX_FILES
+             and all(name.startswith("mobile_release/") and safe_path(name)
+                     and Path(name).suffix in {".py", ".json", ".pem"}
+                     for name, _ in originals)
+             and len({name.lower() for name, _ in originals}) == len(originals),
+             "current-core-bytecode-source-only-roster")
+        need(CURRENT_COMMAND_BYTECODE_FILES <= set(expected), "current-core-command-bytecode-source-roster")
+        size = sum(len(content) for _, content in originals)
+        need(size <= CURRENT_CORE_BYTES, "current-core-derived-byte-bound")
+        for name, content in originals:
+            if name not in CURRENT_COMMAND_BYTECODE_FILES:
+                continue
+            code = compile(content, name, "exec", dont_inherit=True, optimize=0)
+            generated = (importlib.util.MAGIC_NUMBER + (3).to_bytes(4, "little")
+                         + importlib.util.source_hash(content) + marshal.dumps(code))
+            size += len(generated)
+            need(size <= CURRENT_CORE_BYTES, "current-core-derived-byte-bound")
+            expected[name[:-3] + ".pyc"] = generated
     need(len(body) <= CURRENT_CORE_BYTES + LEGACY_MAX_FILES * 2048, "current-core-archive-bound")
     with zipfile.ZipFile(io.BytesIO(body)) as archive:
         rows = archive.infolist()
@@ -1939,10 +1971,13 @@ def current_core_matches(body, projection):
 
 
 def current_runtime_files(runtime, projection, supplier, *, target=ARM_TARGET, history_provider=None,
-                          store_rows=(), fetch_observation=False, push_observation=False, git_observation=False):
+                          store_rows=(), fetch_observation=False, push_observation=False, git_observation=False,
+                          macos_command_bytecode=False):
     target = mac_target(target)
     observation_bootstraps = _git_observation_bootstraps(fetch_observation, push_observation, git_observation)
     need(not git_observation or target == ARM_TARGET, "git-observation-arm-only")
+    need(type(macos_command_bytecode) is bool and (not macos_command_bytecode or
+         target == ARM_TARGET and history_provider is not None and bool(store_rows)), "current-core-bytecode-composition")
     files = tree(runtime, current_root_mode=0o700, mac_store_prefix="store" if store_rows else None)
     preadmitted = supplier
     if history_provider is not None:
@@ -1972,7 +2007,7 @@ def current_runtime_files(runtime, projection, supplier, *, target=ARM_TARGET, h
              "current-runtime-manifest-correspondence")
     for name in bootstraps | {"github-ca.pem"}:
         need(files[name][0] == projection["desktop/" + name][0], "current-entrypoint-byte-correspondence")
-    current_core_matches(files["core.zip"][0], projection)
+    current_core_matches(files["core.zip"][0], projection, macos_command_bytecode=macos_command_bytecode)
     store_runtime_payload(files, current=True, target=target)
     return files, manifest
 
@@ -2050,6 +2085,10 @@ def current_runtime_command(args):
         provider_body, provider_post = (None, None) if provider is None else provider
         runtime_inputs = supplier if provider_body is None else {**supplier, HISTORY_PROVIDER_PATH: (provider_body, 0o555)}
         preparer = current_preparer(captured)
+        command_bytecode = composing and target == ARM_TARGET
+        if command_bytecode:
+            need(provider_enabled and signed_inputs is not None, "current-core-bytecode-signed-provider-composition")
+            preparer._require_core_compiler()
         with current_work_root(args.work, parents[args.work]):
             source, runtime = args.work / "source", args.work / "runtime"
             write_tree(source, projection, current_owned=True)
@@ -2070,12 +2109,15 @@ def current_runtime_command(args):
                     options["git_observation"] = True
                 if store_enabled:
                     options["store_component"] = store_component
+                if command_bytecode:
+                    options["macos_command_bytecode"] = True
                 prepared = preparer.prepare_current(source, runtime, target, **options)
             finally:
                 os.umask(old_mask)
             files, manifest = current_runtime_files(runtime, projection, supplier, target=target,
                 history_provider=provider_body, store_rows=store_rows, fetch_observation=fetch_observation,
-                push_observation=push_observation, git_observation=git_observation)
+                push_observation=push_observation, git_observation=git_observation,
+                macos_command_bytecode=command_bytecode)
             if store_enabled:
                 preparer._store_recheck(store)
             manifest_digest = digest(files["manifest.json"][0])

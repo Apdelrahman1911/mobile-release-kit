@@ -12,10 +12,13 @@ from __future__ import annotations
 import argparse
 import ast
 import hashlib
+import importlib.util
 import json
+import marshal
 import os
 import re
 import stat
+import sys
 import zipfile
 from pathlib import Path
 
@@ -36,6 +39,12 @@ MAX_FILE_BYTES = 512 * 1024 * 1024
 MAX_TOTAL_BYTES = 1024 * 1024 * 1024
 MAX_CORE_BYTES = 32 * 1024 * 1024
 MAX_BOOTSTRAP_BYTES = 64 * 1024
+COMMAND_BYTECODE_FILES = frozenset({
+    "mobile_release/__init__.py", "mobile_release/_command_process.py",
+    "mobile_release/_lifetime_evidence.py", "mobile_release/_native_process.py",
+    "mobile_release/_store_lane_contract.py", "mobile_release/cancellation.py",
+    "mobile_release/errors.py", "mobile_release/owned_process.py",
+})
 BOOTSTRAPS = (
     "engine_bootstrap.py", "config_edit_bootstrap.py", "github_connection_bootstrap.py",
     "environment_bootstrap.py", "offline_preflight_bootstrap.py", "android_build_bootstrap.py",
@@ -243,11 +252,59 @@ def prepare(source: Path, runtime: Path, target: str) -> dict[str, str]:
 
 def prepare_current(source: Path, runtime: Path, target: str, *, history_provider: bool = False,
                     store_component: Path | None = None, fetch_observation: bool = False, push_observation: bool = False,
-                    git_observation: bool = False) -> dict[str, str]:
+                    git_observation: bool = False, macos_command_bytecode: bool = False) -> dict[str, str]:
     """Current complete fixed roster, still DATA only and never qualification."""
     return _prepare(source, runtime, target, current=True, history_provider=history_provider,
                     store_component=store_component, fetch_observation=fetch_observation, push_observation=push_observation,
-                    git_observation=git_observation)
+                    git_observation=git_observation, macos_command_bytecode=macos_command_bytecode)
+
+
+def _require_core_compiler() -> None:
+    # This is publisher DATA compilation, never execution of a core module or
+    # qualification of the separately signed runtime interpreter.
+    if (sys.implementation.name != "cpython" or sys.version_info[:3] != (3, 14, 7)
+            or sys.flags.optimize != 0):
+        raise PreparationError("Mac core bytecode requires the fixed CPython 3.14.7 DATA compiler")
+
+
+def _checked_core_bytecode(core: list[tuple[str, bytes]]) -> list[tuple[str, bytes]]:
+    """Derive code only from captured .py bytes; never accept bytecode inputs.
+
+    Retain all sources. Only the closed command startup imports get bytecode;
+    modules with strict original source-filename contracts keep their .py origin.
+    The independent Mac stager recompiles and compares every derived byte.
+    """
+    from importlib import _bootstrap_external
+    if (not core or len(core) > MAX_FILES
+            or any(type(name) is not str or type(content) is not bytes
+                   or not name.startswith("mobile_release/") or not _safe_runtime_path(name)
+                   or Path(name).suffix not in {".py", ".json", ".pem"}
+                   for name, content in core)
+            or len({name.lower() for name, _ in core}) != len(core)):
+        raise PreparationError("Core bytecode requires the original source-only input roster")
+    if not COMMAND_BYTECODE_FILES <= {name for name, _ in core}:
+        raise PreparationError("Core bytecode lacks the fixed command startup source roster")
+    size = sum(len(content) for _, content in core)
+    if size > MAX_CORE_BYTES:
+        raise PreparationError("Core source and derived bytecode exceed the original byte bound")
+    result = list(core)
+    for name, content in core:
+        if name not in COMMAND_BYTECODE_FILES:
+            continue
+        try:
+            code = compile(content, name, "exec", dont_inherit=True, optimize=0)
+            hashed = importlib.util.source_hash(content)
+            body = bytes(_bootstrap_external._code_to_hash_pyc(code, hashed, checked=True))
+        except (SyntaxError, ValueError, TypeError) as error:
+            raise PreparationError("Core source could not produce checked-hash bytecode") from error
+        if (body[:4] != importlib.util.MAGIC_NUMBER or body[4:8] != (3).to_bytes(4, "little")
+                or body[8:16] != hashed or body[16:] != marshal.dumps(code)):
+            raise PreparationError("Derived core bytecode differs from its original source")
+        size += len(body)
+        if size > MAX_CORE_BYTES:
+            raise PreparationError("Core source and derived bytecode exceed the original byte bound")
+        result.append((name[:-3] + ".pyc", body))
+    return sorted(result)
 
 
 def _store_tooling_names(body: bytes) -> tuple[str, ...]:
@@ -422,9 +479,14 @@ def _copy_store(observed, runtime):
 
 def _prepare(source: Path, runtime: Path, target: str, *, current: bool,
              history_provider: bool = False, store_component: Path | None = None, fetch_observation: bool = False, push_observation: bool = False,
-             git_observation: bool = False) -> dict[str, str]:
+             git_observation: bool = False, macos_command_bytecode: bool = False) -> dict[str, str]:
     bootstrap_names = CURRENT_BOOTSTRAPS if current else BOOTSTRAPS
     current_mac = current and target in {"aarch64-apple-darwin", "x86_64-apple-darwin"}
+    if type(macos_command_bytecode) is not bool or macos_command_bytecode and (
+            not current or target != "aarch64-apple-darwin" or not history_provider or store_component is None):
+        raise PreparationError("Core bytecode requires the explicit current ARM Mac Store/provider composition")
+    if macos_command_bytecode:
+        _require_core_compiler()
     if type(fetch_observation) is not bool or fetch_observation and not current_mac:
         raise PreparationError("Fetch observation is a fixed current Mac input only")
     if fetch_observation:
@@ -514,6 +576,11 @@ def _prepare(source: Path, runtime: Path, target: str, *, current: bool,
         size += len(content)
         core.append(("mobile_release/" + path.relative_to(package).as_posix(), content))
     source_map = dict(core)
+    if macos_command_bytecode:
+        core = _checked_core_bytecode(core)
+        # Include the complete derived backing in the SAME original prewrite
+        # resource quote; neither its byte ceiling nor admission is enlarged.
+        size = sum(len(content) for _, content in core)
     if store and source_map.get("mobile_release/tooling.py") != store[4]:
         raise PreparationError("Selected core tooling roster changed before composition")
     version = re.search(rb'^__version__ = "([0-9]+\.[0-9]+\.[0-9]+)"$', source_map["mobile_release/__init__.py"], re.M)
