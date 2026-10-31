@@ -1950,8 +1950,11 @@ def current_core_matches(body, projection, *, macos_command_bytecode=False):
             if name not in CURRENT_COMMAND_BYTECODE_FILES:
                 continue
             code = compile(content, name, "exec", dont_inherit=True, optimize=0)
+            # Independently retain the original root while serializing; do not
+            # inherit producer rows or borrowed-reference-dependent flags.
+            code_owner = (code,)
             generated = (importlib.util.MAGIC_NUMBER + (3).to_bytes(4, "little")
-                         + importlib.util.source_hash(content) + marshal.dumps(code))
+                         + importlib.util.source_hash(content) + marshal.dumps(code_owner[0]))
             size += len(generated)
             need(size <= CURRENT_CORE_BYTES, "current-core-derived-byte-bound")
             expected[name[:-3] + ".pyc"] = generated

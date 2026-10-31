@@ -293,12 +293,15 @@ def _checked_core_bytecode(core: list[tuple[str, bytes]]) -> list[tuple[str, byt
             continue
         try:
             code = compile(content, name, "exec", dont_inherit=True, optimize=0)
+            # Keep a second original reference throughout serialization. The
+            # marshal reference flag must not depend on borrowed local loads.
+            code_owner = (code,)
             hashed = importlib.util.source_hash(content)
-            body = bytes(_bootstrap_external._code_to_hash_pyc(code, hashed, checked=True))
+            body = bytes(_bootstrap_external._code_to_hash_pyc(code_owner[0], hashed, checked=True))
         except (SyntaxError, ValueError, TypeError) as error:
             raise PreparationError("Core source could not produce checked-hash bytecode") from error
         if (body[:4] != importlib.util.MAGIC_NUMBER or body[4:8] != (3).to_bytes(4, "little")
-                or body[8:16] != hashed or body[16:] != marshal.dumps(code)):
+                or body[8:16] != hashed or body[16:] != marshal.dumps(code_owner[0])):
             raise PreparationError("Derived core bytecode differs from its original source")
         size += len(body)
         if size > MAX_CORE_BYTES:

@@ -69,12 +69,28 @@ class MacCoreBytecodeDataTests(unittest.TestCase):
             self.assertEqual(bytecode[4:8], (3).to_bytes(4, "little"))
             self.assertEqual(bytecode[8:16], importlib.util.source_hash(content))
             original_code = compile(content, name, "exec", dont_inherit=True, optimize=0)
-            self.assertEqual(bytecode[16:], marshal.dumps(original_code))
+            original_owner = (original_code,)
+            self.assertEqual(bytecode[16:], marshal.dumps(original_owner[0]))
         with patch.object(self.stager, "sys", self.compiler_data()):
             self.stager.current_core_matches(self.zip_bytes(rows), self.projection, macos_command_bytecode=True)
         # The original source-only profile never silently accepts derived files.
         with self.assertRaises(self.stager.Refused):
             self.stager.current_core_matches(self.zip_bytes(rows), self.projection)
+
+    def test_compiled_root_reference_flag_is_stable_with_retained_original(self):
+        from importlib import _bootstrap_external
+        rows = dict(preparation._checked_core_bytecode(self.core))
+        for name, source in self.core:
+            if name not in preparation.COMMAND_BYTECODE_FILES:
+                continue
+            code = compile(source, name, "exec", dont_inherit=True, optimize=0)
+            owner = (code,)
+            expected = marshal.dumps(owner[0])
+            self.assertEqual(expected[0], ord("c") | 0x80)
+            generated = bytes(_bootstrap_external._code_to_hash_pyc(
+                owner[0], importlib.util.source_hash(source), checked=True))
+            self.assertEqual(generated[16:], expected)
+            self.assertEqual(rows[name[:-3] + ".pyc"], generated)
 
     def test_independent_stager_rejects_missing_extra_foreign_and_source_only_substitutions(self):
         rows = preparation._checked_core_bytecode(self.core)
