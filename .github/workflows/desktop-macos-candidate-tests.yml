@@ -17,9 +17,9 @@ jobs:
     # On a rerun, nominate the original producer attempt from its unique
     # retained artifact, then fetch that COMPLETE actual attempt's jobs page.
     # Never substitute the consumer's attempt or rebuild its signed app.
-    if: ${{ !cancelled() && github.ref == 'refs/heads/verify/desktop-macos-candidate' && (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && (github.event.inputs.operation == 'candidate-tests' || github.event.inputs.operation == 'local-carrier' || github.event.inputs.operation == 'git-cli-timing'))) }}
+    if: ${{ !cancelled() && github.ref == 'refs/heads/verify/desktop-macos-candidate' && (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && (github.event.inputs.operation == 'candidate-tests' || github.event.inputs.operation == 'local-carrier' || github.event.inputs.operation == 'git-cli-timing' || github.event.inputs.operation == 'git-cli-sample'))) }}
     environment: macos-developer-id
-    name: ${{ github.event.inputs.operation == 'git-cli-timing' && 'Measure only the original installed Git index journey (saved Git27)' || matrix.group == 'local-carrier' && 'Prepare authenticated Tool26 carrier for the owner Mac' || format('Test saved candidate ({0})', matrix.group) }}
+    name: ${{ github.event.inputs.operation == 'git-cli-sample' && 'Sample only the original installed Git index journey (saved Git27)' || github.event.inputs.operation == 'git-cli-timing' && 'Measure only the original installed Git index journey (saved Git27)' || matrix.group == 'local-carrier' && 'Prepare authenticated Tool26 carrier for the owner Mac' || format('Test saved candidate ({0})', matrix.group) }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: ${{ matrix.timeout }}
     strategy:
@@ -61,7 +61,7 @@ jobs:
           set -euo pipefail
           [[ "$RUNNER_ENVIRONMENT" == github-hosted && "$RUNNER_OS" == macOS && "$GITHUB_REF" == refs/heads/verify/desktop-macos-candidate ]] || exit 1
           [[ "$GITHUB_SHA" == "$GITHUB_WORKFLOW_SHA" && "$GITHUB_REPOSITORY" == Apdelrahman1911/mobile-release-kit ]] || exit 1
-          if [[ "$GITHUB_EVENT_NAME" == workflow_dispatch && "$SELECTED_OPERATION" == git-cli-timing ]]; then
+          if [[ "$GITHUB_EVENT_NAME" == workflow_dispatch && ( "$SELECTED_OPERATION" == git-cli-timing || "$SELECTED_OPERATION" == git-cli-sample ) ]]; then
             [[ "$SELECTED_SOURCE" == 86c9337fe82ffd9c110e3700d3d2edb22a0682ea && "$SELECTED_RUN" == 41160295904 && "$SELECTED_GROUP" == git-local ]] || exit 1
           fi
           case "$MRK_MACOS_TARGET/$RUNNER_ARCH/$(/usr/bin/uname -m)" in
@@ -353,7 +353,7 @@ jobs:
           retention-days: 14
           overwrite: false
       - name: Run only this independent Git group
-        if: matrix.native_scope == 'git-native' && steps.package_install.outcome == 'success' && github.event.inputs.operation != 'git-cli-timing'
+        if: matrix.native_scope == 'git-native' && steps.package_install.outcome == 'success' && github.event.inputs.operation != 'git-cli-timing' && github.event.inputs.operation != 'git-cli-sample'
         timeout-minutes: 25
         shell: bash
         env:
@@ -479,6 +479,258 @@ jobs:
         with:
           name: original-installed-git-timing-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ steps.work.outputs.root }}/git-cli-timing-data/original-timing.json
+          if-no-files-found: error
+          retention-days: 7
+          overwrite: false
+      - name: Sample only the original installed Git index journey
+        id: git_cli_sampling
+        if: github.event.inputs.operation == 'git-cli-sample' && matrix.group == 'git-local' && steps.package_install.outcome == 'success'
+        timeout-minutes: 5
+        shell: bash
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: |
+          set -euo pipefail
+          umask 077
+          ulimit -c 0
+          "$MRK_PYTHON" -I -S -B - <<'PY'
+          import hashlib, importlib.util, json, os, pathlib, re, stat, subprocess, sys, threading, time
+          root = pathlib.Path.cwd()
+          spec = importlib.util.spec_from_file_location('original_current_identity_driver', root / 'desktop/tools/macos_identity_current_runtime.py')
+          identity = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(identity)
+          started = time.monotonic()
+          records, snapshots, restorations = [], [], []
+          record_lock = threading.Lock()
+          sample_context = threading.local()
+          overflow = False
+          folder = pathlib.Path(os.environ['MRK_MACOS_WORK']) / 'git-cli-stack-data'
+          folder.mkdir(mode=0o700)
+          APP = '/Library/Application Support/MobileReleaseKit/Mobile Release Kit.app/Contents/Helpers/MobileReleaseKitPayload.app/Contents/MacOS/mobile-release-kit-desktop'
+          ENV = {'PATH': '/usr/bin:/bin:/usr/sbin:/sbin', 'LC_ALL': 'C', 'LANG': 'C'}
+
+
+          def record(phase, before, returned, remaining=None):
+              global overflow
+              try:
+                  row = {'phase': phase, 'startedSeconds': before - started,
+                         'durationSeconds': time.monotonic() - before, 'returned': returned}
+                  if remaining is not None:
+                      row['originalSuccessRemainingSecondsBefore'] = remaining
+                  with record_lock:
+                      if len(records) < 24:
+                          records.append(row)
+                      else:
+                          overflow = True
+              except BaseException:
+                  overflow = True
+
+
+          def timed(original, phase, args, kwargs, remaining=None):
+              before, returned = time.monotonic(), False
+              try:
+                  value = original(*args, **kwargs)
+                  returned = True
+                  return value
+              finally:
+                  record(phase, before, returned, remaining)
+
+
+          def diagnostic_timeout(maximum):
+              remaining = sample_context.end - time.monotonic()
+              if remaining <= 0:
+                  raise TimeoutError('diagnostic-budget-spent')
+              return min(maximum, remaining)
+
+
+          def ps(*args):
+              result = subprocess.run(['/bin/ps', *args], env=ENV, capture_output=True, timeout=diagnostic_timeout(3))
+              if result.returncode != 0 or result.stderr or len(result.stdout) > 65536:
+                  raise RuntimeError('diagnostic-original-ps-return')
+              return result.stdout.decode('utf-8', errors='strict')
+
+
+          def process_row(pid):
+              if type(pid) is not int or not 1 <= pid < 2 ** 31:
+                  raise RuntimeError('diagnostic-fixed-pid')
+              facts = ps('-p', str(pid), '-o', 'uid=,ppid=,lstart=').strip().split(None, 2)
+              if len(facts) != 3 or not facts[0].isdecimal() or not facts[1].isdecimal():
+                  raise RuntimeError('diagnostic-original-ps-shape')
+              return {'pid': pid, 'uid': int(facts[0]), 'parentPid': int(facts[1]), 'start': facts[2],
+                      'executable': ps('-p', str(pid), '-o', 'comm=').strip(),
+                      'arguments': ps('-ww', '-p', str(pid), '-o', 'args=').strip()}
+
+
+          def select_processes():
+              inventory = []
+              for line in ps('-axww', '-o', 'pid=,ppid=,comm=').splitlines():
+                  fields = line.strip().split(None, 2)
+                  if len(fields) != 3 or not fields[0].isdecimal() or not fields[1].isdecimal():
+                      raise RuntimeError('diagnostic-original-inventory-shape')
+                  inventory.append((int(fields[0]), int(fields[1]), fields[2]))
+              app = [pid for pid, parent, executable in inventory if executable == APP]
+              if len(app) != 1:
+                  raise RuntimeError('diagnostic-single-original-installed-app')
+              original = process_row(app[0])
+              if original['uid'] != os.getuid() or original['uid'] == 0 or original['executable'] != APP or original['arguments'] != APP + ' git-index-cli':
+                  raise RuntimeError('diagnostic-original-installed-app-identity')
+              selected = [('app', original)]
+              worker_path = re.compile(r'/Library/Application Support/MobileReleaseKit/versions/[A-Za-z0-9._-]{1,160}/runtime/python/bin/python3')
+              children = [(pid, executable) for pid, parent, executable in inventory if parent == app[0] and worker_path.fullmatch(executable)]
+              if len(children) > 1:
+                  raise RuntimeError('diagnostic-single-original-git-worker')
+              for pid, executable in children:
+                  row = process_row(pid)
+                  runtime = executable.removesuffix('/python/bin/python3')
+                  allowed = [executable + ' -I -S -B ' + runtime + '/' + name + ' ' + runtime + '/core.zip' for name in ('git_read_bootstrap.py', 'git_local_bootstrap.py')]
+                  if row['uid'] != original['uid'] or row['parentPid'] != original['pid'] or row['executable'] != executable or row['arguments'] not in allowed:
+                      raise RuntimeError('diagnostic-original-fixed-worker-identity')
+                  selected.append(('worker', row))
+              return selected
+
+
+          def file_signature(value):
+              return (value.st_dev, value.st_ino, value.st_mode, value.st_uid, value.st_gid,
+                      value.st_nlink, value.st_size, value.st_mtime_ns, value.st_ctime_ns, value.st_flags)
+
+
+          def sample_phase(label, stopped):
+              row = {'phase': label, 'scheduledDelaySeconds': 8, 'durationSeconds': 1,
+                     'intervalMilliseconds': 20, 'diagnosticBudgetSeconds': 8, 'targetSuspensionPossible': True,
+                     'installedOrNativeQualification': False, 'samples': []}
+              try:
+                  if stopped.wait(8):
+                      row['status'] = 'original-phase-returned-before-sampling'
+                      return
+                  sample_context.end = time.monotonic() + 8
+                  tool = pathlib.Path('/usr/bin/sample')
+                  before = tool.lstat()
+                  if not stat.S_ISREG(before.st_mode) or before.st_uid != 0 or before.st_nlink != 1 or before.st_mode & 0o022 or not before.st_mode & 0o111:
+                      raise RuntimeError('diagnostic-original-Apple-tool-metadata')
+                  verify = subprocess.run(['/usr/bin/codesign', '--verify', '--strict', '-R=anchor apple', str(tool)], env=ENV, capture_output=True, timeout=diagnostic_timeout(3))
+                  if verify.returncode != 0 or verify.stdout or verify.stderr or file_signature(tool.lstat()) != file_signature(before):
+                      raise RuntimeError('diagnostic-original-Apple-tool-anchor')
+                  targets = select_processes()
+                  for role, original in targets:
+                      if stopped.is_set():
+                          break
+                      name = label + '-' + role + '.sample.txt'
+                      path = folder / name
+                      fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+                      os.close(fd)
+                      before_call = time.monotonic()
+                      # This separate diagnostic helper suspends briefly; it cannot
+                      # qualify a functional group. No app/test deadline is changed.
+                      result = subprocess.run(['/bin/bash', '-c', 'ulimit -f 1024; exec /usr/bin/sample "$@"',
+                          'mrk-fixed-stack-data', str(original['pid']), '1', '20', '-file', str(path)],
+                          env=ENV, capture_output=True, timeout=diagnostic_timeout(6))
+                      post_known = False
+                      try:
+                          post_known = process_row(original['pid']) == original
+                      except Exception:
+                          pass
+                      held = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+                      try:
+                          first = os.fstat(held)
+                          if not stat.S_ISREG(first.st_mode) or first.st_uid != os.getuid() or first.st_nlink != 1 or not 0 <= first.st_size <= 524288:
+                              raise RuntimeError('diagnostic-original-stack-report-bound')
+                          body = os.read(held, 524289)
+                          if len(body) != first.st_size or file_signature(os.fstat(held)) != file_signature(first) or file_signature(path.lstat()) != file_signature(first):
+                              raise RuntimeError('diagnostic-original-stack-report-post')
+                      finally:
+                          os.close(held)
+                      row['samples'].append({'role': role, 'originalPsData': original,
+                          'samePsDataAfter': post_known, 'processIdentityNativeAuthority': False,
+                          'returncode': result.returncode, 'stdoutBytes': len(result.stdout),
+                          'stderrBytes': len(result.stderr), 'stdoutSha256': hashlib.sha256(result.stdout).hexdigest(),
+                          'stderrSha256': hashlib.sha256(result.stderr).hexdigest(),
+                          'elapsedSeconds': time.monotonic() - before_call,
+                          'report': name, 'bytes': len(body), 'sha256': hashlib.sha256(body).hexdigest(),
+                          'originalReportFdNamePostsAndClose': True})
+                  row['status'] = 'diagnostic-returned'
+              except Exception as error:
+                  row['status'] = 'diagnostic-unavailable'
+                  row['errorCategory'] = type(error).__name__
+              finally:
+                  with record_lock:
+                      if len(snapshots) < 3:
+                          snapshots.append(row)
+
+
+          original_load = identity._load_observer
+
+
+          def load(*, retained=False):
+              aqua = original_load(retained=retained)
+              if retained or aqua.GIT_CLI is not aqua.CLI.GIT_CLI:
+                  raise AssertionError('fixed current Git fixture only')
+              recipe, cli = aqua.GIT_CLI, aqua.CLI
+              original_phase, original_call, original_before = recipe._phase, cli._call, recipe.before_invocation
+              def phase(c, calls, number):
+                  labels = ('allowed', 'prepared', 'terminal', 'revoked', 'reallowed')
+                  label = 'phase-' + labels[number] if type(number) is int and 0 <= number < len(labels) else 'phase-invalid'
+                  stopped, worker = threading.Event(), None
+                  try:
+                      if type(number) is int and 0 <= number <= 2:
+                          try:
+                              worker = threading.Thread(target=sample_phase, args=(label, stopped), daemon=False)
+                              worker.start()
+                          except Exception:
+                              worker = None
+                      return timed(original_phase, label, (c, calls, number), {}, calls.success_end - time.monotonic())
+                  finally:
+                      stopped.set()
+                      if worker is not None:
+                          try:
+                              worker.join(15)
+                          except Exception:
+                              pass
+              def call(*args, **kwargs):
+                  number = args[5] if len(args) > 5 else None
+                  label = 'cli-' + str(number) if type(number) is int and 0 <= number < 8 else 'cli-invalid'
+                  return timed(original_call, label, args, kwargs)
+              def before(*args, **kwargs):
+                  return timed(original_before, 'fixture-before-invocation', args, kwargs)
+              recipe._phase, cli._call, recipe.before_invocation = phase, call, before
+              restorations.extend(((recipe, '_phase', original_phase), (cli, '_call', original_call), (recipe, 'before_invocation', original_before)))
+              return aqua
+
+
+          identity._load_observer = load
+          sys.argv = ['desktop/tools/macos_identity_current_runtime.py', '--target', 'aarch64-apple-darwin', '--scope', 'git-index-cli-native']
+          status = None
+          try:
+              status = identity.main()
+          finally:
+              identity._load_observer = original_load
+              for module, name, original in reversed(restorations):
+                  setattr(module, name, original)
+              report = {'schemaVersion': 1, 'scope': 'original-installed-git-index-stack-sampling-data',
+                        'applicationSource': '86c9337fe82ffd9c110e3700d3d2edb22a0682ea',
+                        'producerRun': '41160295904', 'workflowSource': os.environ['GITHUB_SHA'],
+                        'runId': os.environ['GITHUB_RUN_ID'], 'runAttempt': os.environ['GITHUB_RUN_ATTEMPT'],
+                        'durationSeconds': time.monotonic() - started, 'driverOriginalStatus': status,
+                        'originalDeadlineValuesAndPredicatesUnchanged': True,
+                        'briefSamplingSuspensionPossible': True, 'installedGitQualified': False,
+                        'appReturnOrInvocationFinalitySuppliedBySampling': False,
+                        'records': records, 'snapshots': snapshots, 'overflow': overflow}
+              body = json.dumps(report, sort_keys=True, separators=(',', ':'), allow_nan=False).encode() + b'\n'
+              if len(body) > 16384:
+                  raise AssertionError('fixed sampling summary backing exceeded')
+              with (folder / 'original-sampling.json').open('xb') as stream:
+                  stream.write(body)
+              print(body.decode(), flush=True)
+          if type(status) is not int:
+              raise AssertionError('original driver status absent')
+          raise SystemExit(status)
+          PY
+      - name: Retain bounded original installed Git stack DATA
+        if: ${{ !cancelled() && github.event.inputs.operation == 'git-cli-sample' && (steps.git_cli_sampling.outcome == 'success' || steps.git_cli_sampling.outcome == 'failure') }}
+        timeout-minutes: 2
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: original-installed-git-stack-data-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ steps.work.outputs.root }}/git-cli-stack-data/*
           if-no-files-found: error
           retention-days: 7
           overwrite: false
