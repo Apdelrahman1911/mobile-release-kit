@@ -308,6 +308,7 @@ class _ReadSession(core._Session):
         self.initial_config = False
         self.head_bytes = b""
         self.scans: list[_Scan] = []
+        self._resolved_branch: tuple[str | None, str] | None = None
 
     def checkpoint(self) -> None:
         core._need(time.monotonic() < self.deadline, "deadline")
@@ -404,6 +405,62 @@ class _ReadSession(core._Session):
         assert self.git_dir is not None and self.originals is not None
         current = _inventory(self.git_dir, self.checkpoint, self.names)
         core._need(current == self.originals, "stale-observation")
+
+    def _checked_head_view(self) -> str:
+        """Rematch this session's complete scratch before reusing ref syntax.
+
+        The digest only compares already checked private bytes. Every directory,
+        name and file still passes its original check, and the original source
+        inventory must remain exact. No commit/object result is cached.
+        """
+        self.checkpoint()
+        core._need(not self.repository._unknown and self.frozen is not None
+                   and not self.frozen.unknown, "unknown")
+        core._need(any(session is self for session in self.repository._active_sessions)
+                   and self.frozen.root in self.frozen.directories, "already-used")
+        for path, identity in self.frozen.directories.items():
+            self.checkpoint()
+            before = core._identity(path.lstat())
+            core._need(before[:2] == identity and stat.S_ISDIR(before[2]), "stale-observation")
+            expected = {entry.name for entry in (*self.frozen.directories, *self.frozen.files)
+                        if entry != path and entry.parent == path}
+            core._need(set(self.names(path)) == expected and core._identity(path.lstat()) == before,
+                       "stale-observation")
+        view = hashlib.sha256(b"mrk-git-read-checked-head-view/1\0")
+        for path, stamp in sorted(self.frozen.files.items()):
+            self.checkpoint()
+            current, _ = core._read(path, 65536)
+            core._need(current == stamp and current.kind == "file", "stale-observation")
+            view.update(path.relative_to(self.frozen.root).as_posix().encode("utf-8") + b"\0")
+            view.update(current.digest.encode("ascii") + b"\0")
+        self.check_original()
+        self.checkpoint()
+        return view.hexdigest()
+
+    def head(self) -> tuple[str | None, str | None]:
+        before = self._checked_head_view()
+        resolved = self._resolved_branch
+        if resolved is None:
+            result = core._Session.head(self)
+        else:
+            branch, original_view = resolved
+            core._need(before == original_view, "stale-observation")
+            # Resolve the actual commit again at EVERY original head check.
+            # Object loss/type changes cannot be hidden by cached ref syntax.
+            code, body = self.git(["rev-parse", "--verify", "--quiet", "HEAD^{commit}"],
+                                  accept=(0, 1), limit=128)
+            if code == 0:
+                result = core._oid(body), branch
+            else:
+                core._need(branch is not None, "not-repository")
+                absent, _ = self.git(["show-ref", "--verify", "--quiet", branch],
+                                     accept=(0, 1), limit=1024)
+                core._need(absent == 1, "not-repository")
+                result = None, branch
+        core._need(self._checked_head_view() == before, "stale-observation")
+        if resolved is None:
+            self._resolved_branch = result[1], before
+        return result
 
     def snapshot(self) -> core._Snapshot:
         self.check_original()

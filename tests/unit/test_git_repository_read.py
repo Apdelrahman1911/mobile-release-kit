@@ -192,6 +192,94 @@ class ReadFacetTests(unittest.TestCase):
         self.assertTrue(private_heads)
         self.assertEqual(set(private_heads), {b"ref: refs/heads/Main\n"})
 
+    def test_same_checked_read_reuses_ref_syntax_but_resolves_each_actual_commit(self):
+        self.fake.config = {key: value for key, value in self.fake.config.items() if key.startswith("core.")}
+        self.repository.observe()
+        arguments = [call[0] for call in self.fake.calls]
+        self.assertEqual(len(arguments), 13)
+        self.assertEqual([args for args in arguments if args[0] == "symbolic-ref"], [
+            ("symbolic-ref", "--quiet", "HEAD"), ("symbolic-ref", "--quiet", "refs/heads/Main")])
+        commit = ("rev-parse", "--verify", "--quiet", "HEAD^{commit}")
+        self.assertEqual(arguments.count(commit), 4)
+        self.fake.calls.clear()
+        self.repo().observe()
+        self.assertEqual(sum(call[0][0] == "symbolic-ref" for call in self.fake.calls), 2,
+                         "a new original session must resolve its own ref syntax")
+
+    def test_ref_syntax_reuse_cannot_hide_commit_loss_or_changed_resolution(self):
+        for head in (None, PARENT):
+            with self.subTest(head=head):
+                self.fake.head = HEAD
+                self.fake.calls.clear()
+                self.fake.callback = lambda args, frozen: setattr(self.fake, "head", head) if args[0] == "status" else None
+                self.failure("stale-observation", self.repo().observe)
+                self.assertEqual(sum(call[0] == ("rev-parse", "--verify", "--quiet", "HEAD^{commit}")
+                                     for call in self.fake.calls), 2)
+                if head is None:
+                    self.assertEqual(self.fake.calls[-1][0], ("show-ref", "--verify", "--quiet", "refs/heads/Main"))
+
+    def test_ref_syntax_reuse_refuses_private_ref_change_and_extra_name(self):
+        for change in ("HEAD", "ref", "extra"):
+            with self.subTest(change=change):
+                self.fake.calls.clear()
+                def tamper(args, frozen):
+                    if args[0] != "ls-files":
+                        return
+                    if change == "HEAD":
+                        (frozen / "HEAD").write_bytes((PARENT + "\n").encode())
+                    elif change == "ref":
+                        (frozen / "refs/heads/Main").write_bytes((PARENT + "\n").encode())
+                    else:
+                        (frozen / "unexpected").write_bytes(b"inert extra input")
+                self.fake.callback = tamper
+                self.failure("stale-observation", self.repo().observe)
+                self.assertEqual(sum(call[0][0] == "symbolic-ref" for call in self.fake.calls), 2)
+                self.assertEqual(sum(call[0] == ("rev-parse", "--verify", "--quiet", "HEAD^{commit}")
+                                     for call in self.fake.calls), 1)
+
+    def test_ref_syntax_reuse_refuses_original_ref_change_before_fresh_command(self):
+        self.fake.callback = lambda args, frozen: self.write(".git/refs/heads/Main", (PARENT + "\n").encode()) if args[0] == "status" else None
+        self.failure("stale-observation", self.repository.observe)
+        self.assertEqual(sum(call[0] == ("rev-parse", "--verify", "--quiet", "HEAD^{commit}")
+                             for call in self.fake.calls), 1)
+
+    def test_ref_syntax_reuse_does_not_adopt_changed_tracked_scratch_bytes(self):
+        repository = self.repository
+        def tracked_change(args, frozen):
+            if args[0] == "status":
+                repository._active_sessions[0].frozen.write("HEAD", (PARENT + "\n").encode())
+        self.fake.callback = tracked_change
+        self.failure("stale-observation", repository.observe)
+        self.assertEqual(sum(call[0] == ("rev-parse", "--verify", "--quiet", "HEAD^{commit}")
+                             for call in self.fake.calls), 1)
+
+    def test_ref_syntax_reuse_keeps_original_deadline_and_failed_command_absorbing(self):
+        repository = self.repository
+        def expire(args, frozen):
+            if args[0] == "status":
+                repository._active_sessions[0].deadline = time.monotonic() - 1
+        self.fake.callback = expire
+        self.failure("deadline", repository.observe)
+        self.assertEqual(sum(call[0] == ("rev-parse", "--verify", "--quiet", "HEAD^{commit}")
+                             for call in self.fake.calls), 1)
+        self.fake.calls.clear()
+        commit_calls = 0
+        def fail_second(args, frozen):
+            nonlocal commit_calls
+            if args == ["rev-parse", "--verify", "--quiet", "HEAD^{commit}"]:
+                commit_calls += 1
+                if commit_calls == 2:
+                    raise ProcessCleanupError("inert lost original commit return")
+        self.fake.callback = fail_second
+        repository = self.repo()
+        with self.assertRaises(ProcessCleanupError):
+            repository.observe()
+        self.assertTrue(repository._unknown)
+        count = len(self.fake.calls)
+        self.fake.callback = None
+        self.failure("unknown", repository.observe)
+        self.assertEqual(len(self.fake.calls), count)
+
     def test_detached_unborn_unconfigured_and_gone_are_not_zero_counts(self):
         observed = self.repository.observe()
         self.fake.upstream = None
