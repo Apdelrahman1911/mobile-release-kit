@@ -774,11 +774,13 @@ pub(crate) fn installed_git_read_first_failure_data_check() -> bool {
     use crate::{error::{GitReadFailureOrigin as Origin, GitReadFailureProvenance}, git_read_protocol::{InstalledReadFailure as F, InstalledReadOwnerFailure}};
     // The actual fail_at body under an inert original OwnerState lock. No
     // native resources, tasks, tickets, replacement clocks or admissions.
-    let now = Instant::now(); let endpoint = now + Duration::from_secs(20);
+    let now = Instant::now();
+    let Some(endpoints) = git_read::Endpoints::at(now) else { return false; };
+    let endpoint = endpoints.work;
     let early = now + Duration::from_secs(1); let late = now + Duration::from_secs(5);
     let original = Mutex::new(OwnerState::new(endpoint, None));
     let mut state = lock(&original);
-    state.git_read_endpoints = Some(git_read::Endpoints { work: endpoint, hard: endpoint + CLEANUP_TIME });
+    state.git_read_endpoints = Some(endpoints);
     if state.installed_git_read_failure.is_some() { return false; }
     let error = BridgeError::timeout().with_git_read_failure_provenance(Some(GitReadFailureProvenance {
         origin: Origin::SourceInspectExpired, go_claimed_at_boundary: None, command_failure: None }));
@@ -787,7 +789,7 @@ pub(crate) fn installed_git_read_first_failure_data_check() -> bool {
     if state.installed_git_read_failure != expected { return false; }
     state.fail_at(BridgeError::unavailable("CANARY_PRIVATE"), early);
     if state.error.as_ref().is_none_or(|e| e.code != "runtime_unavailable")
-        || state.cleanup_endpoint != Some(early + CLEANUP_TIME) || state.endpoint != endpoint
+        || state.cleanup_endpoint != Some(endpoints.first_failure(early)) || state.endpoint != endpoint
         || state.unknown || state.installed_git_read_failure != expected { return false; }
     state.fail_at(BridgeError::shutdown(), endpoint + CLEANUP_TIME);
     if state.installed_git_read_failure != expected { return false; }
@@ -796,7 +798,7 @@ pub(crate) fn installed_git_read_first_failure_data_check() -> bool {
     absent.fail_at(BridgeError::timeout(), late); // A different owner is never attributed to GitRead.
     if absent.installed_git_read_failure.is_some() { return false; }
     let mut terminal = OwnerState::new(endpoint, None);
-    terminal.git_read_endpoints = Some(git_read::Endpoints { work: endpoint, hard: endpoint + CLEANUP_TIME });
+    terminal.git_read_endpoints = Some(endpoints);
     terminal.terminal = true; terminal.fail_at(BridgeError::timeout(), late);
     if terminal.installed_git_read_failure.is_some() || terminal.error.is_some() { return false; }
     for (code, category) in [("cleanup_unknown", F::CleanupUnknown), ("git_stale_observation", F::ContextChanged),
