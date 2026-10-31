@@ -780,8 +780,8 @@ jobs:
               for module, name, original in reversed(restorations):
                   setattr(module, name, original)
               report = {'schemaVersion': 3, 'scope': 'original-installed-git-index-printable-process-chain-data',
-                        'applicationSource': '86c9337fe82ffd9c110e3700d3d2edb22a0682ea',
-                        'producerRun': '41160295904', 'workflowSource': os.environ['GITHUB_SHA'],
+                        'applicationSource': '4452cab861231c28fe23b6f1422e4f321b2d497c',
+                        'producerRun': '41205712536', 'workflowSource': os.environ['GITHUB_SHA'],
                         'runId': os.environ['GITHUB_RUN_ID'], 'runAttempt': os.environ['GITHUB_RUN_ATTEMPT'],
                         'durationSeconds': time.monotonic() - started, 'driverOriginalStatus': status,
                         'originalDeadlineValuesAndPredicatesUnchanged': True, 'targetSuspensionRequested': False,
