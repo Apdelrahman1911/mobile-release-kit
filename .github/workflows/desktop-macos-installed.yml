@@ -1,6 +1,6 @@
 name: Desktop Mac candidate build and independent checks
 run-name: >-
-  ${{ github.event_name == 'workflow_dispatch' && inputs.operation == 'git-cli-timing' && 'macOS / installed Git timing / saved Git27' || github.event_name == 'workflow_dispatch' && inputs.operation == 'git-index-data' && 'macOS / small Git index check' || github.event_name == 'workflow_dispatch' && inputs.operation == 'command-lifecycle-data' && 'macOS / small command lifecycle check' || github.event_name == 'workflow_dispatch' && inputs.operation == 'candidate-tests' && format('macOS check / {0} / saved build {1}', inputs.test_group, inputs.prepared_run) || format('macOS / {0} / {1}', github.event_name == 'workflow_dispatch' && inputs.operation || 'candidate builds', github.ref_name) }}
+  ${{ github.event_name == 'workflow_dispatch' && inputs.operation == 'runtime-book-count-data' && 'macOS / small runtime bookkeeping CPU check' || github.event_name == 'workflow_dispatch' && inputs.operation == 'git-cli-timing' && 'macOS / installed Git timing / saved Git27' || github.event_name == 'workflow_dispatch' && inputs.operation == 'git-index-data' && 'macOS / small Git index check' || github.event_name == 'workflow_dispatch' && inputs.operation == 'command-lifecycle-data' && 'macOS / small command lifecycle check' || github.event_name == 'workflow_dispatch' && inputs.operation == 'candidate-tests' && format('macOS check / {0} / saved build {1}', inputs.test_group, inputs.prepared_run) || format('macOS / {0} / {1}', github.event_name == 'workflow_dispatch' && inputs.operation || 'candidate builds', github.ref_name) }}
 
 on:
   workflow_dispatch:
@@ -20,6 +20,7 @@ on:
           - command-lifecycle-data
           - git-index-data
           - git-cli-timing
+          - runtime-book-count-data
       prepared_source:
         description: Full source commit of the saved package
         required: false
@@ -70,6 +71,179 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  runtime-book-count-data:
+    # CPU-only inert records. No installed input, NativeUse, FD inventory or
+    # publisher capability is created; this diagnoses one original expression.
+    if: github.repository == 'Apdelrahman1911/mobile-release-kit' && github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/codex/macos-git-read-continuation' && inputs.operation == 'runtime-book-count-data' && inputs.target == 'aarch64-apple-darwin' && inputs.prepared_source == '86c9337fe82ffd9c110e3700d3d2edb22a0682ea' && inputs.prepared_run == '41160295904' && github.sha == github.workflow_sha
+    name: Small original runtime bookkeeping CPU check (Git27)
+    runs-on: xcode-27
+    timeout-minutes: 12
+    permissions:
+      contents: read
+    env:
+      RUSTUP_TOOLCHAIN: '1.98.1'
+      MRK_MACOS_TARGET: aarch64-apple-darwin
+      DEVELOPER_DIR: /Library/Developer/CommandLineTools
+      MACOSX_DEPLOYMENT_TARGET: '26.0'
+    steps:
+      - name: Admit the actual disposable non-root Git27 route
+        timeout-minutes: 1
+        shell: bash
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: |
+          set -euo pipefail
+          [[ "$RUNNER_ENVIRONMENT" == github-hosted && "$RUNNER_OS" == macOS && "$RUNNER_ARCH" == ARM64 ]] || exit 1
+          [[ "$(/usr/bin/uname -m)" == arm64 && "$(/usr/bin/sw_vers -productVersion)" == 27.* && "$(/usr/bin/id -u)" != 0 ]] || exit 1
+          [[ "$GITHUB_REPOSITORY" == Apdelrahman1911/mobile-release-kit && "$GITHUB_REF" == refs/heads/codex/macos-git-read-continuation ]] || exit 1
+          [[ "$GITHUB_EVENT_NAME" == workflow_dispatch && "$GITHUB_SHA" == "$GITHUB_WORKFLOW_SHA" ]] || exit 1
+      - name: Check out the exact reviewed workflow including the original signed source
+        timeout-minutes: 2
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 6
+          persist-credentials: false
+      - name: Keep every application and native source byte unchanged
+        timeout-minutes: 1
+        shell: bash
+        run: |
+          set -euo pipefail
+          original=86c9337fe82ffd9c110e3700d3d2edb22a0682ea
+          [[ "$(git rev-parse HEAD)" == "$GITHUB_SHA" ]] || exit 1
+          git merge-base --is-ancestor "$original" HEAD
+          git diff --exit-code "$original" HEAD -- . ':!.github/workflows/desktop-macos-installed.yml' ':!.github/workflows/desktop-macos-candidate-tests.yml' ':!MACOS-CONTINUATION.md' ':!MACOS-LOCAL-RESULTS.md'
+      - name: Select only the fixed DATA interpreter
+        id: python
+        timeout-minutes: 2
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.14.7'
+      - name: Reserve a fresh bounded diagnostic directory
+        id: work
+        timeout-minutes: 1
+        shell: bash
+        env:
+          MRK_PYTHON: ${{ steps.python.outputs.python-path }}
+        run: |
+          set -euo pipefail
+          umask 077
+          [[ "$RUNNER_TEMP" == /Users/runner/work/_temp ]] || exit 1
+          root=$(/usr/bin/mktemp -d "$RUNNER_TEMP/mrk-runtime-book-data.XXXXXXXX")
+          printf 'root=%s\n' "$root" >> "$GITHUB_OUTPUT"
+          printf 'MRK_MACOS_WORK=%s\nMRK_PYTHON=%s\nCARGO_TARGET_DIR=%s/cargo-target\n' "$root" "$MRK_PYTHON" "$root" >> "$GITHUB_ENV"
+      - name: Admit the original pinned direct compiler
+        timeout-minutes: 5
+        shell: bash
+        run: /bin/bash desktop/tools/macos_installed_direct_rust.sh
+      - name: Measure the unchanged recount expression with inert records
+        timeout-minutes: 3
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          ulimit -c 0
+          "$MRK_PYTHON" -I -S -B - <<'PY'
+          import hashlib, importlib.util, json, os, pathlib, stat, subprocess, sys
+          root = pathlib.Path.cwd()
+          work = pathlib.Path(os.environ['MRK_MACOS_WORK'])
+          path = root / 'desktop/src-tauri/src/installed_runtime_macos.rs'
+          original = path.read_bytes()
+          expression = 'self.records.iter().filter(|r| r.fd.is_some()).count()'
+          if original.count(expression.encode()) != 1:
+              raise AssertionError('one fixed original reserve expression')
+          code = r'''use std::{hint::black_box, num::NonZeroI32, time::Instant};
+          struct Record { fd: Option<NonZeroI32>, _inert_padding: [u8; 132] }
+          fn main() {
+              for n in [64usize,512,4096,8192] {
+                  let records: Vec<Record>=(0..n).map(|_|Record {fd:NonZeroI32::new(1),_inert_padding:[0;132]}).collect();
+                  let start=Instant::now();let mut sum=0usize;
+                  for i in 0..n {let prior=black_box(&records[..i]);sum=black_box(sum+prior.iter().filter(|r|r.fd.is_some()).count());}
+                  let scanned=start.elapsed().as_secs_f64();
+                  assert_eq!(sum,n*(n-1)/2);
+                  let start=Instant::now();let mut counted=0usize;let mut live=0usize;
+                  for _ in 0..n {counted=black_box(counted+black_box(live));live+=1;}
+                  let counter=start.elapsed().as_secs_f64();assert_eq!(sum,counted);
+                  println!("{} {} {} {} {}",n,std::mem::size_of::<Record>(),sum,scanned,counter);
+              }
+          }
+          '''
+          source = work / 'inert-book-count.rs'
+          with source.open('xb') as stream:
+              stream.write(code.encode())
+          executable = work / 'inert-book-count'
+          compiler = pathlib.Path('/Users/runner/.rustup/toolchains/1.98.1-aarch64-apple-darwin/bin/rustc')
+          spec = importlib.util.spec_from_file_location('original_count_owner', root / 'desktop/tools/macos_aqua_qualification.py')
+          aqua = importlib.util.module_from_spec(spec)
+          sys.modules[spec.name] = aqua
+          spec.loader.exec_module(aqua)
+          owner = aqua.load_owner(root)
+          environment = dict(PATH=str(compiler.parent)+':/usr/bin:/bin:/usr/sbin:/sbin',HOME='/Users/runner',LANG='C',LC_ALL='C',TZ='UTC',DEVELOPER_DIR='/Library/Developer/CommandLineTools',MACOSX_DEPLOYMENT_TARGET='26.0')
+          def signature(value):
+              return tuple(getattr(value,name) for name in ('st_dev','st_ino','st_mode','st_uid','st_gid','st_nlink','st_size','st_mtime_ns','st_ctime_ns','st_flags'))
+          def held(path, maximum, executable=False):
+              fd=os.open(path,os.O_RDONLY|os.O_NOFOLLOW|os.O_CLOEXEC)
+              s=os.fstat(fd)
+              if not stat.S_ISREG(s.st_mode) or s.st_uid != os.getuid() or s.st_nlink!=1 or s.st_flags!=0 or not 0<s.st_size<=maximum or os.listxattr(fd):
+                  os.close(fd);raise AssertionError('original CPU input policy')
+              if executable and not s.st_mode & 0o100:
+                  os.close(fd);raise AssertionError('original CPU executable mode')
+              return (fd,path,signature(s))
+          def post(row):
+              fd,path,before=row
+              if before!=signature(os.fstat(fd)) or before!=signature(path.lstat()) or os.listxattr(fd):
+                  raise AssertionError('same original CPU FD/name POST')
+          originals=[]
+          pending=False
+          try:
+              originals.append(held(compiler,64*1024*1024,executable=True))
+              originals.append(held(source,4096))
+              args=[str(compiler),'--edition=2021','-C','opt-level=0','-C','debug-assertions=yes',str(source),'-o',str(executable)]
+              pending=True
+              compiled=owner.run_owned(args,environ=environment,cwd=root/'desktop/src-tauri',timeout=60,capture=True,text=False,output_limit=4096)
+              pending=False
+              if type(compiled) is not subprocess.CompletedProcess or compiled.args!=args or compiled.returncode!=0 or compiled.stdout or compiled.stderr:
+                  raise AssertionError('original compiler return')
+              for row in originals:post(row)
+              originals.append(held(executable,2*1024*1024,executable=True))
+              args=[str(executable)]
+              pending=True
+              result=owner.run_owned(args,environ=environment,cwd=root/'desktop/src-tauri',timeout=60,capture=True,text=False,output_limit=4096)
+              pending=False
+              if type(result) is not subprocess.CompletedProcess or result.args!=args or result.returncode!=0 or result.stderr:
+                  raise AssertionError('original CPU check return')
+              for row in originals:post(row)
+              lines=result.stdout.decode().splitlines()
+              if len(lines)!=4:
+                  raise AssertionError('fixed CPU case roster')
+              rows=[]
+              for line,n in zip(lines,(64,512,4096,8192)):
+                  fields=line.split()
+                  if len(fields)!=5 or int(fields[0])!=n or int(fields[2])!=n*(n-1)//2:
+                      raise AssertionError('same original count')
+                  rows.append(dict(records=n,inertRecordBytes=int(fields[1]),originalComparisons=int(fields[2]),scanSeconds=float(fields[3]),counterSeconds=float(fields[4])))
+              report=dict(schemaVersion=1,scope='inert-original-runtime-reserve-count-only',workflowSource=os.environ['GITHUB_SHA'],applicationSource='86c9337fe82ffd9c110e3700d3d2edb22a0682ea',producerRun='41160295904',runId=os.environ['GITHUB_RUN_ID'],runAttempt=os.environ['GITHUB_RUN_ATTEMPT'],originalSourceSha256=hashlib.sha256(original).hexdigest(),originalExpression=expression,compilerRelease='1.98.1',optimizationLevel=0,debugAssertions=True,inertPaddingNotActualNativeRecord=True,records=rows,originalCompilerReturncode=compiled.returncode,originalCheckReturncode=result.returncode,nativeOwnershipOrInstalledQualification=False,applicationOrClockOrPredicateChanged=False)
+          finally:
+              if not pending:
+                  for fd,path,before in reversed(originals):os.close(fd)
+          if pending:
+              raise AssertionError('original CPU invocation unreturned')
+          body=(json.dumps(report,sort_keys=True,separators=(',',':'),allow_nan=False)+'\n').encode()
+          if len(body)>16384:
+              raise AssertionError('fixed CPU report backing')
+          with (work/'original-book-count.json').open('xb') as stream:stream.write(body)
+          print(body.decode(),flush=True)
+          PY
+      - name: Retain only the bounded original CPU bookkeeping DATA
+        timeout-minutes: 2
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: original-runtime-book-count-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ steps.work.outputs.root }}/original-book-count.json
+          if-no-files-found: error
+          retention-days: 7
+          overwrite: false
+
   command-lifecycle-data:
     # One existing native contract on a disposable runner. This route consumes
     # no saved package and grants no installed Git/service qualification.
