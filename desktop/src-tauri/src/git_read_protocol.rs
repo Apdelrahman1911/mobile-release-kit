@@ -392,6 +392,43 @@ pub(crate) enum Phase {
     Settled,
     CleanupUnknown,
 }
+#[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation",
+        not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"),
+        target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "kebab-case")]
+pub(crate) enum InstalledReadFailure {
+    CleanupUnknown, ContextChanged, Busy, Cancelled, ShuttingDown, QueryTimeout,
+    GitReadRefused, IoError, InvalidRequest, ProtocolError, RuntimeUnavailable, OutputLimit, Other,
+}
+#[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation",
+        not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"),
+        target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
+pub(crate) struct InstalledReadOwnerFailure {
+    pub(crate) category: InstalledReadFailure,
+    pub(crate) origin: Option<crate::error::GitReadFailureOrigin>,
+}
+#[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation",
+        not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"),
+        target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+impl InstalledReadOwnerFailure {
+    pub(crate) fn capture(error: &BridgeError) -> Self {
+        use InstalledReadFailure as F;
+        let category = match error.code.as_str() {
+            "cleanup_unknown" => F::CleanupUnknown,
+            "context_changed" | "git_stale_observation" => F::ContextChanged,
+            "busy" => F::Busy, "cancelled" => F::Cancelled,
+            "shutting_down" => F::ShuttingDown, "query_timeout" => F::QueryTimeout,
+            "git_read_refused" => F::GitReadRefused, "io_error" => F::IoError,
+            "invalid_request" => F::InvalidRequest, "protocol_error" => F::ProtocolError,
+            "runtime_unavailable" => F::RuntimeUnavailable, "output_limit" => F::OutputLimit,
+            _ => F::Other,
+        };
+        Self { category, origin: error.git_read_failure_provenance().map(|p| p.origin) }
+    }
+}
+
 #[derive(Clone, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct Projection {

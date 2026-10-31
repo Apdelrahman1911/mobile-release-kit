@@ -210,11 +210,25 @@ impl GitCliNativeProgressSample {
     fn value(self)->Value {json!({"sample":"same-original-frame-read","phase":"apply","facts":self.facts})}
 }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum GitReadOrdinal { BeforeCli, AfterCli }
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct GitReadOriginalSample {
+    ordinal: GitReadOrdinal,
+    first_owner_error: Option<git_read::InstalledReadOwnerFailure>,
+}
+impl GitReadOriginalSample {
+    fn value(self) -> Value {
+        json!({"ordinal":match self.ordinal { GitReadOrdinal::BeforeCli => "before-cli", GitReadOrdinal::AfterCli => "after-cli" },
+            "firstOwnerError":self.first_owner_error})
+    }
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct GitReadFailureSample {
     step: Step, check: GitReadCheck, phase: Option<git_read::Phase>, outcome: Option<git_read::Outcome>,
     reason: GitReadReason, result_valid: Option<bool>,
     provenance: Option<crate::error::GitReadFailureProvenance>,
     cli_return:Option<crate::service_git_requests::InstalledCliReturnFacts>,
+    read_original: Option<GitReadOriginalSample>,
 }
 impl GitReadFailureSample {
     fn capture(step: Step, p: Option<&git_read::Projection>, check: GitReadCheck, result_valid: Option<bool>) -> Self {
@@ -230,7 +244,14 @@ impl GitReadFailureSample {
             GitReadCheck::MissingOperation | GitReadCheck::MissingFixture | GitReadCheck::MissingOriginal | GitReadCheck::OriginalMismatch => None,
             _ => p.and_then(|p| p.failure_provenance),
         };
-        Self { step, check, phase: p.map(|p| p.phase), outcome: p.and_then(|p| p.outcome), reason, result_valid, provenance,cli_return:None }
+        Self { step, check, phase: p.map(|p| p.phase), outcome: p.and_then(|p| p.outcome), reason, result_valid, provenance,cli_return:None,read_original:None }
+    }
+    fn with_read_original(mut self, original: Option<GitReadOriginalSample>) -> Self {
+        if self.step == Step::GitCli(git_cli::Step::ReadWait)
+            && !matches!(self.check, GitReadCheck::MissingOperation | GitReadCheck::MissingFixture | GitReadCheck::MissingOriginal | GitReadCheck::OriginalMismatch) {
+            self.read_original = original;
+        }
+        self
     }
     fn value(self) -> Value {
         let reason = match self.reason {
@@ -240,6 +261,7 @@ impl GitReadFailureSample {
         };
         let mut value = json!({"check":self.check.label(),"phase":self.phase,"outcome":self.outcome,"reason":reason,"resultValid":self.result_valid});
         if let Some(facts)=self.cli_return {value["cliOriginalReturn"]=json!(facts);}
+        if let Some(original)=self.read_original {value["readOriginal"]=original.value();}
         if let Some(provenance) = self.provenance {
             value["provenance"] = json!({"origin":provenance.origin,"goClaimedAtBoundary":provenance.go_claimed_at_boundary});
             if provenance.origin == crate::error::GitReadFailureOrigin::ChildTerminal {
@@ -5230,6 +5252,8 @@ fn observer_data_checks() -> bool {
     use mrk_macos_installed_native::{PanelKind, PanelObservation, PanelResponse};
     if !final_fixture_readback_data_check() { return data_contract_failure!(); }
     if !git_read_wait_data_checks() || !git_read_failure_data_checks() || !git_cli_wait_data_checks() { return data_contract_failure!(); }
+    if !crate::supervisor::installed_git_read_first_failure_data_check()
+        || !git_cli::read_original_failure_data_checks() { return data_contract_failure!(); }
     if !project_chooser_data_checks() { return data_contract_failure!(); }
     crate::asset_session::assert_project_selection_gate_contract();
     // SAME inert bodies as the libtest regressions, before any fixture/native

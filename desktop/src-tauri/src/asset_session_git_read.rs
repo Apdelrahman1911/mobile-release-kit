@@ -214,6 +214,16 @@ impl DocumentBinding {
         reconcile(&mut state);
         self.git_read_snapshot(&state) // Memory only; never starts/replays a read.
     }
+    #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation",
+        not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"),
+        target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+    pub(crate) fn installed_git_read_first_failure(&self, operation_id: &str) -> Option<wire::InstalledReadOwnerFailure> {
+        let state = self.lock();
+        match &state.git_read {
+            Some(Entry::Original { ticket, .. }) if ticket.operation_id() == operation_id => ticket.installed_first_failure(),
+            _ => None,
+        }
+    }
     pub(crate) fn git_read_cancel(&self, operation_id: &str) -> Result<wire::Status, BridgeError> {
         let mut state = self.lock();
         match &state.git_read {

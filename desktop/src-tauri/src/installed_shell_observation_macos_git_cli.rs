@@ -11,7 +11,7 @@ use serde_json::{json, Value};
 use std::{
     path::{Path, PathBuf},
     sync::{
-        atomic::{AtomicBool, Ordering},
+        atomic::{AtomicBool, AtomicU8, Ordering},
         Arc, OnceLock, Weak,
     },
     time::Instant,
@@ -305,6 +305,16 @@ impl ReadOriginal {
     }
     fn matches(&self, p: &read::Projection) -> bool {
         self.id == p.operation_id && self.context == p.context && self.action == p.action
+    }
+    fn failure_sample(&self, p: &read::Projection, read_count: u8,
+        first_owner_error: Option<read::InstalledReadOwnerFailure>) -> Option<super::GitReadOriginalSample> {
+        if !self.matches(p) { return None; }
+        let ordinal = match read_count {
+            0 => super::GitReadOrdinal::BeforeCli,
+            1 => super::GitReadOrdinal::AfterCli,
+            _ => return None,
+        };
+        Some(super::GitReadOriginalSample { ordinal, first_owner_error })
     }
 }
 #[derive(Clone)]
@@ -624,14 +634,20 @@ impl Observation {
                         self.fail_git_read_missing(OuterStep::GitCli(step),"git-cli-original-contract");
                         return Err(bad());
                     }
+                    // Same current original ticket, outside Record's lock.
+                    // Missing/finished/mismatched tickets yield absent DATA.
+                    let first_owner_error=status.operation.as_ref().and_then(|p|
+                        document.installed_git_read_first_failure(&p.operation_id));
                     let mut r=self.record().ok_or_else(bad)?;
                     let mut result_valid=None;
+                    let mut read_original=None;
                     let checked=(||{
                         let p=status.operation.as_ref().ok_or(ReadCheck::MissingOperation)?;
                         let head=r.fixture.git_cli.as_ref().ok_or(ReadCheck::MissingFixture)?.target().to_owned();
                         let v=r.git_cli.as_mut().ok_or(ReadCheck::MissingOriginal)?;
                         let original=v.reads.last().ok_or(ReadCheck::MissingOriginal)?;
                         if !original.matches(p){return Err(ReadCheck::OriginalMismatch);}
+                        read_original=original.failure_sample(p,v.read_count,first_owner_error);
                         if !super::git_read_wait_terminal(p)?{return Ok(None);}
                         read_result(p,&head,c.case,v.read_count==1,&mut result_valid)?;
                         if v.read_count==0 {
@@ -644,7 +660,8 @@ impl Observation {
                     match checked {
                         Ok(next)=>next,
                         Err(check)=>{
-                            let sample=GitReadFailureSample::capture(OuterStep::GitCli(step),status.operation.as_ref(),check,result_valid);
+                            let sample=GitReadFailureSample::capture(OuterStep::GitCli(step),status.operation.as_ref(),check,result_valid)
+                                .with_read_original(read_original);
                             self.fail_git_read_wait(&mut r,"git-cli-original-contract",sample);
                             return Err(bad());
                         }
@@ -912,6 +929,55 @@ impl Observation {
         v.host = report.workers_joined;
         true
     }
+}
+
+pub(super) fn read_original_failure_data_checks() -> bool {
+    use super::{GitReadOrdinal, GitReadOriginalSample};
+    // Same original matcher, closed ordinal and first Record latch over inert
+    // DATA. No Document, native fixture, source, task or invocation executes.
+    let p = read::Projection {
+        operation_id: "CANARY_PRIVATE_ID".into(),
+        context: read::Context { project_id: "CANARY_PRIVATE_PROJECT".into(), generation: 1, revision: "CANARY_PRIVATE_REVISION".into() },
+        action: read::Action { kind: read::Kind::Observe, expected_revision: None, paths: Vec::new(), staged: false },
+        phase: read::Phase::CleanupUnknown, outcome: Some(read::Outcome::CleanupUnknown), reason: Some("unknown".into()),
+        result: Value::Null, failure_provenance: None,
+    };
+    let original = ReadOriginal::capture(&p);
+    let error = read::InstalledReadOwnerFailure { category: read::InstalledReadFailure::QueryTimeout, origin: None };
+    let step = OuterStep::GitCli(Step::ReadWait);
+    for (count, ordinal, label) in [(0, GitReadOrdinal::BeforeCli, "before-cli"), (1, GitReadOrdinal::AfterCli, "after-cli")] {
+        let Some(data) = original.failure_sample(&p, count, Some(error)) else { return false; };
+        if data != (GitReadOriginalSample { ordinal, first_owner_error: Some(error) }) { return false; }
+        let sample = GitReadFailureSample::capture(step, Some(&p), ReadCheck::TerminalPhase, None).with_read_original(Some(data));
+        if sample.value()["readOriginal"] != json!({"ordinal":label,"firstOwnerError":{"category":"query-timeout","origin":null}})
+            || sample.value().to_string().contains("CANARY_PRIVATE") { return false; }
+        let Some(absent) = original.failure_sample(&p, count, None) else { return false; };
+        let first_sample = GitReadFailureSample::capture(step, Some(&p), ReadCheck::TerminalPhase, None).with_read_original(Some(absent));
+        let first = AtomicU8::new(0); let failed = AtomicBool::new(false); let mut detail = None;
+        super::latch_git_read_failure(&first, &failed, &mut detail, step, "git-cli-original-contract", first_sample);
+        super::latch_git_read_failure(&first, &failed, &mut detail, step, "git-cli-original-contract", sample);
+        if detail != Some(first_sample) || detail.unwrap().value()["readOriginal"]["firstOwnerError"] != Value::Null { return false; }
+        let mut mismatched = p.clone(); mismatched.operation_id.push('x');
+        if original.failure_sample(&mismatched, count, Some(error)).is_some() { return false; }
+        mismatched = p.clone(); mismatched.context.generation += 1;
+        if original.failure_sample(&mismatched, count, Some(error)).is_some() { return false; }
+        mismatched = p.clone(); mismatched.context.revision.push('x');
+        if original.failure_sample(&mismatched, count, Some(error)).is_some() { return false; }
+        mismatched = p.clone(); mismatched.action.staged = true;
+        if original.failure_sample(&mismatched, count, Some(error)).is_some() { return false; }
+        for check in [ReadCheck::MissingOperation, ReadCheck::MissingFixture, ReadCheck::MissingOriginal, ReadCheck::OriginalMismatch] {
+            if GitReadFailureSample::capture(step, Some(&p), check, None).with_read_original(Some(data)).read_original.is_some() { return false; }
+        }
+        for foreign in [OuterStep::OpenProject, OuterStep::GitCli(Step::Prepared), OuterStep::GitCli(Step::Terminal), OuterStep::GitFetch(super::git_fetch::Step::ReadWait)] {
+            if GitReadFailureSample::capture(foreign, Some(&p), ReadCheck::TerminalPhase, None).with_read_original(Some(data)).read_original.is_some() { return false; }
+        }
+    }
+    original.failure_sample(&p, 2, Some(error)).is_none()
+}
+#[cfg(test)]
+#[test]
+fn git_read_original_failure_keeps_exact_ordinal_and_absent_first_sample() {
+    assert!(read_original_failure_data_checks());
 }
 
 #[cfg(test)]

@@ -384,6 +384,83 @@ def inert_created_directory(gid=GID):
                               mkdir=mkdir, opening=opening, chown=changing_group, chmod=changing_mode)
 
 
+class GitReadOriginalFailureDataTests(unittest.TestCase):
+    """Finite first-owner diagnostics only; no native read or fixture runs."""
+
+    @staticmethod
+    def detail(ordinal="before-cli", first=None):
+        value = GitReadFailureDataTests.detail()
+        value["gitReadFailure"]["readOriginal"] = {"ordinal": ordinal, "firstOwnerError": first}
+        return value
+
+    @staticmethod
+    def parse(value, step="GitCli(ReadWait)", reason="git-cli-original-contract", case=None):
+        return M.failure_context(b"", project_selection_row(value, reason, step), case or M.GIT_CLI.INDEX)
+
+    def test_both_read_ordinals_keep_absent_or_closed_first_owner_error(self):
+        categories = ("cleanup-unknown", "context-changed", "busy", "cancelled", "shutting-down", "query-timeout",
+                      "git-read-refused", "io-error", "invalid-request", "protocol-error", "runtime-unavailable", "output-limit", "other")
+        origins = (None, "explicit-cancel", "document-stop", "shutdown", "driver-stop",
+                   "source-inspect-owner-failed", "source-inspect-stop-flag", "source-inspect-expired",
+                   "source-post-owner-failed", "source-post-stop-flag", "source-post-expired", "child-terminal")
+        for ordinal in ("before-cli", "after-cli"):
+            value = self.detail(ordinal)
+            self.assertEqual(self.parse(value), value)
+            for category in categories:
+                for origin in origins:
+                    value = self.detail(ordinal, {"category": category, "origin": origin})
+                    for case in M.GIT_CLI.CASES:
+                        self.assertEqual(self.parse(value, case=case), value)
+
+    def test_private_extra_missing_and_untyped_first_owner_data_are_rejected(self):
+        valid = self.detail(first={"category": "query-timeout", "origin": None})
+        for key, bad in (("ordinal", 0), ("ordinal", True), ("ordinal", "third-read"),
+                         ("operationId", "private"), ("firstOwnerError", "private error"),
+                         ("firstOwnerError", {}), ("firstOwnerError", False)):
+            value = deepcopy(valid); value["gitReadFailure"]["readOriginal"][key] = bad
+            self.assertIsNone(self.parse(value), key)
+        for key in ("ordinal", "firstOwnerError"):
+            value = deepcopy(valid); del value["gitReadFailure"]["readOriginal"][key]
+            self.assertIsNone(self.parse(value), key)
+        for key, bad in (("category", "private stderr"), ("category", 1), ("category", True),
+                         ("origin", "private path"), ("origin", False), ("origin", {}), ("message", "private")):
+            value = deepcopy(valid); value["gitReadFailure"]["readOriginal"]["firstOwnerError"][key] = bad
+            self.assertIsNone(self.parse(value), key)
+        for key in ("category", "origin"):
+            value = deepcopy(valid); del value["gitReadFailure"]["readOriginal"]["firstOwnerError"][key]
+            self.assertIsNone(self.parse(value), key)
+
+    def test_first_owner_data_cannot_be_attributed_to_unmatched_reads_or_foreign_steps(self):
+        for check in ("missing-operation", "missing-fixture", "missing-original", "original-mismatch"):
+            value = self.detail(); value["gitReadFailure"]["check"] = check
+            self.assertIsNone(self.parse(value), check)
+        for step, reason, case in (("GitCli(Prepared)", "git-cli-original-contract", M.GIT_CLI.INDEX),
+                                  ("GitCli(Terminal)", "git-cli-original-contract", M.GIT_CLI.INDEX),
+                                  ("GitFetch(ReadWait)", "git-fetch-original-contract", M.FETCH.CASES[0]),
+                                  ("GitPush(ReadWait)", "git-push-original-contract", M.PUSH.CASES[0]),
+                                  ("GitUpstream(ReadWait)", "git-upstream-original-contract", M.UPSTREAM.CASE)):
+            value = self.detail()
+            if step in ("GitCli(Prepared)", "GitCli(Terminal)"):
+                value["gitReadFailure"].update(check="cli-original-return", phase=None, outcome=None, reason=None)
+            self.assertIsNone(self.parse(value, step, reason, case), step)
+        value = self.detail(); value["snapshotSource"] = "prearm-open-progress"
+        self.assertIsNone(self.parse(value))
+        self.assertIsNone(self.parse(self.detail(), reason="observer-deadline"))
+
+    def test_new_first_error_data_never_proves_app_return_or_invocation_finality(self):
+        value = self.detail("after-cli", {"category": "io-error", "origin": "child-terminal"})
+        parsed = self.parse(value)
+        self.assertEqual(parsed, value)
+        with self.assertRaises(M.Refused):
+            M.parse_result(b"", project_selection_row(value, "git-cli-original-contract", "GitCli(ReadWait)"), BINDING, M.GIT_CLI.INDEX)
+        fixtures = InertFixtures()
+        fixtures.case, fixtures.stage, fixtures.inflight = M.GIT_CLI.INDEX, "invocation", True
+        fixtures.inner_failure_context = parsed
+        report = M.diagnostic(M.Refused("original-deadline"), None, fixtures)
+        self.assertEqual((report["status"], report["appReturncode"], report["originalCallReturned"], report["invocationFinality"]),
+                         ("failed", None, False, "unknown"))
+
+
 class GitReadFailureDataTests(unittest.TestCase):
     """Safe returned Git DATA; no Git, native operation, or UI is executed."""
 

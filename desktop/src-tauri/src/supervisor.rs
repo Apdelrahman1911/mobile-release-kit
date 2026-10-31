@@ -327,6 +327,10 @@ struct OwnerState {
         not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"),
         target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
     installed_git_failure: Option<Arc<crate::service_git_requests::installed_progress::FailureLatch>>,
+    #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation",
+        not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"),
+        target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+    installed_git_read_failure: Option<crate::git_read_protocol::InstalledReadOwnerFailure>,
     version_allocation_source_endpoints: Option<version_allocation::Endpoints>,
     terminal: bool, unknown: bool,
     #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
@@ -633,6 +637,10 @@ impl OwnerState {
                 not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"),
                 target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
             installed_git_failure: None,
+            #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation",
+                not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"),
+                target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+            installed_git_read_failure: None,
             #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
             native_unknown_pending: false,
             driver_join: ManagementJoin::Pending, watchdog_join: ManagementJoin::Pending,
@@ -665,6 +673,16 @@ impl OwnerState {
             // returns, freezes the same bounded category under OwnerState.
             // This pure DATA latch cannot publish into Entry or wait on it.
             latch.capture(&error.code);
+        }
+        #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation",
+            not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"),
+            target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+        if self.git_read_endpoints.is_some() && self.installed_git_read_failure.is_none() {
+            // Freeze SAME first winning error under SAME original OwnerState
+            // lock. Inline scalar DATA is covered by size_of::<Owner>(); no
+            // extra heap, callback or lock on Document/Entry/Record.
+            self.installed_git_read_failure = self.error.as_ref()
+                .map(crate::git_read_protocol::InstalledReadOwnerFailure::capture);
         }
         self.cleanup_endpoint = Some(self.cleanup_endpoint.map_or(end, |prior| prior.min(end)));
     }
@@ -747,6 +765,58 @@ pub(crate) fn common_acl_owner_data_check() -> bool {
         if latch.capture("CANARY_PRIVATE")!=InstalledNativeFailure::QueryTimeout {return false;}
     }
     true
+}
+
+#[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation",
+    not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"),
+    target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+pub(crate) fn installed_git_read_first_failure_data_check() -> bool {
+    use crate::{error::{GitReadFailureOrigin as Origin, GitReadFailureProvenance}, git_read_protocol::{InstalledReadFailure as F, InstalledReadOwnerFailure}};
+    // The actual fail_at body under an inert original OwnerState lock. No
+    // native resources, tasks, tickets, replacement clocks or admissions.
+    let now = Instant::now(); let endpoint = now + Duration::from_secs(20);
+    let early = now + Duration::from_secs(1); let late = now + Duration::from_secs(5);
+    let original = Mutex::new(OwnerState::new(endpoint, None));
+    let mut state = lock(&original);
+    state.git_read_endpoints = Some(git_read::Endpoints { work: endpoint, hard: endpoint + CLEANUP_TIME });
+    if state.installed_git_read_failure.is_some() { return false; }
+    let error = BridgeError::timeout().with_git_read_failure_provenance(Some(GitReadFailureProvenance {
+        origin: Origin::SourceInspectExpired, go_claimed_at_boundary: None, command_failure: None }));
+    state.fail_at(error, late);
+    let expected = Some(InstalledReadOwnerFailure { category: F::QueryTimeout, origin: Some(Origin::SourceInspectExpired) });
+    if state.installed_git_read_failure != expected { return false; }
+    state.fail_at(BridgeError::unavailable("CANARY_PRIVATE"), early);
+    if state.error.as_ref().is_none_or(|e| e.code != "runtime_unavailable")
+        || state.cleanup_endpoint != Some(early + CLEANUP_TIME) || state.endpoint != endpoint
+        || state.unknown || state.installed_git_read_failure != expected { return false; }
+    state.fail_at(BridgeError::shutdown(), endpoint + CLEANUP_TIME);
+    if state.installed_git_read_failure != expected { return false; }
+    drop(state);
+    let mut absent = OwnerState::new(endpoint, None);
+    absent.fail_at(BridgeError::timeout(), late); // A different owner is never attributed to GitRead.
+    if absent.installed_git_read_failure.is_some() { return false; }
+    let mut terminal = OwnerState::new(endpoint, None);
+    terminal.git_read_endpoints = Some(git_read::Endpoints { work: endpoint, hard: endpoint + CLEANUP_TIME });
+    terminal.terminal = true; terminal.fail_at(BridgeError::timeout(), late);
+    if terminal.installed_git_read_failure.is_some() || terminal.error.is_some() { return false; }
+    for (code, category) in [("cleanup_unknown", F::CleanupUnknown), ("git_stale_observation", F::ContextChanged),
+        ("context_changed", F::ContextChanged), ("busy", F::Busy), ("cancelled", F::Cancelled),
+        ("shutting_down", F::ShuttingDown), ("query_timeout", F::QueryTimeout), ("git_read_refused", F::GitReadRefused),
+        ("io_error", F::IoError), ("invalid_request", F::InvalidRequest), ("protocol_error", F::ProtocolError),
+        ("runtime_unavailable", F::RuntimeUnavailable), ("output_limit", F::OutputLimit), ("CANARY_PRIVATE", F::Other)] {
+        let data = InstalledReadOwnerFailure::capture(&BridgeError::new(code, "CANARY_PRIVATE"));
+        if data != (InstalledReadOwnerFailure { category, origin: None }) { return false; }
+        let Ok(encoded) = serde_json::to_string(&data) else { return false; };
+        if encoded.contains("CANARY_PRIVATE") { return false; }
+    }
+    true
+}
+#[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation",
+    not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"),
+    target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
+#[test]
+fn installed_git_read_first_error_survives_original_earlier_endpoint_replacement() {
+    assert!(installed_git_read_first_failure_data_check());
 }
 
 // The SAME acquisition's error return, not another owner or receipt. The raw

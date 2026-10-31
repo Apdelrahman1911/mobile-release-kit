@@ -4240,7 +4240,7 @@ def _git_read_failure_context(value, source, step, reason, case):
     need(source == "record" and type(case) is str
          and any(case in cases and step == selected_step and reason == selected_reason
                  for cases, selected_step, selected_reason in bindings)
-         and type(value) is dict and set(value) - {"provenance", "cliOriginalReturn"} == {"check", "phase", "outcome", "reason", "resultValid"},
+         and type(value) is dict and set(value) - {"provenance", "cliOriginalReturn", "readOriginal"} == {"check", "phase", "outcome", "reason", "resultValid"},
          "failure-context")
     cli_return = step in ("GitCli(Prepared)", "GitCli(Terminal)")
     need(type(value["check"]) is str and value["check"] in (
@@ -4257,6 +4257,23 @@ def _git_read_failure_context(value, source, step, reason, case):
                        "already-used operation-in-progress unrecognized")):
         need(value[key] is None or type(value[key]) is str and value[key] in vocabulary.split(), "failure-context")
     need(value["resultValid"] is None or type(value["resultValid"]) is bool, "failure-context")
+    if "readOriginal" in value:
+        original = value["readOriginal"]
+        need(step == "GitCli(ReadWait)"
+             and value["check"] not in ("missing-operation", "missing-fixture", "missing-original", "original-mismatch")
+             and type(original) is dict and set(original) == {"ordinal", "firstOwnerError"}
+             and type(original["ordinal"]) is str and original["ordinal"] in ("before-cli", "after-cli"), "failure-context")
+        first = original["firstOwnerError"]
+        if first is not None:
+            need(type(first) is dict and set(first) == {"category", "origin"}
+                 and type(first["category"]) is str and first["category"] in (
+                     "cleanup-unknown", "context-changed", "busy", "cancelled", "shutting-down", "query-timeout",
+                     "git-read-refused", "io-error", "invalid-request", "protocol-error", "runtime-unavailable", "output-limit", "other")
+                 and (first["origin"] is None or type(first["origin"]) is str and first["origin"] in (
+                     "explicit-cancel", "document-stop", "shutdown", "driver-stop",
+                     "source-inspect-owner-failed", "source-inspect-stop-flag", "source-inspect-expired",
+                     "source-post-owner-failed", "source-post-stop-flag", "source-post-expired", "child-terminal")), "failure-context")
+        # Frozen first-error DATA cannot prove a native return or finality.
     if cli_return:
         # The source captures no read Projection at this rejected Entry return.
         # Do not fill its absent fields from later status or history.
