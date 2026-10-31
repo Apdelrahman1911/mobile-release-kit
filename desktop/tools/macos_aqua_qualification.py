@@ -4227,6 +4227,31 @@ def _git_cli_native_progress_context(value, source, step, reason, case):
     return value
 
 
+def _git_cli_step_timing_context(value, source, step, reason, case):
+    """Bounded observer scheduling DATA; no native receipt or invocation finality."""
+    labels = ["read-before", "read-wait-before", "allow", "submitted", "prepared", "started",
+              "terminal", "checked", "read-after", "read-wait-after", "revoke", "denied", "done", "finish"]
+    steps = {"Read": (0, 8), "ReadWait": (1, 9), "Allow": (2,), "Submitted": (3,),
+             "Prepared": (4,), "Started": (5,), "Terminal": (6,), "Checked": (7,),
+             "Revoke": (10,), "Denied": (11,), "Done": (12,), "Finish": (13,)}
+    need(source == "record" and type(case) is str and case in GIT_CLI.CASES
+         and type(step) is str and step in {"GitCli(" + name + ")" for name in steps}
+         and reason in ("observer-deadline", "git-cli-original-contract")
+         and type(value) is dict and set(value) == {"sample", "unit", "labels", "priorStepElapsed",
+             "current", "currentElapsed", "nativeReceiptOrInvocationFinality"}
+         and value["sample"] == "same-original-observer-step-entries" and value["unit"] == "microseconds"
+         and value["labels"] == labels and type(value["current"]) is str and value["current"] in labels
+         and value["nativeReceiptOrInvocationFinality"] is False, "failure-context")
+    current = labels.index(value["current"])
+    prior = value["priorStepElapsed"]
+    need(current in steps[step[7:-1]] and type(prior) is list and len(prior) == len(labels)
+         and all(v is None or i < current and type(v) is int and 0 <= v <= 600_000_000
+                 for i, v in enumerate(prior))
+         and type(value["currentElapsed"]) is int and 0 <= value["currentElapsed"] <= 600_000_000,
+         "failure-context")
+    return value
+
+
 def _git_read_failure_context(value, source, step, reason, case):
     """Already-observed, finite original failure facts; never an operation result."""
     bindings = (
@@ -4404,7 +4429,7 @@ def failure_context(stdout, stderr, case=None):
     try:
         value = json.loads(row.decode("ascii"), object_pairs_hook=_pairs,
                            parse_constant=lambda _: (_ for _ in ()).throw(Refused("failure-context")))
-        need(type(value) is dict and set(value) - {"accessibilityBinding", "snapshotSource", "originalWindow", "projectSelection", "completionSelection", "projectFieldPreparation", "dom", "bootstrap", "vault", "uploadKey", "inputBodyAdmission", "toolService", "gitReadFailure", "gitCliWait", "gitCliNativeProgress"} in (
+        need(type(value) is dict and set(value) - {"accessibilityBinding", "snapshotSource", "originalWindow", "projectSelection", "completionSelection", "projectFieldPreparation", "dom", "bootstrap", "vault", "uploadKey", "inputBodyAdmission", "toolService", "gitReadFailure", "gitCliWait", "gitCliNativeProgress", "gitCliStepTiming"} in (
             {"pending", "nativeHandler", "lastPanel"},
             {"pending", "nativeHandler", "lastPanel", "nativeAction"},
             {"pending", "nativeHandler", "lastPanel", "nativeAction", "accessibility"}), "failure-context")
@@ -4438,6 +4463,9 @@ def failure_context(stdout, stderr, case=None):
                 failure_step(stdout, stderr), failure_reason(stdout, stderr), case)
         if "gitCliWait" in value:
             value["gitCliWait"] = _git_cli_wait_context(value["gitCliWait"], value.get("snapshotSource"),
+                failure_step(stdout, stderr), failure_reason(stdout, stderr), case)
+        if "gitCliStepTiming" in value:
+            value["gitCliStepTiming"] = _git_cli_step_timing_context(value["gitCliStepTiming"], value.get("snapshotSource"),
                 failure_step(stdout, stderr), failure_reason(stdout, stderr), case)
         if "originalWindow" in value:
             value["originalWindow"] = _original_window_context(value["originalWindow"])

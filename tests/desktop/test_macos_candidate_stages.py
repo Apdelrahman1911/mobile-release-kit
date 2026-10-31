@@ -240,6 +240,58 @@ class GitCliWaitDiagnosticTests(unittest.TestCase):
         self.assertIsNone(self.parsed(detail))
 
 
+class GitCliStepTimingDiagnosticTests(unittest.TestCase):
+    @staticmethod
+    def detail(current='terminal'):
+        labels = ['read-before', 'read-wait-before', 'allow', 'submitted', 'prepared', 'started',
+                  'terminal', 'checked', 'read-after', 'read-wait-after', 'revoke', 'denied', 'done', 'finish']
+        slot = labels.index(current)
+        return dict(snapshotSource='record', pending=None, nativeHandler=None, lastPanel=None,
+            gitCliStepTiming=dict(sample='same-original-observer-step-entries', unit='microseconds',
+                labels=labels, priorStepElapsed=[10 if i < slot else None for i in range(14)],
+                current=current, currentElapsed=5, nativeReceiptOrInvocationFinality=False))
+
+    def parsed(self, detail, step='GitCli(Terminal)', reason='observer-deadline', case=A.M.GIT_CLI.INDEX):
+        return A.M.failure_context(b'', A.project_selection_row(detail, reason, step), case)
+
+    def test_original_stages_and_both_cases_preserve_data_and_unknown_invocation(self):
+        for stage, label in [('Read', 'read-before'), ('Read', 'read-after'), ('ReadWait', 'read-wait-before'),
+                ('ReadWait', 'read-wait-after'), *[(name, name.lower()) for name in
+                    ('Allow', 'Submitted', 'Prepared', 'Started', 'Terminal', 'Checked', 'Revoke', 'Denied', 'Done', 'Finish')]]:
+            for case in A.M.GIT_CLI.CASES:
+                for reason in ('observer-deadline', 'git-cli-original-contract'):
+                    detail = self.detail(label); step = 'GitCli(' + stage + ')'
+                    self.assertEqual(self.parsed(detail, step, reason, case), detail)
+                    fixtures = A.InertFixtures(); fixtures.case, fixtures.stage, fixtures.inflight = case, 'invocation', True
+                    fixtures.inner_failure_context = detail; fixtures.inner_failure_reason = reason
+                    report = A.M.diagnostic(A.M.Refused('original-deadline'), None, fixtures)
+                    self.assertEqual(report['innerFailureContext'], detail)
+                    self.assertEqual((report['originalCallReturned'], report['appReturncode'], report['invocationFinality']),
+                                     (False, None, 'unknown'))
+                    with self.assertRaises(A.M.Refused):
+                        A.M.parse_result(b'', A.project_selection_row(detail, reason, step), A.BINDING, case)
+
+    def test_optional_absence_and_foreign_cached_mismatched_or_unbounded_data(self):
+        absent = self.detail(); del absent['gitCliStepTiming']; self.assertEqual(self.parsed(absent), absent)
+        for source in ('prearm-open-progress', 'prearm-open-return', 'PRIVATE_CANARY'):
+            detail = self.detail(); detail['snapshotSource'] = source; self.assertIsNone(self.parsed(detail))
+        for step in ('GitCli(Prepared)', 'OpenProject', 'GitFetch(Terminal)'):
+            self.assertIsNone(self.parsed(self.detail(), step=step))
+        for reason in ('observer-invariant', 'native-default-input'):
+            self.assertIsNone(self.parsed(self.detail(), reason=reason))
+        self.assertIsNone(self.parsed(self.detail(), case="project-save"))
+        for key, value in [('sample', 'PRIVATE_CANARY'), ('unit', 'seconds'), ('current', 'PRIVATE_CANARY'),
+                ('currentElapsed', True), ('currentElapsed', -1), ('currentElapsed', 600_000_001),
+                ('nativeReceiptOrInvocationFinality', True), ('nativeReceiptOrInvocationFinality', 0),
+                ('priorStepElapsed', [None] * 13), ('labels', ['PRIVATE_CANARY'] * 14), ('private', 'PRIVATE_CANARY')]:
+            detail = self.detail(); detail['gitCliStepTiming'][key] = value; self.assertIsNone(self.parsed(detail))
+        for index, value in [(0, True), (0, -1), (0, 600_000_001), (6, 1), (13, 0)]:
+            detail = self.detail(); detail['gitCliStepTiming']['priorStepElapsed'][index] = value
+            self.assertIsNone(self.parsed(detail))
+        detail = self.detail(); detail['gitCliStepTiming']['currentElapsed'] = 600_000_000
+        self.assertEqual(self.parsed(detail), detail)
+
+
 class GitCliNativeProgressDiagnosticTests(unittest.TestCase):
     @staticmethod
     def detail(mask=0, first_error=None, control_mask=0):
@@ -1228,6 +1280,17 @@ class CandidateWorkflowTests(unittest.TestCase):
                 if step['name']=='Retain bounded image signing and detach diagnostics':
                     self.assertEqual(len(paths),8)
                     self.assertTrue(all('/android-helper-' in p and p.endswith(('.stderr','.stdout','.status')) for p in paths))
+                elif step['name'] in ('Retain only bounded original installed Git timing DATA',
+                                      'Retain bounded original installed Git process DATA'):
+                    timing = step['name'] == 'Retain only bounded original installed Git timing DATA'
+                    operation = 'git-cli-timing' if timing else 'git-cli-process-data'
+                    filename = 'git-cli-timing-data/original-timing.json' if timing else 'git-cli-process-data/original-process-observation.json'
+                    self.assertEqual(paths, ['${{ steps.work.outputs.root }}/' + filename])
+                    self.assertIn("github.event.inputs.operation == '" + operation + "'", step['if'])
+                    self.assertEqual(step['with']['if-no-files-found'], 'error')
+                    self.assertEqual(step['with']['overwrite'], False)
+                    self.assertEqual(step['with']['retention-days'], 7)
+                    self.assertIn('${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}', step['with']['name'])
                 else:
                     self.assertEqual(step['name'],'Retain only authenticated files for the owner local installation')
                     self.assertEqual(len(paths),6)
