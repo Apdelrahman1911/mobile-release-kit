@@ -1,6 +1,6 @@
 name: Desktop Mac candidate build and independent checks
 run-name: >-
-  ${{ github.event_name == 'workflow_dispatch' && inputs.operation == 'command-lifecycle-data' && 'macOS / small command lifecycle check' || github.event_name == 'workflow_dispatch' && inputs.operation == 'candidate-tests' && format('macOS check / {0} / saved build {1}', inputs.test_group, inputs.prepared_run) || format('macOS / {0} / {1}', github.event_name == 'workflow_dispatch' && inputs.operation || 'candidate builds', github.ref_name) }}
+  ${{ github.event_name == 'workflow_dispatch' && inputs.operation == 'git-index-data' && 'macOS / small Git index check' || github.event_name == 'workflow_dispatch' && inputs.operation == 'command-lifecycle-data' && 'macOS / small command lifecycle check' || github.event_name == 'workflow_dispatch' && inputs.operation == 'candidate-tests' && format('macOS check / {0} / saved build {1}', inputs.test_group, inputs.prepared_run) || format('macOS / {0} / {1}', github.event_name == 'workflow_dispatch' && inputs.operation || 'candidate builds', github.ref_name) }}
 
 on:
   workflow_dispatch:
@@ -18,6 +18,7 @@ on:
           - candidate-python-sign
           - xcode-setup-companion
           - command-lifecycle-data
+          - git-index-data
       prepared_source:
         description: Full source commit of the saved package
         required: false
@@ -64,8 +65,8 @@ jobs:
   command-lifecycle-data:
     # One existing native contract on a disposable runner. This route consumes
     # no saved package and grants no installed Git/service qualification.
-    if: github.repository == 'Apdelrahman1911/mobile-release-kit' && github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/codex/macos-git-read-continuation' && inputs.operation == 'command-lifecycle-data' && inputs.target == 'aarch64-apple-darwin' && inputs.prepared_source == '86c9337fe82ffd9c110e3700d3d2edb22a0682ea' && inputs.prepared_run == '41160295904' && github.sha == github.workflow_sha
-    name: Small original command lifecycle check (Git27)
+    if: github.repository == 'Apdelrahman1911/mobile-release-kit' && github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/codex/macos-git-read-continuation' && (inputs.operation == 'command-lifecycle-data' || inputs.operation == 'git-index-data') && inputs.target == 'aarch64-apple-darwin' && inputs.prepared_source == '86c9337fe82ffd9c110e3700d3d2edb22a0682ea' && inputs.prepared_run == '41160295904' && github.sha == github.workflow_sha
+    name: ${{ inputs.operation == 'git-index-data' && 'Small original Git index check (Git27)' || 'Small original command lifecycle check (Git27)' }}
     runs-on: xcode-27
     timeout-minutes: 10
     permissions:
@@ -110,11 +111,12 @@ jobs:
         shell: bash
         env:
           MRK_PYTHON: ${{ steps.python.outputs.python-path }}
+          MRK_ORIGINAL_CASE: ${{ inputs.operation }}
         run: |
           set -euo pipefail
           umask 077
           "$MRK_PYTHON" -I -S -B - <<'PY'
-          import json, os, pathlib, sys, tempfile, time, unittest
+          import contextlib, json, os, pathlib, sys, tempfile, time, unittest
           from unittest.mock import patch
 
           root = pathlib.Path.cwd().resolve()
@@ -122,12 +124,22 @@ jobs:
           output.mkdir(mode=0o700)
           (output / 'fixtures').mkdir(mode=0o700)
           tempfile.tempdir = str(output / 'fixtures')
-          sys.path[:0] = [str(root / 'src'), str(root / 'tests')]
+          sys.path[:0] = [str(root / 'src'), str(root / 'tests'), str(root / 'tests/unit')]
           from mobile_release import _command_process as command
           from unit.test_owned_process import OwnedProcessTests
 
-          identifier = 'unit.test_owned_process.OwnedProcessTests.test_complete_results_nonzero_output_bounds_and_no_echoed_private_request'
-          phases, publications = [], []
+          selected = os.environ['MRK_ORIGINAL_CASE']
+          if selected == 'command-lifecycle-data':
+              identifier = 'unit.test_owned_process.OwnedProcessTests.test_complete_results_nonzero_output_bounds_and_no_echoed_private_request'
+              test_class, expected_commands = OwnedProcessTests, 6
+          elif selected == 'git-index-data':
+              from unit.test_git_repository_local_owned import OwnedLocalTests
+              from mobile_release.git_repository_local import GitLocalRepository
+              identifier = 'unit.test_git_repository_local_owned.OwnedLocalTests.test_real_selected_stage_preserves_other_staged_entry_and_worktree'
+              test_class, expected_commands = OwnedLocalTests, None
+          else:
+              raise AssertionError('fixed original case required')
+          phases, publications, repository_phases = {}, [], []
           original_until, original_body, original_publish = command._Outer._until, command._Outer.body, command._Outer.publish
           started = time.monotonic()
           active = []
@@ -141,19 +153,21 @@ jobs:
                   index, entered = active.pop()
                   engine._command_data_timing = (index, entered, time.monotonic())
           def until(engine, *args, **kwargs):
-              if len(phases) >= 64:
-                  raise AssertionError('fixed diagnostic backing exceeded')
               phase = engine.phase
               if phase not in ('STARTING', 'PREPARING', 'WAIT_READY', 'RUNNING'):
                   raise AssertionError('original command phase differs')
-              entry = {'phase': phase, 'enteredSeconds': time.monotonic() - started, 'returned': False}
-              phases.append(entry)
+              entered, returned = time.monotonic(), False
+              entry = phases.setdefault(phase, {'calls': 0, 'returned': 0, 'durationSeconds': 0.0, 'maximumSeconds': 0.0})
+              entry['calls'] += 1
               try:
                   value = original_until(engine, *args, **kwargs)
-                  entry['returned'] = True
+                  returned = True
                   return value
               finally:
-                  entry['finalSeconds'] = time.monotonic() - started
+                  duration = time.monotonic() - entered
+                  entry['returned'] += int(returned)
+                  entry['durationSeconds'] += duration
+                  entry['maximumSeconds'] = max(entry['maximumSeconds'], duration)
           def publish(engine):
               outcome = original_publish(engine)
               index, entered, body_end = engine._command_data_timing
@@ -165,10 +179,30 @@ jobs:
                   'resultIntegrity': outcome.result_integrity, 'returncode': outcome.returncode,
                   'nativeRunAttempted': outcome.run_tool.attempted}
               return outcome
-          suite = unittest.defaultTestLoader.loadTestsFromName(identifier.rsplit('.', 1)[1], OwnedProcessTests)
+          def repository_timing(label, original):
+              def timed(repository, *args, **kwargs):
+                  entry = {'phase': label, 'returned': False, 'commandsBefore': len(publications)}
+                  repository_phases.append(entry)
+                  entered = time.monotonic()
+                  try:
+                      value = original(repository, *args, **kwargs)
+                      entry['returned'] = True
+                      return value
+                  finally:
+                      entry['durationSeconds'] = time.monotonic() - entered
+                      entry['commandsAfter'] = len(publications)
+              return timed
+          suite = unittest.defaultTestLoader.loadTestsFromName(identifier.rsplit('.', 1)[1], test_class)
           if suite.countTestCases() != 1:
               raise AssertionError('exactly one original test required')
-          with patch.object(command._Outer, 'body', new=body), patch.object(command._Outer, '_until', new=until), patch.object(command._Outer, 'publish', new=publish):
+          with contextlib.ExitStack() as observers:
+              observers.enter_context(patch.object(command._Outer, 'body', new=body))
+              observers.enter_context(patch.object(command._Outer, '_until', new=until))
+              observers.enter_context(patch.object(command._Outer, 'publish', new=publish))
+              if selected == 'git-index-data':
+                  for label in ('observe', 'prepare_local', 'apply_review'):
+                      observers.enter_context(patch.object(GitLocalRepository, label,
+                          new=repository_timing(label, getattr(GitLocalRepository, label))))
               result = unittest.TextTestRunner(verbosity=2).run(suite)
           report = {'schemaVersion': 1, 'workflowSource': os.environ['GITHUB_SHA'],
               'applicationSource': '86c9337fe82ffd9c110e3700d3d2edb22a0682ea',
@@ -176,7 +210,9 @@ jobs:
               'test': identifier, 'testsRun': result.testsRun, 'errors': len(result.errors),
               'failures': len(result.failures), 'skips': len(result.skipped),
               'durationSeconds': time.monotonic() - started, 'originalPhases': phases,
-              'originalPublications': publications, 'installedQualification': False,
+              'originalPublications': publications, 'originalRepositoryPhases': repository_phases,
+              'repositoryOwner': 'inert-original-test-journal' if selected == 'git-index-data' else None,
+              'installedQualification': False,
               'sourceOrClockOrProtocolRelaxed': False}
           raw = (json.dumps(report, sort_keys=True, indent=2) + '\n').encode()
           if len(raw) > 65536:
@@ -186,7 +222,7 @@ jobs:
               stream.flush()
               os.fsync(stream.fileno())
           print(raw.decode(), end='')
-          good = result.wasSuccessful() and result.testsRun == 1 and not result.skipped and len(publications) == 6 and all(p is not None and p['originalFinalityPresent'] for p in publications)
+          good = result.wasSuccessful() and result.testsRun == 1 and not result.skipped and (len(publications) == expected_commands if expected_commands is not None else 0 < len(publications) <= 160) and all(p is not None and p['originalFinalityPresent'] for p in publications)
           raise SystemExit(0 if good else 1)
           PY
       - name: Retain the bounded original command timing result
