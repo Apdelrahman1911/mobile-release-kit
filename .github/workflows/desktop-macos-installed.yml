@@ -102,7 +102,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.sha }}
-          fetch-depth: 6
+          fetch-depth: 7
           persist-credentials: false
       - name: Keep every application and native source byte unchanged
         timeout-minutes: 1
@@ -178,21 +178,31 @@ jobs:
           sys.modules[spec.name] = aqua
           spec.loader.exec_module(aqua)
           owner = aqua.load_owner(root)
+          stage_spec = importlib.util.spec_from_file_location('original_count_attribute_reader', root / 'desktop/tools/stage_macos_installed.py')
+          stager = importlib.util.module_from_spec(stage_spec)
+          sys.modules[stage_spec.name] = stager
+          stage_spec.loader.exec_module(stager)
           environment = dict(PATH=str(compiler.parent)+':/usr/bin:/bin:/usr/sbin:/sbin',HOME='/Users/runner',LANG='C',LC_ALL='C',TZ='UTC',DEVELOPER_DIR='/Library/Developer/CommandLineTools',MACOSX_DEPLOYMENT_TARGET='26.0')
           def signature(value):
               return tuple(getattr(value,name) for name in ('st_dev','st_ino','st_mode','st_uid','st_gid','st_nlink','st_size','st_mtime_ns','st_ctime_ns','st_flags'))
           def held(path, maximum, executable=False):
               fd=os.open(path,os.O_RDONLY|os.O_NOFOLLOW|os.O_CLOEXEC)
               s=os.fstat(fd)
-              if not stat.S_ISREG(s.st_mode) or s.st_uid != os.getuid() or s.st_nlink!=1 or s.st_flags!=0 or not 0<s.st_size<=maximum or os.listxattr(fd):
+              if not stat.S_ISREG(s.st_mode) or s.st_uid != os.getuid() or s.st_nlink!=1 or s.st_flags!=0 or not 0<s.st_size<=maximum:
                   os.close(fd);raise AssertionError('original CPU input policy')
+              try:
+                  stager.no_xattrs(fd)
+              except BaseException:
+                  os.close(fd)
+                  raise
               if executable and not s.st_mode & 0o100:
                   os.close(fd);raise AssertionError('original CPU executable mode')
               return (fd,path,signature(s))
           def post(row):
               fd,path,before=row
-              if before!=signature(os.fstat(fd)) or before!=signature(path.lstat()) or os.listxattr(fd):
+              if before!=signature(os.fstat(fd)) or before!=signature(path.lstat()):
                   raise AssertionError('same original CPU FD/name POST')
+              stager.no_xattrs(fd)
           originals=[]
           pending=False
           try:
