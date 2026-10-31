@@ -1,6 +1,6 @@
 name: Desktop Mac candidate build and independent checks
 run-name: >-
-  ${{ github.event_name == 'workflow_dispatch' && inputs.operation == 'runtime-book-count-data' && 'macOS / small runtime bookkeeping CPU check' || github.event_name == 'workflow_dispatch' && inputs.operation == 'git-cli-timing' && 'macOS / installed Git timing / saved Git27' || github.event_name == 'workflow_dispatch' && inputs.operation == 'git-index-data' && 'macOS / small Git index check' || github.event_name == 'workflow_dispatch' && inputs.operation == 'command-lifecycle-data' && 'macOS / small command lifecycle check' || github.event_name == 'workflow_dispatch' && inputs.operation == 'candidate-tests' && format('macOS check / {0} / saved build {1}', inputs.test_group, inputs.prepared_run) || format('macOS / {0} / {1}', github.event_name == 'workflow_dispatch' && inputs.operation || 'candidate builds', github.ref_name) }}
+  ${{ github.event_name == 'workflow_dispatch' && inputs.operation == 'runtime-filesystem-data' && 'macOS / small original filesystem cost check' || github.event_name == 'workflow_dispatch' && inputs.operation == 'runtime-book-count-data' && 'macOS / small runtime bookkeeping CPU check' || github.event_name == 'workflow_dispatch' && inputs.operation == 'git-cli-timing' && 'macOS / installed Git timing / saved Git27' || github.event_name == 'workflow_dispatch' && inputs.operation == 'git-index-data' && 'macOS / small Git index check' || github.event_name == 'workflow_dispatch' && inputs.operation == 'command-lifecycle-data' && 'macOS / small command lifecycle check' || github.event_name == 'workflow_dispatch' && inputs.operation == 'candidate-tests' && format('macOS check / {0} / saved build {1}', inputs.test_group, inputs.prepared_run) || format('macOS / {0} / {1}', github.event_name == 'workflow_dispatch' && inputs.operation || 'candidate builds', github.ref_name) }}
 
 on:
   workflow_dispatch:
@@ -21,6 +21,7 @@ on:
           - git-index-data
           - git-cli-timing
           - runtime-book-count-data
+          - runtime-filesystem-data
       prepared_source:
         description: Full source commit of the saved package
         required: false
@@ -71,6 +72,258 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  runtime-filesystem-data:
+    # Read-only original C primitives on one fresh owned fixture file.
+    # No installed input, Rust Book, native app admission or publisher authority.
+    if: github.repository == 'Apdelrahman1911/mobile-release-kit' && github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/codex/macos-git-read-continuation' && inputs.operation == 'runtime-filesystem-data' && inputs.target == 'aarch64-apple-darwin' && inputs.prepared_source == '86c9337fe82ffd9c110e3700d3d2edb22a0682ea' && inputs.prepared_run == '41160295904' && github.sha == github.workflow_sha
+    name: Small original filesystem primitive cost check (Git27)
+    runs-on: xcode-27
+    timeout-minutes: 12
+    permissions:
+      contents: read
+    env:
+      RUSTUP_TOOLCHAIN: '1.98.1'
+      MRK_MACOS_TARGET: aarch64-apple-darwin
+      DEVELOPER_DIR: /Library/Developer/CommandLineTools
+      MACOSX_DEPLOYMENT_TARGET: '26.0'
+    steps:
+      - name: Admit the actual disposable non-root Git27 route
+        timeout-minutes: 1
+        shell: bash
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: |
+          set -euo pipefail
+          [[ "$RUNNER_ENVIRONMENT" == github-hosted && "$RUNNER_OS" == macOS && "$RUNNER_ARCH" == ARM64 ]] || exit 1
+          [[ "$(/usr/bin/uname -m)" == arm64 && "$(/usr/bin/sw_vers -productVersion)" == 27.* && "$(/usr/bin/id -u)" != 0 ]] || exit 1
+          [[ "$GITHUB_REPOSITORY" == Apdelrahman1911/mobile-release-kit && "$GITHUB_REF" == refs/heads/codex/macos-git-read-continuation ]] || exit 1
+          [[ "$GITHUB_EVENT_NAME" == workflow_dispatch && "$GITHUB_SHA" == "$GITHUB_WORKFLOW_SHA" ]] || exit 1
+      - name: Check out the exact reviewed workflow including the original signed source
+        timeout-minutes: 2
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 8
+          persist-credentials: false
+      - name: Keep every application and native source byte unchanged
+        timeout-minutes: 1
+        shell: bash
+        run: |
+          set -euo pipefail
+          original=86c9337fe82ffd9c110e3700d3d2edb22a0682ea
+          [[ "$(git rev-parse HEAD)" == "$GITHUB_SHA" ]] || exit 1
+          git merge-base --is-ancestor "$original" HEAD
+          git diff --exit-code "$original" HEAD -- . ':!.github/workflows/desktop-macos-installed.yml' ':!.github/workflows/desktop-macos-candidate-tests.yml' ':!MACOS-CONTINUATION.md' ':!MACOS-LOCAL-RESULTS.md'
+      - name: Select only the fixed DATA interpreter
+        id: python
+        timeout-minutes: 2
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.14.7'
+      - name: Reserve a fresh bounded diagnostic directory
+        id: work
+        timeout-minutes: 1
+        shell: bash
+        env:
+          MRK_PYTHON: ${{ steps.python.outputs.python-path }}
+        run: |
+          set -euo pipefail
+          umask 077
+          [[ "$RUNNER_TEMP" == /Users/runner/work/_temp ]] || exit 1
+          root=$(/usr/bin/mktemp -d "$RUNNER_TEMP/mrk-runtime-filesystem-data.XXXXXXXX")
+          printf 'root=%s\n' "$root" >> "$GITHUB_OUTPUT"
+          printf 'MRK_MACOS_WORK=%s\nMRK_PYTHON=%s\nCARGO_TARGET_DIR=%s/cargo-target\n' "$root" "$MRK_PYTHON" "$root" >> "$GITHUB_ENV"
+      - name: Measure unchanged filesystem primitives on one fresh owned file
+        timeout-minutes: 3
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          ulimit -c 0
+          "$MRK_PYTHON" -I -S -B - <<'PY'
+          import hashlib, importlib.util, json, os, pathlib, stat, subprocess, sys
+          root = pathlib.Path.cwd()
+          work = pathlib.Path(os.environ['MRK_MACOS_WORK'])
+          paths = [root / 'desktop/native/macos-installed-native/src/vault_filesystem.m',
+                   root / 'desktop/native/macos-installed-native/src/vault_helper_control.h']
+          originals_data = {p.name: p.read_bytes() for p in paths}
+          runtime = (root / 'desktop/src-tauri/src/installed_runtime_macos.rs').read_bytes()
+          if runtime.count(b'statfs::fstatfs(fd)') != 1 or b'mrk_vault_acl_begin(self.pointer(), &expected, 1)' not in (root / 'desktop/native/macos-installed-native/src/vault_filesystem.rs').read_bytes():
+              raise AssertionError('same original filesystem and Empty snapshot sources')
+          code = r'''#include <sys/mount.h>
+          #include <sys/xattr.h>
+          #include <stdio.h>
+          #include <time.h>
+          #include "vault_filesystem.m"
+          static int same_stat(const struct stat *a, const struct stat *b) {
+              return a->st_dev==b->st_dev && a->st_ino==b->st_ino && a->st_mode==b->st_mode
+                  && a->st_uid==b->st_uid && a->st_gid==b->st_gid && a->st_nlink==b->st_nlink
+                  && a->st_size==b->st_size && a->st_flags==b->st_flags
+                  && a->st_mtimespec.tv_sec==b->st_mtimespec.tv_sec && a->st_mtimespec.tv_nsec==b->st_mtimespec.tv_nsec
+                  && a->st_ctimespec.tv_sec==b->st_ctimespec.tv_sec && a->st_ctimespec.tv_nsec==b->st_ctimespec.tv_nsec
+                  && a->st_birthtimespec.tv_sec==b->st_birthtimespec.tv_sec && a->st_birthtimespec.tv_nsec==b->st_birthtimespec.tv_nsec;
+          }
+          static double elapsed(struct timespec a, struct timespec b) {
+              return (double)(b.tv_sec-a.tv_sec)+(double)(b.tv_nsec-a.tv_nsec)/1000000000.0;
+          }
+          static int snapshot_once(void *frame, int fd, const mrk_vault_acl_expected *expected) {
+              mrk_vault_acl_facts facts;
+              if (mrk_vault_acl_begin(frame,expected,1)!=1 || mrk_vault_acl_facts_read(frame,&facts)!=1) return 0;
+              unsigned work=0,cleanup=0;
+              while (facts.outcome==RUNNING) {
+                  if (++work>32 || mrk_vault_acl_step(frame,fd)!=1 || mrk_vault_acl_facts_read(frame,&facts)!=1) return 0;
+              }
+              while (facts.resource[FSEC]==OWNED || facts.resource[ACL]==OWNED || facts.resource[QUALIFIER]==OWNED) {
+                  if (++cleanup>3 || mrk_vault_acl_cleanup_step(frame)!=1 || mrk_vault_acl_facts_read(frame,&facts)!=1) return 0;
+              }
+              for (unsigned i=0;i<3;i++) if (facts.resource[i]!=ABSENT && facts.resource[i]!=SETTLED) return 0;
+              return facts.version==1 && facts.outcome==ALLOWED && facts.first_phase==0;
+          }
+          int main(int argc,char **argv) {
+              if (argc!=2 || getuid()==0) return 78;
+              int fd=open(argv[1],O_RDONLY|O_NOFOLLOW|O_NONBLOCK|O_CLOEXEC);
+              if (fd<0) return 70;
+              struct stat before,named,after;
+              if (fstat(fd,&before)!=0 || lstat(argv[1],&named)!=0 || !same_stat(&before,&named)
+                  || !S_ISREG(before.st_mode) || before.st_uid!=getuid() || before.st_nlink!=1
+                  || (before.st_mode&07777)!=0600 || before.st_flags!=0 || before.st_size!=16
+                  || flistxattr(fd,NULL,0,0)!=0) return 70;
+              mrk_vault_acl_expected expected={(uint64_t)before.st_dev,before.st_ino,(uint32_t)before.st_mode,
+                  before.st_uid,before.st_gid,before.st_flags};
+              void *frame=mrk_vault_acl_frame_new();
+              if (!frame || mrk_vault_acl_frame_bytes()==0 || mrk_vault_acl_frame_bytes()>1024) return 70;
+              const unsigned cases[]={64,512,4096,8192};
+              for (unsigned row=0;row<4;row++) {
+                  unsigned count=3*cases[row];
+                  struct timespec first,last;
+                  if (clock_gettime(CLOCK_MONOTONIC,&first)!=0) return 70;
+                  for (unsigned i=0;i<count;i++) {
+                      struct statfs mount;
+                      if (fstatfs(fd,&mount)!=0 || strcmp(mount.f_fstypename,"apfs")!=0 || !(mount.f_flags&MNT_LOCAL)
+                          || (mount.f_flags&(MNT_UNION|MNT_AUTOMOUNTED|MNT_IGNORE_OWNERSHIP))) return 70;
+                  }
+                  if (clock_gettime(CLOCK_MONOTONIC,&last)!=0) return 70;
+                  double filesystem=elapsed(first,last);
+                  if (clock_gettime(CLOCK_MONOTONIC,&first)!=0) return 70;
+                  for (unsigned i=0;i<count;i++) if (!snapshot_once(frame,fd,&expected)) return 70;
+                  if (clock_gettime(CLOCK_MONOTONIC,&last)!=0) return 70;
+                  double snapshot=elapsed(first,last);
+                  if (fstat(fd,&after)!=0 || lstat(argv[1],&named)!=0 || !same_stat(&before,&after)
+                      || !same_stat(&before,&named) || flistxattr(fd,NULL,0,0)!=0) return 70;
+                  printf("%u %u %.9f %.9f %zu\n",cases[row],count,filesystem,snapshot,mrk_vault_acl_frame_bytes());
+                  if (fflush(stdout)!=0) return 70;
+              }
+              if (mrk_vault_acl_frame_retire(frame)!=1) return 70;
+              if (fstat(fd,&after)!=0 || lstat(argv[1],&named)!=0 || !same_stat(&before,&after)
+                  || !same_stat(&before,&named) || flistxattr(fd,NULL,0,0)!=0) return 70;
+              if (close(fd)!=0) return 70;
+              return 0;
+          }
+          '''
+          source = work / 'original-filesystem-cost.m'
+          with source.open('xb') as stream:
+              stream.write(code.encode())
+          fixture = work / 'fresh-owned-file'
+          with fixture.open('xb') as stream:
+              stream.write(b'fixed-fs-input!\n')
+          executable = work / 'original-filesystem-cost'
+          compiler = pathlib.Path('/Library/Developer/CommandLineTools/usr/bin/clang')
+          spec = importlib.util.spec_from_file_location('original_fs_owner', root / 'desktop/tools/macos_aqua_qualification.py')
+          aqua = importlib.util.module_from_spec(spec)
+          sys.modules[spec.name] = aqua
+          spec.loader.exec_module(aqua)
+          owner = aqua.load_owner(root)
+          spec = importlib.util.spec_from_file_location('original_fs_attribute_reader', root / 'desktop/tools/stage_macos_installed.py')
+          stager = importlib.util.module_from_spec(spec)
+          sys.modules[spec.name] = stager
+          spec.loader.exec_module(stager)
+          environment = dict(PATH='/usr/bin:/bin:/usr/sbin:/sbin',HOME='/Users/runner',LANG='C',LC_ALL='C',TZ='UTC',
+              DEVELOPER_DIR='/Library/Developer/CommandLineTools',MACOSX_DEPLOYMENT_TARGET='26.0')
+          def signature(value):
+              return tuple(getattr(value,name) for name in ('st_dev','st_ino','st_mode','st_uid','st_gid','st_nlink','st_size','st_mtime_ns','st_ctime_ns','st_flags'))
+          def held(path, maximum, *, expected_uid, executable=False):
+              fd=os.open(path,os.O_RDONLY|os.O_NOFOLLOW|os.O_CLOEXEC)
+              try:
+                  s=os.fstat(fd)
+                  if not stat.S_ISREG(s.st_mode) or s.st_uid!=expected_uid or s.st_nlink!=1 or s.st_flags!=0 or not 0<s.st_size<=maximum:
+                      raise AssertionError('original filesystem fixture input policy: kind,uid,links,flags,bytes,expectedUid=' +
+                          str((stat.S_IFMT(s.st_mode),s.st_uid,s.st_nlink,s.st_flags,s.st_size,expected_uid)))
+                  stager.no_xattrs(fd)
+                  if executable and (not s.st_mode & 0o100 or s.st_mode & 0o022):
+                      raise AssertionError('original filesystem fixture executable policy')
+                  return (fd,path,signature(s))
+              except BaseException:
+                  os.close(fd)
+                  raise
+          def post(row):
+              fd,path,before=row
+              if before!=signature(os.fstat(fd)) or before!=signature(path.lstat()):
+                  raise AssertionError('same original filesystem fixture FD/name POST')
+              stager.no_xattrs(fd)
+          originals=[]
+          pending=False
+          try:
+              originals.append(held(compiler,512*1024*1024,expected_uid=0,executable=True))
+              for path in paths+[source,fixture]:
+                  originals.append(held(path,1024*1024,expected_uid=os.getuid()))
+              args=[str(compiler),'-x','objective-c','-std=gnu11','-O0','-fno-objc-arc','-fblocks','-mmacosx-version-min=26.0',
+                  '-I',str(paths[0].parent),str(source),'-o',str(executable)]
+              pending=True
+              compiled=owner.run_owned(args,environ=environment,cwd=root/'desktop/src-tauri',timeout=60,capture=True,text=False,output_limit=16384)
+              pending=False
+              if type(compiled) is not subprocess.CompletedProcess or compiled.args!=args or compiled.returncode!=0 or compiled.stdout or compiled.stderr:
+                  if type(compiled) is subprocess.CompletedProcess:
+                      print(json.dumps(dict(scope='original-filesystem-fixture-compiler-failure',returncode=compiled.returncode,
+                          stdout=compiled.stdout.decode(errors='replace'),stderr=compiled.stderr.decode(errors='replace'))),flush=True)
+                  raise AssertionError('original filesystem fixture compiler return')
+              for row in originals:post(row)
+              originals.append(held(executable,2*1024*1024,expected_uid=os.getuid(),executable=True))
+              args=[str(executable),str(fixture)]
+              pending=True
+              result=owner.run_owned(args,environ=environment,cwd=root/'desktop/src-tauri',timeout=60,capture=True,text=False,output_limit=4096)
+              pending=False
+              if type(result) is not subprocess.CompletedProcess or result.args!=args or result.returncode!=0 or result.stderr:
+                  if type(result) is subprocess.CompletedProcess:
+                      print(json.dumps(dict(scope='original-filesystem-fixture-native-failure',returncode=result.returncode,
+                          stdout=result.stdout.decode(errors='replace'),stderr=result.stderr.decode(errors='replace'))),flush=True)
+                  raise AssertionError('original filesystem fixture command return')
+              for row in originals:post(row)
+              lines=result.stdout.decode().splitlines()
+              if len(lines)!=4:raise AssertionError('fixed filesystem case roster')
+              rows=[]
+              for line,n in zip(lines,(64,512,4096,8192)):
+                  fields=line.split()
+                  if len(fields)!=5 or int(fields[0])!=n or int(fields[1])!=3*n or not 0<int(fields[4])<=1024:
+                      raise AssertionError('fixed filesystem case counts and exact original frame bytes')
+                  rows.append(dict(fixtureUnits=n,originalCallsPerKind=3*n,filesystemSeconds=float(fields[2]),
+                      originalEmptyAclSeconds=float(fields[3]),originalCFrameBytes=int(fields[4])))
+              report=dict(schemaVersion=1,scope='original-C-filesystem-primitives-on-one-fresh-owned-file',
+                  workflowSource=os.environ['GITHUB_SHA'],applicationSource='86c9337fe82ffd9c110e3700d3d2edb22a0682ea',producerRun='41160295904',
+                  runId=os.environ['GITHUB_RUN_ID'],runAttempt=os.environ['GITHUB_RUN_ATTEMPT'],
+                  originalNativeSourceSha256={name:hashlib.sha256(body).hexdigest() for name,body in originals_data.items()},
+                  originalRuntimeSourceSha256=hashlib.sha256(runtime).hexdigest(),compiler='/Library/Developer/CommandLineTools/usr/bin/clang',
+                  optimizationLevel=0,originalEmptyAclPolicy=True,fixtureOriginalFdNamePostAndClosesKnown=True,
+                  originalCompilerReturncode=compiled.returncode,originalCheckReturncode=result.returncode,records=rows,
+                  RustBookOrInstalledInputsMeasured=False,nativeOwnershipOrInstalledQualification=False,applicationOrClockOrPredicateChanged=False)
+          finally:
+              if not pending:
+                  for fd,path,before in reversed(originals):os.close(fd)
+          if pending:raise AssertionError('original filesystem fixture invocation unreturned')
+          body=(json.dumps(report,sort_keys=True,separators=(',',':'),allow_nan=False)+'\n').encode()
+          if len(body)>16384:raise AssertionError('fixed filesystem report backing')
+          with (work/'original-filesystem-cost.json').open('xb') as stream:stream.write(body)
+          print(body.decode(),flush=True)
+          PY
+      - name: Retain only bounded original filesystem primitive DATA
+        timeout-minutes: 2
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: original-runtime-filesystem-cost-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ steps.work.outputs.root }}/original-filesystem-cost.json
+          if-no-files-found: error
+          retention-days: 7
+          overwrite: false
+
   runtime-book-count-data:
     # CPU-only inert records. No installed input, NativeUse, FD inventory or
     # publisher capability is created; this diagnoses one original expression.
