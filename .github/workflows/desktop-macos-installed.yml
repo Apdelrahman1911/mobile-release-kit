@@ -100,7 +100,7 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.sha }}
-          fetch-depth: 10
+          fetch-depth: 11
           persist-credentials: false
       - name: Keep every application and native source byte unchanged
         timeout-minutes: 1
@@ -138,7 +138,7 @@ jobs:
           umask 077
           ulimit -c 0
           "$MRK_PYTHON" -I -S -B - <<'PY'
-          import hashlib, importlib.util, json, os, pathlib, stat, subprocess, sys
+          import hashlib, importlib.util, json, os, pathlib, re, stat, subprocess, sys
           root = pathlib.Path.cwd()
           work = pathlib.Path(os.environ['MRK_MACOS_WORK'])
           paths = [root / 'desktop/native/macos-installed-native/src/vault_filesystem.m',
@@ -273,10 +273,37 @@ jobs:
                           stdout=signature_result.stdout.decode(errors='replace'),stderr=signature_result.stderr.decode(errors='replace'))),flush=True)
                   raise AssertionError('original Apple anchored system compiler signature return')
               for row in originals:post(row)
+              args=['/usr/bin/xcrun','--sdk','macosx','--show-sdk-path']
+              pending=True
+              sdk_result=owner.run_owned(args,environ=environment,cwd=root/'desktop/src-tauri',timeout=30,capture=True,text=False,output_limit=4096)
+              pending=False
+              if type(sdk_result) is not subprocess.CompletedProcess or sdk_result.args!=args or sdk_result.returncode!=0 or sdk_result.stderr or not 0<len(sdk_result.stdout)<=4096:
+                  if type(sdk_result) is subprocess.CompletedProcess:
+                      print(json.dumps(dict(scope='original-Apple-SDK-query-failure',returncode=sdk_result.returncode,
+                          stdout=sdk_result.stdout.decode(errors='replace'),stderr=sdk_result.stderr.decode(errors='replace'))),flush=True)
+                  raise AssertionError('original Apple SDK selection return')
+              raw_sdk=sdk_result.stdout.decode('ascii')
+              if not raw_sdk.endswith('\n') or raw_sdk.count('\n')!=1:
+                  raise AssertionError('original bounded SDK query path')
+              sdk=pathlib.Path(raw_sdk[:-1]).resolve(strict=True)
+              sdk_parent=pathlib.Path('/Library/Developer/CommandLineTools/SDKs').resolve(strict=True)
+              if sdk.parent!=sdk_parent or not re.fullmatch(r'MacOSX27(?:[.][0-9]{1,2}){1,2}[.]sdk',sdk.name):
+                  raise AssertionError('original fixed CLT current SDK path')
+              sdk_fd=os.open(sdk,os.O_RDONLY|os.O_DIRECTORY|os.O_NOFOLLOW|os.O_CLOEXEC)
+              try:
+                  sdk_stat=os.fstat(sdk_fd)
+                  if not stat.S_ISDIR(sdk_stat.st_mode) or sdk_stat.st_uid!=0 or sdk_stat.st_mode&0o022 or sdk_stat.st_flags!=0 or signature(sdk_stat)!=signature(sdk.lstat()):
+                      raise AssertionError('original protected root-owned SDK directory')
+                  stager.no_xattrs(sdk_fd)
+              except BaseException:
+                  os.close(sdk_fd)
+                  raise
+              originals.append((sdk_fd,sdk,signature(sdk_stat)))
+              for row in originals:post(row)
               for path in paths+[source,fixture]:
                   originals.append(held(path,1024*1024,expected_uid=os.getuid()))
               args=[str(compiler),'-x','objective-c','-std=gnu11','-O0','-fno-objc-arc','-fblocks','-mmacosx-version-min=26.0',
-                  '-I',str(paths[0].parent),str(source),'-o',str(executable)]
+                  '-isysroot',str(sdk),'-I',str(paths[0].parent),str(source),'-o',str(executable)]
               pending=True
               compiled=owner.run_owned(args,environ=environment,cwd=root/'desktop/src-tauri',timeout=60,capture=True,text=False,output_limit=16384)
               pending=False
@@ -314,6 +341,7 @@ jobs:
                   optimizationLevel=0,originalEmptyAclPolicy=True,fixtureOriginalFdNamePostAndClosesKnown=True,
                   originalCompilerReturncode=compiled.returncode,originalCheckReturncode=result.returncode,records=rows,
                   originalSystemCompilerFlags=stat.UF_COMPRESSED,originalSystemCompilerAnchorApplePassed=True,
+                  originalSdkPath=str(sdk),originalSdkQueryReturncode=sdk_result.returncode,originalSdkRootFdNamePostAndCloseKnown=True,
                   RustBookOrInstalledInputsMeasured=False,nativeOwnershipOrInstalledQualification=False,applicationOrClockOrPredicateChanged=False)
           finally:
               if not pending:
