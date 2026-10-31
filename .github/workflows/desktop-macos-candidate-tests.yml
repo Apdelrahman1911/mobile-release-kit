@@ -131,6 +131,12 @@ jobs:
           IFS= read -r producer_attempt < "$MRK_MACOS_WORK/prepared-producer-attempt.txt"
           [[ "$producer_attempt" =~ ^[1-9][0-9]{0,19}$ ]] || exit 1
           fetch "repos/$GITHUB_REPOSITORY/actions/runs/$PRODUCER_RUN/attempts/$producer_attempt/jobs?per_page=100" "$MRK_MACOS_WORK/prepared-jobs.json"
+          "$MRK_PYTHON" -I -S -B desktop/tools/macos_prepared_package.py observer-attempt --target "$MRK_MACOS_TARGET" \
+            --producer-source "$PRODUCER_SOURCE" --producer-run "$PRODUCER_RUN" > "$MRK_MACOS_WORK/prepared-observer-attempt.txt"
+          IFS= read -r observer_attempt < "$MRK_MACOS_WORK/prepared-observer-attempt.txt"
+          [[ "$observer_attempt" =~ ^[1-9][0-9]{0,15}$ ]] || exit 1
+          fetch "repos/$GITHUB_REPOSITORY/actions/runs/$PRODUCER_RUN/attempts/$observer_attempt/jobs?per_page=100" "$MRK_MACOS_WORK/prepared-observer-jobs.json"
+          fetch "repos/$GITHUB_REPOSITORY/actions/runs/$PRODUCER_RUN/attempts/$observer_attempt" "$MRK_MACOS_WORK/prepared-observer-run.json"
           fetch "repos/$GITHUB_REPOSITORY/git/commits/$PRODUCER_SOURCE" "$MRK_MACOS_WORK/prepared-commit.json"
           printf '0\n' > "$MRK_MACOS_WORK/prepared-api.status"
           unset GH_TOKEN

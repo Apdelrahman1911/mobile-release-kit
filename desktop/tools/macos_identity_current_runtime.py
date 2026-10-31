@@ -356,10 +356,12 @@ def _admit_prepared_runtime(aqua, fixtures, binding, work, environment, prepared
     source, run, attempt, actual_work = current_context(environment, binding.target)
     manifest = prepared.manifest
     origin = manifest['origin']
+    compiled = prepared.compiled_origin
     aqua.need(prepared.native_compatible and actual_work == work
               and prepared.consumer['runId'] == run and prepared.consumer['runAttempt'] == attempt
+              and type(compiled) is dict
               and (binding.source, binding.run, binding.attempt) ==
-                  (origin['source'], origin['runId'], origin['runAttempt'])
+                  (compiled['source'], compiled['runId'], compiled['runAttempt'])
               and origin['nativeScope'] == environment['MRK_MACOS_NATIVE_SCOPE'], 'prepared-native-fixture-origin')
     checkout = aqua._gate_directory(fixtures, str(CHECKOUT))
     git = aqua._gate_directory(fixtures, '.git', checkout)
@@ -409,7 +411,7 @@ def _admit_prepared_runtime(aqua, fixtures, binding, work, environment, prepared
                 full9=entry_before, sha256=rows[entry]['sha256']))
             aqua.need(original[6] == rows[entry]['size'] and hashed == rows[entry]['sha256'], 'prepared-git-bootstrap-bytes')
     _current(aqua, fixtures)
-    return dict(origin=dict(origin), consumerRunId=run, consumerRunAttempt=attempt,
+    return dict(origin=dict(origin), compiledObserverOrigin=dict(compiled), consumerRunId=run, consumerRunAttempt=attempt,
                 freshInstallReceiptSha256=aqua.digest(anchors['android-helper-package-install.json']), productReady=False)
 
 
@@ -671,7 +673,8 @@ def main():
             if environment.get("MRK_MACOS_PREPARED_TEST") == "true" else (None, None))
         need(prepared is None or not retained_mode, "prepared-native-single-mode")
         if prepared is not None:
-            origin = prepared.origin
+            origin = prepared.compiled_origin
+            need(type(origin) is dict, 'prepared-native-fixture-origin')
             source, run, attempt = origin["source"], origin["runId"], origin["runAttempt"]
         aqua = _load_observer(retained=True) if retained_mode else _load_observer()
         if retained is not None:

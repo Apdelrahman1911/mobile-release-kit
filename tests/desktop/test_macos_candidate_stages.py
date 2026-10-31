@@ -144,6 +144,7 @@ class ServiceLogDiagnosticTests(unittest.TestCase):
 
 
 def native_fixture(scope='git-native'):
+    from tests.desktop.test_macos_candidate_parts import fixture as part_fixture
     values, manifest, service, consumer = fixture()
     manifest.update(schemaVersion=2, packageRole='installed-shell-observation')
     manifest['observerBuild'] = dict(appBinarySha256BeforeSigning='a'*64, entryBinarySha256BeforeSigning='b'*64)
@@ -153,6 +154,10 @@ def native_fixture(scope='git-native'):
     service['job'].update(name=P.NATIVE_JOB_NAMES[scope], status='completed', conclusion='success',
         steps=[dict(name=n, number=i+1, status='completed', conclusion='success') for i,n in enumerate(P.NATIVE_PRODUCER_STEPS)])
     service['artifact']['name'] = P.artifact_name(manifest['origin'])
+    _, run, job, artifact = part_fixture('observer', scope)
+    job['id'] = 44
+    artifact['id'] = 45
+    service['compiledObserver'] = dict(run=run, job=job, artifact=artifact)
     values['PREPARED.json'] = P.canonical(manifest)
     return values, manifest, service, consumer
 
@@ -715,6 +720,8 @@ class CandidateCheckpointTests(unittest.TestCase):
                             self.assertEqual(binding.same_source, not changed)
                             self.assertTrue(binding.native_compatible)
                             self.assertEqual(binding.origin, manifest['origin'])
+                            self.assertEqual(binding.compiled_origin,
+                                dict(manifest['origin'], jobId='44'))
                     native.assert_not_called()
                     self.assertTrue(op.receipt['originalClosesKnown'] and op.receipt['targetRetired'])
                     self.assertFalse(op.receipt['passed'])

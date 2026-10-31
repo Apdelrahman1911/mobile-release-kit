@@ -612,6 +612,100 @@ class PreparedPackageData(unittest.TestCase):
                    for i, name in enumerate(P.NATIVE_PRODUCER_STEPS if scope else P.PRODUCER_STEPS)])
         return artifact, job
 
+    def compiled_observer_fixture(self, scope='git-native', package_attempt='5'):
+        from desktop.tools import macos_candidate_parts as parts
+        values, manifest, service, consumer = fixture()
+        manifest.update(schemaVersion=2, packageRole='installed-shell-observation',
+            observerBuild=dict(appBinarySha256BeforeSigning='a'*64, entryBinarySha256BeforeSigning='b'*64))
+        manifest.pop('normalBuild')
+        manifest['origin'].update(nativeScope=scope, hostProfile=P.NATIVE_HOSTS[scope], runAttempt=package_attempt)
+        consumer.update(nativeScope=scope, hostProfile=P.NATIVE_HOSTS[scope])
+        service['run']['run_attempt']=int(package_attempt)
+        service['job'].update(run_attempt=int(package_attempt), name=P.NATIVE_JOB_NAMES[scope],
+            steps=[dict(name=name,number=i+1,status='completed',conclusion='success')
+                   for i,name in enumerate(P.NATIVE_PRODUCER_STEPS)])
+        service['artifact']['name']=P.artifact_name(manifest['origin'])
+        origin=dict(manifest['origin'],runAttempt='1',jobId='44')
+        run=dict(service['run'],run_attempt=1,head_commit={'id':origin['source'],'tree_id':origin['tree']})
+        job=dict(service['job'],id=44,run_attempt=1,name=parts.job_name('observer',origin),
+            status='completed',conclusion='success',labels=[origin['hostProfile']],steps=[
+                dict(name=name,number=i+1,status='completed',conclusion='success') for i,name in enumerate(
+                    (*parts.ORIGINAL_CUTS['observer'],'Verify and freeze completed part originals','Upload immutable completed part'))])
+        artifact=dict(service['artifact'],id=45,name=parts.artifact_name('observer',origin))
+        compiled=dict(run=run,job=job,artifact=artifact)
+        values['PREPARED.json']=P.canonical(manifest)
+        return values,manifest,service,consumer,compiled,origin
+
+    def test_original_compilation_final_package_and_current_consumer_keep_three_distinct_origins(self):
+        for scope,attempt in (('git-native','5'),('tool-setup','6')):
+            values,manifest,service,consumer,compiled,origin=self.compiled_observer_fixture(scope,attempt)
+            service['compiledObserver']=compiled
+            with self.subTest(scope=scope):
+                binding=P.admit_data(values,service,consumer)
+                self.assertEqual(binding.compiled_origin,origin)
+                self.assertEqual(binding.origin['runAttempt'],attempt)
+                self.assertEqual(binding.consumer['runAttempt'],'2')
+                returned=binding.compiled_origin;returned['runAttempt']='99'
+                self.assertEqual(binding.compiled_origin['runAttempt'],'1')
+                current=dict(GITHUB_SHA=consumer['source'],GITHUB_RUN_ID='41',GITHUB_RUN_ATTEMPT='2')
+                self.assertEqual(binding.finalization_environment(current)['GITHUB_RUN_ATTEMPT'],attempt)
+                self.assertEqual(current['GITHUB_RUN_ATTEMPT'],'2')
+                artifact_page=P.canonical(dict(total_count=2,artifacts=[service['artifact'],compiled['artifact']]))
+                jobs=P.canonical(dict(total_count=1,jobs=[compiled['job']]))
+                self.assertEqual(P.selected_compiled_observer_data(artifact_page,jobs,P.canonical(compiled['run']),
+                    manifest['origin']),compiled)
+
+    def test_compilation_binding_refuses_copied_attempts_foreign_source_host_and_missing_original_cuts(self):
+        _,manifest,_,_,compiled,origin=self.compiled_observer_fixture()
+        for field,value in (('run_attempt',2),('run_attempt',True),('head_sha','6'*40),('run_id',42),
+                            ('labels',['macos-26']),('status','in_progress'),('conclusion','failure')):
+            bad=copy.deepcopy(compiled);bad['job'][field]=value
+            with self.subTest(field=field),self.assertRaises(ValueError):
+                P.compiled_observer_metadata_data(bad,manifest['origin'])
+        for index in range(len(compiled['job']['steps'])):
+            for mutation in ('missing','duplicate','failure'):
+                bad=copy.deepcopy(compiled)
+                if mutation=='missing':bad['job']['steps'].pop(index)
+                elif mutation=='duplicate':bad['job']['steps'].append(dict(bad['job']['steps'][index],number=10))
+                else:bad['job']['steps'][index]['conclusion']='failure'
+                with self.subTest(cut=index,mutation=mutation),self.assertRaises(ValueError):
+                    P.compiled_observer_metadata_data(bad,manifest['origin'])
+        for key,value in (('run_attempt',2),('run_attempt',True),('head_sha','6'*40),('event','workflow_dispatch')):
+            bad=copy.deepcopy(compiled);bad['run'][key]=value
+            with self.subTest(run=key),self.assertRaises(ValueError):P.compiled_observer_metadata_data(bad,manifest['origin'])
+        for key,value in (('expired',True),('digest','sha256:'+'0'*64),('id',True),('name',compiled['artifact']['name'][:-1]+'2')):
+            bad=copy.deepcopy(compiled);bad['artifact'][key]=value
+            with self.subTest(artifact=key),self.assertRaises(ValueError):P.compiled_observer_metadata_data(bad,manifest['origin'])
+
+    def test_compilation_selection_refuses_incomplete_pages_multiple_originals_and_boolean_counts(self):
+        _,manifest,service,_,compiled,_=self.compiled_observer_fixture()
+        artifact_page=P.canonical(dict(total_count=2,artifacts=[service['artifact'],compiled['artifact']]))
+        for rows,total in (([compiled['job']],2),([compiled['job']],True),([compiled['job']]*2,2)):
+            with self.subTest(total=total),self.assertRaises(ValueError):
+                P.selected_compiled_observer_data(artifact_page,P.canonical(dict(total_count=total,jobs=rows)),
+                    P.canonical(compiled['run']),manifest['origin'])
+        for rows,total in (([],0),([compiled['artifact']],2),([compiled['artifact']]*2,2)):
+            with self.subTest(artifacts=total),self.assertRaises(ValueError):
+                P.retained_observer_artifact_data(P.canonical(dict(total_count=total,artifacts=rows)),
+                    manifest['origin']['source'],'41',P.TARGETS[0],'git-native')
+
+    def test_compilation_metadata_refuses_future_attempts_and_oversized_original_records(self):
+        from desktop.tools import macos_candidate_parts as parts
+        _, manifest, _, _, compiled, _ = self.compiled_observer_fixture()
+        future = copy.deepcopy(compiled)
+        future['run']['run_attempt'] = future['job']['run_attempt'] = 6
+        origin = dict(manifest['origin'], runAttempt='6', jobId='44')
+        future['artifact']['name'] = parts.artifact_name('observer', origin)
+        with self.assertRaisesRegex(ValueError, 'prepared-observer-originals'):
+            P.compiled_observer_metadata_data(future, manifest['origin'])
+        oversized = copy.deepcopy(compiled)
+        oversized['run']['unused'] = 'x' * (128 * 1024)
+        with self.assertRaisesRegex(ValueError, 'prepared-observer-originals'):
+            P.compiled_observer_metadata_data(oversized, manifest['origin'])
+        for value in (None, {}, dict(compiled, foreign={})):
+            with self.subTest(value=type(value)), self.assertRaises(ValueError):
+                P.compiled_observer_metadata_data(value, manifest['origin'])
+
     def test_retained_attempt_nominates_original_not_a_copied_rerun_job(self):
         for scope, attempt in ((None, '1'), ('git-native', '5'), ('tool-setup', '6')):
             artifact, job = self.retained_attempt_fixture(scope, attempt)
@@ -679,9 +773,11 @@ class PreparedPackageData(unittest.TestCase):
         environment = dict(GITHUB_EVENT_NAME='workflow_dispatch', MRK_MACOS_PREPARED_RESUME='true',
             MRK_MACOS_NATIVE_SCOPE='git-native', MRK_MACOS_RUNNER='xcode-27',
             MRK_MACOS_PACKAGE_ROLE='installed-shell-observation')
-        self.assertEqual(P.admit_host(helper, environment, SimpleNamespace(target=P.TARGETS[0],
-            phase='producer-attempt')), Path('/inert-work'))
-        helper.admit.assert_called_once_with(environment, target=P.TARGETS[0], phase='package-install')
+        for phase in ('producer-attempt', 'observer-attempt'):
+            helper.admit.reset_mock()
+            self.assertEqual(P.admit_host(helper, environment, SimpleNamespace(target=P.TARGETS[0],
+                phase=phase)), Path('/inert-work'))
+            helper.admit.assert_called_once_with(environment, target=P.TARGETS[0], phase='package-install')
         with self.assertRaisesRegex(ValueError, 'prepared-native-resume-phase'):
             P.admit_host(helper, environment, SimpleNamespace(target=P.TARGETS[0], phase='export'))
 
@@ -692,10 +788,13 @@ class PreparedPackageData(unittest.TestCase):
         script = textwrap.dedent(gate.split('        run: |\n', 1)[1])
         for scope, attempt in (('git-native', '5'), ('tool-setup', '6')):
             artifact, job = self.retained_attempt_fixture(scope, attempt)
+            _,_,_,_,compiled,_=self.compiled_observer_fixture(scope,attempt)
             with self.subTest(scope=scope), tempfile.TemporaryDirectory() as directory:
                 root = Path(directory); work = root/'work'; work.mkdir()
-                (root/'artifacts.json').write_bytes(P.canonical(dict(total_count=1, artifacts=[artifact])))
+                (root/'artifacts.json').write_bytes(P.canonical(dict(total_count=2, artifacts=[artifact,compiled['artifact']])))
                 (root/'jobs.json').write_bytes(P.canonical(dict(total_count=1, jobs=[job])))
+                (root/'observer-jobs.json').write_bytes(P.canonical(dict(total_count=1,jobs=[compiled['job']])))
+                (root/'observer-run.json').write_bytes(P.canonical(compiled['run']))
                 (root/'commit.json').write_bytes(P.canonical(dict(sha='1'*40, tree={'sha':'2'*40})))
                 gh = root/'gh'; gh.write_text('''#!/bin/bash
 set -euo pipefail
@@ -703,6 +802,8 @@ printf '%s\\n' "$2" >> "$TEST_ROOT/routes"
 case "$2" in
   */artifacts?per_page=100) /bin/cat "$TEST_ROOT/artifacts.json" ;;
   */attempts/'''+attempt+'''/jobs?per_page=100) /bin/cat "$TEST_ROOT/jobs.json" ;;
+  */attempts/1/jobs?per_page=100) /bin/cat "$TEST_ROOT/observer-jobs.json" ;;
+  */attempts/1) /bin/cat "$TEST_ROOT/observer-run.json" ;;
   */git/commits/*) /bin/cat "$TEST_ROOT/commit.json" ;;
   *) exit 97 ;;
 esac
@@ -711,6 +812,7 @@ esac
                 # parsers; this shim intentionally grants no hosted/native IO.
                 driver = root/'parser'; driver.write_text('#!'+sys.executable+'\n'+textwrap.dedent('''
                     import importlib.util, os, pathlib, sys
+                    sys.path.insert(0,str(pathlib.Path(os.environ['TEST_MODULE']).parents[2]))
                     spec=importlib.util.spec_from_file_location('inert', os.environ['TEST_MODULE'])
                     p=importlib.util.module_from_spec(spec); spec.loader.exec_module(p)
                     work=pathlib.Path(os.environ['MRK_MACOS_WORK'])
@@ -719,10 +821,19 @@ esac
                     attempt=p.retained_producer_attempt_data(artifacts, '1'*40, '41', p.TARGETS[0],
                         native_scope=os.environ['TEST_SCOPE'])
                     if phase=='producer-attempt': print(attempt)
+                    elif phase=='observer-attempt':
+                        print(p.retained_observer_artifact_data(artifacts,'1'*40,'41',p.TARGETS[0],os.environ['TEST_SCOPE'])[1])
                     elif phase=='select':
                         job=p.selected_job_data((work/'prepared-jobs.json').read_bytes(), '1'*40, '41',
                             p.TARGETS[0], completed=True, native_scope=os.environ['TEST_SCOPE'], artifacts=artifacts)
                         assert str(job['run_attempt'])==attempt
+                        origin=dict(source='1'*40, tree='2'*40, runId='41', runAttempt=attempt,
+                            jobId=str(job['id']), target=p.TARGETS[0], nativeScope=os.environ['TEST_SCOPE'],
+                            hostProfile=p.NATIVE_HOSTS[os.environ['TEST_SCOPE']])
+                        compiled=p.selected_compiled_observer_data(artifacts,
+                            (work/'prepared-observer-jobs.json').read_bytes(),
+                            (work/'prepared-observer-run.json').read_bytes(), origin)
+                        assert compiled['job']['run_attempt']==1
                         print('artifact-id=43\\nproducer-attempt='+attempt+'\\nproducer-source='+'1'*40)
                     else: raise AssertionError(phase)
                 ''')); driver.chmod(0o700)
@@ -737,6 +848,8 @@ esac
                 self.assertEqual((root/'routes').read_text().splitlines(), [
                     'repos/'+P.REPOSITORY+'/actions/runs/41/artifacts?per_page=100',
                     'repos/'+P.REPOSITORY+'/actions/runs/41/attempts/'+attempt+'/jobs?per_page=100',
+                    'repos/'+P.REPOSITORY+'/actions/runs/41/attempts/1/jobs?per_page=100',
+                    'repos/'+P.REPOSITORY+'/actions/runs/41/attempts/1',
                     'repos/'+P.REPOSITORY+'/git/commits/'+'1'*40])
                 self.assertIn('producer-attempt='+attempt+'\n', output.read_text())
                 self.assertEqual((work/'prepared-artifact-api.status').read_bytes(), b'0\n')

@@ -296,14 +296,20 @@ def compatible_harness_data(value, origin, consumer):
 
 class PreparedBinding:
     """Private admitted provenance, never old live-custody or a caller flag."""
-    __slots__ = ('_manifest', '_consumer', '_artifact', '_compatible')
+    __slots__ = ('_manifest', '_consumer', '_artifact', '_compatible', '_compiled_origin')
 
-    def __init__(self, seal, manifest, consumer, artifact, compatible=False):
+    def __init__(self, seal, manifest, consumer, artifact, compatible=False, compiled_origin=None):
         need(seal is _SEAL, 'prepared-binding-constructor')
         self._manifest = canonical(manifest)
         self._consumer = MappingProxyType(dict(consumer))
         self._artifact = MappingProxyType(dict(artifact))
         self._compatible = compatible
+        self._compiled_origin = canonical(compiled_origin) if compiled_origin is not None else None
+
+    @property
+    def compiled_origin(self):
+        """Actual original observer compilation, separate from package finalization."""
+        return decode(self._compiled_origin, MANIFEST_LIMIT) if self._compiled_origin is not None else None
 
     @property
     def manifest(self):
@@ -372,8 +378,8 @@ def consumer_data(environment, tree, target):
 
 def admit_data(values, service, consumer):
     manifest = cohort_data(values)
-    need(type(service) is dict and set(service) in ({'run', 'job', 'artifact'},
-         {'run', 'job', 'artifact', 'compatibility'}), 'prepared-service-records')
+    need(type(service) is dict and {'run','job','artifact'} <= set(service)
+         and set(service) <= {'run','job','artifact','compatibility','compiledObserver'}, 'prepared-service-records')
     artifact = metadata_data(service['run'], service['job'], service['artifact'], manifest)
     native = {k: manifest['origin'][k] for k in ('nativeScope', 'hostProfile') if k in manifest['origin']}
     need(type(consumer) is dict and set(consumer) == {'source', 'tree', 'target', 'runId', 'runAttempt'} | set(native)
@@ -387,7 +393,11 @@ def admit_data(values, service, consumer):
         compatible = compatible_harness_data(service.get('compatibility'), manifest['origin'], consumer)
     elif 'compatibility' in service:
         need(consumer['source'] != manifest['origin']['source'], 'prepared-harness-unnecessary')
-    return PreparedBinding(_SEAL, manifest, consumer, artifact, compatible)
+    compiled = None
+    if 'compiledObserver' in service:
+        need(bool(native), 'prepared-observer-originals')
+        compiled = compiled_observer_metadata_data(service['compiledObserver'], manifest['origin'])
+    return PreparedBinding(_SEAL, manifest, consumer, artifact, compatible, compiled)
 
 
 def quote_data(package_bytes, original_bytes, expanded_bytes, inventory_bytes):
@@ -829,6 +839,67 @@ def retained_producer_attempt_data(body, source, run, target, *, native_scope=No
     return attempt
 
 
+def retained_observer_artifact_data(body, source, run, target, native_scope):
+    """One immutable original observer artifact; copied jobs cannot nominate it."""
+    from desktop.tools import macos_candidate_parts as parts
+    need(hex_data(source, 40) and decimal(run) and target == TARGETS[0]
+         and type(native_scope) is str and native_scope in NATIVE_HOSTS, 'prepared-selection-context')
+    value = decode(body, 8 * MIB)
+    need(type(value) is dict and type(value.get('artifacts')) is list
+         and type(value.get('total_count')) is int
+         and len(value['artifacts']) == value['total_count'] <= 100, 'prepared-artifact-page-complete')
+    prefix = 'macos-candidate-part-observer-' + native_scope + '-' + source + '-' + run + '-'
+    rows = [row for row in value['artifacts'] if type(row) is dict and type(row.get('name')) is str
+            and row['name'].startswith(prefix) and parts.decimal(row['name'][len(prefix):])]
+    need(len(rows) == 1, 'prepared-one-artifact')
+    row = rows[0]
+    producer = row.get('workflow_run')
+    need(type(row.get('id')) is int and row['id'] > 0 and row.get('expired') is False
+         and type(row.get('size_in_bytes')) is int and 22 <= row['size_in_bytes'] <= parts.TOTAL_LIMIT
+         and type(row.get('digest')) is str and row['digest'].startswith('sha256:')
+         and hex_data(row['digest'][7:]) and type(producer) is dict
+         and type(producer.get('id')) is int and producer['id'] == int(run)
+         and producer.get('head_sha') == source and producer.get('head_branch') == BRANCH,
+         'prepared-service-artifact')
+    return row, row['name'][len(prefix):]
+
+
+def compiled_observer_metadata_data(value, package_origin):
+    """Keep all original part API/cut gates; never relabel package or caller."""
+    from desktop.tools import macos_candidate_parts as parts
+    origin = origin_data(package_origin)
+    need('nativeScope' in origin and type(value) is dict and set(value) == {'run','job','artifact'},
+         'prepared-observer-originals')
+    need(len(canonical(value)) <= 128 * 1024, 'prepared-observer-originals')
+    row, attempt = retained_observer_artifact_data(canonical(dict(total_count=1,
+        artifacts=[value['artifact']])), origin['source'], origin['runId'], origin['target'], origin['nativeScope'])
+    job = value['job']
+    need(type(job) is dict and type(job.get('id')) is int and job['id'] > 0
+         and type(value['run']) is dict and value['run'].get('run_attempt') == int(attempt)
+         and type(value['run'].get('run_attempt')) is int
+         and int(attempt) <= int(origin['runAttempt']), 'prepared-observer-originals')
+    compiled = dict(origin, runAttempt=attempt, jobId=str(job['id']))
+    parts.service_metadata_data(value['run'], job, row, 'observer', compiled)
+    return compiled
+
+
+def selected_compiled_observer_data(artifacts, jobs, run_body, package_origin):
+    """Select only from the complete actual original compilation attempt page."""
+    from desktop.tools import macos_candidate_parts as parts
+    origin = origin_data(package_origin)
+    row, attempt = retained_observer_artifact_data(artifacts, origin['source'], origin['runId'],
+        origin['target'], origin['nativeScope'])
+    page = decode(jobs, 8 * MIB)
+    need(type(page) is dict and type(page.get('jobs')) is list and type(page.get('total_count')) is int
+         and len(page['jobs']) == page['total_count'] <= 100, 'prepared-jobs-page-complete')
+    name = parts.job_name('observer', dict(origin, runAttempt=attempt))
+    rows = [j for j in page['jobs'] if type(j) is dict and j.get('name') in (name, 'Candidate parts / ' + name)]
+    need(len(rows) == 1, 'prepared-one-target-job')
+    selected = dict(run=decode(run_body, 8 * MIB), job=rows[0], artifact=row)
+    compiled_observer_metadata_data(selected, origin)
+    return selected
+
+
 def selected_job_data(body, source, run, target, *, completed, native_scope=None, artifacts=None):
     value = decode(body, 8 * MIB)
     need(type(value) is dict and type(value.get('jobs')) is list and type(value.get('total_count')) is int
@@ -911,19 +982,22 @@ def acquire_checkpoint(op, consumer):
         manifest = manifest_data(decode(marker_body, MANIFEST_LIMIT))
         service_root = op.directory(op.work_entry, 'prepared-service', 'prepared-service-root')
         names = {'run.json', 'job.json', 'artifact.json', 'commit.json', 'metadata.status'}
+        if 'nativeScope' in manifest['origin']:
+            names.add('compiledObserver.json')
         if (op.environment.get('MRK_MACOS_PREPARED_RESUME') == 'true'
             and manifest['origin']['source'] != consumer['source']):
             names.add('compatibility.json')
         need(set(os.listdir(service_root['fd'])) == names, 'prepared-service-original-roster')
         service = {}
         for name in sorted(names):
-            original = op.original(service_root, name, 'prepared-service-original', 8 * MIB, (0o400, 0o444, 0o600, 0o644))
+            limit = 128 * 1024 if name == 'compiledObserver.json' else 8 * MIB
+            original = op.original(service_root, name, 'prepared-service-original', limit, (0o400, 0o444, 0o600, 0o644))
             body = op.read(original)
             op.package_outputs.append((original, sha(body)))
             if name == 'metadata.status':
                 need(body == b'0\n', 'prepared-service-original-status')
             else:
-                service[name[:-5]] = decode(body, 8 * MIB)
+                service[name[:-5]] = decode(body, limit)
         commit = service.pop('commit')
         need(type(commit) is dict and commit.get('sha') == manifest['origin']['source']
              and type(commit.get('tree')) is dict and commit['tree'].get('sha') == manifest['origin']['tree'],
@@ -982,7 +1056,8 @@ def native_binding(environment):
     owner = qualification.load_owner(root)
     operation = helper.Operation(owner, root, work, 'package-install', environment, stager, target=target)
     values, binding = acquire_checkpoint(operation, consumer_data(environment, environment.get('MRK_CONSUMER_TREE'), target))
-    need(binding.native_compatible and binding.origin.get('nativeScope') == environment['MRK_MACOS_NATIVE_SCOPE'],
+    need(binding.native_compatible and binding.compiled_origin is not None
+         and binding.origin.get('nativeScope') == environment['MRK_MACOS_NATIVE_SCOPE'],
          'prepared-native-same-source')
     return binding, owner
 
@@ -1110,7 +1185,7 @@ def main():
     """Fixed hosted entry; no arbitrary checkout, command or Installer path."""
     import argparse
     parser = argparse.ArgumentParser()
-    parser.add_argument('phase', choices=('producer-attempt', 'select', 'export', 'hydrate', 'package-install', 'finalize-image', 'candidate'))
+    parser.add_argument('phase', choices=('producer-attempt', 'observer-attempt', 'select', 'export', 'hydrate', 'package-install', 'finalize-image', 'candidate'))
     parser.add_argument('--target', required=True, choices=TARGETS)
     parser.add_argument('--producer-source')
     parser.add_argument('--producer-run')
@@ -1131,7 +1206,7 @@ def main():
         need(stager.read(root / '.git/HEAD', 64) == (environment['GITHUB_SHA'] + '\n').encode('ascii'), 'prepared-current-source')
         qualification = helper.load_data(root, 'macos_aqua_qualification.py', '_mrk_prepared_owner_loader')
         owner = qualification.load_owner(root)
-        if args.phase in ('producer-attempt', 'select'):
+        if args.phase in ('producer-attempt', 'observer-attempt', 'select'):
             need(hex_data(args.producer_source, 40) and decimal(args.producer_run), 'prepared-selection-context')
             operation = helper.Operation(owner, root, work, 'package-install', environment, stager, target=args.target)
             try:
@@ -1146,12 +1221,15 @@ def main():
                     body = operation.read(entry)
                     operation.package_outputs.append((entry, sha(body)))
                     return body
-                status_name = 'prepared-artifact-api.status' if args.phase == 'producer-attempt' else 'prepared-api.status'
+                status_name = 'prepared-api.status' if args.phase == 'select' else 'prepared-artifact-api.status'
                 need(small(status_name) == b'0\n', 'prepared-api-original-status')
                 artifact_body = small('prepared-artifacts.json')
                 if args.phase == 'producer-attempt':
                     producer_attempt = retained_producer_attempt_data(artifact_body, args.producer_source,
                         args.producer_run, args.target, native_scope=native_origin(environment).get('nativeScope'))
+                elif args.phase == 'observer-attempt':
+                    producer_attempt = retained_observer_artifact_data(artifact_body, args.producer_source,
+                        args.producer_run, args.target, native_origin(environment).get('nativeScope'))[1]
                 else:
                     job = selected_job_data(small('prepared-jobs.json'), args.producer_source, args.producer_run, args.target,
                         completed=True, native_scope=native_origin(environment).get('nativeScope'), artifacts=artifact_body)
@@ -1168,11 +1246,15 @@ def main():
                     operation.package_file(directory, 'job.json', canonical(job))
                     operation.package_file(directory, 'artifact.json', canonical(artifact))
                     operation.package_file(directory, 'commit.json', canonical(commit))
+                    if 'nativeScope' in origin:
+                        compiled = selected_compiled_observer_data(artifact_body, small('prepared-observer-jobs.json'),
+                            small('prepared-observer-run.json'), origin)
+                        operation.package_file(directory, 'compiledObserver.json', canonical(compiled))
                 operation.package_post()
             finally:
                 finish_staging(operation, sys.exception())
             # Finite output consumed by Actions; no caller-provided interpolation.
-            if args.phase == 'producer-attempt':
+            if args.phase in ('producer-attempt', 'observer-attempt'):
                 print(producer_attempt)
                 return 0
             print('artifact-id=' + str(artifact['id']))
@@ -1238,12 +1320,12 @@ def main():
 def admit_host(helper, environment, args):
     if environment.get('GITHUB_EVENT_NAME') == 'push' or (
         environment.get('MRK_MACOS_PREPARED_RESUME') == 'true' and native_origin(environment)):
-        need(args.phase in ('producer-attempt', 'select', 'hydrate', 'package-install')
+        need(args.phase in ('producer-attempt', 'observer-attempt', 'select', 'hydrate', 'package-install')
              or environment.get('GITHUB_EVENT_NAME') == 'push', 'prepared-native-resume-phase')
         return helper.admit(environment, target=args.target, phase='package-install')
     # Diagnostic-only current harness. Never change the actual event/source or
     # let ordinary helper.admit accept dispatch/artifact claims as push evidence.
-    need(args.phase in ('producer-attempt', 'select', 'hydrate', 'package-install') and environment.get('GITHUB_EVENT_NAME') == 'workflow_dispatch',
+    need(args.phase in ('producer-attempt', 'observer-attempt', 'select', 'hydrate', 'package-install') and environment.get('GITHUB_EVENT_NAME') == 'workflow_dispatch',
          'prepared-dispatch-install-only')
     machine, arch, _ = helper.build_profile(args.target)
     source = environment.get('GITHUB_SHA')
