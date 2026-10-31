@@ -62,7 +62,7 @@ jobs:
           [[ "$RUNNER_ENVIRONMENT" == github-hosted && "$RUNNER_OS" == macOS && "$GITHUB_REF" == refs/heads/verify/desktop-macos-candidate ]] || exit 1
           [[ "$GITHUB_SHA" == "$GITHUB_WORKFLOW_SHA" && "$GITHUB_REPOSITORY" == Apdelrahman1911/mobile-release-kit ]] || exit 1
           if [[ "$GITHUB_EVENT_NAME" == workflow_dispatch && ( "$SELECTED_OPERATION" == git-cli-timing || "$SELECTED_OPERATION" == git-cli-process-data ) ]]; then
-            [[ "$SELECTED_SOURCE" == 86c9337fe82ffd9c110e3700d3d2edb22a0682ea && "$SELECTED_RUN" == 41160295904 && "$SELECTED_GROUP" == git-local ]] || exit 1
+            [[ "$SELECTED_SOURCE" == 4452cab861231c28fe23b6f1422e4f321b2d497c && "$SELECTED_RUN" == 41205712536 && "$SELECTED_GROUP" == git-local ]] || exit 1
           fi
           case "$MRK_MACOS_TARGET/$RUNNER_ARCH/$(/usr/bin/uname -m)" in
             aarch64-apple-darwin/ARM64/arm64|x86_64-apple-darwin/X64/x86_64) ;;
