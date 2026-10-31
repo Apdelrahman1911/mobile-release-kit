@@ -17,9 +17,9 @@ jobs:
     # On a rerun, nominate the original producer attempt from its unique
     # retained artifact, then fetch that COMPLETE actual attempt's jobs page.
     # Never substitute the consumer's attempt or rebuild its signed app.
-    if: ${{ !cancelled() && github.ref == 'refs/heads/verify/desktop-macos-candidate' && (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && (github.event.inputs.operation == 'candidate-tests' || github.event.inputs.operation == 'local-carrier' || github.event.inputs.operation == 'git-cli-timing' || github.event.inputs.operation == 'git-cli-sample'))) }}
+    if: ${{ !cancelled() && github.ref == 'refs/heads/verify/desktop-macos-candidate' && (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && (github.event.inputs.operation == 'candidate-tests' || github.event.inputs.operation == 'local-carrier' || github.event.inputs.operation == 'git-cli-timing' || github.event.inputs.operation == 'git-cli-process-data'))) }}
     environment: macos-developer-id
-    name: ${{ github.event.inputs.operation == 'git-cli-sample' && 'Sample only the original installed Git index journey (saved Git27)' || github.event.inputs.operation == 'git-cli-timing' && 'Measure only the original installed Git index journey (saved Git27)' || matrix.group == 'local-carrier' && 'Prepare authenticated Tool26 carrier for the owner Mac' || format('Test saved candidate ({0})', matrix.group) }}
+    name: ${{ github.event.inputs.operation == 'git-cli-process-data' && 'Observe only original installed Git process CPU and scheduling (saved Git27)' || github.event.inputs.operation == 'git-cli-timing' && 'Measure only the original installed Git index journey (saved Git27)' || matrix.group == 'local-carrier' && 'Prepare authenticated Tool26 carrier for the owner Mac' || format('Test saved candidate ({0})', matrix.group) }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: ${{ matrix.timeout }}
     strategy:
@@ -61,7 +61,7 @@ jobs:
           set -euo pipefail
           [[ "$RUNNER_ENVIRONMENT" == github-hosted && "$RUNNER_OS" == macOS && "$GITHUB_REF" == refs/heads/verify/desktop-macos-candidate ]] || exit 1
           [[ "$GITHUB_SHA" == "$GITHUB_WORKFLOW_SHA" && "$GITHUB_REPOSITORY" == Apdelrahman1911/mobile-release-kit ]] || exit 1
-          if [[ "$GITHUB_EVENT_NAME" == workflow_dispatch && ( "$SELECTED_OPERATION" == git-cli-timing || "$SELECTED_OPERATION" == git-cli-sample ) ]]; then
+          if [[ "$GITHUB_EVENT_NAME" == workflow_dispatch && ( "$SELECTED_OPERATION" == git-cli-timing || "$SELECTED_OPERATION" == git-cli-process-data ) ]]; then
             [[ "$SELECTED_SOURCE" == 86c9337fe82ffd9c110e3700d3d2edb22a0682ea && "$SELECTED_RUN" == 41160295904 && "$SELECTED_GROUP" == git-local ]] || exit 1
           fi
           case "$MRK_MACOS_TARGET/$RUNNER_ARCH/$(/usr/bin/uname -m)" in
@@ -353,7 +353,7 @@ jobs:
           retention-days: 14
           overwrite: false
       - name: Run only this independent Git group
-        if: matrix.native_scope == 'git-native' && steps.package_install.outcome == 'success' && github.event.inputs.operation != 'git-cli-timing' && github.event.inputs.operation != 'git-cli-sample'
+        if: matrix.native_scope == 'git-native' && steps.package_install.outcome == 'success' && github.event.inputs.operation != 'git-cli-timing' && github.event.inputs.operation != 'git-cli-process-data'
         timeout-minutes: 25
         shell: bash
         env:
@@ -482,9 +482,9 @@ jobs:
           if-no-files-found: error
           retention-days: 7
           overwrite: false
-      - name: Sample only the original installed Git index journey
-        id: git_cli_sampling
-        if: github.event.inputs.operation == 'git-cli-sample' && matrix.group == 'git-local' && steps.package_install.outcome == 'success'
+      - name: Observe only original installed Git process CPU and scheduling
+        id: git_cli_process_data
+        if: github.event.inputs.operation == 'git-cli-process-data' && matrix.group == 'git-local' && steps.package_install.outcome == 'success'
         timeout-minutes: 5
         shell: bash
         env:
@@ -502,11 +502,12 @@ jobs:
           started = time.monotonic()
           records, snapshots, restorations = [], [], []
           record_lock = threading.Lock()
-          sample_context = threading.local()
+          diagnostic_context = threading.local()
           overflow = False
-          folder = pathlib.Path(os.environ['MRK_MACOS_WORK']) / 'git-cli-stack-data'
+          folder = pathlib.Path(os.environ['MRK_MACOS_WORK']) / 'git-cli-process-data'
           folder.mkdir(mode=0o700)
           APP = '/Library/Application Support/MobileReleaseKit/Mobile Release Kit.app/Contents/Helpers/MobileReleaseKitPayload.app/Contents/MacOS/mobile-release-kit-desktop'
+          GIT = '/Library/Developer/CommandLineTools/usr/bin/git'
           ENV = {'PATH': '/usr/bin:/bin:/usr/sbin:/sbin', 'LC_ALL': 'C', 'LANG': 'C'}
 
 
@@ -537,14 +538,14 @@ jobs:
 
 
           def diagnostic_timeout(maximum):
-              remaining = sample_context.end - time.monotonic()
+              remaining = diagnostic_context.end - time.monotonic()
               if remaining <= 0:
                   raise TimeoutError('diagnostic-budget-spent')
               return min(maximum, remaining)
 
 
           def ps(*args):
-              result = subprocess.run(['/bin/ps', *args], env=ENV, capture_output=True, timeout=diagnostic_timeout(3))
+              result = subprocess.run(['/bin/ps', *args], env=ENV, capture_output=True, timeout=diagnostic_timeout(2))
               if result.returncode != 0 or result.stderr or len(result.stdout) > 65536:
                   raise RuntimeError('diagnostic-original-ps-return')
               return result.stdout.decode('utf-8', errors='strict')
@@ -573,7 +574,7 @@ jobs:
                   raise RuntimeError('diagnostic-single-original-installed-app')
               original = process_row(app[0])
               if original['uid'] != os.getuid() or original['uid'] == 0 or original['executable'] != APP or original['arguments'] != APP + ' git-index-cli':
-                  raise RuntimeError('diagnostic-original-installed-app-identity')
+                  raise RuntimeError('diagnostic-original-installed-app-correlation')
               selected = [('app', original)]
               worker_path = re.compile(r'/Library/Application Support/MobileReleaseKit/versions/[A-Za-z0-9._-]{1,160}/runtime/python/bin/python3')
               children = [(pid, executable) for pid, parent, executable in inventory if parent == app[0] and worker_path.fullmatch(executable)]
@@ -582,79 +583,109 @@ jobs:
               for pid, executable in children:
                   row = process_row(pid)
                   runtime = executable.removesuffix('/python/bin/python3')
-                  allowed = [executable + ' -I -S -B ' + runtime + '/' + name + ' ' + runtime + '/core.zip' for name in ('git_read_bootstrap.py', 'git_local_bootstrap.py')]
-                  if row['uid'] != original['uid'] or row['parentPid'] != original['pid'] or row['executable'] != executable or row['arguments'] not in allowed:
-                      raise RuntimeError('diagnostic-original-fixed-worker-identity')
-                  selected.append(('worker', row))
+                  allowed = [(role, executable + ' -I -S -B ' + runtime + '/' + name + ' ' + runtime + '/core.zip') for role, name in
+                             (('read-worker', 'git_read_bootstrap.py'), ('local-worker', 'git_local_bootstrap.py'))]
+                  role = next((role for role, arguments in allowed if row['arguments'] == arguments), None)
+                  if row['uid'] != original['uid'] or row['parentPid'] != original['pid'] or row['executable'] != executable or role is None:
+                      raise RuntimeError('diagnostic-original-fixed-worker-correlation')
+                  selected.append((role, row))
+                  commands = [child for child, parent, path in inventory if parent == pid and path == GIT]
+                  if len(commands) > 1:
+                      raise RuntimeError('diagnostic-single-original-git-command')
+                  for child in commands:
+                      facts = process_row(child)
+                      if facts['uid'] != original['uid'] or facts['parentPid'] != pid or facts['executable'] != GIT:
+                          raise RuntimeError('diagnostic-original-git-command-correlation')
+                      selected.append(('git-command', facts))
               return selected
 
 
-          def file_signature(value):
-              return (value.st_dev, value.st_ino, value.st_mode, value.st_uid, value.st_gid,
-                      value.st_nlink, value.st_size, value.st_mtime_ns, value.st_ctime_ns, value.st_flags)
+          def duration(value):
+              if not re.fullmatch(r'(?:[0-9]{1,6}-)?[0-9]{1,8}(?::[0-9]{2}){1,2}(?:\.[0-9]{1,6})?', value):
+                  raise RuntimeError('diagnostic-original-duration-shape')
+              days, rest = value.split('-', 1) if '-' in value else ('0', value)
+              fields = rest.split(':')
+              total = int(days) * 86400 + float(fields[-1])
+              if float(fields[-1]) >= 60 or len(fields) == 3 and int(fields[-2]) >= 60:
+                  raise RuntimeError('diagnostic-original-duration-range')
+              total += int(fields[-2]) * 60
+              if len(fields) == 3:
+                  total += int(fields[0]) * 3600
+              if not 0 <= total < 10 * 366 * 86400:
+                  raise RuntimeError('diagnostic-original-duration-bound')
+              return total
 
 
-          def sample_phase(label, stopped):
-              row = {'phase': label, 'scheduledDelaySeconds': 8, 'durationSeconds': 1,
-                     'intervalMilliseconds': 20, 'diagnosticBudgetSeconds': 8, 'targetSuspensionPossible': True,
-                     'installedOrNativeQualification': False, 'samples': []}
+          def metrics(row):
+              fields = ps('-p', str(row['pid']), '-o', 'state=,time=,etime=,rss=,nvcsw=,nivcsw=').strip().split()
+              if len(fields) != 6 or not re.fullmatch(r'[A-Za-z+<>]{1,16}', fields[0]):
+                  raise RuntimeError('diagnostic-original-metrics-shape')
+              def count(value):
+                  if value == '-':
+                      return None
+                  if not value.isdecimal() or not 0 <= int(value) < 2 ** 63:
+                      raise RuntimeError('diagnostic-original-count-shape')
+                  return int(value)
+              state = {'R': 'running', 'S': 'sleeping', 'I': 'idle', 'U': 'uninterruptible', 'D': 'uninterruptible',
+                       'T': 'stopped', 'Z': 'zombie'}.get(fields[0][0], 'other')
+              return {'stateCategory': state, 'cpuSeconds': duration(fields[1]), 'elapsedSeconds': duration(fields[2]),
+                      'residentKiB': count(fields[3]), 'voluntarySwitches': count(fields[4]), 'involuntarySwitches': count(fields[5])}
+
+
+          def signature(value):
+              return (value.st_dev, value.st_ino, value.st_mode, value.st_uid, value.st_gid, value.st_nlink,
+                      value.st_size, value.st_mtime_ns, value.st_ctime_ns, value.st_flags)
+
+
+          def observe_once(label, delay):
+              row = {'phase': label, 'scheduledDelaySeconds': delay, 'diagnosticBudgetSeconds': 3,
+                     'processCorrelationNativeAuthority': False, 'installedOrNativeQualification': False, 'processes': []}
+              diagnostic_context.end = time.monotonic() + 3
+              tool, fd = pathlib.Path('/bin/ps'), None
               try:
-                  if stopped.wait(8):
-                      row['status'] = 'original-phase-returned-before-sampling'
-                      return
-                  sample_context.end = time.monotonic() + 8
-                  tool = pathlib.Path('/usr/bin/sample')
-                  before = tool.lstat()
+                  fd = os.open(tool, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+                  before = os.fstat(fd)
                   if not stat.S_ISREG(before.st_mode) or before.st_uid != 0 or before.st_nlink != 1 or before.st_mode & 0o022 or not before.st_mode & 0o111:
                       raise RuntimeError('diagnostic-original-Apple-tool-metadata')
-                  verify = subprocess.run(['/usr/bin/codesign', '--verify', '--strict', '-R=anchor apple', str(tool)], env=ENV, capture_output=True, timeout=diagnostic_timeout(3))
-                  if verify.returncode != 0 or verify.stdout or verify.stderr or file_signature(tool.lstat()) != file_signature(before):
+                  if signature(tool.lstat()) != signature(before):
+                      raise RuntimeError('diagnostic-original-Apple-tool-name')
+                  verify = subprocess.run(['/usr/bin/codesign', '--verify', '--strict', '-R=anchor apple', str(tool)], env=ENV,
+                                          capture_output=True, timeout=diagnostic_timeout(2))
+                  if verify.returncode != 0 or verify.stdout or verify.stderr:
                       raise RuntimeError('diagnostic-original-Apple-tool-anchor')
-                  targets = select_processes()
-                  for role, original in targets:
-                      if stopped.is_set():
-                          break
-                      name = label + '-' + role + '.sample.txt'
-                      path = folder / name
-                      fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
-                      os.close(fd)
-                      before_call = time.monotonic()
-                      # This separate diagnostic helper suspends briefly; it cannot
-                      # qualify a functional group. No app/test deadline is changed.
-                      result = subprocess.run(['/bin/bash', '-c', 'ulimit -f 1024; exec /usr/bin/sample "$@"',
-                          'mrk-fixed-stack-data', str(original['pid']), '1', '20', '-file', str(path)],
-                          env=ENV, capture_output=True, timeout=diagnostic_timeout(6))
-                      post_known = False
-                      try:
-                          post_known = process_row(original['pid']) == original
-                      except Exception:
-                          pass
-                      held = os.open(path, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
-                      try:
-                          first = os.fstat(held)
-                          if not stat.S_ISREG(first.st_mode) or first.st_uid != os.getuid() or first.st_nlink != 1 or not 0 <= first.st_size <= 524288:
-                              raise RuntimeError('diagnostic-original-stack-report-bound')
-                          body = os.read(held, 524289)
-                          if len(body) != first.st_size or file_signature(os.fstat(held)) != file_signature(first) or file_signature(path.lstat()) != file_signature(first):
-                              raise RuntimeError('diagnostic-original-stack-report-post')
-                      finally:
-                          os.close(held)
-                      row['samples'].append({'role': role, 'originalPsData': original,
-                          'samePsDataAfter': post_known, 'processIdentityNativeAuthority': False,
-                          'returncode': result.returncode, 'stdoutBytes': len(result.stdout),
-                          'stderrBytes': len(result.stderr), 'stdoutSha256': hashlib.sha256(result.stdout).hexdigest(),
-                          'stderrSha256': hashlib.sha256(result.stderr).hexdigest(),
-                          'elapsedSeconds': time.monotonic() - before_call,
-                          'report': name, 'bytes': len(body), 'sha256': hashlib.sha256(body).hexdigest(),
-                          'originalReportFdNamePostsAndClose': True})
+                  selected = select_processes()
+                  for role, original in selected:
+                      observed_at = time.monotonic()
+                      value = metrics(original)
+                      if process_row(original['pid']) != original:
+                          raise RuntimeError('diagnostic-original-ps-correlation-changed')
+                      # Retain only fixed roles and bounded numeric/state DATA. PID, argv,
+                      # paths, inventory, UID and lstart stay transient, never in artifact.
+                      row['processes'].append({'role': role, 'observedSeconds': observed_at - started,
+                                              'sameOriginalPsTupleAfter': True, **value})
+                  if signature(os.fstat(fd)) != signature(before) or signature(tool.lstat()) != signature(before):
+                      raise RuntimeError('diagnostic-original-Apple-tool-post')
+                  os.close(fd)
+                  fd = None
+                  row['originalAppleToolFdNamePostAndClose'] = True
                   row['status'] = 'diagnostic-returned'
               except Exception as error:
                   row['status'] = 'diagnostic-unavailable'
                   row['errorCategory'] = type(error).__name__
               finally:
+                  if fd is not None:
+                      os.close(fd)
                   with record_lock:
-                      if len(snapshots) < 3:
+                      if len(snapshots) < 9:
                           snapshots.append(row)
+
+
+          def observe_phase(label, stopped):
+              before = time.monotonic()
+              for delay in (4, 12, 24):
+                  if stopped.wait(max(0, before + delay - time.monotonic())):
+                      return
+                  observe_once(label, delay)
 
 
           original_load = identity._load_observer
@@ -673,7 +704,7 @@ jobs:
                   try:
                       if type(number) is int and 0 <= number <= 2:
                           try:
-                              worker = threading.Thread(target=sample_phase, args=(label, stopped), daemon=False)
+                              worker = threading.Thread(target=observe_phase, args=(label, stopped), daemon=False)
                               worker.start()
                           except Exception:
                               worker = None
@@ -682,7 +713,7 @@ jobs:
                       stopped.set()
                       if worker is not None:
                           try:
-                              worker.join(15)
+                              worker.join(4)
                           except Exception:
                               pass
               def call(*args, **kwargs):
@@ -705,32 +736,43 @@ jobs:
               identity._load_observer = original_load
               for module, name, original in reversed(restorations):
                   setattr(module, name, original)
-              report = {'schemaVersion': 1, 'scope': 'original-installed-git-index-stack-sampling-data',
+              report = {'schemaVersion': 1, 'scope': 'original-installed-git-index-process-observation-data',
                         'applicationSource': '86c9337fe82ffd9c110e3700d3d2edb22a0682ea',
                         'producerRun': '41160295904', 'workflowSource': os.environ['GITHUB_SHA'],
                         'runId': os.environ['GITHUB_RUN_ID'], 'runAttempt': os.environ['GITHUB_RUN_ATTEMPT'],
                         'durationSeconds': time.monotonic() - started, 'driverOriginalStatus': status,
-                        'originalDeadlineValuesAndPredicatesUnchanged': True,
-                        'briefSamplingSuspensionPossible': True, 'installedGitQualified': False,
-                        'appReturnOrInvocationFinalitySuppliedBySampling': False,
+                        'originalDeadlineValuesAndPredicatesUnchanged': True, 'targetSuspensionRequested': False,
+                        'installedGitQualified': False, 'appReturnOrInvocationFinalitySuppliedByObservation': False,
                         'records': records, 'snapshots': snapshots, 'overflow': overflow}
               body = json.dumps(report, sort_keys=True, separators=(',', ':'), allow_nan=False).encode() + b'\n'
-              if len(body) > 16384:
-                  raise AssertionError('fixed sampling summary backing exceeded')
-              with (folder / 'original-sampling.json').open('xb') as stream:
-                  stream.write(body)
-              print(body.decode(), flush=True)
-          if type(status) is not int:
-              raise AssertionError('original driver status absent')
+              if len(body) > 32768:
+                  raise AssertionError('fixed process summary backing exceeded')
+              report_path = folder / 'original-process-observation.json'
+              held = os.open(report_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+              try:
+                  view = memoryview(body)
+                  while view:
+                      count = os.write(held, view)
+                      if not 0 < count <= len(view):
+                          raise AssertionError('original diagnostic report write progress')
+                      view = view[count:]
+                  os.fsync(held)
+                  original = os.fstat(held)
+                  if not stat.S_ISREG(original.st_mode) or original.st_uid != os.getuid() or original.st_nlink != 1 or original.st_size != len(body):
+                      raise AssertionError('original diagnostic report writer')
+                  if signature(os.fstat(held)) != signature(original) or signature(report_path.lstat()) != signature(original):
+                      raise AssertionError('original diagnostic report writer post')
+              finally:
+                  os.close(held)
           raise SystemExit(status)
           PY
-      - name: Retain bounded original installed Git stack DATA
-        if: ${{ !cancelled() && github.event.inputs.operation == 'git-cli-sample' && (steps.git_cli_sampling.outcome == 'success' || steps.git_cli_sampling.outcome == 'failure') }}
+      - name: Retain bounded original installed Git process DATA
+        if: ${{ !cancelled() && github.event.inputs.operation == 'git-cli-process-data' && (steps.git_cli_process_data.outcome == 'success' || steps.git_cli_process_data.outcome == 'failure') }}
         timeout-minutes: 2
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: original-installed-git-stack-data-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
-          path: ${{ steps.work.outputs.root }}/git-cli-stack-data/*
+          name: original-installed-git-process-data-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ steps.work.outputs.root }}/git-cli-process-data/original-process-observation.json
           if-no-files-found: error
           retention-days: 7
           overwrite: false
