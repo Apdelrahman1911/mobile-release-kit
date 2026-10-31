@@ -1,6 +1,6 @@
 name: Desktop Mac candidate build and independent checks
 run-name: >-
-  ${{ github.event_name == 'workflow_dispatch' && inputs.operation == 'candidate-tests' && format('macOS check / {0} / saved build {1}', inputs.test_group, inputs.prepared_run) || format('macOS / {0} / {1}', github.event_name == 'workflow_dispatch' && inputs.operation || 'candidate builds', github.ref_name) }}
+  ${{ github.event_name == 'workflow_dispatch' && inputs.operation == 'command-lifecycle-data' && 'macOS / small command lifecycle check' || github.event_name == 'workflow_dispatch' && inputs.operation == 'candidate-tests' && format('macOS check / {0} / saved build {1}', inputs.test_group, inputs.prepared_run) || format('macOS / {0} / {1}', github.event_name == 'workflow_dispatch' && inputs.operation || 'candidate builds', github.ref_name) }}
 
 on:
   workflow_dispatch:
@@ -17,6 +17,7 @@ on:
           - candidate-python-source
           - candidate-python-sign
           - xcode-setup-companion
+          - command-lifecycle-data
       prepared_source:
         description: Full source commit of the saved package
         required: false
@@ -60,6 +61,144 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
+  command-lifecycle-data:
+    # One existing native contract on a disposable runner. This route consumes
+    # no saved package and grants no installed Git/service qualification.
+    if: github.repository == 'Apdelrahman1911/mobile-release-kit' && github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/codex/macos-git-read-continuation' && inputs.operation == 'command-lifecycle-data' && inputs.target == 'aarch64-apple-darwin' && inputs.prepared_source == '86c9337fe82ffd9c110e3700d3d2edb22a0682ea' && inputs.prepared_run == '41160295904' && github.sha == github.workflow_sha
+    name: Small original command lifecycle check (Git27)
+    runs-on: xcode-27
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - name: Admit the fixed disposable non-root Mac route
+        timeout-minutes: 1
+        shell: bash
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: |
+          set -euo pipefail
+          [[ "$RUNNER_ENVIRONMENT" == github-hosted && "$RUNNER_OS" == macOS && "$RUNNER_ARCH" == ARM64 ]] || exit 1
+          [[ "$(/usr/bin/uname -m)" == arm64 && "$(/usr/bin/sw_vers -productVersion)" == 27.* && "$(/usr/bin/id -u)" != 0 ]] || exit 1
+          [[ "$GITHUB_REPOSITORY" == Apdelrahman1911/mobile-release-kit && "$GITHUB_REF" == refs/heads/codex/macos-git-read-continuation ]] || exit 1
+          [[ "$GITHUB_EVENT_NAME" == workflow_dispatch && "$GITHUB_SHA" == "$GITHUB_WORKFLOW_SHA" ]] || exit 1
+          [[ "$GITHUB_WORKFLOW_REF" == "$GITHUB_REPOSITORY/.github/workflows/desktop-macos-installed.yml@$GITHUB_REF" ]] || exit 1
+      - name: Check out the exact reviewed diagnostic workflow source
+        timeout-minutes: 2
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 2
+          persist-credentials: false
+      - name: Prove all application and test bytes still match the signed source
+        timeout-minutes: 1
+        shell: bash
+        run: |
+          set -euo pipefail
+          original=86c9337fe82ffd9c110e3700d3d2edb22a0682ea
+          [[ "$(git rev-parse HEAD)" == "$GITHUB_SHA" ]] || exit 1
+          git merge-base --is-ancestor "$original" HEAD
+          git diff --exit-code "$original" HEAD -- . ':!.github/workflows/desktop-macos-installed.yml' ':!MACOS-CONTINUATION.md' ':!MACOS-LOCAL-RESULTS.md'
+      - name: Select the fixed helper interpreter
+        id: python
+        timeout-minutes: 2
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.14.7'
+      - name: Run one original native command contract with passive timing
+        timeout-minutes: 5
+        shell: bash
+        env:
+          MRK_PYTHON: ${{ steps.python.outputs.python-path }}
+        run: |
+          set -euo pipefail
+          umask 077
+          "$MRK_PYTHON" -I -S -B - <<'PY'
+          import json, os, pathlib, sys, tempfile, time, unittest
+          from unittest.mock import patch
+
+          root = pathlib.Path.cwd().resolve()
+          output = pathlib.Path(os.environ['RUNNER_TEMP']) / 'mrk-original-command-lifecycle-data'
+          output.mkdir(mode=0o700)
+          (output / 'fixtures').mkdir(mode=0o700)
+          tempfile.tempdir = str(output / 'fixtures')
+          sys.path[:0] = [str(root / 'src'), str(root / 'tests')]
+          from mobile_release import _command_process as command
+          from unit.test_owned_process import OwnedProcessTests
+
+          identifier = 'unit.test_owned_process.OwnedProcessTests.test_complete_results_nonzero_output_bounds_and_no_echoed_private_request'
+          phases, publications = [], []
+          original_until, original_body, original_publish = command._Outer._until, command._Outer.body, command._Outer.publish
+          started = time.monotonic()
+          active = []
+          def body(engine, *args, **kwargs):
+              index = len(publications)
+              publications.append(None)  # An unpublished return stays absent.
+              active.append((index, time.monotonic()))
+              try:
+                  return original_body(engine, *args, **kwargs)
+              finally:
+                  index, entered = active.pop()
+                  engine._command_data_timing = (index, entered, time.monotonic())
+          def until(engine, *args, **kwargs):
+              if len(phases) >= 64:
+                  raise AssertionError('fixed diagnostic backing exceeded')
+              phase = engine.phase
+              if phase not in ('STARTING', 'PREPARING', 'WAIT_READY', 'RUNNING'):
+                  raise AssertionError('original command phase differs')
+              entry = {'phase': phase, 'enteredSeconds': time.monotonic() - started, 'returned': False}
+              phases.append(entry)
+              try:
+                  value = original_until(engine, *args, **kwargs)
+                  entry['returned'] = True
+                  return value
+              finally:
+                  entry['finalSeconds'] = time.monotonic() - started
+          def publish(engine):
+              outcome = original_publish(engine)
+              index, entered, body_end = engine._command_data_timing
+              if publications[index] is not None or engine.slot.read() is not outcome:
+                  raise AssertionError('original publication differs')
+              publications[index] = {'commandOrdinal': index + 1,
+                  'bodySeconds': body_end - entered, 'throughPublicationSeconds': time.monotonic() - entered,
+                  'originalFinalityPresent': outcome.original_finality is not None,
+                  'resultIntegrity': outcome.result_integrity, 'returncode': outcome.returncode,
+                  'nativeRunAttempted': outcome.run_tool.attempted}
+              return outcome
+          suite = unittest.defaultTestLoader.loadTestsFromName(identifier.rsplit('.', 1)[1], OwnedProcessTests)
+          if suite.countTestCases() != 1:
+              raise AssertionError('exactly one original test required')
+          with patch.object(command._Outer, 'body', new=body), patch.object(command._Outer, '_until', new=until), patch.object(command._Outer, 'publish', new=publish):
+              result = unittest.TextTestRunner(verbosity=2).run(suite)
+          report = {'schemaVersion': 1, 'workflowSource': os.environ['GITHUB_SHA'],
+              'applicationSource': '86c9337fe82ffd9c110e3700d3d2edb22a0682ea',
+              'run': os.environ['GITHUB_RUN_ID'], 'attempt': os.environ['GITHUB_RUN_ATTEMPT'],
+              'test': identifier, 'testsRun': result.testsRun, 'errors': len(result.errors),
+              'failures': len(result.failures), 'skips': len(result.skipped),
+              'durationSeconds': time.monotonic() - started, 'originalPhases': phases,
+              'originalPublications': publications, 'installedQualification': False,
+              'sourceOrClockOrProtocolRelaxed': False}
+          raw = (json.dumps(report, sort_keys=True, indent=2) + '\n').encode()
+          if len(raw) > 65536:
+              raise AssertionError('fixed diagnostic output bound exceeded')
+          with (output / 'original-command-lifecycle-data.json').open('xb') as stream:
+              stream.write(raw)
+              stream.flush()
+              os.fsync(stream.fileno())
+          print(raw.decode(), end='')
+          good = result.wasSuccessful() and result.testsRun == 1 and not result.skipped and len(publications) == 6 and all(p is not None and p['originalFinalityPresent'] for p in publications)
+          raise SystemExit(0 if good else 1)
+          PY
+      - name: Retain the bounded original command timing result
+        if: always()
+        timeout-minutes: 1
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: original-command-lifecycle-data-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/mrk-original-command-lifecycle-data/original-command-lifecycle-data.json
+          if-no-files-found: error
+          retention-days: 7
+
   engineering-install:
     if: github.event_name == 'push' && (github.ref == 'refs/heads/verify/desktop-macos-preview' || github.ref == 'refs/heads/verify/desktop-macos-removal-lifecycle' || github.ref == 'refs/heads/verify/desktop-macos-app-signature' || github.ref == 'refs/heads/verify/desktop-macos-app-absence-fixture' || github.ref == 'refs/heads/verify/desktop-macos-positive-update')
     environment: macos-developer-id
