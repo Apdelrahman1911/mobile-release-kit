@@ -17,9 +17,9 @@ jobs:
     # On a rerun, nominate the original producer attempt from its unique
     # retained artifact, then fetch that COMPLETE actual attempt's jobs page.
     # Never substitute the consumer's attempt or rebuild its signed app.
-    if: ${{ !cancelled() && github.ref == 'refs/heads/verify/desktop-macos-candidate' && (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && (github.event.inputs.operation == 'candidate-tests' || github.event.inputs.operation == 'local-carrier'))) }}
+    if: ${{ !cancelled() && github.ref == 'refs/heads/verify/desktop-macos-candidate' && (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && (github.event.inputs.operation == 'candidate-tests' || github.event.inputs.operation == 'local-carrier' || github.event.inputs.operation == 'git-cli-timing'))) }}
     environment: macos-developer-id
-    name: ${{ matrix.group == 'local-carrier' && 'Prepare authenticated Tool26 carrier for the owner Mac' || format('Test saved candidate ({0})', matrix.group) }}
+    name: ${{ github.event.inputs.operation == 'git-cli-timing' && 'Measure only the original installed Git index journey (saved Git27)' || matrix.group == 'local-carrier' && 'Prepare authenticated Tool26 carrier for the owner Mac' || format('Test saved candidate ({0})', matrix.group) }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: ${{ matrix.timeout }}
     strategy:
@@ -53,10 +53,17 @@ jobs:
         shell: bash
         env:
           RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          SELECTED_OPERATION: ${{ github.event.inputs.operation }}
+          SELECTED_SOURCE: ${{ github.event.inputs.prepared_source }}
+          SELECTED_RUN: ${{ github.event.inputs.prepared_run }}
+          SELECTED_GROUP: ${{ github.event.inputs.test_group }}
         run: |
           set -euo pipefail
           [[ "$RUNNER_ENVIRONMENT" == github-hosted && "$RUNNER_OS" == macOS && "$GITHUB_REF" == refs/heads/verify/desktop-macos-candidate ]] || exit 1
           [[ "$GITHUB_SHA" == "$GITHUB_WORKFLOW_SHA" && "$GITHUB_REPOSITORY" == Apdelrahman1911/mobile-release-kit ]] || exit 1
+          if [[ "$GITHUB_EVENT_NAME" == workflow_dispatch && "$SELECTED_OPERATION" == git-cli-timing ]]; then
+            [[ "$SELECTED_SOURCE" == 86c9337fe82ffd9c110e3700d3d2edb22a0682ea && "$SELECTED_RUN" == 41160295904 && "$SELECTED_GROUP" == git-local ]] || exit 1
+          fi
           case "$MRK_MACOS_TARGET/$RUNNER_ARCH/$(/usr/bin/uname -m)" in
             aarch64-apple-darwin/ARM64/arm64|x86_64-apple-darwin/X64/x86_64) ;;
             *) exit 1 ;;
@@ -346,7 +353,7 @@ jobs:
           retention-days: 14
           overwrite: false
       - name: Run only this independent Git group
-        if: matrix.native_scope == 'git-native' && steps.package_install.outcome == 'success'
+        if: matrix.native_scope == 'git-native' && steps.package_install.outcome == 'success' && github.event.inputs.operation != 'git-cli-timing'
         timeout-minutes: 25
         shell: bash
         env:
@@ -365,6 +372,116 @@ jobs:
             git-upstream) observe git-upstream-native ;;
             *) exit 1 ;;
           esac
+      - name: Measure the original installed Git index journey without changing its checks
+        id: git_cli_timing
+        if: github.event.inputs.operation == 'git-cli-timing' && matrix.group == 'git-local' && steps.package_install.outcome == 'success'
+        timeout-minutes: 5
+        shell: bash
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: |
+          set -euo pipefail
+          umask 077
+          ulimit -c 0
+          "$MRK_PYTHON" -I -S -B - <<'PY'
+          import importlib.util, json, os, pathlib, sys, threading, time
+          root = pathlib.Path.cwd()
+          spec = importlib.util.spec_from_file_location('original_current_identity_driver', root / 'desktop/tools/macos_identity_current_runtime.py')
+          identity = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(identity)
+          started = time.monotonic()
+          records = []
+          record_lock = threading.Lock()
+          restorations = []
+          overflow = False
+
+          def record(phase, before, returned, remaining=None):
+              global overflow
+              try:
+                  row = {'phase': phase, 'startedSeconds': before - started,
+                         'durationSeconds': time.monotonic() - before, 'returned': returned}
+                  if remaining is not None:
+                      row['originalSuccessRemainingSecondsBefore'] = remaining
+                  with record_lock:
+                      if len(records) < 24:
+                          records.append(row)
+                      else:
+                          overflow = True
+              except BaseException:
+                  overflow = True
+
+          def timed(original, phase, args, kwargs, remaining=None):
+              before = time.monotonic()
+              returned = False
+              try:
+                  value = original(*args, **kwargs)
+                  returned = True
+                  return value
+              finally:
+                  record(phase, before, returned, remaining)
+
+          original_load = identity._load_observer
+
+          def load(*, retained=False):
+              aqua = original_load(retained=retained)
+              if retained or aqua.GIT_CLI is not aqua.CLI.GIT_CLI:
+                  raise AssertionError('fixed current Git fixture only')
+              recipe, cli = aqua.GIT_CLI, aqua.CLI
+              original_phase = recipe._phase
+              original_call = cli._call
+              original_before = recipe.before_invocation
+              def phase(c, calls, number):
+                  labels = ('allowed', 'prepared', 'terminal', 'revoked', 'reallowed')
+                  label = 'phase-' + labels[number] if type(number) is int and 0 <= number < len(labels) else 'phase-invalid'
+                  return timed(original_phase, label, (c, calls, number), {}, calls.success_end - time.monotonic())
+              def call(*args, **kwargs):
+                  number = args[5] if len(args) > 5 else None
+                  label = 'cli-' + str(number) if type(number) is int and 0 <= number < 8 else 'cli-invalid'
+                  return timed(original_call, label, args, kwargs)
+              def before(*args, **kwargs):
+                  return timed(original_before, 'fixture-before-invocation', args, kwargs)
+              recipe._phase, cli._call, recipe.before_invocation = phase, call, before
+              restorations.extend(((recipe, '_phase', original_phase), (cli, '_call', original_call), (recipe, 'before_invocation', original_before)))
+              return aqua
+
+          identity._load_observer = load
+          sys.argv = ['desktop/tools/macos_identity_current_runtime.py', '--target', 'aarch64-apple-darwin', '--scope', 'git-index-cli-native']
+          status = None
+          try:
+              status = identity.main()
+          finally:
+              identity._load_observer = original_load
+              for module, name, original in reversed(restorations):
+                  setattr(module, name, original)
+              report = {'schemaVersion': 1, 'scope': 'original-installed-git-index-passive-timing-data',
+                        'applicationSource': '86c9337fe82ffd9c110e3700d3d2edb22a0682ea',
+                        'producerRun': '41160295904', 'workflowSource': os.environ['GITHUB_SHA'],
+                        'runId': os.environ['GITHUB_RUN_ID'], 'runAttempt': os.environ['GITHUB_RUN_ATTEMPT'],
+                        'durationSeconds': time.monotonic() - started, 'driverOriginalStatus': status,
+                        'originalClocksAndPredicatesUnchanged': True, 'installedGitQualified': False,
+                        'appReturnOrInvocationFinalitySuppliedByTiming': False, 'records': records, 'overflow': overflow}
+              body = json.dumps(report, sort_keys=True, separators=(',', ':'), allow_nan=False).encode() + b'\n'
+              if len(body) > 16384:
+                  raise AssertionError('fixed timing report backing exceeded')
+              folder = pathlib.Path(os.environ['MRK_MACOS_WORK']) / 'git-cli-timing-data'
+              folder.mkdir(mode=0o700)
+              with (folder / 'original-timing.json').open('xb') as stream:
+                  stream.write(body)
+              print(body.decode(), flush=True)
+          if type(status) is not int:
+              raise AssertionError('original driver status absent')
+          raise SystemExit(status)
+          PY
+      - name: Retain only bounded original installed Git timing DATA
+        if: ${{ !cancelled() && github.event.inputs.operation == 'git-cli-timing' && (steps.git_cli_timing.outcome == 'success' || steps.git_cli_timing.outcome == 'failure') }}
+        timeout-minutes: 2
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: original-installed-git-timing-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ steps.work.outputs.root }}/git-cli-timing-data/original-timing.json
+          if-no-files-found: error
+          retention-days: 7
+          overwrite: false
       - name: Request the fixed native service once and confirm its joined readiness
         id: tool_service
         if: matrix.native_scope == 'tool-setup' && matrix.group != 'local-carrier' && steps.package_install.outcome == 'success'

@@ -1,6 +1,6 @@
 name: Desktop Mac candidate build and independent checks
 run-name: >-
-  ${{ github.event_name == 'workflow_dispatch' && inputs.operation == 'git-index-data' && 'macOS / small Git index check' || github.event_name == 'workflow_dispatch' && inputs.operation == 'command-lifecycle-data' && 'macOS / small command lifecycle check' || github.event_name == 'workflow_dispatch' && inputs.operation == 'candidate-tests' && format('macOS check / {0} / saved build {1}', inputs.test_group, inputs.prepared_run) || format('macOS / {0} / {1}', github.event_name == 'workflow_dispatch' && inputs.operation || 'candidate builds', github.ref_name) }}
+  ${{ github.event_name == 'workflow_dispatch' && inputs.operation == 'git-cli-timing' && 'macOS / installed Git timing / saved Git27' || github.event_name == 'workflow_dispatch' && inputs.operation == 'git-index-data' && 'macOS / small Git index check' || github.event_name == 'workflow_dispatch' && inputs.operation == 'command-lifecycle-data' && 'macOS / small command lifecycle check' || github.event_name == 'workflow_dispatch' && inputs.operation == 'candidate-tests' && format('macOS check / {0} / saved build {1}', inputs.test_group, inputs.prepared_run) || format('macOS / {0} / {1}', github.event_name == 'workflow_dispatch' && inputs.operation || 'candidate builds', github.ref_name) }}
 
 on:
   workflow_dispatch:
@@ -19,6 +19,7 @@ on:
           - xcode-setup-companion
           - command-lifecycle-data
           - git-index-data
+          - git-cli-timing
       prepared_source:
         description: Full source commit of the saved package
         required: false
@@ -41,6 +42,13 @@ on:
           - aarch64-apple-darwin
           - x86_64-apple-darwin
   push:
+    # Workflow-only diagnostics reuse the immutable signed application package.
+    # App/native/runtime, tests, profiles and packaging input changes still build.
+    paths-ignore:
+      - '.github/workflows/desktop-macos-installed.yml'
+      - '.github/workflows/desktop-macos-candidate-tests.yml'
+      - 'MACOS-CONTINUATION.md'
+      - 'MACOS-LOCAL-RESULTS.md'
     branches:
       - verify/desktop-macos-installed
       - verify/desktop-macos-preview
@@ -3069,7 +3077,7 @@ jobs:
 
   candidate-tests:
     needs: [engineering-install, candidate-tool26-final-package, candidate-git27-final-package]
-    if: ${{ !cancelled() && github.ref == 'refs/heads/verify/desktop-macos-candidate' && ((github.event_name == 'push' && needs.candidate-tool26-final-package.result == 'success' && needs.candidate-git27-final-package.result == 'success') || (github.event_name == 'workflow_dispatch' && (inputs.operation == 'candidate-tests' || inputs.operation == 'local-carrier'))) }}
+    if: ${{ !cancelled() && github.ref == 'refs/heads/verify/desktop-macos-candidate' && ((github.event_name == 'push' && needs.candidate-tool26-final-package.result == 'success' && needs.candidate-git27-final-package.result == 'success') || (github.event_name == 'workflow_dispatch' && (inputs.operation == 'candidate-tests' || inputs.operation == 'local-carrier' || inputs.operation == 'git-cli-timing'))) }}
     uses: ./.github/workflows/desktop-macos-candidate-tests.yml
     secrets: inherit
 
