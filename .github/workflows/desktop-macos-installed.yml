@@ -89,7 +89,8 @@ jobs:
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           ref: ${{ github.sha }}
-          fetch-depth: 2
+          # Include the signed source and its three workflow-only descendants.
+          fetch-depth: 4
           persist-credentials: false
       - name: Prove all application and test bytes still match the signed source
         timeout-minutes: 1
