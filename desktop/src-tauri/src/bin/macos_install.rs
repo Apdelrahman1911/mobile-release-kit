@@ -716,6 +716,26 @@ mod installer {
             }
             Ok(())
         }
+        // Call only after authenticating the recorded app/launcher original.
+        // The same snapshot follows its held FD through rename, POST and close.
+        fn capture_existing_app_metadata(&mut self,n:usize,allow_existing_macl:bool,reason:&'static str)->Result<()> {
+            let identity=self.identity(n)?;
+            let existing=allow_existing_macl && !self.creations.iter()
+                .any(|effect|effect.identity.is_some_and(|id|id.same_object(identity)));
+            if !existing {native::no_xattrs(self.fd(n)?.as_fd()).map_err(|_|reason)?;}
+            let captured=self.read_existing_app_metadata(n,reason)?;
+            if !existing {check(captured==mobile_release_desktop::macos_existing_app_metadata::SnapshotData::from_observed_bytes_data(&[])
+                .ok_or(reason)?,reason)?;}
+            self.check_name(n,true)?;
+            for prior in &self.originals {
+                if prior.identity.is_some_and(|id|id.same_object(identity)) {
+                    check(mobile_release_desktop::macos_existing_app_metadata::SnapshotData::conserve_data(
+                        prior.existing_app_metadata,captured).is_some(),reason)?;
+                }
+            }
+            self.originals[n].existing_app_metadata=Some(captured);
+            self.check_name(n,true)
+        }
         fn app_attributes(&self,n:usize,reason:&'static str)->Result<()> {
             if self.originals[n].existing_app_metadata.is_some() {self.existing_app_metadata_post(n,reason)}
             else {native::no_xattrs(self.fd(n)?.as_fd()).map_err(|_|reason)?;self.clock()}
@@ -10117,7 +10137,8 @@ mod installer {
             mut resume:Option<&mut RemovalRemainingPlan>)->Result<()> {
             check(payload_depth_data(prefix,depth,true) && index.directories.contains(prefix), "maintenance-tree-depth")?;
             book.protected(root, true, Some(0o555))?;
-            if prefix=="app" && depth==0 { book.app_attributes(root,"maintenance-payload-attributes")?; }
+            if prefix=="app" && depth==0 || prefix==mobile_release_desktop::macos_applications_launcher::BUNDLE
+                && depth==launcher_inventory_depth_data() { book.app_attributes(root,"maintenance-payload-attributes")?; }
             else { native::no_xattrs(book.fd(root)?.as_fd()).map_err(|_| "maintenance-payload-attributes")?; }
             check(stat::fstat(book.fd(root)?).map_err(|_| "maintenance-payload-stat")?.st_flags == 0,
                 "maintenance-payload-flags")?;
@@ -10252,26 +10273,10 @@ mod installer {
                     // Record/inventory/history and SAME original identity matched.
                     // A prior observation of this inode freezes the expectation;
                     // reopening it may not adopt changed or disappeared metadata.
-                    let identity=book.identity(original)?;
                     // A fresh app published by this invocation stays strict,
                     // including the parent's joined-worker readback. A created
                     // directory cannot enroll an OS tag as existing metadata.
-                    let existing=allow_existing_macl && !book.creations.iter()
-                        .any(|effect|effect.identity.is_some_and(|id|id.same_object(identity)));
-                    if !existing {native::no_xattrs(book.fd(original)?.as_fd()).map_err(|_|"maintenance-app-attributes")?;}
-                    let captured=book.read_existing_app_metadata(original,"maintenance-app-attributes")?;
-                    if !existing {check(captured==mobile_release_desktop::macos_existing_app_metadata::SnapshotData::from_observed_bytes_data(&[])
-                        .ok_or("maintenance-app-attributes")?,"maintenance-app-attributes")?;}
-                    book.check_name(original,true)?;
-                    let identity=book.identity(original)?;
-                    for prior in &book.originals {
-                        if prior.identity.is_some_and(|id|id.same_object(identity)) {
-                            check(mobile_release_desktop::macos_existing_app_metadata::SnapshotData::conserve_data(
-                                prior.existing_app_metadata,captured).is_some(),"maintenance-app-attributes")?;
-                        }
-                    }
-                    book.originals[original].existing_app_metadata=Some(captured);
-                    book.check_name(original,true)?;
+                    book.capture_existing_app_metadata(original,allow_existing_macl,"maintenance-app-attributes")?;
                     if let Some((_,plan))=resume.as_mut(){
                         if generation.retained_invocation_data().is_none(){plan.current_app=Some(book.identity(original)?);}
                         audit_tree_mode(book,original,"app",&index,0,Some(&mut **plan))?;

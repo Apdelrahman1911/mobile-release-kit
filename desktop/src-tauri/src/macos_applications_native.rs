@@ -165,7 +165,7 @@ impl Observation {
                 "launcher-unowned-collision")?;
             check(prior_capsule.is_some(),"launcher-unenrolled-collision")?;
             let old = previous.as_ref().ok_or("launcher-unowned-collision")?;
-            operation.hold_matching(book,&old.index(),history.and_then(|h|h.current.capsule.launcher_data()).and_then(|row|row.published_identity))?;
+            operation.hold_matching(book,&old.index(),history.and_then(|h|h.current.capsule.launcher_data()).and_then(|row|row.published_identity),true)?;
             occupied_decision(action,prior_capsule.is_some(),current.same(old)?)?
         };
         Ok(Some(Self { current,previous,operation,decision,absent,prior_capsule }))
@@ -246,7 +246,7 @@ impl Observation {
             let mut current = Operation { applications:self.operation.applications,
                 system_root:self.operation.system_root,bundle:None,
                 returned:Returned::NotAttempted,verified:false };
-            current.hold_matching(book,&self.current.index(),row.published_identity)?;
+            current.hold_matching(book,&self.current.index(),row.published_identity,false)?;
             book.forward_close(current.bundle.ok_or("launcher-original-missing")?,
                 "launcher-parent-bundle-close")?;
             current.parent_post(book)?;
@@ -330,7 +330,7 @@ impl RemovalPreparation {
             check(absent,"launcher-removal-live-and-retained")?;
             result.retirement.inspect_resumed(book,workspace,&result.material.index(),capsule.launcher_data().and_then(|row|row.published_identity))?;
         } else if !absent {
-            result.operation.hold_matching(book,&result.material.index(),capsule.launcher_data().and_then(|row|row.published_identity))?;
+            result.operation.hold_matching(book,&result.material.index(),capsule.launcher_data().and_then(|row|row.published_identity),true)?;
         }
         result.post_before(book)?;
         Ok(Some(result))
@@ -1184,7 +1184,7 @@ impl Operation {
     /// Exact authenticated inventory only. Unknown or modified bundles refuse;
     /// no signature-only approximation or name-based replacement is allowed.
     pub(super) fn hold_matching(&mut self, book: &mut Install, expected: &InventoryIndex<'_>,
-        enrolled:Option<launcher::OriginalIdentityData>) -> Result<()> {
+        enrolled:Option<launcher::OriginalIdentityData>,allow_existing_macl:bool) -> Result<()> {
         check(self.bundle.is_none() && self.returned == Returned::NotAttempted,
             "launcher-operation-once")?;
         launcher::LauncherInventory::from_index(expected)?.ok_or("launcher-inventory-missing")?;
@@ -1193,6 +1193,9 @@ impl Operation {
         // Store the exact original before any fallible read can return.
         self.bundle = Some(bundle);
         require_enrolled(book,bundle,enrolled)?;
+        // Old signed-history enrollment authenticates this original. The
+        // joined worker's newly published launcher passes false and stays empty.
+        book.capture_existing_app_metadata(bundle,allow_existing_macl,"maintenance-payload-attributes")?;
         maintenance::audit_launcher_tree(book,bundle,expected)?;
         self.parent_post(book)?;
         book.check_name(bundle, true)
@@ -1618,7 +1621,10 @@ impl Retirement {
         self.nodes.push(RetiredNode { original: bundle, parent: workspace.original, name: self.root_name.into(),
             directory: true, size: 0, digest: String::new(), attempted: false, removed: false });
         check(book.identity(bundle)?.ino == inode, "launcher-recovery-original")?;
-        if let Some(enrolled)=enrolled {require_enrolled(book,bundle,enrolled)?;}
+        if let Some(enrolled)=enrolled {
+            require_enrolled(book,bundle,enrolled)?;
+            book.capture_existing_app_metadata(bundle,true,"launcher-retirement-attributes")?;
+        }
         let mut directories = BTreeMap::new();
         directories.insert(String::new(), bundle);
         let mut rosters = BTreeMap::new();
@@ -1638,7 +1644,8 @@ impl Retirement {
             let mode = book.identity(directory)?.mode & 0o7777;
             check(mode == 0o555 || source.is_some() && mode == 0o700, "launcher-recovery-directory-mode")?;
             book.protected(directory, true, Some(mode))?;
-            native::no_xattrs(book.fd(directory)?.as_fd()).map_err(|_| "launcher-retirement-attributes")?;
+            if path.is_empty() {book.app_attributes(directory,"launcher-retirement-attributes")?;}
+            else {native::no_xattrs(book.fd(directory)?.as_fd()).map_err(|_| "launcher-retirement-attributes")?;}
             check(stat::fstat(book.fd(directory)?).map_err(|_| "launcher-recovery-stat")?.st_flags == 0,
                 "launcher-recovery-flags")?;
             let actual = maintenance::roster_now(book, directory)?;
@@ -1734,7 +1741,8 @@ impl Retirement {
         let expected = book.identity(original)?;
         check(stat::fstat(book.fd(original)?).map_err(|_| "launcher-retirement-node-stat")?.st_flags == 0
             && before.st_flags == 0, "launcher-retirement-node-flags")?;
-        native::no_xattrs(book.fd(original)?.as_fd()).map_err(|_| "launcher-retirement-attributes")?;
+        if slot==0 && directory {book.app_attributes(original,"launcher-retirement-attributes")?;}
+        else {native::no_xattrs(book.fd(original)?.as_fd()).map_err(|_| "launcher-retirement-attributes")?;}
         book.check_name(original, true)?;
         book.clock()?;
         self.nodes[slot].attempted = true;

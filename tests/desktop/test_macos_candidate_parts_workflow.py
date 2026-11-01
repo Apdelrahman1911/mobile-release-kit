@@ -7,6 +7,7 @@ import tomllib
 import unittest
 import os
 import tempfile
+import shutil
 
 from desktop.tools import macos_candidate_parts as P
 
@@ -45,15 +46,53 @@ class CandidatePartsWorkflowTests(unittest.TestCase):
             self.assertIn('crate::macos_existing_app_metadata::'+name+'();',observer)
         installer=(ROOT/'desktop/src-tauri/src/bin/macos_install.rs').read_text()
         audit=installer[installer.index('fn audit_generation_mode('):installer.index('// Strict known-control prelude')]
-        self.assertLess(audit.index('"maintenance-app-original"'),audit.index('book.read_existing_app_metadata('))
-        self.assertLess(audit.index('SnapshotData::conserve_data('),audit.index('existing_app_metadata=Some(captured)'))
-        self.assertIn('let existing=allow_existing_macl && !book.creations.iter()',audit)
-        self.assertIn('if !existing {native::no_xattrs(',audit)
+        self.assertLess(audit.index('"maintenance-app-original"'),audit.index('book.capture_existing_app_metadata('))
+        capture=installer[installer.index('fn capture_existing_app_metadata('):installer.index('fn app_attributes(')]
+        self.assertLess(capture.index('SnapshotData::conserve_data('),capture.index('existing_app_metadata=Some(captured)'))
+        self.assertIn('let existing=allow_existing_macl && !self.creations.iter()',capture)
+        self.assertIn('if !existing {native::no_xattrs(',capture)
         self.assertIn('None,false,inverse || observed.action==ActionData::SamePackageNoop',installer)
         self.assertIn('if prefix=="app" && depth==0',installer)
         self.assertIn('book.app_attributes(original,"maintenance-renamed-attributes")',installer)
         self.assertIn('if !metadata_ok { self.unknown=true; }',installer)
         self.assertNotIn('setxattr',source)
+
+    def test_existing_launcher_metadata_original_control_flow(self):
+        rustc = shutil.which('rustc')
+        self.assertIsNotNone(rustc, 'the existing Rust compiler is required; download nothing')
+        installer=(ROOT/'desktop/src-tauri/src/bin/macos_install.rs').read_text()
+        body=(ROOT/'tests/desktop/fixtures/existing_launcher_metadata_data.rs').read_text()
+        for marker,start,end in (
+            ('MRK_EXISTING_METADATA_POST_ORIGINAL','fn existing_app_metadata_post(','// Call only after'),
+            ('MRK_EXISTING_METADATA_CAPTURE_ORIGINAL','fn capture_existing_app_metadata(','fn app_attributes('),
+            ('MRK_APP_ATTRIBUTES_ORIGINAL','fn app_attributes(','fn protected('),
+        ):
+            first=installer.index(start); last=installer.index(end,first)
+            token='/* '+marker+' */'; self.assertEqual(body.count(token),1)
+            body=body.replace(token,installer[first:last])
+        first=installer.index('if prefix=="app" && depth==0')
+        last=installer.index('check(stat::fstat(',first)
+        token='/* MRK_TREE_ROOT_ATTRIBUTES_ORIGINAL */'; self.assertEqual(body.count(token),1)
+        body=body.replace(token,installer[first:last])
+        with tempfile.TemporaryDirectory(dir=os.environ.get('MRK_PART_TEST_ROOT')) as temporary:
+            source=Path(temporary)/'original-data.rs'; binary=Path(temporary)/'original-data'
+            source.write_text(body)
+            subprocess.run([rustc,'--edition=2021',str(source),'-o',str(binary)],
+                           check=True,capture_output=True,timeout=30)
+            result=subprocess.run([str(binary)],check=True,capture_output=True,timeout=5)
+        self.assertEqual(result.stdout,b'MRK_EXISTING_LAUNCHER_METADATA_DATA=PASS\n')
+        self.assertEqual(result.stderr,b'')
+
+    def test_launcher_existing_metadata_requires_original_enrollment(self):
+        launcher=(ROOT/'desktop/src-tauri/src/macos_applications_native.rs').read_text()
+        hold=launcher[launcher.index('pub(super) fn hold_matching('):launcher.index('pub(super) fn stage(')]
+        self.assertLess(hold.index('require_enrolled('),hold.index('capture_existing_app_metadata('))
+        self.assertLess(hold.index('capture_existing_app_metadata('),hold.index('audit_launcher_tree('))
+        self.assertIn('current.hold_matching(book,&self.current.index(),row.published_identity,false)',launcher)
+        retirement=launcher[launcher.index('fn capture_remaining('):launcher.index('fn unlink(')]
+        self.assertIn('if let Some(enrolled)=enrolled {\n            require_enrolled(',retirement)
+        self.assertIn('if path.is_empty() {book.app_attributes(',retirement)
+        self.assertIn('if slot==0 && directory {book.app_attributes(',launcher)
 
     def test_observer_callback_dependencies_are_declared_in_its_actual_crate(self):
         manifest = tomllib.loads((ROOT/'desktop/src-tauri/Cargo.toml').read_text())
