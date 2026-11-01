@@ -7,7 +7,7 @@ permissions:
   actions: read
 jobs:
   desktop26-prepare:
-    name: macOS part (Desktop26 / prepare)
+    name: "${{ matrix.native_scope == 'disabled' && 'macOS part (Desktop26 / prepare)' || 'Invalid Desktop update scope' }}"
     if: github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-macos-candidate'
       && contains(github.event.head_commit.message, '[macos-desktop-update]')
     runs-on: "${{ matrix.runner }}"
@@ -426,7 +426,7 @@ jobs:
         compression-level: 0
         overwrite: false
   desktop26-resident:
-    name: macOS part (Desktop26 / resident)
+    name: "${{ matrix.native_scope == 'disabled' && 'macOS part (Desktop26 / resident)' || 'Invalid Desktop update scope' }}"
     if: github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-macos-candidate'
       && contains(github.event.head_commit.message, '[macos-desktop-update]')
     runs-on: "${{ matrix.runner }}"
@@ -552,7 +552,7 @@ jobs:
         compression-level: 0
         overwrite: false
   desktop26-vault:
-    name: macOS part (Desktop26 / vault)
+    name: "${{ matrix.native_scope == 'disabled' && 'macOS part (Desktop26 / vault)' || 'Invalid Desktop update scope' }}"
     if: github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-macos-candidate'
       && contains(github.event.head_commit.message, '[macos-desktop-update]')
     runs-on: "${{ matrix.runner }}"
@@ -678,7 +678,7 @@ jobs:
         compression-level: 0
         overwrite: false
   desktop26-frontend:
-    name: macOS part (Desktop26 / frontend)
+    name: "${{ matrix.native_scope == 'disabled' && 'macOS part (Desktop26 / frontend)' || 'Invalid Desktop update scope' }}"
     if: github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-macos-candidate'
       && contains(github.event.head_commit.message, '[macos-desktop-update]')
     runs-on: "${{ matrix.runner }}"
@@ -798,7 +798,7 @@ jobs:
         compression-level: 0
         overwrite: false
   desktop26-image:
-    name: macOS part (Desktop26 / image)
+    name: "${{ matrix.native_scope == 'disabled' && 'macOS part (Desktop26 / image)' || 'Invalid Desktop update scope' }}"
     if: github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-macos-candidate'
       && contains(github.event.head_commit.message, '[macos-desktop-update]')
     runs-on: "${{ matrix.runner }}"
@@ -929,7 +929,7 @@ jobs:
         compression-level: 0
         overwrite: false
   desktop26-remover:
-    name: macOS part (Desktop26 / remover)
+    name: "${{ matrix.native_scope == 'disabled' && 'macOS part (Desktop26 / remover)' || 'Invalid Desktop update scope' }}"
     if: github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-macos-candidate'
       && contains(github.event.head_commit.message, '[macos-desktop-update]')
     runs-on: "${{ matrix.runner }}"
@@ -1062,7 +1062,7 @@ jobs:
         compression-level: 0
         overwrite: false
   desktop26-cli:
-    name: macOS part (Desktop26 / cli)
+    name: "${{ matrix.native_scope == 'disabled' && 'macOS part (Desktop26 / cli)' || 'Invalid Desktop update scope' }}"
     if: github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-macos-candidate'
       && contains(github.event.head_commit.message, '[macos-desktop-update]')
     runs-on: "${{ matrix.runner }}"
@@ -1195,7 +1195,7 @@ jobs:
         compression-level: 0
         overwrite: false
   desktop26-sign-remover:
-    name: macOS part (Desktop26 / sign-remover)
+    name: "${{ matrix.native_scope == 'disabled' && 'macOS part (Desktop26 / sign-remover)' || 'Invalid Desktop update scope' }}"
     if: github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-macos-candidate'
       && contains(github.event.head_commit.message, '[macos-desktop-update]')
     runs-on: "${{ matrix.runner }}"
@@ -1318,7 +1318,7 @@ jobs:
         compression-level: 0
         overwrite: false
   desktop26-sign-cli:
-    name: macOS part (Desktop26 / sign-cli)
+    name: "${{ matrix.native_scope == 'disabled' && 'macOS part (Desktop26 / sign-cli)' || 'Invalid Desktop update scope' }}"
     if: github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-macos-candidate'
       && contains(github.event.head_commit.message, '[macos-desktop-update]')
     runs-on: "${{ matrix.runner }}"
@@ -1441,7 +1441,7 @@ jobs:
         compression-level: 0
         overwrite: false
   desktop26-assemble:
-    name: macOS part (Desktop26 / assemble)
+    name: "${{ matrix.native_scope == 'disabled' && 'macOS part (Desktop26 / assemble)' || 'Invalid Desktop update scope' }}"
     if: github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-macos-candidate'
       && contains(github.event.head_commit.message, '[macos-desktop-update]')
     runs-on: "${{ matrix.runner }}"
@@ -1581,7 +1581,7 @@ jobs:
         compression-level: 0
         overwrite: false
   desktop26-notarize-payload:
-    name: macOS part (Desktop26 / notarize-payload)
+    name: "${{ matrix.native_scope == 'disabled' && 'macOS part (Desktop26 / notarize-payload)' || 'Invalid Desktop update scope' }}"
     if: github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-macos-candidate'
       && contains(github.event.head_commit.message, '[macos-desktop-update]')
     runs-on: "${{ matrix.runner }}"
@@ -1722,7 +1722,7 @@ jobs:
         compression-level: 0
         overwrite: false
   desktop26-installer:
-    name: macOS part (Desktop26 / installer)
+    name: "${{ matrix.native_scope == 'disabled' && 'macOS part (Desktop26 / installer)' || 'Invalid Desktop update scope' }}"
     if: github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-macos-candidate'
       && contains(github.event.head_commit.message, '[macos-desktop-update]')
     runs-on: "${{ matrix.runner }}"
@@ -1851,7 +1851,7 @@ jobs:
         compression-level: 0
         overwrite: false
   desktop26-scripts-package:
-    name: macOS part (Desktop26 / scripts-package)
+    name: "${{ matrix.native_scope == 'disabled' && 'macOS part (Desktop26 / scripts-package)' || 'Invalid Desktop update scope' }}"
     if: github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-macos-candidate'
       && contains(github.event.head_commit.message, '[macos-desktop-update]')
     runs-on: "${{ matrix.runner }}"
@@ -1984,7 +1984,7 @@ jobs:
         compression-level: 0
         overwrite: false
   desktop26-final-package:
-    name: Build signed candidate (Desktop26)
+    name: "${{ matrix.native_scope == 'disabled' && 'Build signed candidate (Desktop26)' || 'Invalid Desktop update scope' }}"
     if: github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-macos-candidate'
       && contains(github.event.head_commit.message, '[macos-desktop-update]')
     runs-on: "${{ matrix.runner }}"
@@ -2189,7 +2189,7 @@ jobs:
     if: github.event_name == 'workflow_dispatch' && github.event.inputs.operation
       == 'local-desktop-carrier'
     environment: macos-developer-id
-    name: Prepare authenticated ordinary Desktop carrier for the owner Mac
+    name: "${{ matrix.native_scope == 'disabled' && 'Prepare authenticated ordinary Desktop carrier for the owner Mac' || 'Invalid Desktop update scope' }}"
     runs-on: "${{ matrix.runner }}"
     timeout-minutes: "${{ matrix.timeout }}"
     strategy:

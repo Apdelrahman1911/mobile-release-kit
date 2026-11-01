@@ -2,6 +2,7 @@
 import copy
 import json
 import os
+import re
 from pathlib import Path
 import tempfile
 import unittest
@@ -42,6 +43,36 @@ def inventory_fixture():
 
 
 class OrdinaryDesktopUpdateTests(unittest.TestCase):
+    def test_matrix_job_names_match_strict_current_job_selector(self):
+        # Actual run 41291021077/job 124802333160 added this suffix to the
+        # original static name. Keep the selector strict; name jobs explicitly.
+        observed = ('Desktop update / macOS part (Desktop26 / prepare) '
+                    '(disabled, aarch64-apple-darwin, macos-26, arm64, github-hosted-...')
+        workflow = yaml('.github/workflows/desktop-macos-update-parts.yml')['jobs']
+        for part in P.ORDINARY_PARTS:
+            origin = ordinary_fixture(part)[0]['origin']
+            job = workflow['desktop26-' + part]
+            expression = re.fullmatch(
+                r"\$\{\{ matrix\.native_scope == 'disabled' && '([^']+)' "
+                r"\|\| 'Invalid Desktop update scope' \}\}", job['name'])
+            self.assertIsNotNone(expression, 'a static matrix name acquires a GitHub suffix')
+            self.assertEqual(P.ORDINARY_CALLER + ' / ' + expression[1], P.job_name(part, origin))
+            correct = dict(id=123, name=P.job_name(part, origin), status='in_progress',
+                           head_sha=origin['source'])
+            env = dict(GITHUB_SHA=origin['source'], GITHUB_RUN_ID=origin['runId'],
+                       GITHUB_RUN_ATTEMPT=origin['runAttempt'], MRK_MACOS_NATIVE_SCOPE='disabled',
+                       MRK_MACOS_RUNNER='macos-26')
+            with patch.dict(os.environ, env), patch.object(T, 'read', return_value=json.dumps(
+                    dict(tree=origin['tree'])).encode()):
+                with patch.object(T, 'listing', return_value=[correct]):
+                    self.assertEqual(T.current(part, Path('/inert')), dict(origin, jobId='123'))
+                for rows in ([dict(correct, name=observed)], [correct, correct],
+                             [dict(correct, head_sha='f'*40)], [dict(correct, status='completed')]):
+                    with patch.object(T, 'listing', return_value=rows), self.assertRaisesRegex(
+                            ValueError, 'part-current-actual-job'):
+                        T.current(part, Path('/inert'))
+        self.assertIn("matrix.native_scope == 'disabled'", workflow['desktop26-carrier']['name'])
+
     def test_complete_update_requires_five_launcher_components_and_real_desktop(self):
         value = inventory_fixture()
         result = U.contents_data(value, 'ordinary-image')
