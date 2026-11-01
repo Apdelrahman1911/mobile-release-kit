@@ -52,8 +52,23 @@ class OrdinaryDesktopUpdateTests(unittest.TestCase):
         # The attribute port, like the credential/native-return ports, is
         # inert DATA here. This is size/signing custody coverage, never proof
         # that a local checkout or package passes the actual attribute gate.
-        with patch.object(TOOL, 'no_xattrs', return_value=None):
+        # GitHub's default macOS temp path traverses /var -> /private/var.
+        # The production held-directory reader must keep refusing symlinks.
+        # Place only these inert fixtures in the caller's real owned directory.
+        fixture_root = Path(os.environ['MRK_PART_TEST_ROOT']).resolve(strict=True)
+        with patch.object(tempfile, 'tempdir', str(fixture_root)), \
+                patch.object(TOOL, 'no_xattrs', return_value=None):
             MacAndroidHelperPackagingData().test_fixed_workflow_signing_roles_use_original_inputs_and_identity()
+
+    def test_signer_fixture_resolves_owned_temp_alias_and_restores_default(self):
+        with tempfile.TemporaryDirectory(dir=os.environ['MRK_PART_TEST_ROOT']) as temporary:
+            root = Path(temporary)
+            real = root / 'real'; real.mkdir()
+            alias = root / 'alias'; alias.symlink_to(real, target_is_directory=True)
+            with patch.dict(os.environ, {'MRK_PART_TEST_ROOT': str(alias)}), \
+                    patch.object(tempfile, 'tempdir', str(alias)):
+                self.test_actual_desktop_size_traverses_original_signer_and_retains_strict_refusals()
+                self.assertEqual(tempfile.tempdir, str(alias))
 
     def test_current_launcher_versions_match_real_application_and_package(self):
         # Run 41291931705 refused assembly before Swift compilation because
