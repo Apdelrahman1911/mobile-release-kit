@@ -17,9 +17,9 @@ jobs:
     # On a rerun, nominate the original producer attempt from its unique
     # retained artifact, then fetch that COMPLETE actual attempt's jobs page.
     # Never substitute the consumer's attempt or rebuild its signed app.
-    if: ${{ !cancelled() && github.ref == 'refs/heads/verify/desktop-macos-candidate' && (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && (github.event.inputs.operation == 'candidate-tests' || github.event.inputs.operation == 'local-carrier' || github.event.inputs.operation == 'git-cli-timing' || github.event.inputs.operation == 'git-cli-process-data'))) }}
+    if: ${{ !cancelled() && github.ref == 'refs/heads/verify/desktop-macos-candidate' && (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && (github.event.inputs.operation == 'local-desktop-carrier' || github.event.inputs.operation == 'candidate-tests' || github.event.inputs.operation == 'local-carrier' || github.event.inputs.operation == 'git-cli-timing' || github.event.inputs.operation == 'git-cli-process-data'))) }}
     environment: macos-developer-id
-    name: ${{ github.event.inputs.operation == 'git-cli-process-data' && 'Observe only original installed Git printable process chain (saved Git27)' || github.event.inputs.operation == 'git-cli-timing' && 'Measure only the original installed Git index journey (saved Git27)' || matrix.group == 'local-carrier' && 'Prepare authenticated Tool26 carrier for the owner Mac' || format('Test saved candidate ({0})', matrix.group) }}
+    name: ${{ github.event.inputs.operation == 'local-desktop-carrier' && 'Prepare authenticated ordinary Desktop carrier for the owner Mac' || github.event.inputs.operation == 'git-cli-process-data' && 'Observe only original installed Git printable process chain (saved Git27)' || github.event.inputs.operation == 'git-cli-timing' && 'Measure only the original installed Git index journey (saved Git27)' || matrix.group == 'local-carrier' && 'Prepare authenticated Tool26 carrier for the owner Mac' || format('Test saved candidate ({0})', matrix.group) }}
     runs-on: ${{ matrix.runner }}
     timeout-minutes: ${{ matrix.timeout }}
     strategy:
@@ -30,7 +30,7 @@ jobs:
       # local-carrier only retains the successful Tool package owner's signed
       # files. It does not request a service or qualify any of the eleven groups.
       matrix:
-        include: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.operation == 'local-carrier' && fromJSON('[{"target":"aarch64-apple-darwin","group":"local-carrier","native_scope":"tool-setup","runner":"macos-26","hosted_job":"github-hosted-macos26-arm64","timeout":65}]') || github.event_name == 'workflow_dispatch' && fromJSON('{"git-local":[{"target":"aarch64-apple-darwin","group":"git-local","native_scope":"git-native","runner":"xcode-27","hosted_job":"github-hosted-xcode27-arm64","timeout":65}],"git-fetch":[{"target":"aarch64-apple-darwin","group":"git-fetch","native_scope":"git-native","runner":"xcode-27","hosted_job":"github-hosted-xcode27-arm64","timeout":65}],"git-push":[{"target":"aarch64-apple-darwin","group":"git-push","native_scope":"git-native","runner":"xcode-27","hosted_job":"github-hosted-xcode27-arm64","timeout":65}],"git-create":[{"target":"aarch64-apple-darwin","group":"git-create","native_scope":"git-native","runner":"xcode-27","hosted_job":"github-hosted-xcode27-arm64","timeout":65}],"git-upstream":[{"target":"aarch64-apple-darwin","group":"git-upstream","native_scope":"git-native","runner":"xcode-27","hosted_job":"github-hosted-xcode27-arm64","timeout":65}],"service-cli":[{"target":"aarch64-apple-darwin","group":"service-cli","native_scope":"tool-setup","runner":"macos-26","hosted_job":"github-hosted-macos26-arm64","timeout":65}],"public-acquisition":[{"target":"aarch64-apple-darwin","group":"public-acquisition","native_scope":"tool-setup","runner":"macos-26","hosted_job":"github-hosted-macos26-arm64","timeout":160}],"sdk-registration":[{"target":"aarch64-apple-darwin","group":"sdk-registration","native_scope":"tool-setup","runner":"macos-26","hosted_job":"github-hosted-macos26-arm64","timeout":165}],"upload-keys":[{"target":"aarch64-apple-darwin","group":"upload-keys","native_scope":"tool-setup","runner":"macos-26","hosted_job":"github-hosted-macos26-arm64","timeout":190}],"cold-restart":[{"target":"aarch64-apple-darwin","group":"cold-restart","native_scope":"tool-setup","runner":"macos-26","hosted_job":"github-hosted-macos26-arm64","timeout":190}],"backup":[{"target":"aarch64-apple-darwin","group":"backup","native_scope":"tool-setup","runner":"macos-26","hosted_job":"github-hosted-macos26-arm64","timeout":190}]}')[github.event.inputs.test_group] || fromJSON('[{"target":"aarch64-apple-darwin","group":"git-local","native_scope":"git-native","runner":"xcode-27","hosted_job":"github-hosted-xcode27-arm64","timeout":65}]') }}
+        include: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.operation == 'local-desktop-carrier' && fromJSON('[{"target":"aarch64-apple-darwin","group":"local-carrier","native_scope":"disabled","runner":"macos-26","hosted_job":"github-hosted-macos26-arm64","timeout":65}]') || github.event_name == 'workflow_dispatch' && github.event.inputs.operation == 'local-carrier' && fromJSON('[{"target":"aarch64-apple-darwin","group":"local-carrier","native_scope":"tool-setup","runner":"macos-26","hosted_job":"github-hosted-macos26-arm64","timeout":65}]') || github.event_name == 'workflow_dispatch' && fromJSON('{"git-local":[{"target":"aarch64-apple-darwin","group":"git-local","native_scope":"git-native","runner":"xcode-27","hosted_job":"github-hosted-xcode27-arm64","timeout":65}],"git-fetch":[{"target":"aarch64-apple-darwin","group":"git-fetch","native_scope":"git-native","runner":"xcode-27","hosted_job":"github-hosted-xcode27-arm64","timeout":65}],"git-push":[{"target":"aarch64-apple-darwin","group":"git-push","native_scope":"git-native","runner":"xcode-27","hosted_job":"github-hosted-xcode27-arm64","timeout":65}],"git-create":[{"target":"aarch64-apple-darwin","group":"git-create","native_scope":"git-native","runner":"xcode-27","hosted_job":"github-hosted-xcode27-arm64","timeout":65}],"git-upstream":[{"target":"aarch64-apple-darwin","group":"git-upstream","native_scope":"git-native","runner":"xcode-27","hosted_job":"github-hosted-xcode27-arm64","timeout":65}],"service-cli":[{"target":"aarch64-apple-darwin","group":"service-cli","native_scope":"tool-setup","runner":"macos-26","hosted_job":"github-hosted-macos26-arm64","timeout":65}],"public-acquisition":[{"target":"aarch64-apple-darwin","group":"public-acquisition","native_scope":"tool-setup","runner":"macos-26","hosted_job":"github-hosted-macos26-arm64","timeout":160}],"sdk-registration":[{"target":"aarch64-apple-darwin","group":"sdk-registration","native_scope":"tool-setup","runner":"macos-26","hosted_job":"github-hosted-macos26-arm64","timeout":165}],"upload-keys":[{"target":"aarch64-apple-darwin","group":"upload-keys","native_scope":"tool-setup","runner":"macos-26","hosted_job":"github-hosted-macos26-arm64","timeout":190}],"cold-restart":[{"target":"aarch64-apple-darwin","group":"cold-restart","native_scope":"tool-setup","runner":"macos-26","hosted_job":"github-hosted-macos26-arm64","timeout":190}],"backup":[{"target":"aarch64-apple-darwin","group":"backup","native_scope":"tool-setup","runner":"macos-26","hosted_job":"github-hosted-macos26-arm64","timeout":190}]}')[github.event.inputs.test_group] || fromJSON('[{"target":"aarch64-apple-darwin","group":"git-local","native_scope":"git-native","runner":"xcode-27","hosted_job":"github-hosted-xcode27-arm64","timeout":65}]') }}
     env:
       RUSTUP_TOOLCHAIN: '1.98.1'
       MRK_MACOS_TARGET: aarch64-apple-darwin
@@ -39,7 +39,7 @@ jobs:
       MRK_MACOS_HOSTED_JOB: ${{ matrix.hosted_job }}
       MRK_EXPECTED_SHA: ${{ github.sha }}
       MRK_MACOS_INSTALL_SOURCE_COMMIT: ${{ github.sha }}
-      MRK_MACOS_PACKAGE_ROLE: installed-shell-observation
+      MRK_MACOS_PACKAGE_ROLE: ${{ github.event.inputs.operation == 'local-desktop-carrier' && 'ordinary-image' || 'installed-shell-observation' }}
       MRK_MACOS_NATIVE_SCOPE: ${{ matrix.native_scope }}
       MRK_MACOS_PREPARED_TEST: 'true'
       MRK_MACOS_PREPARED_RESUME: ${{ github.event_name == 'workflow_dispatch' && 'true' || 'false' }}
@@ -68,6 +68,12 @@ jobs:
             aarch64-apple-darwin/ARM64/arm64|x86_64-apple-darwin/X64/x86_64) ;;
             *) exit 1 ;;
           esac
+          if [[ "$SELECTED_OPERATION" == local-desktop-carrier ]]; then
+            [[ "$GITHUB_EVENT_NAME" == workflow_dispatch && "$MRK_MACOS_PACKAGE_ROLE" == ordinary-image && "$MRK_MACOS_NATIVE_SCOPE" == disabled && "$MRK_MACOS_TARGET" == aarch64-apple-darwin && "$SELECTED_GROUP" == service-cli ]] || exit 1
+            [[ "$SELECTED_SOURCE" =~ ^[0-9a-f]{40}$ && "$SELECTED_RUN" =~ ^[1-9][0-9]{0,19}$ ]] || exit 1
+            # The original full comparison and held package readers below
+            # admit source compatibility before any native preparation.
+          fi
           expected_host_major=26
           if [[ "$MRK_MACOS_NATIVE_SCOPE" == git-native ]]; then expected_host_major=27; fi
           [[ "$(/usr/bin/id -u)" != 0 && "$(/usr/bin/sw_vers -productVersion)" == "$expected_host_major".* ]] || exit 1
@@ -138,12 +144,17 @@ jobs:
           IFS= read -r producer_attempt < "$MRK_MACOS_WORK/prepared-producer-attempt.txt"
           [[ "$producer_attempt" =~ ^[1-9][0-9]{0,19}$ ]] || exit 1
           fetch "repos/$GITHUB_REPOSITORY/actions/runs/$PRODUCER_RUN/attempts/$producer_attempt/jobs?per_page=100" "$MRK_MACOS_WORK/prepared-jobs.json"
-          "$MRK_PYTHON" -I -S -B desktop/tools/macos_prepared_package.py observer-attempt --target "$MRK_MACOS_TARGET" \
-            --producer-source "$PRODUCER_SOURCE" --producer-run "$PRODUCER_RUN" > "$MRK_MACOS_WORK/prepared-observer-attempt.txt"
-          IFS= read -r observer_attempt < "$MRK_MACOS_WORK/prepared-observer-attempt.txt"
-          [[ "$observer_attempt" =~ ^[1-9][0-9]{0,15}$ ]] || exit 1
-          fetch "repos/$GITHUB_REPOSITORY/actions/runs/$PRODUCER_RUN/attempts/$observer_attempt/jobs?per_page=100" "$MRK_MACOS_WORK/prepared-observer-jobs.json"
-          fetch "repos/$GITHUB_REPOSITORY/actions/runs/$PRODUCER_RUN/attempts/$observer_attempt" "$MRK_MACOS_WORK/prepared-observer-run.json"
+          if [[ "$MRK_MACOS_PACKAGE_ROLE" == ordinary-image ]]; then
+            checkpoint=image
+          else
+            checkpoint=observer
+          fi
+          "$MRK_PYTHON" -I -S -B desktop/tools/macos_prepared_package.py "$checkpoint-attempt" --target "$MRK_MACOS_TARGET" \
+            --producer-source "$PRODUCER_SOURCE" --producer-run "$PRODUCER_RUN" > "$MRK_MACOS_WORK/prepared-$checkpoint-attempt.txt"
+          IFS= read -r checkpoint_attempt < "$MRK_MACOS_WORK/prepared-$checkpoint-attempt.txt"
+          [[ "$checkpoint_attempt" =~ ^[1-9][0-9]{0,15}$ ]] || exit 1
+          fetch "repos/$GITHUB_REPOSITORY/actions/runs/$PRODUCER_RUN/attempts/$checkpoint_attempt/jobs?per_page=100" "$MRK_MACOS_WORK/prepared-$checkpoint-jobs.json"
+          fetch "repos/$GITHUB_REPOSITORY/actions/runs/$PRODUCER_RUN/attempts/$checkpoint_attempt" "$MRK_MACOS_WORK/prepared-$checkpoint-run.json"
           fetch "repos/$GITHUB_REPOSITORY/git/commits/$PRODUCER_SOURCE" "$MRK_MACOS_WORK/prepared-commit.json"
           printf '0\n' > "$MRK_MACOS_WORK/prepared-api.status"
           unset GH_TOKEN
@@ -170,6 +181,24 @@ jobs:
             (ulimit -f 16384; gh api "repos/$GITHUB_REPOSITORY/compare/$PRODUCER_SOURCE...$GITHUB_SHA" > "$MRK_MACOS_WORK/prepared-service/compatibility.json")
           fi
           printf '0\n' > "$MRK_MACOS_WORK/prepared-service/metadata.status"
+          if [[ "${MRK_MACOS_PACKAGE_ROLE-}" == ordinary-image ]]; then
+            # Reject an incompatible harness before the large transport. The
+            # original held-file hydrate/install admission repeats this check.
+            "$MRK_PYTHON" -I -S -B - <<'PY'
+          import os, sys
+          from pathlib import Path
+          sys.path.insert(0, str(Path.cwd()))
+          from desktop.tools import macos_prepared_package as P
+          work = Path(os.environ['MRK_MACOS_WORK']) / 'prepared-service'
+          commit = P.decode((work / 'commit.json').read_bytes(), 8 * P.MIB)
+          source = os.environ['PRODUCER_SOURCE']
+          P.need(commit['sha'] == source, 'prepared-selected-tree')
+          if source != os.environ['GITHUB_SHA']:
+              comparison = P.decode((work / 'compatibility.json').read_bytes(), 8 * P.MIB)
+              P.compatible_harness_data(comparison, dict(source=source, tree=commit['tree']['sha']),
+                  P.consumer_data(os.environ, os.environ['MRK_CONSUMER_TREE'], os.environ['MRK_MACOS_TARGET']))
+          PY
+          fi
       - name: Download only the selected prepared artifact with service digest verification
         timeout-minutes: 5
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
@@ -316,7 +345,10 @@ jobs:
                   assert identity(os.fstat(fd)) == identity(os.stat(leaf, dir_fd=parent_fd, follow_symlinks=False)) == identity(before)
                   values[name] = body
               consumer = P.consumer_data(os.environ, os.environ['MRK_CONSUMER_TREE'], os.environ['MRK_MACOS_TARGET'])
-              record = P.canonical(P.local_carrier_transport_data(values, consumer))
+              if os.environ['MRK_MACOS_PACKAGE_ROLE'] == 'ordinary-image':
+                  record = P.canonical(P.ordinary_local_carrier_transport_data(values, consumer))
+              else:
+                  record = P.canonical(P.local_carrier_transport_data(values, consumer))
               for name, (fd, before) in parents.items():
                   assert identity(os.fstat(fd)) == identity(os.stat(name, dir_fd=work_fd, follow_symlinks=False)) == before
               assert identity(os.fstat(work_fd)) == identity(work.lstat()) == work_pre
@@ -330,7 +362,7 @@ jobs:
               assert identity(os.fstat(fd)) == identity(os.stat('LOCAL-CARRIER.json', dir_fd=work_fd, follow_symlinks=False))
           finally:
               for fd in reversed(held): os.close(fd)
-          print('Closed Tool package files bound for transport; local installation and service remain unqualified.')
+          print('Closed package files bound for transport; local installation and service remain unqualified.')
           PY
       - name: Retain only authenticated files for the owner local installation
         if: matrix.group == 'local-carrier' && steps.local_carrier_export.outcome == 'success'

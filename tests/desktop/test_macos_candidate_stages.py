@@ -1263,8 +1263,10 @@ class CandidateWorkflowTests(unittest.TestCase):
         self.assertIs(job['strategy']['fail-fast'],False)
         expression=job['strategy']['matrix']['include']
         literals=re.findall(r"fromJSON\('([^']+)'\)",expression)
-        self.assertEqual(len(literals),3)
-        carrier,singles,initial=map(json.loads,literals)
+        self.assertEqual(len(literals),4)
+        ordinary,carrier,singles,initial=map(json.loads,literals)
+        self.assertEqual(ordinary,[dict(target='aarch64-apple-darwin',group='local-carrier',native_scope='disabled',
+            runner='macos-26',hosted_job='github-hosted-macos26-arm64',timeout=65)])
         self.assertEqual(carrier,[dict(target='aarch64-apple-darwin',group='local-carrier',native_scope='tool-setup',
             runner='macos-26',hosted_job='github-hosted-macos26-arm64',timeout=65)])
         self.assertEqual(set(singles),{'git-local','git-fetch','git-push','git-create','git-upstream',
@@ -1307,6 +1309,37 @@ class CandidateWorkflowTests(unittest.TestCase):
         self.assertEqual(len(paths.splitlines()),6)
         for forbidden in ('Install.pkg','macos-package-producer','identity.p12','keychain','password'):
             self.assertNotIn(forbidden,paths)
+
+    def test_ordinary_carrier_uses_shared_original_prepared_admission_before_native_work(self):
+        caller=self.workflow['jobs']['desktop-local-carrier']
+        self.assertEqual(caller['uses'],'./.github/workflows/desktop-macos-candidate-tests.yml')
+        self.assertNotIn('needs',caller)
+        self.assertIn("inputs.operation == 'local-desktop-carrier'",caller['if'])
+        job=self.saved_test_job();steps=job['steps']
+        expression=job['strategy']['matrix']['include']
+        first=json.loads(re.findall(r"fromJSON\('([^']+)'\)",expression)[0])
+        self.assertEqual(len(first),1)
+        self.assertEqual((first[0]['group'],first[0]['native_scope']),('local-carrier','disabled'))
+        selected=next(s['run'] for s in steps if s.get('id')=='prepared')
+        branch=selected[selected.index('if [[ "$MRK_MACOS_PACKAGE_ROLE" == ordinary-image'):
+                        selected.index('"$MRK_PYTHON"',selected.index('if [[ "$MRK_MACOS_PACKAGE_ROLE" == ordinary-image'))]
+        for role,checkpoint in (('ordinary-image','image'),('installed-shell-observation','observer')):
+            result=subprocess.run(['/bin/bash','-c',branch+'printf "%s" "$checkpoint"'],
+                env=dict(PATH='/usr/bin:/bin',MRK_MACOS_PACKAGE_ROLE=role),capture_output=True,timeout=5)
+            self.assertEqual((result.returncode,result.stdout,result.stderr),(0,checkpoint.encode(),b''))
+        capture=next(i for i,s in enumerate(steps) if s['name'].startswith('Capture the exact selected producer'))
+        download=next(i for i,s in enumerate(steps) if s.get('uses','').startswith('actions/download-artifact'))
+        hydrate=next(i for i,s in enumerate(steps) if 'macos_prepared_package.py hydrate' in s.get('run',''))
+        compiler=next(i for i,s in enumerate(steps) if 'cargo" fetch' in s.get('run',''))
+        install=next(i for i,s in enumerate(steps) if s.get('id')=='package_install')
+        self.assertLess(capture,download);self.assertLess(download,hydrate)
+        self.assertLess(hydrate,compiler);self.assertLess(compiler,install)
+        self.assertIn('P.compatible_harness_data(',steps[capture]['run'])
+        self.assertIn('P.ordinary_local_carrier_transport_data(values, consumer)',
+                      next(s['run'] for s in steps if s.get('id')=='local_carrier_export'))
+        for s in steps:
+            if s.get('id') in ('git_native','tool_service'):
+                self.assertIn('matrix.native_scope',s['if'])
 
     def test_dispatch_uses_selected_origin_and_checks_credentials_before_download(self):
         job=self.saved_test_job();steps=job['steps']

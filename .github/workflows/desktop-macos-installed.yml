@@ -3635,7 +3635,7 @@ jobs:
   desktop-local-carrier:
     name: Desktop local preparation
     if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/verify/desktop-macos-candidate' && inputs.operation == 'local-desktop-carrier'
-    uses: ./.github/workflows/desktop-macos-update-parts.yml
+    uses: ./.github/workflows/desktop-macos-candidate-tests.yml
     secrets: inherit
 
   candidate-desktop-update:
