@@ -4594,16 +4594,26 @@ class Operation:
         binary_name = ("mrk-macos-launcher" if launcher else "mobile-release-kit-desktop" if self.phase == "sign-desktop-payload" else ENTRY)
         binary = selected + "/Contents/MacOS/" + binary_name if bundled else selected
         parent = self.descend(self.work_entry, tuple(binary.split("/")[:-1]))
-        limit = (self.stager.OBSERVER_BINARY_BYTES if self.phase == "sign-desktop-payload"
-                 and self.environment.get("MRK_MACOS_PACKAGE_ROLE") == "installed-shell-observation"
-                 else 64 * 1024 * 1024)
+        matcher = None
+        if self.phase == "sign-desktop-image":
+            # The ordinary Cargo/stager path admits a complete Desktop dylib,
+            # which is larger than a facade/CLI (run 41295506185: 79,873,752
+            # bytes). Retain BOTH existing finite image/content-parser bounds,
+            # including on the signed output; no other signing role changes.
+            matcher = self.signing_matcher()
+            limit = min(self.stager.MAX_BYTES, matcher.FILE_LIMIT)
+        else:
+            limit = (self.stager.OBSERVER_BINARY_BYTES if self.phase == "sign-desktop-payload"
+                     and self.environment.get("MRK_MACOS_PACKAGE_ROLE") == "installed-shell-observation"
+                     else 64 * 1024 * 1024)
         old = self.original(parent, binary.split("/")[-1], "fixed-sign-input", limit, (0o555, 0o700, 0o755), alias=not bundled)
         original = self.read(old)
         if self.phase == "sign-desktop-image":
             self.stager.image_macho(original, "desktop", target=self.target)
         else:
             self.stager.macho(original, system_only=True, target=self.target)
-        matcher = self.signing_matcher()
+        if matcher is None:
+            matcher = self.signing_matcher()
         entitlements = self.source_original("desktop/packaging/macos-empty-entitlements.plist", "fixed-sign-empty-entitlements", 1024)
         empty = self.read(entitlements)
         need(digest(empty) == self.stager.SIGNED_ENTITLEMENTS_SHA256, "fixed-sign-empty-profile")

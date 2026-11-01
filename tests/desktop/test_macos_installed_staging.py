@@ -4094,6 +4094,8 @@ sys.exit(status)
             {"struct": struct, "need": module.need, "native_slice": thin,
              "LOAD_COMMANDS": {0xC, 0x80000018, 0x8000001F, 0x80000023},
              "LC_ID_DYLIB": 0xD, "LC_RPATH": 0x8000001C, "LC_LOAD_DYLINKER": 0xE})
+        from desktop.tools import macos_cpython_orchestrator as signing_data
+        matcher.FILE_LIMIT = signing_data.FILE_LIMIT
         transport = functions("macos_python_supplier_transport.py", ("member_header", "project_archive"),
                               {"tarfile": TOOL.tarfile, "TAR_LIMIT": 512 * 1024 * 1024})
         parsed = functions("macos_cpython_source_build.py", ("probe_result",),
@@ -7821,12 +7823,19 @@ sys.exit(status)
                           ("sign-desktop-payload", False, "installed-shell-observation", "oversize"),
                           ("sign-desktop-payload", False, "installed-shell-observation", "metadata-and-oversize"),
                           ("sign-desktop-payload", False, "installed-shell-observation", "signed-oversize")]
+                # Actual run 41295506185 compiled a 79,873,752-byte Desktop
+                # dylib. Exercise that size through the original held-file
+                # signer path and retain input/output/metadata refusals.
+                cases += [("sign-desktop-image", False, "ordinary-image", size)
+                          for size in ("actual-desktop", "oversize", "metadata-and-oversize", "signed-oversize")]
             for phase, failed_verify, role, size_case in cases:
                 with self.subTest(fixedSigning=phase, target=target, failedVerify=failed_verify,
                                   role=role, sizeCase=size_case), tempfile.TemporaryDirectory() as directory:
                     checkout, work, environment, _owner, _observations = self.fixture(Path(directory), build_target=target)
                     environment["MRK_MACOS_PACKAGE_ROLE"] = role
                     observer = phase == "sign-desktop-payload" and role == "installed-shell-observation"
+                    desktop_image = phase == "sign-desktop-image"
+                    maximum = min(TOOL.MAX_BYTES, matcher.FILE_LIMIT) if desktop_image else TOOL.OBSERVER_BINARY_BYTES
                     refused_input = size_case in ("oversize", "metadata-and-oversize") or size_case == "above64" and not observer
                     refused_output = size_case == "signed-oversize"
                     environment["CARGO_TARGET_DIR"] = str(work / ("xcode-setup-target" if phase == "sign-xcode-setup" else "cargo-target"))
@@ -7856,11 +7865,13 @@ sys.exit(status)
                         # One real >64MiB read/signature-match/readback case.
                         # Refusal cases below are sparse and never read their bodies.
                         original += bytes(64 * 1024 * 1024 + 1 - len(original))
+                    if size_case == "actual-desktop":
+                        original += bytes(79_873_752 - len(original))
                     signed = self.signed_macho_fixture(original)
                     binary.write_bytes(original); binary.chmod(0o755)
                     if refused_input:
                         with binary.open("r+b") as stream:
-                            stream.truncate((64 * 1024 * 1024 if size_case == "above64" else TOOL.OBSERVER_BINARY_BYTES) + 1)
+                            stream.truncate((64 * 1024 * 1024 if size_case == "above64" else maximum) + 1)
                         if size_case == "metadata-and-oversize":
                             binary.chmod(0o644)
                     if launcher:
@@ -7887,7 +7898,7 @@ sys.exit(status)
                             replacement.write_bytes(signed); replacement.chmod(0o755)
                             if refused_output:
                                 with replacement.open("r+b") as stream:
-                                    stream.truncate(TOOL.OBSERVER_BINARY_BYTES + 1)
+                                    stream.truncate(maximum + 1)
                             replacement.replace(binary)
                             if launcher:
                                 seal = selected / "Contents/_CodeSignature/CodeResources"

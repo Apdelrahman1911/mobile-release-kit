@@ -44,6 +44,17 @@ def inventory_fixture():
 
 
 class OrdinaryDesktopUpdateTests(unittest.TestCase):
+    def test_actual_desktop_size_traverses_original_signer_and_retains_strict_refusals(self):
+        # The pre-compilation DATA job must exercise the actual fixed signer,
+        # not merely verify that the ordinary inventory contains the dylib.
+        # All credential/signature returns are inert fixtures, never native.
+        from tests.desktop.test_macos_installed_staging import MacAndroidHelperPackagingData, TOOL
+        # The attribute port, like the credential/native-return ports, is
+        # inert DATA here. This is size/signing custody coverage, never proof
+        # that a local checkout or package passes the actual attribute gate.
+        with patch.object(TOOL, 'no_xattrs', return_value=None):
+            MacAndroidHelperPackagingData().test_fixed_workflow_signing_roles_use_original_inputs_and_identity()
+
     def test_current_launcher_versions_match_real_application_and_package(self):
         # Run 41291931705 refused assembly before Swift compilation because
         # the launcher still said 0.1.2 while the application/package was 0.1.3.
