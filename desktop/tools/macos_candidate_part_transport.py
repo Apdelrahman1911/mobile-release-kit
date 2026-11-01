@@ -87,6 +87,11 @@ def roster(part, origin=None):
     if part == 'assemble' and origin and origin['nativeScope'] == 'disabled':
         return (*ROSTER[part], 'work/android-helper-sign-applications-launcher.json',
                 'work/android-helper-sign-desktop-image.json')
+    if part == 'scripts-package' and origin and origin['nativeScope'] == 'disabled':
+        # The ordinary recipe creates a component for the next productbuild.
+        # The observer recipe already creates its flat unsigned package.
+        return tuple('work/package-component' if name == 'work/package-unsigned' else name
+                     for name in ROSTER[part])
     return ROSTER[part]
 
 

@@ -44,6 +44,61 @@ def inventory_fixture():
 
 
 class OrdinaryDesktopUpdateTests(unittest.TestCase):
+    def test_scripts_package_exports_the_recipe_component_for_the_final_product(self):
+        recipe = yaml('.github/actions/macos-candidate-recipes/'
+                      'build-the-fixed-one-shot-root-installer-and-scripts-/action.yml')
+        command = recipe['runs']['steps'][0]['run']
+        # Exercise the source recipe's closed role selection, without pkgbuild,
+        # signing, credentials, or native installation.
+        selection = command[command.index('case "${MRK_MACOS_PACKAGE_ROLE-}" in'):
+                            command.index('/bin/mkdir -m 700 "$package_output"')]
+        import subprocess
+        for ordinary in (True, False):
+            manifest = ordinary_fixture('scripts-package')[0] if ordinary else native_fixture('scripts-package')[0]
+            origin = manifest['origin']
+            role = 'ordinary-image' if ordinary else 'installed-shell-observation'
+            output = 'package-component' if ordinary else 'package-unsigned'
+            other = 'package-unsigned' if ordinary else 'package-component'
+            with self.subTest(role=role), tempfile.TemporaryDirectory(
+                    dir=Path(os.environ['MRK_PART_TEST_ROOT']).resolve(strict=True)) as temporary:
+                root = Path(temporary)
+                work = root / manifest['workName']; work.mkdir(mode=0o700)
+                workspace = root / 'source'; workspace.mkdir(mode=0o700)
+                selected = subprocess.run(['/bin/bash', '-c', selection + 'printf "%s" "$package_output"'],
+                    env=dict(PATH='/usr/bin:/bin', MRK_MACOS_WORK=str(work), MRK_MACOS_PACKAGE_ROLE=role),
+                    check=True, capture_output=True, timeout=5)
+                self.assertEqual(selected.stdout, str(work / output).encode())
+                self.assertEqual(selected.stderr, b'')
+                expected = tuple('work/' + output if n == 'work/package-unsigned' else n
+                                 for n in T.ROSTER['scripts-package'])
+                # The real held-file/roster/archive/project readers execute.
+                # Only the attribute port is inert DATA, never qualification.
+                with patch.object(T.S, 'no_xattrs', return_value=None):
+                    for name in expected:
+                        path = T.destination(name, work, workspace)
+                        if name in ('work/scripts', 'work/package-parts', 'work/' + output):
+                            path.mkdir(mode=0o700)
+                            T.write(path / ('MobileReleaseKit.pkg' if name == 'work/' + output else 'inert'), b'inert\n')
+                        else:
+                            T.write(path, b'inert\n')
+                    files, directories = T.selected_files('scripts-package', work, workspace, origin)
+                    self.assertIn('work/' + output + '/MobileReleaseKit.pkg', files)
+                    self.assertNotIn('work/' + other, directories)
+                    self.assertFalse(T.permitted('scripts-package', 'work/' + other + '/MobileReleaseKit.pkg', origin=origin))
+                    manifest['members'] = [files[n] for n in sorted(files)]
+                    manifest['directories'] = [dict(path=n, mode=m) for n, m in sorted(directories.items())]
+                    archive = root / 'scripts-part.zip'
+                    T.encode_archive(archive, manifest, files, work, workspace)
+                    self.assertEqual(T.archive_manifest(archive), manifest)
+                    fresh = root / 'fresh'; fresh.mkdir(mode=0o700)
+                    T.project_archive(archive, manifest, fresh, workspace, {n: 'scripts-package' for n in files})
+                    self.assertEqual(T.read(fresh / output / 'MobileReleaseKit.pkg', 16), b'inert\n')
+                    self.assertEqual(T.selected_files('scripts-package', fresh, workspace, origin), (files, directories))
+                    (fresh / output / 'MobileReleaseKit.pkg').unlink()
+                    (fresh / output).rmdir()
+                    with self.assertRaises(FileNotFoundError):
+                        T.selected_files('scripts-package', fresh, workspace, origin)
+
     def test_actual_desktop_size_traverses_original_signer_and_retains_strict_refusals(self):
         # The pre-compilation DATA job must exercise the actual fixed signer,
         # not merely verify that the ordinary inventory contains the dylib.
