@@ -8716,9 +8716,16 @@ class Operation:
         # Saved-package jobs have a cold Cargo cache, unlike the original
         # build job. Only these two nonshipping compiler calls get this budget;
         # signing, emitter, Installer, readback and detach caps are unchanged.
-        return (900 if getattr(self, "phase", None) == "package-install"
-            and prepared is not None and prepared.native_compatible
-            and prepared.origin.get("nativeScope") in ("git-native", "tool-setup") else 480)
+        if (getattr(self, "phase", None) != "package-install"
+                or prepared is None or not prepared.native_compatible):
+            return 480
+        origin = prepared.origin
+        # The ordinary saved Desktop uses the SAME exact producer test/build
+        # graph on a fresh runner. It has no observer nativeScope; omitting this
+        # role incorrectly selected the original warm-build480 profile.
+        ordinary = ("nativeScope" not in origin
+            and prepared.manifest["packageRole"] == "ordinary-image")
+        return 900 if ordinary or origin.get("nativeScope") in ("git-native", "tool-setup") else 480
 
     def package_producer_compile(self, environment):
         seconds = self.package_compiler_seconds()

@@ -786,7 +786,7 @@ class CandidateCheckpointTests(unittest.TestCase):
         finally:
             os.umask(previous)
 
-    def test_cold_producer_budget_does_not_extend_native_calls_or_ordinary_installs(self):
+    def test_cold_producer_budget_does_not_extend_native_calls_or_nonprepared_installs(self):
         from tests.desktop.test_macos_installed_staging import ANDROID_HELPER as H
         values, _, service, consumer = native_fixture('tool-setup')
         prepared = P.admit_data(values, service, consumer)
@@ -820,6 +820,48 @@ class CandidateCheckpointTests(unittest.TestCase):
         with self.assertRaises(H.Refused):
             H.package_timeout_data(898_000_000_000,900_000_000_000,900,
                 phase='package-install',role='producer-build',prepared_compiler=True)
+
+    def test_cold_ordinary_saved_package_keeps_the_same_producer_graph_and_shared_deadline(self):
+        from tests.desktop.test_macos_installed_staging import ANDROID_HELPER as H
+        output = (b'\nrunning 1 test\ntest emitter::tests::fixed_cli_and_original_state_data_refuse_ambient_or_partial_routes ... ok\n\n'
+                  b'test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.00s\n\n')
+        ordinary_values, _, ordinary_service, ordinary_consumer = fixture()
+        ordinary = P.admit_data(ordinary_values, ordinary_service, ordinary_consumer)
+        native_values, _, native_service, native_consumer = native_fixture('tool-setup')
+        native = P.admit_data(native_values, native_service, native_consumer)
+        class Compiler(H.Operation):
+            def __init__(self, prepared):
+                self.phase='package-install';self.prepared_binding=prepared
+                self.target=P.TARGETS[0];self.checkout=Path('/inert/source');self.work=Path('/inert/work')
+                self.target_name='compiler';self.image_package_version='0.2.0'
+                self.package_endpoint=1410_000_000_000;self.now=0;self.calls=[]
+            def package_clock(self):return self.now
+            def package_call(self, role, argv, **options):
+                self.calls.append((role, tuple(argv), options['timeout'], dict(options['environment'])))
+                self.now+=(600 if role=='producer-tests' else 50)*1_000_000_000
+                return subprocess.CompletedProcess(argv,0,output if role=='producer-tests' else b'INERT graph',b'')
+        calls=[]
+        for binding in (ordinary, native):
+            compiler=Compiler(binding)
+            with mock.patch.object(H, 'producer_artifact', return_value=Path('/inert/program')):
+                self.assertEqual(compiler.package_producer_compile({}), Path('/inert/program'))
+            self.assertEqual([(r, seconds) for r, _, seconds, _ in compiler.calls],
+                             [('producer-tests',897), ('producer-build',297)])
+            calls.append(compiler.calls)
+            # One shared compiler endpoint: the second call cannot renew it.
+            compiler=Compiler(binding)
+            compiler.package_endpoint=602_000_000_000
+            with mock.patch.object(H, 'producer_artifact'), self.assertRaises(H.Refused):
+                compiler.package_producer_compile({})
+            self.assertEqual(len(compiler.calls),1)
+        self.assertEqual(calls[0],calls[1])
+        for phase in ('package-remove','prepare','finalize-image'):
+            compiler=Compiler(ordinary);compiler.phase=phase
+            self.assertEqual(compiler.package_compiler_seconds(),480)
+        compiler=Compiler(None)
+        self.assertEqual(compiler.package_compiler_seconds(),480)
+        # These are inert compiler clocks/results. No native, signing, package
+        # installation, cached output or original return is qualified here.
 
     def test_streaming_census_enforces_real_expansion_and_complete_single_stream(self):
         body=b'inert payload\n'*100000
