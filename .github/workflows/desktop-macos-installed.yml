@@ -1,6 +1,6 @@
 name: Desktop Mac candidate build and independent checks
 run-name: >-
-  ${{ github.event_name == 'workflow_dispatch' && inputs.operation == 'git-cli-process-data' && 'macOS / installed Git process text diagnostic / saved Git27' || github.event_name == 'workflow_dispatch' && inputs.operation == 'command-startup-data' && 'macOS / small original command startup comparison' || github.event_name == 'workflow_dispatch' && inputs.operation == 'git-cli-timing' && 'macOS / installed Git timing / saved Git27' || github.event_name == 'workflow_dispatch' && inputs.operation == 'candidate-tests' && format('macOS check / {0} / saved build {1}', inputs.test_group, inputs.prepared_run) || format('macOS / {0} / {1}', github.event_name == 'workflow_dispatch' && inputs.operation || 'candidate builds', github.ref_name) }}
+  ${{ github.event_name == 'workflow_dispatch' && inputs.operation == 'git-cli-process-data' && 'macOS / installed Git process text diagnostic / saved Git27' || github.event_name == 'workflow_dispatch' && inputs.operation == 'command-startup-data' && 'macOS / small original command startup comparison' || github.event_name == 'workflow_dispatch' && inputs.operation == 'git-cli-timing' && 'macOS / installed Git timing / saved Git27' || github.event_name == 'workflow_dispatch' && inputs.operation == 'candidate-tests' && format('macOS check / {0} / saved build {1}', inputs.test_group, inputs.prepared_run) || github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-macos-candidate' && contains(github.event.head_commit.message, '[macos-builds-only]') && 'macOS / signed package builds only / Git tests skipped' || format('macOS / {0} / {1}', github.event_name == 'workflow_dispatch' && inputs.operation || 'candidate builds', github.ref_name) }}
 
 on:
   workflow_dispatch:
@@ -3006,9 +3006,11 @@ jobs:
     if: github.repository == 'Apdelrahman1911/mobile-release-kit' && github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/verify/desktop-macos-candidate' && inputs.operation == 'candidate-python-source' && inputs.target == 'aarch64-apple-darwin' && github.sha == github.workflow_sha
     uses: ./.github/workflows/desktop-macos-candidate-python-source.yml
 
+  # A reviewed push marked [macos-builds-only] exports both signed packages
+  # without starting functional checks. Saved-package dispatches stay explicit.
   candidate-tests:
     needs: [engineering-install, candidate-tool26-final-package, candidate-git27-final-package]
-    if: ${{ !cancelled() && github.ref == 'refs/heads/verify/desktop-macos-candidate' && ((github.event_name == 'push' && needs.candidate-tool26-final-package.result == 'success' && needs.candidate-git27-final-package.result == 'success') || (github.event_name == 'workflow_dispatch' && (inputs.operation == 'candidate-tests' || inputs.operation == 'local-carrier' || inputs.operation == 'git-cli-timing' || inputs.operation == 'git-cli-process-data'))) }}
+    if: ${{ !cancelled() && github.ref == 'refs/heads/verify/desktop-macos-candidate' && ((github.event_name == 'push' && !contains(github.event.head_commit.message, '[macos-builds-only]') && needs.candidate-tool26-final-package.result == 'success' && needs.candidate-git27-final-package.result == 'success') || (github.event_name == 'workflow_dispatch' && (inputs.operation == 'candidate-tests' || inputs.operation == 'local-carrier' || inputs.operation == 'git-cli-timing' || inputs.operation == 'git-cli-process-data'))) }}
     uses: ./.github/workflows/desktop-macos-candidate-tests.yml
     secrets: inherit
 

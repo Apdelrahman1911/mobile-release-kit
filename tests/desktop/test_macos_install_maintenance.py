@@ -12,6 +12,24 @@ INPUTS = ROOT / "desktop/macos-installed-inputs"
 
 
 class MacMaintenancePreparationTests(unittest.TestCase):
+    def test_launcher_history_keeps_authenticated_predecessor_inventory_contract(self):
+        # A historical inventory is complete under its selected release's
+        # frozen contract. Re-parsing it through the current default loses
+        # that selection before LauncherInventory performs its own index check.
+        source = (ROOT / "desktop/src-tauri/src/macos_applications_native.rs").read_text()
+        capture = source[source.index("pub(super) fn capture("):source.index("pub(super) fn close_for_reobservation(")]
+        admit = source[source.index("pub(super) fn admit("):source.index("pub(super) fn admit(") + 3500]
+        for section, raw in ((capture, "&bytes"), (admit, "inventory_bytes")):
+            with self.subTest(reader=raw):
+                self.assertIn(f"Inventory::parse_for_selected_release({raw}, generation.release_data())?", section)
+                self.assertNotIn("Inventory::parse_for_release(", section)
+                self.assertLess(section.index("binding.inventory_sha256"),
+                                section.index("Inventory::parse_for_selected_release("))
+        record = (ROOT / "desktop/src-tauri/src/macos_install_record.rs").read_text()
+        selected = record[record.index("pub fn parse_for_selected_release("):record.index("pub fn parse_for_release(")]
+        self.assertLess(selected.index('digest(bytes) == binding.inventory_sha256'),
+                        selected.index('selected_inventory_contract(binding)'))
+
     def test_distribution_is_local_fixed_declarative_and_not_relocatable(self):
         root = ET.fromstring((INPUTS / "Distribution.xml").read_bytes())
         self.assertEqual(root.tag, "installer-gui-script")

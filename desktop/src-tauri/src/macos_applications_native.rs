@@ -140,7 +140,7 @@ impl Observation {
             let (reader, bytes) = maintenance::metadata_original(book,release,
                 installation_record::INVENTORY_NAME,installation_record::INVENTORY_LIMIT)?;
             check(format!("{:x}",Sha256::digest(&bytes)) == binding.inventory_sha256, "launcher-generation-inventory")?;
-            let inventory = Inventory::parse_for_release(&bytes,binding.runtime_manifest_sha256,binding.release)?;
+            let inventory = Inventory::parse_for_selected_release(&bytes, generation.release_data())?;
             let material = Material::from_index(&inventory.index()?)?;
             book.check_name(reader,true)?;
             book.forward_close(reader,"launcher-generation-inventory-close")?;
@@ -1029,7 +1029,7 @@ impl Workspace {
         let binding = generation.release_data().binding_data();
         check(format!("{:x}", Sha256::digest(inventory_bytes)) == binding.inventory_sha256,
             "launcher-generation-binding")?;
-        let inventory = Inventory::parse_for_release(inventory_bytes, binding.runtime_manifest_sha256, binding.release)?;
+        let inventory = Inventory::parse_for_selected_release(inventory_bytes, generation.release_data())?;
         launcher::LauncherInventory::from_index(&inventory.index()?)?.ok_or("launcher-inventory-missing")?;
         let instance = generation.instance_data();
         check(worker::invocation_valid(instance), "launcher-generation-instance")?;

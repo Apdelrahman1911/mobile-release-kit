@@ -1144,6 +1144,50 @@ class CandidateWorkflowTests(unittest.TestCase):
             with self.subTest(name=name):
                 self.assertLessEqual((ROOT/'.github/workflows'/name).stat().st_size,500*1024)
 
+    def test_builds_only_push_keeps_both_producers_and_skips_automatic_git(self):
+        # Evaluate the actual caller conditions against event DATA, including
+        # settled build failures and explicit saved-package dispatches.
+        def selected(expression, *, event='push', message='', ref='verify/desktop-macos-candidate',
+                     operation='', tool='success', git='success', cancelled=False):
+            values = {
+                'github.event.head_commit.message': message,
+                'github.event_name': event,
+                'github.ref': 'refs/heads/' + ref,
+                'inputs.operation': operation,
+                'needs.candidate-tool26-final-package.result': tool,
+                'needs.candidate-git27-final-package.result': git,
+            }
+            expression = expression.removeprefix('${{').removesuffix('}}').strip()
+            for key, value in values.items():
+                expression = expression.replace(key, repr(value))
+            expression = expression.replace('!cancelled()', repr(not cancelled))
+            expression = expression.replace('!contains(', 'not contains(')
+            expression = expression.replace('&&', ' and ').replace('||', ' or ')
+            return eval(expression, {'__builtins__': {},
+                'contains': lambda value, part: part.lower() in value.lower()})
+
+        marker = '[macos-builds-only]'
+        caller = self.workflow['jobs']['candidate-tests']['if']
+        self.assertIn("!contains(github.event.head_commit.message, '[macos-builds-only]')", caller)
+        for message, expected in (('ordinary correction', True),
+                                  ('installer correction ' + marker, False)):
+            with self.subTest(message=message):
+                self.assertEqual(selected(caller, message=message), expected)
+                producers = {name: job for name, job in self.workflow['jobs'].items()
+                    if name.startswith(('candidate-tool26-', 'candidate-git27-'))}
+                self.assertEqual(len(producers), 28)
+                self.assertTrue(all(selected(job['if'], message=message) for job in producers.values()))
+                self.assertTrue(selected(self.workflow['jobs']['candidate-parts-data']['if'], message=message))
+        for failure in ({'tool': 'failure'}, {'git': 'failure'}, {'cancelled': True},
+                        {'ref': 'codex/macos-git-read-continuation'}):
+            with self.subTest(failure=failure):
+                self.assertFalse(selected(caller, **failure))
+        for operation in ('candidate-tests', 'local-carrier', 'git-cli-timing', 'git-cli-process-data'):
+            with self.subTest(operation=operation):
+                self.assertTrue(selected(caller, event='workflow_dispatch', message=marker,
+                    operation=operation, tool='skipped', git='skipped'))
+        self.assertFalse(selected(caller, event='workflow_dispatch', operation='prepared-install'))
+
     @classmethod
     def saved_test_job(cls):
         caller=cls.workflow['jobs']['candidate-tests']
