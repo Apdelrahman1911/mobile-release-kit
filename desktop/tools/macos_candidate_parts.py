@@ -19,6 +19,8 @@ MEMBER_LIMIT = 512 * 1024 * 1024
 TOTAL_LIMIT = 2 * 1024 * 1024 * 1024
 MAX_MEMBERS = 32768
 PROFILES = MappingProxyType({'tool-setup': ('Tool26', 'macos-26'), 'git-native': ('Git27', 'xcode-27')})
+ORDINARY_PROFILE = ('Desktop26', 'macos-26')
+ORDINARY_CALLER = 'Desktop update'
 EXTRA_STEPS = {
     'prepare': ('Bind the complete reviewed first-party checkout before compilation',
                 'Prepare the current payload from the independently accepted fresh Python supplier',
@@ -70,6 +72,26 @@ ORIGINAL_CUTS = MappingProxyType({
                'Retain prepared signed input for failed-job-only installation retries',
                "Retire only the completed candidate's disposable compiler outputs"),
 })
+ORDINARY_PARTS = MappingProxyType({
+    ('image' if name == 'observer' else name): tuple('image' if prior == 'observer' else prior for prior in deps)
+    for name, deps in PARTS.items()
+})
+ORDINARY_CUTS = MappingProxyType(dict({k: v for k, v in ORIGINAL_CUTS.items() if k != 'observer'},
+    image=('Build the genuine ordinary Desktop image',
+           'Record the effective pinned ordinary Desktop compiler'),
+    assemble=('Assemble the ordinary Desktop and signed launcher inside-out',),
+    **{'notarize-payload': (*ORIGINAL_CUTS['notarize-payload'],
+        'Require all five launcher leaves and the functional ordinary Desktop before Installer compilation')},
+    **{'final-package': ('Sign and notarize the completed ordinary Desktop package',
+                        *ORIGINAL_CUTS['final-package'][1:])}))
+
+
+def parts(origin=None):
+    return ORDINARY_PARTS if origin and origin['nativeScope'] == 'disabled' else PARTS
+
+
+def cuts(part, origin):
+    return (ORDINARY_CUTS if origin['nativeScope'] == 'disabled' else ORIGINAL_CUTS)[part]
 
 
 def need(value, reason):
@@ -110,39 +132,49 @@ def origin_data(value):
         'jobId', 'nativeScope', 'hostProfile'} and all(hex_data(value[k], 40) for k in ('source', 'tree'))
         and all(decimal(value[k]) for k in ('runId', 'runAttempt', 'jobId'))
         and value['target'] == TARGET and type(value['nativeScope']) is str
-        and value['nativeScope'] in PROFILES and value['hostProfile'] == PROFILES[value['nativeScope']][1],
+        and value['nativeScope'] in (*PROFILES, 'disabled')
+        and value['hostProfile'] == (ORDINARY_PROFILE if value['nativeScope'] == 'disabled'
+                                    else PROFILES[value['nativeScope']])[1],
         'part-origin')
     return dict(value)
 
 
 def part_name(value):
-    need(type(value) is str and value in PARTS, 'part-name')
+    need(type(value) is str and value in (*PARTS, 'image'), 'part-name')
     return value
 
 
 def artifact_name(part, origin):
     part, origin = part_name(part), origin_data(origin)
+    need(part in parts(origin), 'part-profile-roster')
     return '-'.join(('macos-candidate-part', part, origin['nativeScope'], origin['source'],
                      origin['runId'], origin['runAttempt']))
 
 
 def job_name(part, origin):
     part, origin = part_name(part), origin_data(origin)
+    need(part in parts(origin), 'part-profile-roster')
+    if origin['nativeScope'] == 'disabled':
+        title = ('Build signed candidate (Desktop26)' if part == 'final-package'
+                 else 'macOS part (Desktop26 / ' + part + ')')
+        return ORDINARY_CALLER + ' / ' + title
     if part == 'final-package':
         return 'Build signed candidate (' + PROFILES[origin['nativeScope']][0] + ')'
     return 'macOS part (' + PROFILES[origin['nativeScope']][0] + ' / ' + part + ')'
 
 
-def ancestors(part):
+def ancestors(part, origin=None):
     part_name(part)
+    graph = parts(origin)
+    need(part in graph, 'part-profile-roster')
     result = set()
     def visit(current):
-        for prior in PARTS[current]:
+        for prior in graph[current]:
             if prior not in result:
                 result.add(prior)
                 visit(prior)
     visit(part)
-    return tuple(name for name in PARTS if name in result)
+    return tuple(name for name in graph if name in result)
 
 
 def same_candidate(left, right):
@@ -173,11 +205,12 @@ def manifest_data(value):
          and all(value[k] is False for k in ('nativeAuthority', 'installed', 'productReady')),
          'part-manifest')
     part, origin = part_name(value['part']), origin_data(value['origin'])
+    need(part in parts(origin), 'part-profile-roster')
     need(type(value['workName']) is str and re.fullmatch(r'mrk-macos-installed\.[A-Za-z0-9]{8}', value['workName']),
          'part-work-name')
     deps = value['dependencies']
-    need(type(deps) is list and len(deps) == len(ancestors(part))
-         and [d.get('part') if type(d) is dict else None for d in deps] == list(ancestors(part)),
+    need(type(deps) is list and len(deps) == len(ancestors(part, origin))
+         and [d.get('part') if type(d) is dict else None for d in deps] == list(ancestors(part, origin)),
          'part-dependency-roster')
     for row in deps:
         need(set(row) == {'part', 'origin', 'artifactId', 'artifactSha256', 'manifestSha256'}
@@ -226,11 +259,12 @@ def service_metadata_data(run, job, artifact, part, origin):
          and type(job.get('run_id')) is int and job['run_id'] == run['id']
          and type(job.get('run_attempt')) is int and job['run_attempt'] == int(origin['runAttempt'])
          and job.get('head_sha') == origin['source'] and job.get('status') == 'completed'
-         and job.get('conclusion') == 'success' and job.get('name') in (title, 'Candidate parts / ' + title)
+         and job.get('conclusion') == 'success'
+         and job.get('name') in ((title,) if origin['nativeScope'] == 'disabled' else (title, 'Candidate parts / ' + title))
          and job.get('labels') == [origin['hostProfile']], 'part-actual-job')
     steps = job.get('steps')
     need(type(steps) is list and 0 < len(steps) <= 128, 'part-actual-steps')
-    required = (*ORIGINAL_CUTS[part], *EXTRA_STEPS.get(part, ()),
+    required = (*cuts(part, origin), *EXTRA_STEPS.get(part, ()),
                 'Verify and freeze completed part originals', 'Upload immutable completed part')
     for name in required:
         rows = [s for s in steps if type(s) is dict and s.get('name') == name]
@@ -255,11 +289,12 @@ def metadata_data(run, job, artifact, manifest):
 
 def ready_parts(statuses):
     """A failed part is retried; its successful ancestors stay completed."""
-    need(type(statuses) is dict and set(statuses) == set(PARTS)
+    graph = ORDINARY_PARTS if type(statuses) is dict and set(statuses) == set(ORDINARY_PARTS) else PARTS
+    need(type(statuses) is dict and set(statuses) == set(graph)
          and all(type(v) is str and v in ('pending', 'running', 'success', 'failure', 'skipped')
                  for v in statuses.values()), 'part-status-roster')
-    return tuple(part for part in PARTS if statuses[part] in ('pending', 'failure', 'skipped')
-                 and all(statuses[prior] == 'success' for prior in PARTS[part]))
+    return tuple(part for part in graph if statuses[part] in ('pending', 'failure', 'skipped')
+                 and all(statuses[prior] == 'success' for prior in graph[part]))
 
 
 if __name__ == '__main__':

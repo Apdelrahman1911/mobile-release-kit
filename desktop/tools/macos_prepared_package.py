@@ -36,6 +36,8 @@ NATIVE_PRODUCER_STEPS = (
 NATIVE_HOSTS = {'tool-setup': 'macos-26', 'git-native': 'xcode-27'}
 NATIVE_JOB_NAMES = {'tool-setup': 'Build signed candidate (Tool26)',
                     'git-native': 'Build signed candidate (Git27)'}
+ORDINARY_SPLIT_JOB = 'Desktop update / Build signed candidate (Desktop26)'
+ORDINARY_SPLIT_STEPS = ('Sign and notarize the completed ordinary Desktop package', *PRODUCER_STEPS[1:])
 _SEAL = object()
 
 
@@ -127,6 +129,8 @@ def manifest_data(value):
 
 def producer_steps_data(job, *, native=False):
     required = NATIVE_PRODUCER_STEPS if native else PRODUCER_STEPS
+    if not native and job.get('name') == ORDINARY_SPLIT_JOB:
+        required = ORDINARY_SPLIT_STEPS
     steps = job.get('steps')
     need(type(steps) is list and len(required) <= len(steps) <= 256
          and all(type(row) is dict and type(row.get('number')) is int and 0 < row['number'] <= 256 for row in steps)
@@ -151,8 +155,11 @@ def metadata_data(run, job, artifact, manifest):
          and run['repository'].get('full_name') == REPOSITORY, 'prepared-service-run')
     need(all(type(job.get(k)) is int and job[k] == int(origin[v]) for k, v in (('id', 'jobId'), ('run_id', 'runId'), ('run_attempt', 'runAttempt')))
          and job.get('head_sha') == origin['source']
-         and job.get('name') == (NATIVE_JOB_NAMES[native_scope] if native_scope else 'normal-installed-' + origin['target']),
+         and job.get('name') in ((NATIVE_JOB_NAMES[native_scope],) if native_scope else
+                                ('normal-installed-' + origin['target'], ORDINARY_SPLIT_JOB)),
          'prepared-service-job')
+    if job.get('name') == ORDINARY_SPLIT_JOB:
+        need(origin['target'] == TARGETS[0] and job.get('labels') == ['macos-26'], 'prepared-desktop-host')
     producer_steps_data(job, native=native_scope is not None)
     producer = artifact.get('workflow_run')
     need(type(artifact.get('id')) is int and artifact['id'] > 0 and artifact.get('name') == artifact_name(origin)
@@ -186,6 +193,14 @@ LOCAL_CARRIER_FILES = {
 
 
 def local_carrier_transport_data(values, consumer):
+    return _local_carrier_transport_data(values, consumer, ordinary=False)
+
+
+def ordinary_local_carrier_transport_data(values, consumer):
+    return _local_carrier_transport_data(values, consumer, ordinary=True)
+
+
+def _local_carrier_transport_data(values, consumer, *, ordinary):
     """Correlate already signed output DATA; grant no local/native authority."""
     from desktop.tools import stage_macos_installed as stager
     need(type(values) is dict and set(values) == set(LOCAL_CARRIER_FILES)
@@ -193,15 +208,17 @@ def local_carrier_transport_data(values, consumer):
                  for n, limit in LOCAL_CARRIER_FILES.items()), 'local-carrier-roster')
     need(values['package-install.status'] == b'0\n', 'local-carrier-original-status')
     manifest = manifest_data(decode(values['prepared-input/PREPARED.json'], MANIFEST_LIMIT))
-    need(manifest['origin'].get('nativeScope') == 'tool-setup'
-         and manifest['origin'].get('hostProfile') == 'macos-26', 'local-carrier-tool-source')
-    need(type(consumer) is dict and set(consumer) == {
-        'source', 'tree', 'target', 'runId', 'runAttempt', 'nativeScope', 'hostProfile'}
+    need((ordinary and 'nativeScope' not in manifest['origin'] and manifest['packageRole'] == 'ordinary-image'
+          and manifest['origin']['target'] == TARGETS[0]) or
+         (not ordinary and manifest['origin'].get('nativeScope') == 'tool-setup'
+          and manifest['origin'].get('hostProfile') == 'macos-26'), 'local-carrier-tool-source')
+    fields = {'source', 'tree', 'target', 'runId', 'runAttempt'}
+    need(type(consumer) is dict and set(consumer) == (fields if ordinary else fields | {'nativeScope', 'hostProfile'})
          and all(hex_data(consumer[k], 40) for k in ('source', 'tree'))
          and all(decimal(consumer[k]) for k in ('runId', 'runAttempt'))
          and consumer['target'] == manifest['origin']['target']
          and (consumer['source'] != manifest['origin']['source'] or consumer['tree'] == manifest['origin']['tree'])
-         and consumer['nativeScope'] == 'tool-setup' and consumer['hostProfile'] == 'macos-26',
+         and (ordinary or consumer['nativeScope'] == 'tool-setup' and consumer['hostProfile'] == 'macos-26'),
          'local-carrier-consumer')
     descriptor, signed = values['producer-root/producer.json'], values['producer-root/producer.sig']
     current = stager.maintenance_producer_data(descriptor, target=consumer['target'])['releaseSet']['current']
@@ -215,7 +232,7 @@ def local_carrier_transport_data(values, consumer):
         'schemaVersion': 1, 'phase': 'package-install', 'target': consumer['target'],
         'source': consumer['source'], 'workflowSource': consumer['source'],
         'runId': consumer['runId'], 'runAttempt': consumer['runAttempt'],
-        'packageRole': 'installed-shell-observation', 'passed': True,
+        'packageRole': 'ordinary-image' if ordinary else 'installed-shell-observation', 'passed': True,
         'originalClosesKnown': True, 'targetRetired': True,
         'directStagerIOPending': None, 'cleanupErrors': []}.items()), 'local-carrier-owner')
     calls = receipt.get('originalCalls')
@@ -379,7 +396,7 @@ def consumer_data(environment, tree, target):
 def admit_data(values, service, consumer):
     manifest = cohort_data(values)
     need(type(service) is dict and {'run','job','artifact'} <= set(service)
-         and set(service) <= {'run','job','artifact','compatibility','compiledObserver'}, 'prepared-service-records')
+         and set(service) <= {'run','job','artifact','compatibility','compiledObserver','compiledImage'}, 'prepared-service-records')
     artifact = metadata_data(service['run'], service['job'], service['artifact'], manifest)
     native = {k: manifest['origin'][k] for k in ('nativeScope', 'hostProfile') if k in manifest['origin']}
     need(type(consumer) is dict and set(consumer) == {'source', 'tree', 'target', 'runId', 'runAttempt'} | set(native)
@@ -397,6 +414,11 @@ def admit_data(values, service, consumer):
     if 'compiledObserver' in service:
         need(bool(native), 'prepared-observer-originals')
         compiled = compiled_observer_metadata_data(service['compiledObserver'], manifest['origin'])
+    if service['job'].get('name') == ORDINARY_SPLIT_JOB:
+        need(not native and 'compiledImage' in service, 'prepared-desktop-originals')
+        compiled_image_metadata_data(service['compiledImage'], manifest['origin'])
+    elif 'compiledImage' in service:
+        raise ValueError('prepared-desktop-unnecessary')
     return PreparedBinding(_SEAL, manifest, consumer, artifact, compatible, compiled)
 
 
@@ -900,13 +922,76 @@ def selected_compiled_observer_data(artifacts, jobs, run_body, package_origin):
     return selected
 
 
+def retained_image_attempt_data(body, source, run, target):
+    from desktop.tools import macos_candidate_parts as parts
+    need(hex_data(source, 40) and decimal(run) and target == TARGETS[0], 'prepared-desktop-originals')
+    value = decode(body, 8 * MIB)
+    need(type(value) is dict and type(value.get('artifacts')) is list and type(value.get('total_count')) is int
+         and len(value['artifacts']) == value['total_count'] <= 100, 'prepared-desktop-page-complete')
+    prefix = 'macos-candidate-part-image-disabled-' + source + '-' + run + '-'
+    rows = [a for a in value['artifacts'] if type(a) is dict and type(a.get('name')) is str
+            and a['name'].startswith(prefix) and decimal(a['name'][len(prefix):])]
+    need(len(rows) == 1, 'prepared-one-desktop-original')
+    a = rows[0]
+    need(type(a.get('id')) is int and a['id'] > 0 and a.get('expired') is False
+         and type(a.get('size_in_bytes')) is int and 22 <= a['size_in_bytes'] <= parts.TOTAL_LIMIT
+         and type(a.get('digest')) is str and re.fullmatch('sha256:[0-9a-f]{64}', a['digest'])
+         and a.get('workflow_run', {}).get('id') == int(run)
+         and a['workflow_run'].get('head_sha') == source and a['workflow_run'].get('head_branch') == BRANCH,
+         'prepared-desktop-originals')
+    return a['name'][len(prefix):]
+
+
+def compiled_image_metadata_data(value, package_origin):
+    """The ordinary cdylib's successful original part, never an observer donor."""
+    from desktop.tools import macos_candidate_parts as parts
+    origin = origin_data(package_origin)
+    need('nativeScope' not in origin and origin['target'] == TARGETS[0]
+         and type(value) is dict and set(value) == {'run', 'job', 'artifact'}, 'prepared-desktop-originals')
+    job = value['job']
+    need(type(job) is dict and type(job.get('id')) is int and job['id'] > 0
+         and type(job.get('run_attempt')) is int and 0 < job['run_attempt'] <= int(origin['runAttempt']),
+         'prepared-desktop-originals')
+    compiled = dict(origin, jobId=str(job['id']), runAttempt=str(job['run_attempt']),
+                    nativeScope='disabled', hostProfile='macos-26')
+    parts.service_metadata_data(value['run'], job, value['artifact'], 'image', compiled)
+    return compiled
+
+
+def selected_compiled_image_data(artifacts, jobs, run_body, package_origin):
+    from desktop.tools import macos_candidate_parts as parts
+    origin = origin_data(package_origin)
+    need('nativeScope' not in origin and origin['target'] == TARGETS[0], 'prepared-desktop-originals')
+    listing, page = decode(artifacts, 8 * MIB), decode(jobs, 8 * MIB)
+    need(all(type(v) is dict and type(v.get(k)) is list and type(v.get('total_count')) is int
+             and len(v[k]) == v['total_count'] <= 100 for v, k in ((listing, 'artifacts'), (page, 'jobs'))),
+         'prepared-desktop-page-complete')
+    candidates = []
+    for job in page['jobs']:
+        if type(job) is not dict or job.get('name') != 'Desktop update / macOS part (Desktop26 / image)':
+            continue
+        if type(job.get('run_attempt')) is not int or type(job.get('id')) is not int:
+            continue
+        compiled = dict(origin, jobId=str(job['id']), runAttempt=str(job['run_attempt']),
+                        nativeScope='disabled', hostProfile='macos-26')
+        matched = [a for a in listing['artifacts'] if type(a) is dict
+                   and a.get('name') == parts.artifact_name('image', compiled) and a.get('expired') is False]
+        if len(matched) == 1:
+            value = dict(run=decode(run_body, 8 * MIB), job=job, artifact=matched[0])
+            compiled_image_metadata_data(value, origin)
+            candidates.append(value)
+    need(len(candidates) == 1, 'prepared-one-desktop-original')
+    return candidates[0]
+
+
 def selected_job_data(body, source, run, target, *, completed, native_scope=None, artifacts=None):
     value = decode(body, 8 * MIB)
     need(type(value) is dict and type(value.get('jobs')) is list and type(value.get('total_count')) is int
          and len(value['jobs']) == value['total_count'] <= 100, 'prepared-jobs-page-complete')
     need(native_scope is None or type(native_scope) is str and native_scope in NATIVE_HOSTS, 'prepared-job-scope')
     name = NATIVE_JOB_NAMES[native_scope] if native_scope else 'normal-installed-' + target
-    rows = [row for row in value['jobs'] if type(row) is dict and row.get('name') == name]
+    names = (name, ORDINARY_SPLIT_JOB) if native_scope is None and target == TARGETS[0] else (name,)
+    rows = [row for row in value['jobs'] if type(row) is dict and row.get('name') in names]
     if completed:
         # All-attempt API page: select the exact successful checkpoint cut,
         # not its whole job's conclusion. Later unrelated cleanup may fail;
@@ -984,13 +1069,15 @@ def acquire_checkpoint(op, consumer):
         names = {'run.json', 'job.json', 'artifact.json', 'commit.json', 'metadata.status'}
         if 'nativeScope' in manifest['origin']:
             names.add('compiledObserver.json')
+        elif os.path.lexists(op.work / 'prepared-service/compiledImage.json'):
+            names.add('compiledImage.json')
         if (op.environment.get('MRK_MACOS_PREPARED_RESUME') == 'true'
             and manifest['origin']['source'] != consumer['source']):
             names.add('compatibility.json')
         need(set(os.listdir(service_root['fd'])) == names, 'prepared-service-original-roster')
         service = {}
         for name in sorted(names):
-            limit = 128 * 1024 if name == 'compiledObserver.json' else 8 * MIB
+            limit = 128 * 1024 if name in ('compiledObserver.json', 'compiledImage.json') else 8 * MIB
             original = op.original(service_root, name, 'prepared-service-original', limit, (0o400, 0o444, 0o600, 0o644))
             body = op.read(original)
             op.package_outputs.append((original, sha(body)))
@@ -1185,7 +1272,7 @@ def main():
     """Fixed hosted entry; no arbitrary checkout, command or Installer path."""
     import argparse
     parser = argparse.ArgumentParser()
-    parser.add_argument('phase', choices=('producer-attempt', 'observer-attempt', 'select', 'export', 'hydrate', 'package-install', 'finalize-image', 'candidate'))
+    parser.add_argument('phase', choices=('producer-attempt', 'observer-attempt', 'image-attempt', 'select', 'export', 'hydrate', 'package-install', 'finalize-image', 'candidate'))
     parser.add_argument('--target', required=True, choices=TARGETS)
     parser.add_argument('--producer-source')
     parser.add_argument('--producer-run')
@@ -1206,7 +1293,7 @@ def main():
         need(stager.read(root / '.git/HEAD', 64) == (environment['GITHUB_SHA'] + '\n').encode('ascii'), 'prepared-current-source')
         qualification = helper.load_data(root, 'macos_aqua_qualification.py', '_mrk_prepared_owner_loader')
         owner = qualification.load_owner(root)
-        if args.phase in ('producer-attempt', 'observer-attempt', 'select'):
+        if args.phase in ('producer-attempt', 'observer-attempt', 'image-attempt', 'select'):
             need(hex_data(args.producer_source, 40) and decimal(args.producer_run), 'prepared-selection-context')
             operation = helper.Operation(owner, root, work, 'package-install', environment, stager, target=args.target)
             try:
@@ -1230,6 +1317,9 @@ def main():
                 elif args.phase == 'observer-attempt':
                     producer_attempt = retained_observer_artifact_data(artifact_body, args.producer_source,
                         args.producer_run, args.target, native_origin(environment).get('nativeScope'))[1]
+                elif args.phase == 'image-attempt':
+                    need(not native_origin(environment), 'prepared-desktop-originals')
+                    producer_attempt = retained_image_attempt_data(artifact_body, args.producer_source, args.producer_run, args.target)
                 else:
                     job = selected_job_data(small('prepared-jobs.json'), args.producer_source, args.producer_run, args.target,
                         completed=True, native_scope=native_origin(environment).get('nativeScope'), artifacts=artifact_body)
@@ -1250,11 +1340,15 @@ def main():
                         compiled = selected_compiled_observer_data(artifact_body, small('prepared-observer-jobs.json'),
                             small('prepared-observer-run.json'), origin)
                         operation.package_file(directory, 'compiledObserver.json', canonical(compiled))
+                    elif job['name'] == ORDINARY_SPLIT_JOB:
+                        compiled = selected_compiled_image_data(artifact_body, small('prepared-image-jobs.json'),
+                            small('prepared-image-run.json'), origin)
+                        operation.package_file(directory, 'compiledImage.json', canonical(compiled))
                 operation.package_post()
             finally:
                 finish_staging(operation, sys.exception())
             # Finite output consumed by Actions; no caller-provided interpolation.
-            if args.phase in ('producer-attempt', 'observer-attempt'):
+            if args.phase in ('producer-attempt', 'observer-attempt', 'image-attempt'):
                 print(producer_attempt)
                 return 0
             print('artifact-id=' + str(artifact['id']))
@@ -1320,12 +1414,12 @@ def main():
 def admit_host(helper, environment, args):
     if environment.get('GITHUB_EVENT_NAME') == 'push' or (
         environment.get('MRK_MACOS_PREPARED_RESUME') == 'true' and native_origin(environment)):
-        need(args.phase in ('producer-attempt', 'observer-attempt', 'select', 'hydrate', 'package-install')
+        need(args.phase in ('producer-attempt', 'observer-attempt', 'image-attempt', 'select', 'hydrate', 'package-install')
              or environment.get('GITHUB_EVENT_NAME') == 'push', 'prepared-native-resume-phase')
         return helper.admit(environment, target=args.target, phase='package-install')
     # Diagnostic-only current harness. Never change the actual event/source or
     # let ordinary helper.admit accept dispatch/artifact claims as push evidence.
-    need(args.phase in ('producer-attempt', 'observer-attempt', 'select', 'hydrate', 'package-install') and environment.get('GITHUB_EVENT_NAME') == 'workflow_dispatch',
+    need(args.phase in ('producer-attempt', 'observer-attempt', 'image-attempt', 'select', 'hydrate', 'package-install') and environment.get('GITHUB_EVENT_NAME') == 'workflow_dispatch',
          'prepared-dispatch-install-only')
     machine, arch, _ = helper.build_profile(args.target)
     source = environment.get('GITHUB_SHA')

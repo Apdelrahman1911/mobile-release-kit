@@ -1,0 +1,2539 @@
+---
+name: Focused ordinary Desktop update parts
+'on':
+  workflow_call: {}
+permissions:
+  contents: read
+  actions: read
+jobs:
+  desktop26-prepare:
+    name: macOS part (Desktop26 / prepare)
+    if: github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-macos-candidate'
+      && contains(github.event.head_commit.message, '[macos-desktop-update]')
+    runs-on: "${{ matrix.runner }}"
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+        - native_scope: disabled
+          target: aarch64-apple-darwin
+          runner: macos-26
+          machine: arm64
+          hosted_job: github-hosted-macos26-arm64
+          supplier_receipt: e6b23316078020c513ab1b05b3b55e4f87b8d15908a8dee022ad5ee03b8f763e
+          supplier_tar: ead75b364118139561a34da6aa48e3c54791e152154ab32c46196b0223962359
+          supplier_source: c6551aa07d0673436aa9587b3a039889d22449c3
+          supplier_run: '40473858216'
+          supplier_attempt: '1'
+          supplier_artifact: '12719943283'
+          removal_case: disabled
+    env:
+      RUSTUP_TOOLCHAIN: ${{ fromJSON('{"aarch64-apple-darwin":"1.98.1","x86_64-apple-darwin":"1.98.0"}')[matrix.target]
+        }}
+      MRK_MACOS_TARGET: "${{ matrix.target }}"
+      MRK_MACOS_RUNNER: "${{ matrix.runner }}"
+      MRK_MACOS_MACHINE: "${{ matrix.machine }}"
+      MRK_MACOS_HOSTED_JOB: "${{ matrix.hosted_job }}"
+      MRK_EXPECTED_SHA: "${{ github.sha }}"
+      MRK_MACOS_INSTALL_SOURCE_COMMIT: "${{ github.sha }}"
+      MRK_MACOS_NATIVE_SCOPE: disabled
+      MRK_MACOS_PACKAGE_ROLE: ordinary-image
+      MRK_MACOS_SAME_PACKAGE_SCOPE: "${{ github.ref == 'refs/heads/verify/desktop-macos-preview'
+        && 'same-package-noop' || 'disabled' }}"
+      MRK_MACOS_REMOVAL_CASE: "${{ matrix.removal_case || 'disabled' }}"
+      MRK_MACOS_ANDROID_UI_SCOPE: "${{ github.ref == 'refs/heads/verify/desktop-macos-installed'
+        && 'android-signed-build' || 'disabled' }}"
+      MRK_MACOS_IOS_UI_SCOPE: disabled
+      MRK_MACOS_SAVED_FILE_UI_SCOPE: "${{ github.ref == 'refs/heads/verify/desktop-macos-preview'
+        && 'remaining-three' || 'ordinary-seven' }}"
+      MRK_MACOS_STORE_RUNTIME: signed-component
+      MRK_BUNDLED_RUNTIME_SOURCE_SHA256: 10d3f2cf13155335444c8376a346d89581c03a43f0ae642e67401e379745dca2
+      MRK_MACOS_RUNTIME_SUPPLIER: fresh-public-source
+      MRK_MACOS_PYTHON_SUPPLIER_SHA256: "${{ matrix.supplier_receipt }}"
+      MRK_MACOS_PYTHON_SUPPLIER_TAR_SHA256: "${{ matrix.supplier_tar }}"
+      MRK_MACOS_PYTHON_SUPPLIER_SOURCE_COMMIT: "${{ matrix.supplier_source }}"
+      MRK_MACOS_PYTHON_SUPPLIER_RUN_ID: "${{ matrix.supplier_run }}"
+      MRK_MACOS_PYTHON_SUPPLIER_RUN_ATTEMPT: "${{ matrix.supplier_attempt }}"
+      MRK_MACOS_PYTHON_SUPPLIER_ARTIFACT_ID: "${{ matrix.supplier_artifact }}"
+      MRK_BUNDLED_PROTOCOL_SHA256: '083e6afae3e329c4e0d81bad00dd0c9920f77491b38ce0d23aa602996f4c4bf5'
+      MRK_GITHUB_PREFLIGHT_TOOLING_SHA: d4a639b396eaa60385b223a154710e99a2862e67
+      MRK_GITHUB_RELEASE_TOOLING_SHA: d4a639b396eaa60385b223a154710e99a2862e67
+      MACOSX_DEPLOYMENT_TARGET: '26.0'
+      DEVELOPER_DIR: "/Library/Developer/CommandLineTools"
+    outputs:
+      work-root: "${{ steps.work.outputs.root }}"
+    steps:
+    - name: Admit only this exact disposable-hosted source route
+      timeout-minutes: 1
+      env:
+        RUNNER_ENVIRONMENT: "${{ runner.environment }}"
+      shell: bash
+      run: |
+        set -euo pipefail
+        [[ "$RUNNER_ENVIRONMENT" == github-hosted && "$RUNNER_OS" == macOS ]] || exit 1
+        case "$MRK_MACOS_NATIVE_SCOPE" in
+          disabled) [[ "$MRK_MACOS_PACKAGE_ROLE" == ordinary-image ]] || exit 1 ;;
+          project-identity-native|tool-setup|git-native)
+            [[ "$GITHUB_REF" == refs/heads/verify/desktop-macos-candidate && "$MRK_MACOS_TARGET" == aarch64-apple-darwin && "$MRK_MACOS_PACKAGE_ROLE" == installed-shell-observation ]] || exit 1
+            [[ "$MRK_MACOS_SAME_PACKAGE_SCOPE" == disabled && "$MRK_MACOS_REMOVAL_CASE" == disabled && "$MRK_MACOS_ANDROID_UI_SCOPE" == disabled && "$MRK_MACOS_IOS_UI_SCOPE" == disabled && "$MRK_MACOS_SAVED_FILE_UI_SCOPE" == ordinary-seven ]] || exit 1
+            [[ "${MRK_MACOS_AQUA_SCOPE:-disabled}" == disabled && "${MRK_MACOS_XCODE_SETUP_SCOPE:-disabled}" == disabled ]] || exit 1
+            ;;
+          *) exit 1 ;;
+        esac
+        case "$MRK_MACOS_SAME_PACKAGE_SCOPE" in
+          disabled) ;;
+          same-package-noop) [[ "$GITHUB_REF" == refs/heads/verify/desktop-macos-preview ]] || exit 1 ;;
+          *) exit 1 ;;
+        esac
+        case "$MRK_MACOS_ANDROID_UI_SCOPE" in
+          disabled|android-signed-build) ;;
+          *) exit 1 ;;
+        esac
+        case "$MRK_MACOS_IOS_UI_SCOPE" in
+          disabled) ;;
+          ios-unsigned-archive|ios-pending-recovery)
+            [[ "$GITHUB_REF" == refs/heads/verify/desktop-macos-installed && "$MRK_MACOS_ANDROID_UI_SCOPE" == disabled && "$MRK_MACOS_SAVED_FILE_UI_SCOPE" == ordinary-seven ]] || exit 1
+            ;;
+          *) exit 1 ;;
+        esac
+        case "$MRK_MACOS_TARGET" in
+          aarch64-apple-darwin)
+            [[ "$RUNNER_ARCH" == ARM64 && "$MRK_MACOS_MACHINE" == arm64 && "$(/usr/bin/uname -m)" == arm64 ]] || exit 1
+            case "$MRK_MACOS_RUNNER:$MRK_MACOS_HOSTED_JOB" in
+              macos-26:github-hosted-macos26-arm64) expected_host_major=26 ;;
+              xcode-27:github-hosted-xcode27-arm64)
+                # Separate source-only matrix selection; never a tool or
+                # ordinary image fallback, and never a Git nomination.
+                [[ "$MRK_MACOS_NATIVE_SCOPE" == git-native && "$MRK_MACOS_PACKAGE_ROLE" == installed-shell-observation && "$GITHUB_REF" == refs/heads/verify/desktop-macos-candidate ]] || exit 1
+                expected_host_major=27
+                ;;
+              *) exit 1 ;;
+            esac
+            expected_supplier_receipt=e6b23316078020c513ab1b05b3b55e4f87b8d15908a8dee022ad5ee03b8f763e
+            expected_supplier_tar=ead75b364118139561a34da6aa48e3c54791e152154ab32c46196b0223962359
+            expected_supplier_source=c6551aa07d0673436aa9587b3a039889d22449c3
+            expected_supplier_run=40473858216
+            expected_supplier_attempt=1
+            expected_supplier_artifact=12719943283
+            ;;
+          x86_64-apple-darwin)
+            [[ "$MRK_MACOS_RUNNER" == macos-26-intel && "$RUNNER_ARCH" == X64 && "$MRK_MACOS_MACHINE" == x86_64 && "$MRK_MACOS_HOSTED_JOB" == github-hosted-macos26-x86_64 && "$(/usr/bin/uname -m)" == x86_64 ]] || exit 1
+            expected_host_major=26
+            expected_supplier_receipt=afba303207b19692b73fb1288b56afcd73378fc29b0b0ede4ff10eb2e0f949b8
+            expected_supplier_tar=ff976626b48e95abc414d46ff91f1ebb183416356bb4706b8e673b7c9018ca9c
+            expected_supplier_source=a2f7a10b4c86305f5ee65c6779ceaf6b128cd8fa
+            expected_supplier_run=38343340695
+            expected_supplier_attempt=1
+            expected_supplier_artifact=11787588635
+            ;;
+          *) exit 1 ;;
+        esac
+        [[ "$GITHUB_EVENT_NAME" == push && ( "$GITHUB_REF" == refs/heads/verify/desktop-macos-installed || "$GITHUB_REF" == refs/heads/verify/desktop-macos-preview || "$GITHUB_REF" == refs/heads/verify/desktop-macos-removal-lifecycle || "$GITHUB_REF" == refs/heads/verify/desktop-macos-app-signature || "$GITHUB_REF" == refs/heads/verify/desktop-macos-app-absence-fixture || "$GITHUB_REF" == refs/heads/verify/desktop-macos-positive-update || "$GITHUB_REF" == refs/heads/verify/desktop-macos-candidate ) ]] || exit 1
+        if [[ "$GITHUB_REF" == refs/heads/verify/desktop-macos-app-absence-fixture || "$GITHUB_REF" == refs/heads/verify/desktop-macos-positive-update ]]; then
+          [[ "$MRK_MACOS_SAME_PACKAGE_SCOPE" == disabled && "$MRK_MACOS_ANDROID_UI_SCOPE" == disabled && "$MRK_MACOS_IOS_UI_SCOPE" == disabled && "$MRK_MACOS_SAVED_FILE_UI_SCOPE" == ordinary-seven ]] || exit 1
+        fi
+        if [[ "$GITHUB_REF" == refs/heads/verify/desktop-macos-app-signature ]]; then
+          [[ "$MRK_MACOS_ANDROID_UI_SCOPE" == disabled && "$MRK_MACOS_IOS_UI_SCOPE" == disabled && "$MRK_MACOS_SAVED_FILE_UI_SCOPE" == ordinary-seven ]] || exit 1
+        fi
+        if [[ "$GITHUB_REF" == refs/heads/verify/desktop-macos-removal-lifecycle ]]; then
+          [[ "$MRK_MACOS_ANDROID_UI_SCOPE" == disabled && "$MRK_MACOS_IOS_UI_SCOPE" == disabled && "$MRK_MACOS_SAVED_FILE_UI_SCOPE" == ordinary-seven ]] || exit 1
+          case "$MRK_MACOS_REMOVAL_CASE" in ordinary|abrupt) ;; *) exit 1 ;; esac
+        else
+          [[ "$MRK_MACOS_REMOVAL_CASE" == disabled ]] || exit 1
+        fi
+        case "$MRK_MACOS_SAVED_FILE_UI_SCOPE" in
+          ordinary-seven) ;;
+          saved-version-recovery|workflow-refusal|release-evidence|remaining-three) [[ "$GITHUB_REF" == refs/heads/verify/desktop-macos-preview ]] || exit 1 ;;
+          *) exit 1 ;;
+        esac
+        [[ "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ && "$MRK_EXPECTED_SHA" == "$GITHUB_SHA" && "$MRK_MACOS_INSTALL_SOURCE_COMMIT" == "$GITHUB_SHA" && "$GITHUB_WORKFLOW_SHA" == "$GITHUB_SHA" ]] || exit 1
+        [[ "$GITHUB_WORKFLOW_REF" == "$GITHUB_REPOSITORY/.github/workflows/desktop-macos-installed.yml@$GITHUB_REF" ]] || exit 1
+        # Fresh supplier pins never replace the separate current-core source binding.
+        [[ "$MRK_BUNDLED_RUNTIME_SOURCE_SHA256" =~ ^[0-9a-f]{64}$ && "$MRK_BUNDLED_RUNTIME_SOURCE_SHA256" == 10d3f2cf13155335444c8376a346d89581c03a43f0ae642e67401e379745dca2 ]] || exit 1
+        [[ "$GITHUB_REPOSITORY" == Apdelrahman1911/mobile-release-kit ]] || exit 1
+        [[ "$MRK_MACOS_RUNTIME_SUPPLIER" == fresh-public-source ]] || exit 1
+        [[ "$MRK_MACOS_PYTHON_SUPPLIER_SHA256" =~ ^[0-9a-f]{64}$ && "$MRK_MACOS_PYTHON_SUPPLIER_SHA256" == "$expected_supplier_receipt" ]] || exit 1
+        [[ "$MRK_MACOS_PYTHON_SUPPLIER_TAR_SHA256" =~ ^[0-9a-f]{64}$ && "$MRK_MACOS_PYTHON_SUPPLIER_TAR_SHA256" == "$expected_supplier_tar" ]] || exit 1
+        [[ "$MRK_MACOS_PYTHON_SUPPLIER_SOURCE_COMMIT" =~ ^[0-9a-f]{40}$ && "$MRK_MACOS_PYTHON_SUPPLIER_SOURCE_COMMIT" == "$expected_supplier_source" ]] || exit 1
+        [[ "$MRK_MACOS_PYTHON_SUPPLIER_RUN_ID" =~ ^[1-9][0-9]{0,15}$ && "$MRK_MACOS_PYTHON_SUPPLIER_RUN_ID" -le 9007199254740991 && "$MRK_MACOS_PYTHON_SUPPLIER_RUN_ID" == "$expected_supplier_run" ]] || exit 1
+        [[ "$MRK_MACOS_PYTHON_SUPPLIER_RUN_ATTEMPT" =~ ^[1-9][0-9]{0,15}$ && "$MRK_MACOS_PYTHON_SUPPLIER_RUN_ATTEMPT" -le 9007199254740991 && "$MRK_MACOS_PYTHON_SUPPLIER_RUN_ATTEMPT" == "$expected_supplier_attempt" ]] || exit 1
+        [[ "$MRK_MACOS_PYTHON_SUPPLIER_ARTIFACT_ID" =~ ^[1-9][0-9]{0,15}$ && "$MRK_MACOS_PYTHON_SUPPLIER_ARTIFACT_ID" -le 9007199254740991 && "$MRK_MACOS_PYTHON_SUPPLIER_ARTIFACT_ID" == "$expected_supplier_artifact" ]] || exit 1
+        [[ "$MRK_BUNDLED_PROTOCOL_SHA256" =~ ^[0-9a-f]{64}$ && "$MRK_BUNDLED_PROTOCOL_SHA256" == 083e6afae3e329c4e0d81bad00dd0c9920f77491b38ce0d23aa602996f4c4bf5 ]] || exit 1
+        [[ "$MRK_GITHUB_PREFLIGHT_TOOLING_SHA" =~ ^[0-9a-f]{40}$ && "$MRK_GITHUB_PREFLIGHT_TOOLING_SHA" == d4a639b396eaa60385b223a154710e99a2862e67 ]] || exit 1
+        [[ "$MRK_GITHUB_RELEASE_TOOLING_SHA" =~ ^[0-9a-f]{40}$ && "$MRK_GITHUB_RELEASE_TOOLING_SHA" == d4a639b396eaa60385b223a154710e99a2862e67 ]] || exit 1
+        [[ "$(/usr/bin/sw_vers -productVersion)" == "$expected_host_major".* ]] || exit 1
+        [[ "$(/usr/bin/id -u)" != 0 && -d "$DEVELOPER_DIR" ]] || exit 1
+    - name: Check out exact reviewed source without retained credentials
+      timeout-minutes: 3
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      env:
+        GIT_CONFIG_COUNT: '1'
+        GIT_CONFIG_KEY_0: core.autocrlf
+        GIT_CONFIG_VALUE_0: 'false'
+      with:
+        ref: "${{ github.sha }}"
+        persist-credentials: false
+    - name: Select DATA stager Python, not the packaged interpreter
+      timeout-minutes: 2
+      id: python
+      uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+      with:
+        python-version: 3.14.7
+    - name: Check Mac installer transport and native dialog compilation before expensive
+        preparation
+      timeout-minutes: 3
+      shell: bash
+      env:
+        MRK_PYTHON: "${{ steps.python.outputs.python-path }}"
+      run: |
+        set -euo pipefail
+        umask 077
+        "$MRK_PYTHON" -I -B desktop/tools/macos_local_preflight.py --transport \
+          --output "$RUNNER_TEMP/mrk-fast-macos-preflight"
+    - name: Refuse unconfigured update before any artifact download or native preparation
+      if: github.ref == 'refs/heads/verify/desktop-macos-positive-update'
+      id: update_selection
+      timeout-minutes: 1
+      env:
+        MRK_PYTHON: "${{ steps.python.outputs.python-path }}"
+      uses: "./.github/actions/macos-candidate-recipes/update_selection"
+    - name: Select the fixed configured signed runtime before any payload download
+      timeout-minutes: 1
+      env:
+        MRK_PYTHON: "${{ steps.python.outputs.python-path }}"
+      uses: "./.github/actions/macos-candidate-recipes/select-the-fixed-configured-signed-runtime-before-an"
+    - name: Select fixed frontend compiler
+      timeout-minutes: 2
+      uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
+      with:
+        node-version: 24.20.0
+        package-manager-cache: false
+    - name: Reserve fresh work and record exact source and actual tool bindings
+      timeout-minutes: 2
+      id: work
+      env:
+        MRK_PYTHON: "${{ steps.python.outputs.python-path }}"
+      uses: "./.github/actions/macos-candidate-recipes/work"
+    - name: Bind the complete reviewed first-party checkout before compilation
+      timeout-minutes: 3
+      id: source
+      uses: "./.github/actions/macos-candidate-recipes/source"
+    - name: Check fixed optional-array argv before native preparation
+      timeout-minutes: 1
+      shell: bash
+      run: |
+        set -euo pipefail
+        /usr/bin/env -i PATH=/usr/bin:/bin LC_ALL=C "$MRK_PYTHON" -I -S -B \
+          tests/desktop/test_macos_optional_arrays.py \
+          MacOSOptionalArraysTests.test_optional_arrays_preserve_empty_and_quoted_argv_under_nounset -v
+    - name: Install and verify the pinned Mac Rust toolchain
+      timeout-minutes: 8
+      shell: bash
+      run: "/bin/bash desktop/tools/macos_installed_direct_rust.sh"
+    - name: Check actual Git and Library flags before the expensive candidate build
+      timeout-minutes: 1
+      uses: "./.github/actions/macos-candidate-recipes/check-actual-git-and-library-flags-before-the-expens"
+    - name: Check the corrected macOS minimum and actual native host before signing
+      if: github.ref == 'refs/heads/verify/desktop-macos-candidate' && env.MRK_MACOS_NATIVE_SCOPE
+        == 'disabled'
+      timeout-minutes: 10
+      uses: "./.github/actions/macos-candidate-recipes/check-the-corrected-macos-minimum-and-actual-native-"
+    - name: Admit only a fresh independently pinned Python transport destination
+      timeout-minutes: 1
+      shell: bash
+      run: |
+        set -euo pipefail
+        umask 077
+        [[ "$MRK_PYTHON" == /* && -x "$MRK_PYTHON" ]] || exit 1
+        [[ ! -e "$MRK_MACOS_WORK/fresh-python-transport" && ! -L "$MRK_MACOS_WORK/fresh-python-transport" ]] || exit 1
+        [[ ! -e "$MRK_MACOS_WORK/signed-python-transport" && ! -L "$MRK_MACOS_WORK/signed-python-transport" ]] || exit 1
+        [[ ! -e "$MRK_MACOS_WORK/signed-android-transport" && ! -L "$MRK_MACOS_WORK/signed-android-transport" ]] || exit 1
+    - name: Download the independently accepted fresh Python transport
+      timeout-minutes: 3
+      uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+      with:
+        artifact-ids: "${{ env.MRK_MACOS_PYTHON_SUPPLIER_ARTIFACT_ID }}"
+        run-id: "${{ env.MRK_MACOS_PYTHON_SUPPLIER_RUN_ID }}"
+        repository: Apdelrahman1911/mobile-release-kit
+        github-token: "${{ github.token }}"
+        path: "${{ steps.work.outputs.root }}/fresh-python-transport"
+        merge-multiple: 'false'
+        digest-mismatch: error
+        skip-decompress: 'false'
+    - name: Project the pinned fresh Python transport without executing it
+      timeout-minutes: 3
+      uses: "./.github/actions/macos-candidate-recipes/project-the-pinned-fresh-python-transport-without-ex"
+    - name: Download only the configured signed Python capsule
+      timeout-minutes: 3
+      uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+      with:
+        artifact-ids: "${{ env.MRK_MACOS_SIGNING_ARTIFACT_ID }}"
+        run-id: "${{ env.MRK_MACOS_SIGNING_RUN_ID }}"
+        repository: Apdelrahman1911/mobile-release-kit
+        github-token: "${{ github.token }}"
+        path: "${{ steps.work.outputs.root }}/signed-python-transport"
+        merge-multiple: 'false'
+        digest-mismatch: error
+        skip-decompress: 'false'
+    - name: Project the configured capsule as DATA without executing it
+      timeout-minutes: 3
+      shell: bash
+      run: |
+        set -euo pipefail
+        set -o noclobber
+        umask 077
+        /usr/bin/env -i PATH=/usr/bin:/bin HOME="$MRK_MACOS_WORK" TMPDIR="$MRK_MACOS_WORK" LANG=C LC_ALL=C TZ=UTC \
+          "$MRK_PYTHON" -I -S -B desktop/tools/stage_macos_installed.py project-signed-python \
+          --target "$MRK_MACOS_TARGET" \
+          --transport-root "$MRK_MACOS_WORK/signed-python-transport" \
+          --output "$MRK_MACOS_WORK/signed-python-capsule" > "$MRK_MACOS_WORK/signed-python-transport-result.json"
+    - name: Select only SOURCE-enrolled current signed GitHub tools
+      id: github_tools
+      timeout-minutes: 1
+      env:
+        RUNNER_ENVIRONMENT: "${{ runner.environment }}"
+      uses: "./.github/actions/macos-candidate-recipes/github_tools"
+    - name: Download exactly the nominated signed history provider
+      if: steps.github_tools.outputs.history-enabled == 'true'
+      timeout-minutes: 3
+      uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+      with:
+        artifact-ids: "${{ steps.github_tools.outputs.history-artifact-id }}"
+        run-id: "${{ steps.github_tools.outputs.history-run-id }}"
+        repository: Apdelrahman1911/mobile-release-kit
+        github-token: "${{ github.token }}"
+        path: "${{ steps.work.outputs.root }}/history-provider-transport"
+        merge-multiple: 'false'
+        digest-mismatch: error
+        skip-decompress: 'false'
+    - name: Download exactly the nominated signed seal helper
+      if: steps.github_tools.outputs.seal-enabled == 'true'
+      timeout-minutes: 3
+      uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+      with:
+        artifact-ids: "${{ steps.github_tools.outputs.seal-artifact-id }}"
+        run-id: "${{ steps.github_tools.outputs.seal-run-id }}"
+        repository: Apdelrahman1911/mobile-release-kit
+        github-token: "${{ github.token }}"
+        path: "${{ steps.work.outputs.root }}/github-seal-transport"
+        merge-multiple: 'false'
+        digest-mismatch: error
+        skip-decompress: 'false'
+    - name: Project current signed tools without executing either program
+      id: app_tools
+      timeout-minutes: 3
+      env:
+        RUNNER_ENVIRONMENT: "${{ runner.environment }}"
+        HISTORY_ENABLED: "${{ steps.github_tools.outputs.history-enabled }}"
+        SEAL_ENABLED: "${{ steps.github_tools.outputs.seal-enabled }}"
+      uses: "./.github/actions/macos-candidate-recipes/app_tools"
+    - name: Restore exactly the SOURCE-selected signed Store component without executing
+        it
+      timeout-minutes: 5
+      shell: bash
+      env:
+        GH_TOKEN: "${{ github.token }}"
+      run: |
+        set -euo pipefail
+        umask 077
+        [[ "$MRK_MACOS_STORE_RUNTIME" == signed-component ]] || exit 1
+        "$MRK_PYTHON" -I -S -B desktop/tools/macos_store_component.py restore-selected \
+          "$MRK_MACOS_WORK/signed-store-component" --target "$MRK_MACOS_TARGET"
+    - name: Prepare the current payload from the independently accepted fresh Python
+        supplier
+      id: app_runtime
+      timeout-minutes: 3
+      uses: "./.github/actions/macos-candidate-recipes/app_runtime"
+      with:
+        binding-1: "${{ matrix.native_scope || 'disabled' }}"
+        binding-2: "${{ steps.github_tools.outputs.history-enabled }}"
+    - name: Latch the same computed runtime binding before any application compilation
+      timeout-minutes: 1
+      uses: "./.github/actions/macos-candidate-recipes/latch-the-same-computed-runtime-binding-before-any-a"
+    - name: Exercise projected signed Store native CRC32 and Fastlane without a Store
+        lane
+      timeout-minutes: 2
+      uses: "./.github/actions/macos-candidate-recipes/exercise-projected-signed-store-native-crc32-and-fas"
+    - name: Build only the external normal-app XCTest runner, not an instrumented
+        app
+      id: normal_ui_build
+      if: github.ref != 'refs/heads/verify/desktop-macos-candidate' && (github.ref
+        != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == 'refs/heads/verify/desktop-macos-positive-update'
+        || github.ref == 'refs/heads/verify/desktop-macos-removal-lifecycle' || github.ref
+        == 'refs/heads/verify/desktop-macos-preview' || (github.ref == 'refs/heads/verify/desktop-macos-installed'
+        && env.MRK_MACOS_ANDROID_UI_SCOPE == 'android-signed-build') || (github.ref
+        == 'refs/heads/verify/desktop-macos-installed' && (env.MRK_MACOS_IOS_UI_SCOPE
+        == 'ios-unsigned-archive' || env.MRK_MACOS_IOS_UI_SCOPE == 'ios-pending-recovery')
+        && env.MRK_MACOS_ANDROID_UI_SCOPE == 'disabled' && env.MRK_MACOS_SAVED_FILE_UI_SCOPE
+        == 'ordinary-seven')))
+      timeout-minutes: 9
+      env:
+        DEVELOPER_DIR: "/Applications/Xcode.app/Contents/Developer"
+      uses: "./.github/actions/macos-candidate-recipes/normal_ui_build"
+    - name: Require the fixed SOURCE producer identity and release before ordinary
+        signing
+      id: app_selection
+      timeout-minutes: 1
+      uses: "./.github/actions/macos-candidate-recipes/app_selection"
+    - name: Fail fast on native Scripts ownership and package format (never Installer)
+      if: github.ref != 'refs/heads/verify/desktop-macos-candidate' && (github.ref
+        != 'refs/heads/verify/desktop-macos-app-signature')
+      timeout-minutes: 2
+      uses: "./.github/actions/macos-candidate-recipes/fail-fast-on-native-scripts-ownership-and-package-fo"
+    - name: Fail fast on the selected SDK actual no-ACL and ACE-refusal primitive
+      if: github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref
+        == 'refs/heads/verify/desktop-macos-installed')
+      timeout-minutes: 2
+      uses: "./.github/actions/macos-candidate-recipes/fail-fast-on-the-selected-sdk-actual-no-acl-and-ace-"
+    - name: Download the fixed once-signed Android support capsule
+      timeout-minutes: 3
+      uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+      with:
+        artifact-ids: '11691308054'
+        run-id: '38109802320'
+        repository: Apdelrahman1911/mobile-release-kit
+        github-token: "${{ github.token }}"
+        path: "${{ steps.work.outputs.root }}/signed-android-transport"
+        merge-multiple: 'false'
+        digest-mismatch: error
+        skip-decompress: 'false'
+    - name: Acquire and verify the two fixed Android support archives as DATA
+      timeout-minutes: 1
+      uses: "./.github/actions/macos-candidate-recipes/acquire-and-verify-the-two-fixed-android-support-arc"
+      with:
+        binding-1: "${{ steps.work.outputs.root }}"
+        binding-2: "${{ matrix.target }}"
+        binding-3: "${{ steps.python.outputs.python-path }}"
+    - name: Verify and freeze completed part originals
+      id: part
+      timeout-minutes: 10
+      env:
+        GH_TOKEN: "${{ github.token }}"
+        RUNNER_ENVIRONMENT: "${{ runner.environment }}"
+      shell: bash
+      run: |
+        set -euo pipefail
+        "$MRK_PYTHON" -I -S -B desktop/tools/macos_candidate_parts.py freeze --part prepare
+    - name: Upload immutable completed part
+      timeout-minutes: 8
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+      with:
+        name: "${{ steps.part.outputs.artifact-name }}"
+        path: "${{ steps.part.outputs.archive }}"
+        if-no-files-found: error
+        retention-days: 14
+        compression-level: 0
+        overwrite: false
+  desktop26-resident:
+    name: macOS part (Desktop26 / resident)
+    if: github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-macos-candidate'
+      && contains(github.event.head_commit.message, '[macos-desktop-update]')
+    runs-on: "${{ matrix.runner }}"
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+        - native_scope: disabled
+          target: aarch64-apple-darwin
+          runner: macos-26
+          machine: arm64
+          hosted_job: github-hosted-macos26-arm64
+          supplier_receipt: e6b23316078020c513ab1b05b3b55e4f87b8d15908a8dee022ad5ee03b8f763e
+          supplier_tar: ead75b364118139561a34da6aa48e3c54791e152154ab32c46196b0223962359
+          supplier_source: c6551aa07d0673436aa9587b3a039889d22449c3
+          supplier_run: '40473858216'
+          supplier_attempt: '1'
+          supplier_artifact: '12719943283'
+          removal_case: disabled
+    env:
+      RUSTUP_TOOLCHAIN: ${{ fromJSON('{"aarch64-apple-darwin":"1.98.1","x86_64-apple-darwin":"1.98.0"}')[matrix.target]
+        }}
+      MRK_MACOS_TARGET: "${{ matrix.target }}"
+      MRK_MACOS_RUNNER: "${{ matrix.runner }}"
+      MRK_MACOS_MACHINE: "${{ matrix.machine }}"
+      MRK_MACOS_HOSTED_JOB: "${{ matrix.hosted_job }}"
+      MRK_EXPECTED_SHA: "${{ github.sha }}"
+      MRK_MACOS_INSTALL_SOURCE_COMMIT: "${{ github.sha }}"
+      MRK_MACOS_NATIVE_SCOPE: disabled
+      MRK_MACOS_PACKAGE_ROLE: ordinary-image
+      MRK_MACOS_SAME_PACKAGE_SCOPE: "${{ github.ref == 'refs/heads/verify/desktop-macos-preview'
+        && 'same-package-noop' || 'disabled' }}"
+      MRK_MACOS_REMOVAL_CASE: "${{ matrix.removal_case || 'disabled' }}"
+      MRK_MACOS_ANDROID_UI_SCOPE: "${{ github.ref == 'refs/heads/verify/desktop-macos-installed'
+        && 'android-signed-build' || 'disabled' }}"
+      MRK_MACOS_IOS_UI_SCOPE: disabled
+      MRK_MACOS_SAVED_FILE_UI_SCOPE: "${{ github.ref == 'refs/heads/verify/desktop-macos-preview'
+        && 'remaining-three' || 'ordinary-seven' }}"
+      MRK_MACOS_STORE_RUNTIME: signed-component
+      MRK_BUNDLED_RUNTIME_SOURCE_SHA256: 10d3f2cf13155335444c8376a346d89581c03a43f0ae642e67401e379745dca2
+      MRK_MACOS_RUNTIME_SUPPLIER: fresh-public-source
+      MRK_MACOS_PYTHON_SUPPLIER_SHA256: "${{ matrix.supplier_receipt }}"
+      MRK_MACOS_PYTHON_SUPPLIER_TAR_SHA256: "${{ matrix.supplier_tar }}"
+      MRK_MACOS_PYTHON_SUPPLIER_SOURCE_COMMIT: "${{ matrix.supplier_source }}"
+      MRK_MACOS_PYTHON_SUPPLIER_RUN_ID: "${{ matrix.supplier_run }}"
+      MRK_MACOS_PYTHON_SUPPLIER_RUN_ATTEMPT: "${{ matrix.supplier_attempt }}"
+      MRK_MACOS_PYTHON_SUPPLIER_ARTIFACT_ID: "${{ matrix.supplier_artifact }}"
+      MRK_BUNDLED_PROTOCOL_SHA256: '083e6afae3e329c4e0d81bad00dd0c9920f77491b38ce0d23aa602996f4c4bf5'
+      MRK_GITHUB_PREFLIGHT_TOOLING_SHA: d4a639b396eaa60385b223a154710e99a2862e67
+      MRK_GITHUB_RELEASE_TOOLING_SHA: d4a639b396eaa60385b223a154710e99a2862e67
+      MACOSX_DEPLOYMENT_TARGET: '26.0'
+      DEVELOPER_DIR: "/Library/Developer/CommandLineTools"
+    environment: macos-developer-id
+    needs:
+    - desktop26-prepare
+    steps:
+    - name: Check out exact reviewed source without retained credentials
+      timeout-minutes: 3
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      env:
+        GIT_CONFIG_COUNT: '1'
+        GIT_CONFIG_KEY_0: core.autocrlf
+        GIT_CONFIG_VALUE_0: 'false'
+      with:
+        ref: "${{ github.sha }}"
+        persist-credentials: false
+    - name: Admit a fresh part runner and bind current SOURCE
+      id: bootstrap
+      uses: "./.github/actions/macos-candidate-bootstrap"
+      with:
+        work-root: "${{ needs.desktop26-prepare.outputs.work-root }}"
+    - name: Record only the freshly admitted part work root
+      id: work
+      shell: bash
+      run: 'printf ''root=%s\n'' "$MRK_MACOS_WORK" >> "$GITHUB_OUTPUT"
+
+'
+    - name: Admit and restore only completed source-bound predecessor parts
+      timeout-minutes: 15
+      env:
+        GH_TOKEN: "${{ github.token }}"
+        RUNNER_ENVIRONMENT: "${{ runner.environment }}"
+      shell: bash
+      run: |
+        set -euo pipefail
+        "$MRK_PYTHON" -I -S -B desktop/tools/macos_candidate_parts.py restore --part resident
+    - name: Latch fresh runtime and SOURCE packaging bindings
+      id: github_tools
+      uses: "./.github/actions/macos-candidate-bindings"
+    - name: Install and verify the pinned Mac Rust toolchain
+      timeout-minutes: 8
+      shell: bash
+      run: "/bin/bash desktop/tools/macos_installed_direct_rust.sh"
+    - name: Build and sign the fixed resident image and C facades
+      id: android_helper
+      timeout-minutes: 26
+      env:
+        RUNNER_ENVIRONMENT: "${{ runner.environment }}"
+        MRK_MACOS_DEVELOPER_ID_P12_BASE64: "${{ secrets.MRK_MACOS_DEVELOPER_ID_P12_BASE64
+          }}"
+        MRK_MACOS_DEVELOPER_ID_P12_PASSWORD: "${{ secrets.MRK_MACOS_DEVELOPER_ID_P12_PASSWORD
+          }}"
+      uses: "./.github/actions/macos-candidate-recipes/android_helper"
+    - name: Verify and freeze completed part originals
+      id: part
+      timeout-minutes: 10
+      env:
+        GH_TOKEN: "${{ github.token }}"
+        RUNNER_ENVIRONMENT: "${{ runner.environment }}"
+      shell: bash
+      run: |
+        set -euo pipefail
+        "$MRK_PYTHON" -I -S -B desktop/tools/macos_candidate_parts.py freeze --part resident
+    - name: Upload immutable completed part
+      timeout-minutes: 8
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+      with:
+        name: "${{ steps.part.outputs.artifact-name }}"
+        path: "${{ steps.part.outputs.archive }}"
+        if-no-files-found: error
+        retention-days: 14
+        compression-level: 0
+        overwrite: false
+  desktop26-vault:
+    name: macOS part (Desktop26 / vault)
+    if: github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-macos-candidate'
+      && contains(github.event.head_commit.message, '[macos-desktop-update]')
+    runs-on: "${{ matrix.runner }}"
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+        - native_scope: disabled
+          target: aarch64-apple-darwin
+          runner: macos-26
+          machine: arm64
+          hosted_job: github-hosted-macos26-arm64
+          supplier_receipt: e6b23316078020c513ab1b05b3b55e4f87b8d15908a8dee022ad5ee03b8f763e
+          supplier_tar: ead75b364118139561a34da6aa48e3c54791e152154ab32c46196b0223962359
+          supplier_source: c6551aa07d0673436aa9587b3a039889d22449c3
+          supplier_run: '40473858216'
+          supplier_attempt: '1'
+          supplier_artifact: '12719943283'
+          removal_case: disabled
+    env:
+      RUSTUP_TOOLCHAIN: ${{ fromJSON('{"aarch64-apple-darwin":"1.98.1","x86_64-apple-darwin":"1.98.0"}')[matrix.target]
+        }}
+      MRK_MACOS_TARGET: "${{ matrix.target }}"
+      MRK_MACOS_RUNNER: "${{ matrix.runner }}"
+      MRK_MACOS_MACHINE: "${{ matrix.machine }}"
+      MRK_MACOS_HOSTED_JOB: "${{ matrix.hosted_job }}"
+      MRK_EXPECTED_SHA: "${{ github.sha }}"
+      MRK_MACOS_INSTALL_SOURCE_COMMIT: "${{ github.sha }}"
+      MRK_MACOS_NATIVE_SCOPE: disabled
+      MRK_MACOS_PACKAGE_ROLE: ordinary-image
+      MRK_MACOS_SAME_PACKAGE_SCOPE: "${{ github.ref == 'refs/heads/verify/desktop-macos-preview'
+        && 'same-package-noop' || 'disabled' }}"
+      MRK_MACOS_REMOVAL_CASE: "${{ matrix.removal_case || 'disabled' }}"
+      MRK_MACOS_ANDROID_UI_SCOPE: "${{ github.ref == 'refs/heads/verify/desktop-macos-installed'
+        && 'android-signed-build' || 'disabled' }}"
+      MRK_MACOS_IOS_UI_SCOPE: disabled
+      MRK_MACOS_SAVED_FILE_UI_SCOPE: "${{ github.ref == 'refs/heads/verify/desktop-macos-preview'
+        && 'remaining-three' || 'ordinary-seven' }}"
+      MRK_MACOS_STORE_RUNTIME: signed-component
+      MRK_BUNDLED_RUNTIME_SOURCE_SHA256: 10d3f2cf13155335444c8376a346d89581c03a43f0ae642e67401e379745dca2
+      MRK_MACOS_RUNTIME_SUPPLIER: fresh-public-source
+      MRK_MACOS_PYTHON_SUPPLIER_SHA256: "${{ matrix.supplier_receipt }}"
+      MRK_MACOS_PYTHON_SUPPLIER_TAR_SHA256: "${{ matrix.supplier_tar }}"
+      MRK_MACOS_PYTHON_SUPPLIER_SOURCE_COMMIT: "${{ matrix.supplier_source }}"
+      MRK_MACOS_PYTHON_SUPPLIER_RUN_ID: "${{ matrix.supplier_run }}"
+      MRK_MACOS_PYTHON_SUPPLIER_RUN_ATTEMPT: "${{ matrix.supplier_attempt }}"
+      MRK_MACOS_PYTHON_SUPPLIER_ARTIFACT_ID: "${{ matrix.supplier_artifact }}"
+      MRK_BUNDLED_PROTOCOL_SHA256: '083e6afae3e329c4e0d81bad00dd0c9920f77491b38ce0d23aa602996f4c4bf5'
+      MRK_GITHUB_PREFLIGHT_TOOLING_SHA: d4a639b396eaa60385b223a154710e99a2862e67
+      MRK_GITHUB_RELEASE_TOOLING_SHA: d4a639b396eaa60385b223a154710e99a2862e67
+      MACOSX_DEPLOYMENT_TARGET: '26.0'
+      DEVELOPER_DIR: "/Library/Developer/CommandLineTools"
+    environment: macos-developer-id
+    needs:
+    - desktop26-prepare
+    steps:
+    - name: Check out exact reviewed source without retained credentials
+      timeout-minutes: 3
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      env:
+        GIT_CONFIG_COUNT: '1'
+        GIT_CONFIG_KEY_0: core.autocrlf
+        GIT_CONFIG_VALUE_0: 'false'
+      with:
+        ref: "${{ github.sha }}"
+        persist-credentials: false
+    - name: Admit a fresh part runner and bind current SOURCE
+      id: bootstrap
+      uses: "./.github/actions/macos-candidate-bootstrap"
+      with:
+        work-root: "${{ needs.desktop26-prepare.outputs.work-root }}"
+    - name: Record only the freshly admitted part work root
+      id: work
+      shell: bash
+      run: 'printf ''root=%s\n'' "$MRK_MACOS_WORK" >> "$GITHUB_OUTPUT"
+
+'
+    - name: Admit and restore only completed source-bound predecessor parts
+      timeout-minutes: 15
+      env:
+        GH_TOKEN: "${{ github.token }}"
+        RUNNER_ENVIRONMENT: "${{ runner.environment }}"
+      shell: bash
+      run: |
+        set -euo pipefail
+        "$MRK_PYTHON" -I -S -B desktop/tools/macos_candidate_parts.py restore --part vault
+    - name: Latch fresh runtime and SOURCE packaging bindings
+      id: github_tools
+      uses: "./.github/actions/macos-candidate-bindings"
+    - name: Install and verify the pinned Mac Rust toolchain
+      timeout-minutes: 8
+      shell: bash
+      run: "/bin/bash desktop/tools/macos_installed_direct_rust.sh"
+    - name: Build and sign the separate fixed vault helper before binding the app
+      id: app_vault
+      timeout-minutes: 8
+      env:
+        RUNNER_ENVIRONMENT: "${{ runner.environment }}"
+        MRK_MACOS_DEVELOPER_ID_P12_BASE64: "${{ secrets.MRK_MACOS_DEVELOPER_ID_P12_BASE64
+          }}"
+        MRK_MACOS_DEVELOPER_ID_P12_PASSWORD: "${{ secrets.MRK_MACOS_DEVELOPER_ID_P12_PASSWORD
+          }}"
+      uses: "./.github/actions/macos-candidate-recipes/app_vault"
+    - name: Verify and freeze completed part originals
+      id: part
+      timeout-minutes: 10
+      env:
+        GH_TOKEN: "${{ github.token }}"
+        RUNNER_ENVIRONMENT: "${{ runner.environment }}"
+      shell: bash
+      run: |
+        set -euo pipefail
+        "$MRK_PYTHON" -I -S -B desktop/tools/macos_candidate_parts.py freeze --part vault
+    - name: Upload immutable completed part
+      timeout-minutes: 8
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+      with:
+        name: "${{ steps.part.outputs.artifact-name }}"
+        path: "${{ steps.part.outputs.archive }}"
+        if-no-files-found: error
+        retention-days: 14
+        compression-level: 0
+        overwrite: false
+  desktop26-frontend:
+    name: macOS part (Desktop26 / frontend)
+    if: github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-macos-candidate'
+      && contains(github.event.head_commit.message, '[macos-desktop-update]')
+    runs-on: "${{ matrix.runner }}"
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+        - native_scope: disabled
+          target: aarch64-apple-darwin
+          runner: macos-26
+          machine: arm64
+          hosted_job: github-hosted-macos26-arm64
+          supplier_receipt: e6b23316078020c513ab1b05b3b55e4f87b8d15908a8dee022ad5ee03b8f763e
+          supplier_tar: ead75b364118139561a34da6aa48e3c54791e152154ab32c46196b0223962359
+          supplier_source: c6551aa07d0673436aa9587b3a039889d22449c3
+          supplier_run: '40473858216'
+          supplier_attempt: '1'
+          supplier_artifact: '12719943283'
+          removal_case: disabled
+    env:
+      RUSTUP_TOOLCHAIN: ${{ fromJSON('{"aarch64-apple-darwin":"1.98.1","x86_64-apple-darwin":"1.98.0"}')[matrix.target]
+        }}
+      MRK_MACOS_TARGET: "${{ matrix.target }}"
+      MRK_MACOS_RUNNER: "${{ matrix.runner }}"
+      MRK_MACOS_MACHINE: "${{ matrix.machine }}"
+      MRK_MACOS_HOSTED_JOB: "${{ matrix.hosted_job }}"
+      MRK_EXPECTED_SHA: "${{ github.sha }}"
+      MRK_MACOS_INSTALL_SOURCE_COMMIT: "${{ github.sha }}"
+      MRK_MACOS_NATIVE_SCOPE: disabled
+      MRK_MACOS_PACKAGE_ROLE: ordinary-image
+      MRK_MACOS_SAME_PACKAGE_SCOPE: "${{ github.ref == 'refs/heads/verify/desktop-macos-preview'
+        && 'same-package-noop' || 'disabled' }}"
+      MRK_MACOS_REMOVAL_CASE: "${{ matrix.removal_case || 'disabled' }}"
+      MRK_MACOS_ANDROID_UI_SCOPE: "${{ github.ref == 'refs/heads/verify/desktop-macos-installed'
+        && 'android-signed-build' || 'disabled' }}"
+      MRK_MACOS_IOS_UI_SCOPE: disabled
+      MRK_MACOS_SAVED_FILE_UI_SCOPE: "${{ github.ref == 'refs/heads/verify/desktop-macos-preview'
+        && 'remaining-three' || 'ordinary-seven' }}"
+      MRK_MACOS_STORE_RUNTIME: signed-component
+      MRK_BUNDLED_RUNTIME_SOURCE_SHA256: 10d3f2cf13155335444c8376a346d89581c03a43f0ae642e67401e379745dca2
+      MRK_MACOS_RUNTIME_SUPPLIER: fresh-public-source
+      MRK_MACOS_PYTHON_SUPPLIER_SHA256: "${{ matrix.supplier_receipt }}"
+      MRK_MACOS_PYTHON_SUPPLIER_TAR_SHA256: "${{ matrix.supplier_tar }}"
+      MRK_MACOS_PYTHON_SUPPLIER_SOURCE_COMMIT: "${{ matrix.supplier_source }}"
+      MRK_MACOS_PYTHON_SUPPLIER_RUN_ID: "${{ matrix.supplier_run }}"
+      MRK_MACOS_PYTHON_SUPPLIER_RUN_ATTEMPT: "${{ matrix.supplier_attempt }}"
+      MRK_MACOS_PYTHON_SUPPLIER_ARTIFACT_ID: "${{ matrix.supplier_artifact }}"
+      MRK_BUNDLED_PROTOCOL_SHA256: '083e6afae3e329c4e0d81bad00dd0c9920f77491b38ce0d23aa602996f4c4bf5'
+      MRK_GITHUB_PREFLIGHT_TOOLING_SHA: d4a639b396eaa60385b223a154710e99a2862e67
+      MRK_GITHUB_RELEASE_TOOLING_SHA: d4a639b396eaa60385b223a154710e99a2862e67
+      MACOSX_DEPLOYMENT_TARGET: '26.0'
+      DEVELOPER_DIR: "/Library/Developer/CommandLineTools"
+    needs:
+    - desktop26-prepare
+    steps:
+    - name: Check out exact reviewed source without retained credentials
+      timeout-minutes: 3
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      env:
+        GIT_CONFIG_COUNT: '1'
+        GIT_CONFIG_KEY_0: core.autocrlf
+        GIT_CONFIG_VALUE_0: 'false'
+      with:
+        ref: "${{ github.sha }}"
+        persist-credentials: false
+    - name: Admit a fresh part runner and bind current SOURCE
+      id: bootstrap
+      uses: "./.github/actions/macos-candidate-bootstrap"
+      with:
+        work-root: "${{ needs.desktop26-prepare.outputs.work-root }}"
+    - name: Record only the freshly admitted part work root
+      id: work
+      shell: bash
+      run: 'printf ''root=%s\n'' "$MRK_MACOS_WORK" >> "$GITHUB_OUTPUT"
+
+'
+    - name: Admit and restore only completed source-bound predecessor parts
+      timeout-minutes: 15
+      env:
+        GH_TOKEN: "${{ github.token }}"
+        RUNNER_ENVIRONMENT: "${{ runner.environment }}"
+      shell: bash
+      run: |
+        set -euo pipefail
+        "$MRK_PYTHON" -I -S -B desktop/tools/macos_candidate_parts.py restore --part frontend
+    - name: Latch fresh runtime and SOURCE packaging bindings
+      id: github_tools
+      uses: "./.github/actions/macos-candidate-bindings"
+    - name: Build the embedded frontend once before native compilation
+      id: app_frontend
+      timeout-minutes: 5
+      shell: bash
+      run: |
+        set -euo pipefail
+        cd desktop
+        npm ci --ignore-scripts --no-audit --no-fund --cache "$MRK_MACOS_WORK/npm-cache"
+        npm run build
+    - name: Verify and freeze completed part originals
+      id: part
+      timeout-minutes: 10
+      env:
+        GH_TOKEN: "${{ github.token }}"
+        RUNNER_ENVIRONMENT: "${{ runner.environment }}"
+      shell: bash
+      run: |
+        set -euo pipefail
+        "$MRK_PYTHON" -I -S -B desktop/tools/macos_candidate_parts.py freeze --part frontend
+    - name: Upload immutable completed part
+      timeout-minutes: 8
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+      with:
+        name: "${{ steps.part.outputs.artifact-name }}"
+        path: "${{ steps.part.outputs.archive }}"
+        if-no-files-found: error
+        retention-days: 14
+        compression-level: 0
+        overwrite: false
+  desktop26-image:
+    name: macOS part (Desktop26 / image)
+    if: github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-macos-candidate'
+      && contains(github.event.head_commit.message, '[macos-desktop-update]')
+    runs-on: "${{ matrix.runner }}"
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+        - native_scope: disabled
+          target: aarch64-apple-darwin
+          runner: macos-26
+          machine: arm64
+          hosted_job: github-hosted-macos26-arm64
+          supplier_receipt: e6b23316078020c513ab1b05b3b55e4f87b8d15908a8dee022ad5ee03b8f763e
+          supplier_tar: ead75b364118139561a34da6aa48e3c54791e152154ab32c46196b0223962359
+          supplier_source: c6551aa07d0673436aa9587b3a039889d22449c3
+          supplier_run: '40473858216'
+          supplier_attempt: '1'
+          supplier_artifact: '12719943283'
+          removal_case: disabled
+    env:
+      RUSTUP_TOOLCHAIN: ${{ fromJSON('{"aarch64-apple-darwin":"1.98.1","x86_64-apple-darwin":"1.98.0"}')[matrix.target]
+        }}
+      MRK_MACOS_TARGET: "${{ matrix.target }}"
+      MRK_MACOS_RUNNER: "${{ matrix.runner }}"
+      MRK_MACOS_MACHINE: "${{ matrix.machine }}"
+      MRK_MACOS_HOSTED_JOB: "${{ matrix.hosted_job }}"
+      MRK_EXPECTED_SHA: "${{ github.sha }}"
+      MRK_MACOS_INSTALL_SOURCE_COMMIT: "${{ github.sha }}"
+      MRK_MACOS_NATIVE_SCOPE: disabled
+      MRK_MACOS_PACKAGE_ROLE: ordinary-image
+      MRK_MACOS_SAME_PACKAGE_SCOPE: "${{ github.ref == 'refs/heads/verify/desktop-macos-preview'
+        && 'same-package-noop' || 'disabled' }}"
+      MRK_MACOS_REMOVAL_CASE: "${{ matrix.removal_case || 'disabled' }}"
+      MRK_MACOS_ANDROID_UI_SCOPE: "${{ github.ref == 'refs/heads/verify/desktop-macos-installed'
+        && 'android-signed-build' || 'disabled' }}"
+      MRK_MACOS_IOS_UI_SCOPE: disabled
+      MRK_MACOS_SAVED_FILE_UI_SCOPE: "${{ github.ref == 'refs/heads/verify/desktop-macos-preview'
+        && 'remaining-three' || 'ordinary-seven' }}"
+      MRK_MACOS_STORE_RUNTIME: signed-component
+      MRK_BUNDLED_RUNTIME_SOURCE_SHA256: 10d3f2cf13155335444c8376a346d89581c03a43f0ae642e67401e379745dca2
+      MRK_MACOS_RUNTIME_SUPPLIER: fresh-public-source
+      MRK_MACOS_PYTHON_SUPPLIER_SHA256: "${{ matrix.supplier_receipt }}"
+      MRK_MACOS_PYTHON_SUPPLIER_TAR_SHA256: "${{ matrix.supplier_tar }}"
+      MRK_MACOS_PYTHON_SUPPLIER_SOURCE_COMMIT: "${{ matrix.supplier_source }}"
+      MRK_MACOS_PYTHON_SUPPLIER_RUN_ID: "${{ matrix.supplier_run }}"
+      MRK_MACOS_PYTHON_SUPPLIER_RUN_ATTEMPT: "${{ matrix.supplier_attempt }}"
+      MRK_MACOS_PYTHON_SUPPLIER_ARTIFACT_ID: "${{ matrix.supplier_artifact }}"
+      MRK_BUNDLED_PROTOCOL_SHA256: '083e6afae3e329c4e0d81bad00dd0c9920f77491b38ce0d23aa602996f4c4bf5'
+      MRK_GITHUB_PREFLIGHT_TOOLING_SHA: d4a639b396eaa60385b223a154710e99a2862e67
+      MRK_GITHUB_RELEASE_TOOLING_SHA: d4a639b396eaa60385b223a154710e99a2862e67
+      MACOSX_DEPLOYMENT_TARGET: '26.0'
+      DEVELOPER_DIR: "/Library/Developer/CommandLineTools"
+    needs:
+    - desktop26-prepare
+    - desktop26-resident
+    - desktop26-vault
+    - desktop26-frontend
+    steps:
+    - name: Check out exact reviewed source without retained credentials
+      timeout-minutes: 3
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      env:
+        GIT_CONFIG_COUNT: '1'
+        GIT_CONFIG_KEY_0: core.autocrlf
+        GIT_CONFIG_VALUE_0: 'false'
+      with:
+        ref: "${{ github.sha }}"
+        persist-credentials: false
+    - name: Admit a fresh part runner and bind current SOURCE
+      id: bootstrap
+      uses: "./.github/actions/macos-candidate-bootstrap"
+      with:
+        work-root: "${{ needs.desktop26-prepare.outputs.work-root }}"
+    - name: Record only the freshly admitted part work root
+      id: work
+      shell: bash
+      run: 'printf ''root=%s\n'' "$MRK_MACOS_WORK" >> "$GITHUB_OUTPUT"
+
+'
+    - name: Admit and restore only completed source-bound predecessor parts
+      timeout-minutes: 15
+      env:
+        GH_TOKEN: "${{ github.token }}"
+        RUNNER_ENVIRONMENT: "${{ runner.environment }}"
+      shell: bash
+      run: |
+        set -euo pipefail
+        "$MRK_PYTHON" -I -S -B desktop/tools/macos_candidate_parts.py restore --part image
+    - name: Latch fresh runtime and SOURCE packaging bindings
+      id: github_tools
+      uses: "./.github/actions/macos-candidate-bindings"
+    - name: Install and verify the pinned Mac Rust toolchain
+      timeout-minutes: 8
+      shell: bash
+      run: "/bin/bash desktop/tools/macos_installed_direct_rust.sh"
+    - name: Build the genuine ordinary Desktop image
+      id: app_build
+      timeout-minutes: 48
+      shell: bash
+      env:
+        MRK_IMAGE_RELEASE_ID: "${{ env.MRK_IMAGE_RELEASE_ID }}"
+      run: 'builtin source ./desktop/tools/macos_installed_app_build.sh image
+
+'
+    - name: Record the effective pinned ordinary Desktop compiler
+      id: app_compiler
+      timeout-minutes: 1
+      uses: "./.github/actions/macos-candidate-recipes/app_compiler"
+    - name: Verify and freeze completed part originals
+      id: part
+      timeout-minutes: 10
+      env:
+        GH_TOKEN: "${{ github.token }}"
+        RUNNER_ENVIRONMENT: "${{ runner.environment }}"
+      shell: bash
+      run: |
+        set -euo pipefail
+        "$MRK_PYTHON" -I -S -B desktop/tools/macos_candidate_parts.py freeze --part image
+    - name: Upload immutable completed part
+      timeout-minutes: 8
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+      with:
+        name: "${{ steps.part.outputs.artifact-name }}"
+        path: "${{ steps.part.outputs.archive }}"
+        if-no-files-found: error
+        retention-days: 14
+        compression-level: 0
+        overwrite: false
+  desktop26-remover:
+    name: macOS part (Desktop26 / remover)
+    if: github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-macos-candidate'
+      && contains(github.event.head_commit.message, '[macos-desktop-update]')
+    runs-on: "${{ matrix.runner }}"
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+        - native_scope: disabled
+          target: aarch64-apple-darwin
+          runner: macos-26
+          machine: arm64
+          hosted_job: github-hosted-macos26-arm64
+          supplier_receipt: e6b23316078020c513ab1b05b3b55e4f87b8d15908a8dee022ad5ee03b8f763e
+          supplier_tar: ead75b364118139561a34da6aa48e3c54791e152154ab32c46196b0223962359
+          supplier_source: c6551aa07d0673436aa9587b3a039889d22449c3
+          supplier_run: '40473858216'
+          supplier_attempt: '1'
+          supplier_artifact: '12719943283'
+          removal_case: disabled
+    env:
+      RUSTUP_TOOLCHAIN: ${{ fromJSON('{"aarch64-apple-darwin":"1.98.1","x86_64-apple-darwin":"1.98.0"}')[matrix.target]
+        }}
+      MRK_MACOS_TARGET: "${{ matrix.target }}"
+      MRK_MACOS_RUNNER: "${{ matrix.runner }}"
+      MRK_MACOS_MACHINE: "${{ matrix.machine }}"
+      MRK_MACOS_HOSTED_JOB: "${{ matrix.hosted_job }}"
+      MRK_EXPECTED_SHA: "${{ github.sha }}"
+      MRK_MACOS_INSTALL_SOURCE_COMMIT: "${{ github.sha }}"
+      MRK_MACOS_NATIVE_SCOPE: disabled
+      MRK_MACOS_PACKAGE_ROLE: ordinary-image
+      MRK_MACOS_SAME_PACKAGE_SCOPE: "${{ github.ref == 'refs/heads/verify/desktop-macos-preview'
+        && 'same-package-noop' || 'disabled' }}"
+      MRK_MACOS_REMOVAL_CASE: "${{ matrix.removal_case || 'disabled' }}"
+      MRK_MACOS_ANDROID_UI_SCOPE: "${{ github.ref == 'refs/heads/verify/desktop-macos-installed'
+        && 'android-signed-build' || 'disabled' }}"
+      MRK_MACOS_IOS_UI_SCOPE: disabled
+      MRK_MACOS_SAVED_FILE_UI_SCOPE: "${{ github.ref == 'refs/heads/verify/desktop-macos-preview'
+        && 'remaining-three' || 'ordinary-seven' }}"
+      MRK_MACOS_STORE_RUNTIME: signed-component
+      MRK_BUNDLED_RUNTIME_SOURCE_SHA256: 10d3f2cf13155335444c8376a346d89581c03a43f0ae642e67401e379745dca2
+      MRK_MACOS_RUNTIME_SUPPLIER: fresh-public-source
+      MRK_MACOS_PYTHON_SUPPLIER_SHA256: "${{ matrix.supplier_receipt }}"
+      MRK_MACOS_PYTHON_SUPPLIER_TAR_SHA256: "${{ matrix.supplier_tar }}"
+      MRK_MACOS_PYTHON_SUPPLIER_SOURCE_COMMIT: "${{ matrix.supplier_source }}"
+      MRK_MACOS_PYTHON_SUPPLIER_RUN_ID: "${{ matrix.supplier_run }}"
+      MRK_MACOS_PYTHON_SUPPLIER_RUN_ATTEMPT: "${{ matrix.supplier_attempt }}"
+      MRK_MACOS_PYTHON_SUPPLIER_ARTIFACT_ID: "${{ matrix.supplier_artifact }}"
+      MRK_BUNDLED_PROTOCOL_SHA256: '083e6afae3e329c4e0d81bad00dd0c9920f77491b38ce0d23aa602996f4c4bf5'
+      MRK_GITHUB_PREFLIGHT_TOOLING_SHA: d4a639b396eaa60385b223a154710e99a2862e67
+      MRK_GITHUB_RELEASE_TOOLING_SHA: d4a639b396eaa60385b223a154710e99a2862e67
+      MACOSX_DEPLOYMENT_TARGET: '26.0'
+      DEVELOPER_DIR: "/Library/Developer/CommandLineTools"
+    needs:
+    - desktop26-prepare
+    - desktop26-resident
+    steps:
+    - name: Check out exact reviewed source without retained credentials
+      timeout-minutes: 3
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      env:
+        GIT_CONFIG_COUNT: '1'
+        GIT_CONFIG_KEY_0: core.autocrlf
+        GIT_CONFIG_VALUE_0: 'false'
+      with:
+        ref: "${{ github.sha }}"
+        persist-credentials: false
+    - name: Admit a fresh part runner and bind current SOURCE
+      id: bootstrap
+      uses: "./.github/actions/macos-candidate-bootstrap"
+      with:
+        work-root: "${{ needs.desktop26-prepare.outputs.work-root }}"
+    - name: Record only the freshly admitted part work root
+      id: work
+      shell: bash
+      run: 'printf ''root=%s\n'' "$MRK_MACOS_WORK" >> "$GITHUB_OUTPUT"
+
+'
+    - name: Admit and restore only completed source-bound predecessor parts
+      timeout-minutes: 15
+      env:
+        GH_TOKEN: "${{ github.token }}"
+        RUNNER_ENVIRONMENT: "${{ runner.environment }}"
+      shell: bash
+      run: |
+        set -euo pipefail
+        "$MRK_PYTHON" -I -S -B desktop/tools/macos_candidate_parts.py restore --part remover
+    - name: Latch fresh runtime and SOURCE packaging bindings
+      id: github_tools
+      uses: "./.github/actions/macos-candidate-bindings"
+    - name: Install and verify the pinned Mac Rust toolchain
+      timeout-minutes: 8
+      shell: bash
+      run: "/bin/bash desktop/tools/macos_installed_direct_rust.sh"
+    - name: Fetch only this exact locked compiler dependency graph
+      timeout-minutes: 5
+      shell: bash
+      run: |
+        set -euo pipefail
+        rust_bin="/Users/runner/.rustup/toolchains/${RUSTUP_TOOLCHAIN}-$MRK_MACOS_TARGET/bin"
+        PATH="$rust_bin:/usr/bin:/bin:/usr/sbin:/sbin" RUSTC="$rust_bin/rustc" RUSTUP_AUTO_INSTALL=0 \
+          "$rust_bin/cargo" fetch --manifest-path desktop/src-tauri/Cargo.toml --locked --target "$MRK_MACOS_TARGET"
+    - name: Build the fixed remover and selected removal-only observer
+      id: app_remover
+      timeout-minutes: 60
+      shell: bash
+      env:
+        MRK_IMAGE_RELEASE_ID: "${{ env.MRK_IMAGE_RELEASE_ID }}"
+      run: 'builtin source ./desktop/tools/macos_installed_app_build.sh remover
+
+'
+    - name: Verify and freeze completed part originals
+      id: part
+      timeout-minutes: 10
+      env:
+        GH_TOKEN: "${{ github.token }}"
+        RUNNER_ENVIRONMENT: "${{ runner.environment }}"
+      shell: bash
+      run: |
+        set -euo pipefail
+        "$MRK_PYTHON" -I -S -B desktop/tools/macos_candidate_parts.py freeze --part remover
+    - name: Upload immutable completed part
+      timeout-minutes: 8
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+      with:
+        name: "${{ steps.part.outputs.artifact-name }}"
+        path: "${{ steps.part.outputs.archive }}"
+        if-no-files-found: error
+        retention-days: 14
+        compression-level: 0
+        overwrite: false
+  desktop26-cli:
+    name: macOS part (Desktop26 / cli)
+    if: github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-macos-candidate'
+      && contains(github.event.head_commit.message, '[macos-desktop-update]')
+    runs-on: "${{ matrix.runner }}"
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+        - native_scope: disabled
+          target: aarch64-apple-darwin
+          runner: macos-26
+          machine: arm64
+          hosted_job: github-hosted-macos26-arm64
+          supplier_receipt: e6b23316078020c513ab1b05b3b55e4f87b8d15908a8dee022ad5ee03b8f763e
+          supplier_tar: ead75b364118139561a34da6aa48e3c54791e152154ab32c46196b0223962359
+          supplier_source: c6551aa07d0673436aa9587b3a039889d22449c3
+          supplier_run: '40473858216'
+          supplier_attempt: '1'
+          supplier_artifact: '12719943283'
+          removal_case: disabled
+    env:
+      RUSTUP_TOOLCHAIN: ${{ fromJSON('{"aarch64-apple-darwin":"1.98.1","x86_64-apple-darwin":"1.98.0"}')[matrix.target]
+        }}
+      MRK_MACOS_TARGET: "${{ matrix.target }}"
+      MRK_MACOS_RUNNER: "${{ matrix.runner }}"
+      MRK_MACOS_MACHINE: "${{ matrix.machine }}"
+      MRK_MACOS_HOSTED_JOB: "${{ matrix.hosted_job }}"
+      MRK_EXPECTED_SHA: "${{ github.sha }}"
+      MRK_MACOS_INSTALL_SOURCE_COMMIT: "${{ github.sha }}"
+      MRK_MACOS_NATIVE_SCOPE: disabled
+      MRK_MACOS_PACKAGE_ROLE: ordinary-image
+      MRK_MACOS_SAME_PACKAGE_SCOPE: "${{ github.ref == 'refs/heads/verify/desktop-macos-preview'
+        && 'same-package-noop' || 'disabled' }}"
+      MRK_MACOS_REMOVAL_CASE: "${{ matrix.removal_case || 'disabled' }}"
+      MRK_MACOS_ANDROID_UI_SCOPE: "${{ github.ref == 'refs/heads/verify/desktop-macos-installed'
+        && 'android-signed-build' || 'disabled' }}"
+      MRK_MACOS_IOS_UI_SCOPE: disabled
+      MRK_MACOS_SAVED_FILE_UI_SCOPE: "${{ github.ref == 'refs/heads/verify/desktop-macos-preview'
+        && 'remaining-three' || 'ordinary-seven' }}"
+      MRK_MACOS_STORE_RUNTIME: signed-component
+      MRK_BUNDLED_RUNTIME_SOURCE_SHA256: 10d3f2cf13155335444c8376a346d89581c03a43f0ae642e67401e379745dca2
+      MRK_MACOS_RUNTIME_SUPPLIER: fresh-public-source
+      MRK_MACOS_PYTHON_SUPPLIER_SHA256: "${{ matrix.supplier_receipt }}"
+      MRK_MACOS_PYTHON_SUPPLIER_TAR_SHA256: "${{ matrix.supplier_tar }}"
+      MRK_MACOS_PYTHON_SUPPLIER_SOURCE_COMMIT: "${{ matrix.supplier_source }}"
+      MRK_MACOS_PYTHON_SUPPLIER_RUN_ID: "${{ matrix.supplier_run }}"
+      MRK_MACOS_PYTHON_SUPPLIER_RUN_ATTEMPT: "${{ matrix.supplier_attempt }}"
+      MRK_MACOS_PYTHON_SUPPLIER_ARTIFACT_ID: "${{ matrix.supplier_artifact }}"
+      MRK_BUNDLED_PROTOCOL_SHA256: '083e6afae3e329c4e0d81bad00dd0c9920f77491b38ce0d23aa602996f4c4bf5'
+      MRK_GITHUB_PREFLIGHT_TOOLING_SHA: d4a639b396eaa60385b223a154710e99a2862e67
+      MRK_GITHUB_RELEASE_TOOLING_SHA: d4a639b396eaa60385b223a154710e99a2862e67
+      MACOSX_DEPLOYMENT_TARGET: '26.0'
+      DEVELOPER_DIR: "/Library/Developer/CommandLineTools"
+    needs:
+    - desktop26-prepare
+    - desktop26-resident
+    steps:
+    - name: Check out exact reviewed source without retained credentials
+      timeout-minutes: 3
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      env:
+        GIT_CONFIG_COUNT: '1'
+        GIT_CONFIG_KEY_0: core.autocrlf
+        GIT_CONFIG_VALUE_0: 'false'
+      with:
+        ref: "${{ github.sha }}"
+        persist-credentials: false
+    - name: Admit a fresh part runner and bind current SOURCE
+      id: bootstrap
+      uses: "./.github/actions/macos-candidate-bootstrap"
+      with:
+        work-root: "${{ needs.desktop26-prepare.outputs.work-root }}"
+    - name: Record only the freshly admitted part work root
+      id: work
+      shell: bash
+      run: 'printf ''root=%s\n'' "$MRK_MACOS_WORK" >> "$GITHUB_OUTPUT"
+
+'
+    - name: Admit and restore only completed source-bound predecessor parts
+      timeout-minutes: 15
+      env:
+        GH_TOKEN: "${{ github.token }}"
+        RUNNER_ENVIRONMENT: "${{ runner.environment }}"
+      shell: bash
+      run: |
+        set -euo pipefail
+        "$MRK_PYTHON" -I -S -B desktop/tools/macos_candidate_parts.py restore --part cli
+    - name: Latch fresh runtime and SOURCE packaging bindings
+      id: github_tools
+      uses: "./.github/actions/macos-candidate-bindings"
+    - name: Install and verify the pinned Mac Rust toolchain
+      timeout-minutes: 8
+      shell: bash
+      run: "/bin/bash desktop/tools/macos_installed_direct_rust.sh"
+    - name: Fetch only this exact locked compiler dependency graph
+      timeout-minutes: 5
+      shell: bash
+      run: |
+        set -euo pipefail
+        rust_bin="/Users/runner/.rustup/toolchains/${RUSTUP_TOOLCHAIN}-$MRK_MACOS_TARGET/bin"
+        PATH="$rust_bin:/usr/bin:/bin:/usr/sbin:/sbin" RUSTC="$rust_bin/rustc" RUSTUP_AUTO_INSTALL=0 \
+          "$rust_bin/cargo" fetch --manifest-path desktop/src-tauri/Cargo.toml --locked --target "$MRK_MACOS_TARGET"
+    - name: Build the fixed installed CLI
+      id: app_cli
+      timeout-minutes: 60
+      shell: bash
+      env:
+        MRK_IMAGE_RELEASE_ID: "${{ env.MRK_IMAGE_RELEASE_ID }}"
+      run: 'builtin source ./desktop/tools/macos_installed_app_build.sh installed-cli
+
+'
+    - name: Verify and freeze completed part originals
+      id: part
+      timeout-minutes: 10
+      env:
+        GH_TOKEN: "${{ github.token }}"
+        RUNNER_ENVIRONMENT: "${{ runner.environment }}"
+      shell: bash
+      run: |
+        set -euo pipefail
+        "$MRK_PYTHON" -I -S -B desktop/tools/macos_candidate_parts.py freeze --part cli
+    - name: Upload immutable completed part
+      timeout-minutes: 8
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+      with:
+        name: "${{ steps.part.outputs.artifact-name }}"
+        path: "${{ steps.part.outputs.archive }}"
+        if-no-files-found: error
+        retention-days: 14
+        compression-level: 0
+        overwrite: false
+  desktop26-sign-remover:
+    name: macOS part (Desktop26 / sign-remover)
+    if: github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-macos-candidate'
+      && contains(github.event.head_commit.message, '[macos-desktop-update]')
+    runs-on: "${{ matrix.runner }}"
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+        - native_scope: disabled
+          target: aarch64-apple-darwin
+          runner: macos-26
+          machine: arm64
+          hosted_job: github-hosted-macos26-arm64
+          supplier_receipt: e6b23316078020c513ab1b05b3b55e4f87b8d15908a8dee022ad5ee03b8f763e
+          supplier_tar: ead75b364118139561a34da6aa48e3c54791e152154ab32c46196b0223962359
+          supplier_source: c6551aa07d0673436aa9587b3a039889d22449c3
+          supplier_run: '40473858216'
+          supplier_attempt: '1'
+          supplier_artifact: '12719943283'
+          removal_case: disabled
+    env:
+      RUSTUP_TOOLCHAIN: ${{ fromJSON('{"aarch64-apple-darwin":"1.98.1","x86_64-apple-darwin":"1.98.0"}')[matrix.target]
+        }}
+      MRK_MACOS_TARGET: "${{ matrix.target }}"
+      MRK_MACOS_RUNNER: "${{ matrix.runner }}"
+      MRK_MACOS_MACHINE: "${{ matrix.machine }}"
+      MRK_MACOS_HOSTED_JOB: "${{ matrix.hosted_job }}"
+      MRK_EXPECTED_SHA: "${{ github.sha }}"
+      MRK_MACOS_INSTALL_SOURCE_COMMIT: "${{ github.sha }}"
+      MRK_MACOS_NATIVE_SCOPE: disabled
+      MRK_MACOS_PACKAGE_ROLE: ordinary-image
+      MRK_MACOS_SAME_PACKAGE_SCOPE: "${{ github.ref == 'refs/heads/verify/desktop-macos-preview'
+        && 'same-package-noop' || 'disabled' }}"
+      MRK_MACOS_REMOVAL_CASE: "${{ matrix.removal_case || 'disabled' }}"
+      MRK_MACOS_ANDROID_UI_SCOPE: "${{ github.ref == 'refs/heads/verify/desktop-macos-installed'
+        && 'android-signed-build' || 'disabled' }}"
+      MRK_MACOS_IOS_UI_SCOPE: disabled
+      MRK_MACOS_SAVED_FILE_UI_SCOPE: "${{ github.ref == 'refs/heads/verify/desktop-macos-preview'
+        && 'remaining-three' || 'ordinary-seven' }}"
+      MRK_MACOS_STORE_RUNTIME: signed-component
+      MRK_BUNDLED_RUNTIME_SOURCE_SHA256: 10d3f2cf13155335444c8376a346d89581c03a43f0ae642e67401e379745dca2
+      MRK_MACOS_RUNTIME_SUPPLIER: fresh-public-source
+      MRK_MACOS_PYTHON_SUPPLIER_SHA256: "${{ matrix.supplier_receipt }}"
+      MRK_MACOS_PYTHON_SUPPLIER_TAR_SHA256: "${{ matrix.supplier_tar }}"
+      MRK_MACOS_PYTHON_SUPPLIER_SOURCE_COMMIT: "${{ matrix.supplier_source }}"
+      MRK_MACOS_PYTHON_SUPPLIER_RUN_ID: "${{ matrix.supplier_run }}"
+      MRK_MACOS_PYTHON_SUPPLIER_RUN_ATTEMPT: "${{ matrix.supplier_attempt }}"
+      MRK_MACOS_PYTHON_SUPPLIER_ARTIFACT_ID: "${{ matrix.supplier_artifact }}"
+      MRK_BUNDLED_PROTOCOL_SHA256: '083e6afae3e329c4e0d81bad00dd0c9920f77491b38ce0d23aa602996f4c4bf5'
+      MRK_GITHUB_PREFLIGHT_TOOLING_SHA: d4a639b396eaa60385b223a154710e99a2862e67
+      MRK_GITHUB_RELEASE_TOOLING_SHA: d4a639b396eaa60385b223a154710e99a2862e67
+      MACOSX_DEPLOYMENT_TARGET: '26.0'
+      DEVELOPER_DIR: "/Library/Developer/CommandLineTools"
+    environment: macos-developer-id
+    needs:
+    - desktop26-prepare
+    - desktop26-resident
+    - desktop26-remover
+    steps:
+    - name: Check out exact reviewed source without retained credentials
+      timeout-minutes: 3
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      env:
+        GIT_CONFIG_COUNT: '1'
+        GIT_CONFIG_KEY_0: core.autocrlf
+        GIT_CONFIG_VALUE_0: 'false'
+      with:
+        ref: "${{ github.sha }}"
+        persist-credentials: false
+    - name: Admit a fresh part runner and bind current SOURCE
+      id: bootstrap
+      uses: "./.github/actions/macos-candidate-bootstrap"
+      with:
+        work-root: "${{ needs.desktop26-prepare.outputs.work-root }}"
+    - name: Record only the freshly admitted part work root
+      id: work
+      shell: bash
+      run: 'printf ''root=%s\n'' "$MRK_MACOS_WORK" >> "$GITHUB_OUTPUT"
+
+'
+    - name: Admit and restore only completed source-bound predecessor parts
+      timeout-minutes: 15
+      env:
+        GH_TOKEN: "${{ github.token }}"
+        RUNNER_ENVIRONMENT: "${{ runner.environment }}"
+      shell: bash
+      run: |
+        set -euo pipefail
+        "$MRK_PYTHON" -I -S -B desktop/tools/macos_candidate_parts.py restore --part sign-remover
+    - name: Latch fresh runtime and SOURCE packaging bindings
+      id: github_tools
+      uses: "./.github/actions/macos-candidate-bindings"
+    - name: Sign only the fixed compiled remover
+      timeout-minutes: 8
+      env:
+        RUNNER_ENVIRONMENT: "${{ runner.environment }}"
+        MRK_MACOS_DEVELOPER_ID_P12_BASE64: "${{ secrets.MRK_MACOS_DEVELOPER_ID_P12_BASE64
+          }}"
+        MRK_MACOS_DEVELOPER_ID_P12_PASSWORD: "${{ secrets.MRK_MACOS_DEVELOPER_ID_P12_PASSWORD
+          }}"
+      uses: "./.github/actions/macos-candidate-recipes/sign-only-the-fixed-compiled-remover"
+    - name: Verify and freeze completed part originals
+      id: part
+      timeout-minutes: 10
+      env:
+        GH_TOKEN: "${{ github.token }}"
+        RUNNER_ENVIRONMENT: "${{ runner.environment }}"
+      shell: bash
+      run: |
+        set -euo pipefail
+        "$MRK_PYTHON" -I -S -B desktop/tools/macos_candidate_parts.py freeze --part sign-remover
+    - name: Upload immutable completed part
+      timeout-minutes: 8
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+      with:
+        name: "${{ steps.part.outputs.artifact-name }}"
+        path: "${{ steps.part.outputs.archive }}"
+        if-no-files-found: error
+        retention-days: 14
+        compression-level: 0
+        overwrite: false
+  desktop26-sign-cli:
+    name: macOS part (Desktop26 / sign-cli)
+    if: github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-macos-candidate'
+      && contains(github.event.head_commit.message, '[macos-desktop-update]')
+    runs-on: "${{ matrix.runner }}"
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+        - native_scope: disabled
+          target: aarch64-apple-darwin
+          runner: macos-26
+          machine: arm64
+          hosted_job: github-hosted-macos26-arm64
+          supplier_receipt: e6b23316078020c513ab1b05b3b55e4f87b8d15908a8dee022ad5ee03b8f763e
+          supplier_tar: ead75b364118139561a34da6aa48e3c54791e152154ab32c46196b0223962359
+          supplier_source: c6551aa07d0673436aa9587b3a039889d22449c3
+          supplier_run: '40473858216'
+          supplier_attempt: '1'
+          supplier_artifact: '12719943283'
+          removal_case: disabled
+    env:
+      RUSTUP_TOOLCHAIN: ${{ fromJSON('{"aarch64-apple-darwin":"1.98.1","x86_64-apple-darwin":"1.98.0"}')[matrix.target]
+        }}
+      MRK_MACOS_TARGET: "${{ matrix.target }}"
+      MRK_MACOS_RUNNER: "${{ matrix.runner }}"
+      MRK_MACOS_MACHINE: "${{ matrix.machine }}"
+      MRK_MACOS_HOSTED_JOB: "${{ matrix.hosted_job }}"
+      MRK_EXPECTED_SHA: "${{ github.sha }}"
+      MRK_MACOS_INSTALL_SOURCE_COMMIT: "${{ github.sha }}"
+      MRK_MACOS_NATIVE_SCOPE: disabled
+      MRK_MACOS_PACKAGE_ROLE: ordinary-image
+      MRK_MACOS_SAME_PACKAGE_SCOPE: "${{ github.ref == 'refs/heads/verify/desktop-macos-preview'
+        && 'same-package-noop' || 'disabled' }}"
+      MRK_MACOS_REMOVAL_CASE: "${{ matrix.removal_case || 'disabled' }}"
+      MRK_MACOS_ANDROID_UI_SCOPE: "${{ github.ref == 'refs/heads/verify/desktop-macos-installed'
+        && 'android-signed-build' || 'disabled' }}"
+      MRK_MACOS_IOS_UI_SCOPE: disabled
+      MRK_MACOS_SAVED_FILE_UI_SCOPE: "${{ github.ref == 'refs/heads/verify/desktop-macos-preview'
+        && 'remaining-three' || 'ordinary-seven' }}"
+      MRK_MACOS_STORE_RUNTIME: signed-component
+      MRK_BUNDLED_RUNTIME_SOURCE_SHA256: 10d3f2cf13155335444c8376a346d89581c03a43f0ae642e67401e379745dca2
+      MRK_MACOS_RUNTIME_SUPPLIER: fresh-public-source
+      MRK_MACOS_PYTHON_SUPPLIER_SHA256: "${{ matrix.supplier_receipt }}"
+      MRK_MACOS_PYTHON_SUPPLIER_TAR_SHA256: "${{ matrix.supplier_tar }}"
+      MRK_MACOS_PYTHON_SUPPLIER_SOURCE_COMMIT: "${{ matrix.supplier_source }}"
+      MRK_MACOS_PYTHON_SUPPLIER_RUN_ID: "${{ matrix.supplier_run }}"
+      MRK_MACOS_PYTHON_SUPPLIER_RUN_ATTEMPT: "${{ matrix.supplier_attempt }}"
+      MRK_MACOS_PYTHON_SUPPLIER_ARTIFACT_ID: "${{ matrix.supplier_artifact }}"
+      MRK_BUNDLED_PROTOCOL_SHA256: '083e6afae3e329c4e0d81bad00dd0c9920f77491b38ce0d23aa602996f4c4bf5'
+      MRK_GITHUB_PREFLIGHT_TOOLING_SHA: d4a639b396eaa60385b223a154710e99a2862e67
+      MRK_GITHUB_RELEASE_TOOLING_SHA: d4a639b396eaa60385b223a154710e99a2862e67
+      MACOSX_DEPLOYMENT_TARGET: '26.0'
+      DEVELOPER_DIR: "/Library/Developer/CommandLineTools"
+    environment: macos-developer-id
+    needs:
+    - desktop26-prepare
+    - desktop26-resident
+    - desktop26-cli
+    steps:
+    - name: Check out exact reviewed source without retained credentials
+      timeout-minutes: 3
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      env:
+        GIT_CONFIG_COUNT: '1'
+        GIT_CONFIG_KEY_0: core.autocrlf
+        GIT_CONFIG_VALUE_0: 'false'
+      with:
+        ref: "${{ github.sha }}"
+        persist-credentials: false
+    - name: Admit a fresh part runner and bind current SOURCE
+      id: bootstrap
+      uses: "./.github/actions/macos-candidate-bootstrap"
+      with:
+        work-root: "${{ needs.desktop26-prepare.outputs.work-root }}"
+    - name: Record only the freshly admitted part work root
+      id: work
+      shell: bash
+      run: 'printf ''root=%s\n'' "$MRK_MACOS_WORK" >> "$GITHUB_OUTPUT"
+
+'
+    - name: Admit and restore only completed source-bound predecessor parts
+      timeout-minutes: 15
+      env:
+        GH_TOKEN: "${{ github.token }}"
+        RUNNER_ENVIRONMENT: "${{ runner.environment }}"
+      shell: bash
+      run: |
+        set -euo pipefail
+        "$MRK_PYTHON" -I -S -B desktop/tools/macos_candidate_parts.py restore --part sign-cli
+    - name: Latch fresh runtime and SOURCE packaging bindings
+      id: github_tools
+      uses: "./.github/actions/macos-candidate-bindings"
+    - name: Sign only the fixed compiled installed CLI
+      timeout-minutes: 8
+      env:
+        RUNNER_ENVIRONMENT: "${{ runner.environment }}"
+        MRK_MACOS_DEVELOPER_ID_P12_BASE64: "${{ secrets.MRK_MACOS_DEVELOPER_ID_P12_BASE64
+          }}"
+        MRK_MACOS_DEVELOPER_ID_P12_PASSWORD: "${{ secrets.MRK_MACOS_DEVELOPER_ID_P12_PASSWORD
+          }}"
+      uses: "./.github/actions/macos-candidate-recipes/sign-only-the-fixed-compiled-installed-cli"
+    - name: Verify and freeze completed part originals
+      id: part
+      timeout-minutes: 10
+      env:
+        GH_TOKEN: "${{ github.token }}"
+        RUNNER_ENVIRONMENT: "${{ runner.environment }}"
+      shell: bash
+      run: |
+        set -euo pipefail
+        "$MRK_PYTHON" -I -S -B desktop/tools/macos_candidate_parts.py freeze --part sign-cli
+    - name: Upload immutable completed part
+      timeout-minutes: 8
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+      with:
+        name: "${{ steps.part.outputs.artifact-name }}"
+        path: "${{ steps.part.outputs.archive }}"
+        if-no-files-found: error
+        retention-days: 14
+        compression-level: 0
+        overwrite: false
+  desktop26-assemble:
+    name: macOS part (Desktop26 / assemble)
+    if: github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-macos-candidate'
+      && contains(github.event.head_commit.message, '[macos-desktop-update]')
+    runs-on: "${{ matrix.runner }}"
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+        - native_scope: disabled
+          target: aarch64-apple-darwin
+          runner: macos-26
+          machine: arm64
+          hosted_job: github-hosted-macos26-arm64
+          supplier_receipt: e6b23316078020c513ab1b05b3b55e4f87b8d15908a8dee022ad5ee03b8f763e
+          supplier_tar: ead75b364118139561a34da6aa48e3c54791e152154ab32c46196b0223962359
+          supplier_source: c6551aa07d0673436aa9587b3a039889d22449c3
+          supplier_run: '40473858216'
+          supplier_attempt: '1'
+          supplier_artifact: '12719943283'
+          removal_case: disabled
+    env:
+      RUSTUP_TOOLCHAIN: ${{ fromJSON('{"aarch64-apple-darwin":"1.98.1","x86_64-apple-darwin":"1.98.0"}')[matrix.target]
+        }}
+      MRK_MACOS_TARGET: "${{ matrix.target }}"
+      MRK_MACOS_RUNNER: "${{ matrix.runner }}"
+      MRK_MACOS_MACHINE: "${{ matrix.machine }}"
+      MRK_MACOS_HOSTED_JOB: "${{ matrix.hosted_job }}"
+      MRK_EXPECTED_SHA: "${{ github.sha }}"
+      MRK_MACOS_INSTALL_SOURCE_COMMIT: "${{ github.sha }}"
+      MRK_MACOS_NATIVE_SCOPE: disabled
+      MRK_MACOS_PACKAGE_ROLE: ordinary-image
+      MRK_MACOS_SAME_PACKAGE_SCOPE: "${{ github.ref == 'refs/heads/verify/desktop-macos-preview'
+        && 'same-package-noop' || 'disabled' }}"
+      MRK_MACOS_REMOVAL_CASE: "${{ matrix.removal_case || 'disabled' }}"
+      MRK_MACOS_ANDROID_UI_SCOPE: "${{ github.ref == 'refs/heads/verify/desktop-macos-installed'
+        && 'android-signed-build' || 'disabled' }}"
+      MRK_MACOS_IOS_UI_SCOPE: disabled
+      MRK_MACOS_SAVED_FILE_UI_SCOPE: "${{ github.ref == 'refs/heads/verify/desktop-macos-preview'
+        && 'remaining-three' || 'ordinary-seven' }}"
+      MRK_MACOS_STORE_RUNTIME: signed-component
+      MRK_BUNDLED_RUNTIME_SOURCE_SHA256: 10d3f2cf13155335444c8376a346d89581c03a43f0ae642e67401e379745dca2
+      MRK_MACOS_RUNTIME_SUPPLIER: fresh-public-source
+      MRK_MACOS_PYTHON_SUPPLIER_SHA256: "${{ matrix.supplier_receipt }}"
+      MRK_MACOS_PYTHON_SUPPLIER_TAR_SHA256: "${{ matrix.supplier_tar }}"
+      MRK_MACOS_PYTHON_SUPPLIER_SOURCE_COMMIT: "${{ matrix.supplier_source }}"
+      MRK_MACOS_PYTHON_SUPPLIER_RUN_ID: "${{ matrix.supplier_run }}"
+      MRK_MACOS_PYTHON_SUPPLIER_RUN_ATTEMPT: "${{ matrix.supplier_attempt }}"
+      MRK_MACOS_PYTHON_SUPPLIER_ARTIFACT_ID: "${{ matrix.supplier_artifact }}"
+      MRK_BUNDLED_PROTOCOL_SHA256: '083e6afae3e329c4e0d81bad00dd0c9920f77491b38ce0d23aa602996f4c4bf5'
+      MRK_GITHUB_PREFLIGHT_TOOLING_SHA: d4a639b396eaa60385b223a154710e99a2862e67
+      MRK_GITHUB_RELEASE_TOOLING_SHA: d4a639b396eaa60385b223a154710e99a2862e67
+      MACOSX_DEPLOYMENT_TARGET: '26.0'
+      DEVELOPER_DIR: "/Library/Developer/CommandLineTools"
+    environment: macos-developer-id
+    needs:
+    - desktop26-prepare
+    - desktop26-resident
+    - desktop26-vault
+    - desktop26-frontend
+    - desktop26-image
+    - desktop26-remover
+    - desktop26-cli
+    - desktop26-sign-remover
+    - desktop26-sign-cli
+    steps:
+    - name: Check out exact reviewed source without retained credentials
+      timeout-minutes: 3
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      env:
+        GIT_CONFIG_COUNT: '1'
+        GIT_CONFIG_KEY_0: core.autocrlf
+        GIT_CONFIG_VALUE_0: 'false'
+      with:
+        ref: "${{ github.sha }}"
+        persist-credentials: false
+    - name: Admit a fresh part runner and bind current SOURCE
+      id: bootstrap
+      uses: "./.github/actions/macos-candidate-bootstrap"
+      with:
+        work-root: "${{ needs.desktop26-prepare.outputs.work-root }}"
+    - name: Record only the freshly admitted part work root
+      id: work
+      shell: bash
+      run: 'printf ''root=%s\n'' "$MRK_MACOS_WORK" >> "$GITHUB_OUTPUT"
+
+'
+    - name: Admit and restore only completed source-bound predecessor parts
+      timeout-minutes: 15
+      env:
+        GH_TOKEN: "${{ github.token }}"
+        RUNNER_ENVIRONMENT: "${{ runner.environment }}"
+      shell: bash
+      run: |
+        set -euo pipefail
+        "$MRK_PYTHON" -I -S -B desktop/tools/macos_candidate_parts.py restore --part assemble
+    - name: Latch fresh runtime and SOURCE packaging bindings
+      id: github_tools
+      uses: "./.github/actions/macos-candidate-bindings"
+    - name: Assemble the ordinary Desktop and signed launcher inside-out
+      id: app_assemble
+      timeout-minutes: 20
+      env:
+        RUNNER_ENVIRONMENT: "${{ runner.environment }}"
+        MRK_MACOS_DESKTOP_FACADE_SHA256: "${{ env.MRK_MACOS_DESKTOP_FACADE_SHA256
+          }}"
+        MRK_MACOS_ANDROID_HELPER_SHA256: "${{ env.MRK_MACOS_ANDROID_HELPER_SHA256
+          }}"
+        MRK_MACOS_RESIDENT_IMAGE_SHA256: "${{ env.MRK_MACOS_RESIDENT_IMAGE_SHA256
+          }}"
+        MRK_MACOS_ENTRY_SHA256: "${{ env.MRK_MACOS_ENTRY_SHA256 }}"
+        MRK_MACOS_DEVELOPER_ID_P12_BASE64: "${{ secrets.MRK_MACOS_DEVELOPER_ID_P12_BASE64
+          }}"
+        MRK_MACOS_DEVELOPER_ID_P12_PASSWORD: "${{ secrets.MRK_MACOS_DEVELOPER_ID_P12_PASSWORD
+          }}"
+      uses: "./.github/actions/macos-candidate-recipes/app_assemble-a6bc5e54"
+      with:
+        binding-1: "${{ steps.github_tools.outputs.seal-enabled }}"
+        binding-2: "${{ steps.github_tools.outputs.history-enabled }}"
+    - name: Verify and freeze completed part originals
+      id: part
+      timeout-minutes: 10
+      env:
+        GH_TOKEN: "${{ github.token }}"
+        RUNNER_ENVIRONMENT: "${{ runner.environment }}"
+      shell: bash
+      run: |
+        set -euo pipefail
+        "$MRK_PYTHON" -I -S -B desktop/tools/macos_candidate_parts.py freeze --part assemble
+    - name: Upload immutable completed part
+      timeout-minutes: 8
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+      with:
+        name: "${{ steps.part.outputs.artifact-name }}"
+        path: "${{ steps.part.outputs.archive }}"
+        if-no-files-found: error
+        retention-days: 14
+        compression-level: 0
+        overwrite: false
+  desktop26-notarize-payload:
+    name: macOS part (Desktop26 / notarize-payload)
+    if: github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-macos-candidate'
+      && contains(github.event.head_commit.message, '[macos-desktop-update]')
+    runs-on: "${{ matrix.runner }}"
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+        - native_scope: disabled
+          target: aarch64-apple-darwin
+          runner: macos-26
+          machine: arm64
+          hosted_job: github-hosted-macos26-arm64
+          supplier_receipt: e6b23316078020c513ab1b05b3b55e4f87b8d15908a8dee022ad5ee03b8f763e
+          supplier_tar: ead75b364118139561a34da6aa48e3c54791e152154ab32c46196b0223962359
+          supplier_source: c6551aa07d0673436aa9587b3a039889d22449c3
+          supplier_run: '40473858216'
+          supplier_attempt: '1'
+          supplier_artifact: '12719943283'
+          removal_case: disabled
+    env:
+      RUSTUP_TOOLCHAIN: ${{ fromJSON('{"aarch64-apple-darwin":"1.98.1","x86_64-apple-darwin":"1.98.0"}')[matrix.target]
+        }}
+      MRK_MACOS_TARGET: "${{ matrix.target }}"
+      MRK_MACOS_RUNNER: "${{ matrix.runner }}"
+      MRK_MACOS_MACHINE: "${{ matrix.machine }}"
+      MRK_MACOS_HOSTED_JOB: "${{ matrix.hosted_job }}"
+      MRK_EXPECTED_SHA: "${{ github.sha }}"
+      MRK_MACOS_INSTALL_SOURCE_COMMIT: "${{ github.sha }}"
+      MRK_MACOS_NATIVE_SCOPE: disabled
+      MRK_MACOS_PACKAGE_ROLE: ordinary-image
+      MRK_MACOS_SAME_PACKAGE_SCOPE: "${{ github.ref == 'refs/heads/verify/desktop-macos-preview'
+        && 'same-package-noop' || 'disabled' }}"
+      MRK_MACOS_REMOVAL_CASE: "${{ matrix.removal_case || 'disabled' }}"
+      MRK_MACOS_ANDROID_UI_SCOPE: "${{ github.ref == 'refs/heads/verify/desktop-macos-installed'
+        && 'android-signed-build' || 'disabled' }}"
+      MRK_MACOS_IOS_UI_SCOPE: disabled
+      MRK_MACOS_SAVED_FILE_UI_SCOPE: "${{ github.ref == 'refs/heads/verify/desktop-macos-preview'
+        && 'remaining-three' || 'ordinary-seven' }}"
+      MRK_MACOS_STORE_RUNTIME: signed-component
+      MRK_BUNDLED_RUNTIME_SOURCE_SHA256: 10d3f2cf13155335444c8376a346d89581c03a43f0ae642e67401e379745dca2
+      MRK_MACOS_RUNTIME_SUPPLIER: fresh-public-source
+      MRK_MACOS_PYTHON_SUPPLIER_SHA256: "${{ matrix.supplier_receipt }}"
+      MRK_MACOS_PYTHON_SUPPLIER_TAR_SHA256: "${{ matrix.supplier_tar }}"
+      MRK_MACOS_PYTHON_SUPPLIER_SOURCE_COMMIT: "${{ matrix.supplier_source }}"
+      MRK_MACOS_PYTHON_SUPPLIER_RUN_ID: "${{ matrix.supplier_run }}"
+      MRK_MACOS_PYTHON_SUPPLIER_RUN_ATTEMPT: "${{ matrix.supplier_attempt }}"
+      MRK_MACOS_PYTHON_SUPPLIER_ARTIFACT_ID: "${{ matrix.supplier_artifact }}"
+      MRK_BUNDLED_PROTOCOL_SHA256: '083e6afae3e329c4e0d81bad00dd0c9920f77491b38ce0d23aa602996f4c4bf5'
+      MRK_GITHUB_PREFLIGHT_TOOLING_SHA: d4a639b396eaa60385b223a154710e99a2862e67
+      MRK_GITHUB_RELEASE_TOOLING_SHA: d4a639b396eaa60385b223a154710e99a2862e67
+      MACOSX_DEPLOYMENT_TARGET: '26.0'
+      DEVELOPER_DIR: "/Library/Developer/CommandLineTools"
+    environment: macos-developer-id
+    needs:
+    - desktop26-prepare
+    - desktop26-resident
+    - desktop26-vault
+    - desktop26-frontend
+    - desktop26-image
+    - desktop26-remover
+    - desktop26-cli
+    - desktop26-sign-remover
+    - desktop26-sign-cli
+    - desktop26-assemble
+    steps:
+    - name: Check out exact reviewed source without retained credentials
+      timeout-minutes: 3
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      env:
+        GIT_CONFIG_COUNT: '1'
+        GIT_CONFIG_KEY_0: core.autocrlf
+        GIT_CONFIG_VALUE_0: 'false'
+      with:
+        ref: "${{ github.sha }}"
+        persist-credentials: false
+    - name: Admit a fresh part runner and bind current SOURCE
+      id: bootstrap
+      uses: "./.github/actions/macos-candidate-bootstrap"
+      with:
+        work-root: "${{ needs.desktop26-prepare.outputs.work-root }}"
+    - name: Record only the freshly admitted part work root
+      id: work
+      shell: bash
+      run: 'printf ''root=%s\n'' "$MRK_MACOS_WORK" >> "$GITHUB_OUTPUT"
+
+'
+    - name: Admit and restore only completed source-bound predecessor parts
+      timeout-minutes: 15
+      env:
+        GH_TOKEN: "${{ github.token }}"
+        RUNNER_ENVIRONMENT: "${{ runner.environment }}"
+      shell: bash
+      run: |
+        set -euo pipefail
+        "$MRK_PYTHON" -I -S -B desktop/tools/macos_candidate_parts.py restore --part notarize-payload
+    - name: Latch fresh runtime and SOURCE packaging bindings
+      id: github_tools
+      uses: "./.github/actions/macos-candidate-bindings"
+    - name: Notarize and staple the signed payload, then bind Installer inputs
+      if: github.ref != 'refs/heads/verify/desktop-macos-app-signature'
+      timeout-minutes: 32
+      env:
+        RUNNER_ENVIRONMENT: "${{ runner.environment }}"
+        MRK_MACOS_NOTARY_API_KEY_BASE64: "${{ secrets.MRK_MACOS_NOTARY_API_KEY_BASE64
+          }}"
+        MRK_MACOS_ANDROID_HELPER_SHA256: "${{ env.MRK_MACOS_ANDROID_HELPER_SHA256
+          }}"
+        MRK_MACOS_RESIDENT_IMAGE_SHA256: "${{ env.MRK_MACOS_RESIDENT_IMAGE_SHA256
+          }}"
+        MRK_MACOS_ENTRY_SHA256: "${{ env.MRK_MACOS_ENTRY_SHA256 }}"
+      uses: "./.github/actions/macos-candidate-recipes/notarize-and-staple-the-signed-payload-then-bind-ins"
+    - name: Require all five launcher leaves and the functional ordinary Desktop before
+        Installer compilation
+      timeout-minutes: 1
+      shell: bash
+      run: |
+        set -euo pipefail
+        "$MRK_PYTHON" -I -S -B desktop/tools/macos_desktop_update.py --inventory "$MRK_MACOS_WORK/input/install-inventory.json" --expected-inventory "$MRK_MACOS_INSTALL_INVENTORY_SHA256" --package-role "$MRK_MACOS_PACKAGE_ROLE"
+    - name: Verify and freeze completed part originals
+      id: part
+      timeout-minutes: 10
+      env:
+        GH_TOKEN: "${{ github.token }}"
+        RUNNER_ENVIRONMENT: "${{ runner.environment }}"
+      shell: bash
+      run: |
+        set -euo pipefail
+        "$MRK_PYTHON" -I -S -B desktop/tools/macos_candidate_parts.py freeze --part notarize-payload
+    - name: Upload immutable completed part
+      timeout-minutes: 8
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+      with:
+        name: "${{ steps.part.outputs.artifact-name }}"
+        path: "${{ steps.part.outputs.archive }}"
+        if-no-files-found: error
+        retention-days: 14
+        compression-level: 0
+        overwrite: false
+  desktop26-installer:
+    name: macOS part (Desktop26 / installer)
+    if: github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-macos-candidate'
+      && contains(github.event.head_commit.message, '[macos-desktop-update]')
+    runs-on: "${{ matrix.runner }}"
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+        - native_scope: disabled
+          target: aarch64-apple-darwin
+          runner: macos-26
+          machine: arm64
+          hosted_job: github-hosted-macos26-arm64
+          supplier_receipt: e6b23316078020c513ab1b05b3b55e4f87b8d15908a8dee022ad5ee03b8f763e
+          supplier_tar: ead75b364118139561a34da6aa48e3c54791e152154ab32c46196b0223962359
+          supplier_source: c6551aa07d0673436aa9587b3a039889d22449c3
+          supplier_run: '40473858216'
+          supplier_attempt: '1'
+          supplier_artifact: '12719943283'
+          removal_case: disabled
+    env:
+      RUSTUP_TOOLCHAIN: ${{ fromJSON('{"aarch64-apple-darwin":"1.98.1","x86_64-apple-darwin":"1.98.0"}')[matrix.target]
+        }}
+      MRK_MACOS_TARGET: "${{ matrix.target }}"
+      MRK_MACOS_RUNNER: "${{ matrix.runner }}"
+      MRK_MACOS_MACHINE: "${{ matrix.machine }}"
+      MRK_MACOS_HOSTED_JOB: "${{ matrix.hosted_job }}"
+      MRK_EXPECTED_SHA: "${{ github.sha }}"
+      MRK_MACOS_INSTALL_SOURCE_COMMIT: "${{ github.sha }}"
+      MRK_MACOS_NATIVE_SCOPE: disabled
+      MRK_MACOS_PACKAGE_ROLE: ordinary-image
+      MRK_MACOS_SAME_PACKAGE_SCOPE: "${{ github.ref == 'refs/heads/verify/desktop-macos-preview'
+        && 'same-package-noop' || 'disabled' }}"
+      MRK_MACOS_REMOVAL_CASE: "${{ matrix.removal_case || 'disabled' }}"
+      MRK_MACOS_ANDROID_UI_SCOPE: "${{ github.ref == 'refs/heads/verify/desktop-macos-installed'
+        && 'android-signed-build' || 'disabled' }}"
+      MRK_MACOS_IOS_UI_SCOPE: disabled
+      MRK_MACOS_SAVED_FILE_UI_SCOPE: "${{ github.ref == 'refs/heads/verify/desktop-macos-preview'
+        && 'remaining-three' || 'ordinary-seven' }}"
+      MRK_MACOS_STORE_RUNTIME: signed-component
+      MRK_BUNDLED_RUNTIME_SOURCE_SHA256: 10d3f2cf13155335444c8376a346d89581c03a43f0ae642e67401e379745dca2
+      MRK_MACOS_RUNTIME_SUPPLIER: fresh-public-source
+      MRK_MACOS_PYTHON_SUPPLIER_SHA256: "${{ matrix.supplier_receipt }}"
+      MRK_MACOS_PYTHON_SUPPLIER_TAR_SHA256: "${{ matrix.supplier_tar }}"
+      MRK_MACOS_PYTHON_SUPPLIER_SOURCE_COMMIT: "${{ matrix.supplier_source }}"
+      MRK_MACOS_PYTHON_SUPPLIER_RUN_ID: "${{ matrix.supplier_run }}"
+      MRK_MACOS_PYTHON_SUPPLIER_RUN_ATTEMPT: "${{ matrix.supplier_attempt }}"
+      MRK_MACOS_PYTHON_SUPPLIER_ARTIFACT_ID: "${{ matrix.supplier_artifact }}"
+      MRK_BUNDLED_PROTOCOL_SHA256: '083e6afae3e329c4e0d81bad00dd0c9920f77491b38ce0d23aa602996f4c4bf5'
+      MRK_GITHUB_PREFLIGHT_TOOLING_SHA: d4a639b396eaa60385b223a154710e99a2862e67
+      MRK_GITHUB_RELEASE_TOOLING_SHA: d4a639b396eaa60385b223a154710e99a2862e67
+      MACOSX_DEPLOYMENT_TARGET: '26.0'
+      DEVELOPER_DIR: "/Library/Developer/CommandLineTools"
+    needs:
+    - desktop26-prepare
+    - desktop26-resident
+    - desktop26-vault
+    - desktop26-frontend
+    - desktop26-image
+    - desktop26-remover
+    - desktop26-cli
+    - desktop26-sign-remover
+    - desktop26-sign-cli
+    - desktop26-assemble
+    - desktop26-notarize-payload
+    steps:
+    - name: Check out exact reviewed source without retained credentials
+      timeout-minutes: 3
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      env:
+        GIT_CONFIG_COUNT: '1'
+        GIT_CONFIG_KEY_0: core.autocrlf
+        GIT_CONFIG_VALUE_0: 'false'
+      with:
+        ref: "${{ github.sha }}"
+        persist-credentials: false
+    - name: Admit a fresh part runner and bind current SOURCE
+      id: bootstrap
+      uses: "./.github/actions/macos-candidate-bootstrap"
+      with:
+        work-root: "${{ needs.desktop26-prepare.outputs.work-root }}"
+    - name: Record only the freshly admitted part work root
+      id: work
+      shell: bash
+      run: 'printf ''root=%s\n'' "$MRK_MACOS_WORK" >> "$GITHUB_OUTPUT"
+
+'
+    - name: Admit and restore only completed source-bound predecessor parts
+      timeout-minutes: 15
+      env:
+        GH_TOKEN: "${{ github.token }}"
+        RUNNER_ENVIRONMENT: "${{ runner.environment }}"
+      shell: bash
+      run: |
+        set -euo pipefail
+        "$MRK_PYTHON" -I -S -B desktop/tools/macos_candidate_parts.py restore --part installer
+    - name: Latch fresh runtime and SOURCE packaging bindings
+      id: github_tools
+      uses: "./.github/actions/macos-candidate-bindings"
+    - name: Install and verify the pinned Mac Rust toolchain
+      timeout-minutes: 8
+      shell: bash
+      run: "/bin/bash desktop/tools/macos_installed_direct_rust.sh"
+    - name: Compile the fixed ordinary root Installer before credential admission
+      if: github.ref != 'refs/heads/verify/desktop-macos-app-signature'
+      timeout-minutes: 20
+      uses: "./.github/actions/macos-candidate-recipes/compile-the-fixed-ordinary-root-installer-before-cre"
+    - name: Verify and freeze completed part originals
+      id: part
+      timeout-minutes: 10
+      env:
+        GH_TOKEN: "${{ github.token }}"
+        RUNNER_ENVIRONMENT: "${{ runner.environment }}"
+      shell: bash
+      run: |
+        set -euo pipefail
+        "$MRK_PYTHON" -I -S -B desktop/tools/macos_candidate_parts.py freeze --part installer
+    - name: Upload immutable completed part
+      timeout-minutes: 8
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+      with:
+        name: "${{ steps.part.outputs.artifact-name }}"
+        path: "${{ steps.part.outputs.archive }}"
+        if-no-files-found: error
+        retention-days: 14
+        compression-level: 0
+        overwrite: false
+  desktop26-scripts-package:
+    name: macOS part (Desktop26 / scripts-package)
+    if: github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-macos-candidate'
+      && contains(github.event.head_commit.message, '[macos-desktop-update]')
+    runs-on: "${{ matrix.runner }}"
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+        - native_scope: disabled
+          target: aarch64-apple-darwin
+          runner: macos-26
+          machine: arm64
+          hosted_job: github-hosted-macos26-arm64
+          supplier_receipt: e6b23316078020c513ab1b05b3b55e4f87b8d15908a8dee022ad5ee03b8f763e
+          supplier_tar: ead75b364118139561a34da6aa48e3c54791e152154ab32c46196b0223962359
+          supplier_source: c6551aa07d0673436aa9587b3a039889d22449c3
+          supplier_run: '40473858216'
+          supplier_attempt: '1'
+          supplier_artifact: '12719943283'
+          removal_case: disabled
+    env:
+      RUSTUP_TOOLCHAIN: ${{ fromJSON('{"aarch64-apple-darwin":"1.98.1","x86_64-apple-darwin":"1.98.0"}')[matrix.target]
+        }}
+      MRK_MACOS_TARGET: "${{ matrix.target }}"
+      MRK_MACOS_RUNNER: "${{ matrix.runner }}"
+      MRK_MACOS_MACHINE: "${{ matrix.machine }}"
+      MRK_MACOS_HOSTED_JOB: "${{ matrix.hosted_job }}"
+      MRK_EXPECTED_SHA: "${{ github.sha }}"
+      MRK_MACOS_INSTALL_SOURCE_COMMIT: "${{ github.sha }}"
+      MRK_MACOS_NATIVE_SCOPE: disabled
+      MRK_MACOS_PACKAGE_ROLE: ordinary-image
+      MRK_MACOS_SAME_PACKAGE_SCOPE: "${{ github.ref == 'refs/heads/verify/desktop-macos-preview'
+        && 'same-package-noop' || 'disabled' }}"
+      MRK_MACOS_REMOVAL_CASE: "${{ matrix.removal_case || 'disabled' }}"
+      MRK_MACOS_ANDROID_UI_SCOPE: "${{ github.ref == 'refs/heads/verify/desktop-macos-installed'
+        && 'android-signed-build' || 'disabled' }}"
+      MRK_MACOS_IOS_UI_SCOPE: disabled
+      MRK_MACOS_SAVED_FILE_UI_SCOPE: "${{ github.ref == 'refs/heads/verify/desktop-macos-preview'
+        && 'remaining-three' || 'ordinary-seven' }}"
+      MRK_MACOS_STORE_RUNTIME: signed-component
+      MRK_BUNDLED_RUNTIME_SOURCE_SHA256: 10d3f2cf13155335444c8376a346d89581c03a43f0ae642e67401e379745dca2
+      MRK_MACOS_RUNTIME_SUPPLIER: fresh-public-source
+      MRK_MACOS_PYTHON_SUPPLIER_SHA256: "${{ matrix.supplier_receipt }}"
+      MRK_MACOS_PYTHON_SUPPLIER_TAR_SHA256: "${{ matrix.supplier_tar }}"
+      MRK_MACOS_PYTHON_SUPPLIER_SOURCE_COMMIT: "${{ matrix.supplier_source }}"
+      MRK_MACOS_PYTHON_SUPPLIER_RUN_ID: "${{ matrix.supplier_run }}"
+      MRK_MACOS_PYTHON_SUPPLIER_RUN_ATTEMPT: "${{ matrix.supplier_attempt }}"
+      MRK_MACOS_PYTHON_SUPPLIER_ARTIFACT_ID: "${{ matrix.supplier_artifact }}"
+      MRK_BUNDLED_PROTOCOL_SHA256: '083e6afae3e329c4e0d81bad00dd0c9920f77491b38ce0d23aa602996f4c4bf5'
+      MRK_GITHUB_PREFLIGHT_TOOLING_SHA: d4a639b396eaa60385b223a154710e99a2862e67
+      MRK_GITHUB_RELEASE_TOOLING_SHA: d4a639b396eaa60385b223a154710e99a2862e67
+      MACOSX_DEPLOYMENT_TARGET: '26.0'
+      DEVELOPER_DIR: "/Library/Developer/CommandLineTools"
+    environment: macos-developer-id
+    needs:
+    - desktop26-prepare
+    - desktop26-resident
+    - desktop26-vault
+    - desktop26-frontend
+    - desktop26-image
+    - desktop26-remover
+    - desktop26-cli
+    - desktop26-sign-remover
+    - desktop26-sign-cli
+    - desktop26-assemble
+    - desktop26-notarize-payload
+    - desktop26-installer
+    steps:
+    - name: Check out exact reviewed source without retained credentials
+      timeout-minutes: 3
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      env:
+        GIT_CONFIG_COUNT: '1'
+        GIT_CONFIG_KEY_0: core.autocrlf
+        GIT_CONFIG_VALUE_0: 'false'
+      with:
+        ref: "${{ github.sha }}"
+        persist-credentials: false
+    - name: Admit a fresh part runner and bind current SOURCE
+      id: bootstrap
+      uses: "./.github/actions/macos-candidate-bootstrap"
+      with:
+        work-root: "${{ needs.desktop26-prepare.outputs.work-root }}"
+    - name: Record only the freshly admitted part work root
+      id: work
+      shell: bash
+      run: 'printf ''root=%s\n'' "$MRK_MACOS_WORK" >> "$GITHUB_OUTPUT"
+
+'
+    - name: Admit and restore only completed source-bound predecessor parts
+      timeout-minutes: 15
+      env:
+        GH_TOKEN: "${{ github.token }}"
+        RUNNER_ENVIRONMENT: "${{ runner.environment }}"
+      shell: bash
+      run: |
+        set -euo pipefail
+        "$MRK_PYTHON" -I -S -B desktop/tools/macos_candidate_parts.py restore --part scripts-package
+    - name: Latch fresh runtime and SOURCE packaging bindings
+      id: github_tools
+      uses: "./.github/actions/macos-candidate-bindings"
+    - name: Build the fixed one-shot root Installer and scripts-only package
+      if: github.ref != 'refs/heads/verify/desktop-macos-app-signature'
+      timeout-minutes: 8
+      env:
+        RUNNER_ENVIRONMENT: "${{ runner.environment }}"
+        MRK_MACOS_DEVELOPER_ID_P12_BASE64: "${{ secrets.MRK_MACOS_DEVELOPER_ID_P12_BASE64
+          }}"
+        MRK_MACOS_DEVELOPER_ID_P12_PASSWORD: "${{ secrets.MRK_MACOS_DEVELOPER_ID_P12_PASSWORD
+          }}"
+      uses: "./.github/actions/macos-candidate-recipes/build-the-fixed-one-shot-root-installer-and-scripts-"
+    - name: Verify and freeze completed part originals
+      id: part
+      timeout-minutes: 10
+      env:
+        GH_TOKEN: "${{ github.token }}"
+        RUNNER_ENVIRONMENT: "${{ runner.environment }}"
+      shell: bash
+      run: |
+        set -euo pipefail
+        "$MRK_PYTHON" -I -S -B desktop/tools/macos_candidate_parts.py freeze --part scripts-package
+    - name: Upload immutable completed part
+      timeout-minutes: 8
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+      with:
+        name: "${{ steps.part.outputs.artifact-name }}"
+        path: "${{ steps.part.outputs.archive }}"
+        if-no-files-found: error
+        retention-days: 14
+        compression-level: 0
+        overwrite: false
+  desktop26-final-package:
+    name: Build signed candidate (Desktop26)
+    if: github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-macos-candidate'
+      && contains(github.event.head_commit.message, '[macos-desktop-update]')
+    runs-on: "${{ matrix.runner }}"
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+        - native_scope: disabled
+          target: aarch64-apple-darwin
+          runner: macos-26
+          machine: arm64
+          hosted_job: github-hosted-macos26-arm64
+          supplier_receipt: e6b23316078020c513ab1b05b3b55e4f87b8d15908a8dee022ad5ee03b8f763e
+          supplier_tar: ead75b364118139561a34da6aa48e3c54791e152154ab32c46196b0223962359
+          supplier_source: c6551aa07d0673436aa9587b3a039889d22449c3
+          supplier_run: '40473858216'
+          supplier_attempt: '1'
+          supplier_artifact: '12719943283'
+          removal_case: disabled
+    env:
+      RUSTUP_TOOLCHAIN: ${{ fromJSON('{"aarch64-apple-darwin":"1.98.1","x86_64-apple-darwin":"1.98.0"}')[matrix.target]
+        }}
+      MRK_MACOS_TARGET: "${{ matrix.target }}"
+      MRK_MACOS_RUNNER: "${{ matrix.runner }}"
+      MRK_MACOS_MACHINE: "${{ matrix.machine }}"
+      MRK_MACOS_HOSTED_JOB: "${{ matrix.hosted_job }}"
+      MRK_EXPECTED_SHA: "${{ github.sha }}"
+      MRK_MACOS_INSTALL_SOURCE_COMMIT: "${{ github.sha }}"
+      MRK_MACOS_NATIVE_SCOPE: disabled
+      MRK_MACOS_PACKAGE_ROLE: ordinary-image
+      MRK_MACOS_SAME_PACKAGE_SCOPE: "${{ github.ref == 'refs/heads/verify/desktop-macos-preview'
+        && 'same-package-noop' || 'disabled' }}"
+      MRK_MACOS_REMOVAL_CASE: "${{ matrix.removal_case || 'disabled' }}"
+      MRK_MACOS_ANDROID_UI_SCOPE: "${{ github.ref == 'refs/heads/verify/desktop-macos-installed'
+        && 'android-signed-build' || 'disabled' }}"
+      MRK_MACOS_IOS_UI_SCOPE: disabled
+      MRK_MACOS_SAVED_FILE_UI_SCOPE: "${{ github.ref == 'refs/heads/verify/desktop-macos-preview'
+        && 'remaining-three' || 'ordinary-seven' }}"
+      MRK_MACOS_STORE_RUNTIME: signed-component
+      MRK_BUNDLED_RUNTIME_SOURCE_SHA256: 10d3f2cf13155335444c8376a346d89581c03a43f0ae642e67401e379745dca2
+      MRK_MACOS_RUNTIME_SUPPLIER: fresh-public-source
+      MRK_MACOS_PYTHON_SUPPLIER_SHA256: "${{ matrix.supplier_receipt }}"
+      MRK_MACOS_PYTHON_SUPPLIER_TAR_SHA256: "${{ matrix.supplier_tar }}"
+      MRK_MACOS_PYTHON_SUPPLIER_SOURCE_COMMIT: "${{ matrix.supplier_source }}"
+      MRK_MACOS_PYTHON_SUPPLIER_RUN_ID: "${{ matrix.supplier_run }}"
+      MRK_MACOS_PYTHON_SUPPLIER_RUN_ATTEMPT: "${{ matrix.supplier_attempt }}"
+      MRK_MACOS_PYTHON_SUPPLIER_ARTIFACT_ID: "${{ matrix.supplier_artifact }}"
+      MRK_BUNDLED_PROTOCOL_SHA256: '083e6afae3e329c4e0d81bad00dd0c9920f77491b38ce0d23aa602996f4c4bf5'
+      MRK_GITHUB_PREFLIGHT_TOOLING_SHA: d4a639b396eaa60385b223a154710e99a2862e67
+      MRK_GITHUB_RELEASE_TOOLING_SHA: d4a639b396eaa60385b223a154710e99a2862e67
+      MACOSX_DEPLOYMENT_TARGET: '26.0'
+      DEVELOPER_DIR: "/Library/Developer/CommandLineTools"
+    environment: macos-developer-id
+    needs:
+    - desktop26-prepare
+    - desktop26-resident
+    - desktop26-vault
+    - desktop26-frontend
+    - desktop26-image
+    - desktop26-remover
+    - desktop26-cli
+    - desktop26-sign-remover
+    - desktop26-sign-cli
+    - desktop26-assemble
+    - desktop26-notarize-payload
+    - desktop26-installer
+    - desktop26-scripts-package
+    steps:
+    - name: Check out exact reviewed source without retained credentials
+      timeout-minutes: 3
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      env:
+        GIT_CONFIG_COUNT: '1'
+        GIT_CONFIG_KEY_0: core.autocrlf
+        GIT_CONFIG_VALUE_0: 'false'
+      with:
+        ref: "${{ github.sha }}"
+        persist-credentials: false
+    - name: Admit a fresh part runner and bind current SOURCE
+      id: bootstrap
+      uses: "./.github/actions/macos-candidate-bootstrap"
+      with:
+        work-root: "${{ needs.desktop26-prepare.outputs.work-root }}"
+    - name: Record only the freshly admitted part work root
+      id: work
+      shell: bash
+      run: 'printf ''root=%s\n'' "$MRK_MACOS_WORK" >> "$GITHUB_OUTPUT"
+
+'
+    - name: Admit and restore only completed source-bound predecessor parts
+      timeout-minutes: 15
+      env:
+        GH_TOKEN: "${{ github.token }}"
+        RUNNER_ENVIRONMENT: "${{ runner.environment }}"
+      shell: bash
+      run: |
+        set -euo pipefail
+        "$MRK_PYTHON" -I -S -B desktop/tools/macos_candidate_parts.py restore --part final-package
+    - name: Latch fresh runtime and SOURCE packaging bindings
+      id: github_tools
+      uses: "./.github/actions/macos-candidate-bindings"
+    - name: Install and verify the pinned Mac Rust toolchain
+      timeout-minutes: 8
+      shell: bash
+      run: "/bin/bash desktop/tools/macos_installed_direct_rust.sh"
+    - name: Sign and notarize the completed ordinary Desktop package
+      if: github.ref != 'refs/heads/verify/desktop-macos-app-signature'
+      timeout-minutes: 32
+      env:
+        RUNNER_ENVIRONMENT: "${{ runner.environment }}"
+        MRK_MACOS_INSTALLER_P12_BASE64: "${{ secrets.MRK_MACOS_INSTALLER_P12_BASE64
+          }}"
+        MRK_MACOS_INSTALLER_P12_PASSWORD: "${{ secrets.MRK_MACOS_INSTALLER_P12_PASSWORD
+          }}"
+        MRK_MACOS_NOTARY_API_KEY_BASE64: "${{ secrets.MRK_MACOS_NOTARY_API_KEY_BASE64
+          }}"
+      uses: "./.github/actions/macos-candidate-recipes/sign-and-notarize-the-same-completed-observer-packag"
+    - name: Publish only the prepared signed input checkpoint; not installed
+      id: prepared_export
+      if: github.ref == 'refs/heads/verify/desktop-macos-candidate' && (env.MRK_MACOS_NATIVE_SCOPE
+        == 'disabled' || env.MRK_MACOS_NATIVE_SCOPE == 'tool-setup' || env.MRK_MACOS_NATIVE_SCOPE
+        == 'git-native')
+      timeout-minutes: 5
+      shell: bash
+      env:
+        RUNNER_ENVIRONMENT: "${{ runner.environment }}"
+        GH_TOKEN: "${{ github.token }}"
+        GH_HOST: github.com
+      run: |
+        set +x
+        set -euo pipefail
+        set -o noclobber
+        umask 077
+        ulimit -c 0
+        # One bounded original page, no latest-artifact or pagination fallback.
+        (ulimit -f 16384; gh api "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/attempts/$GITHUB_RUN_ATTEMPT/jobs?per_page=100" > "$MRK_MACOS_WORK/prepared-jobs.json")
+        printf '0\n' > "$MRK_MACOS_WORK/prepared-api.status"
+        unset GH_TOKEN
+        "$MRK_PYTHON" -I -S -B desktop/tools/macos_prepared_package.py export --target "$MRK_MACOS_TARGET"
+    - name: Upload the immutable prepared input; first retention attempt
+      id: prepared_upload_first
+      if: github.ref == 'refs/heads/verify/desktop-macos-candidate' && steps.prepared_export.outcome
+        == 'success'
+      continue-on-error: true
+      timeout-minutes: 5
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+      with:
+        name: "${{ (matrix.native_scope == 'tool-setup' || matrix.native_scope ==
+          'git-native') && format('macos-candidate-package-{0}', matrix.native_scope)
+          || format('mobile-release-kit-macos26-{0}-prepared', matrix.target) }}-${{
+          github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}"
+        path: "${{ steps.work.outputs.root }}/prepared/*"
+        if-no-files-found: error
+        retention-days: 14
+        compression-level: 0
+        overwrite: false
+    - name: Retry the same immutable prepared input once after returned upload failure
+      id: prepared_upload_retry
+      if: "${{ !cancelled() && github.ref == 'refs/heads/verify/desktop-macos-candidate'
+        && steps.prepared_export.outcome == 'success' && steps.prepared_upload_first.outcome
+        == 'failure' }}"
+      continue-on-error: true
+      timeout-minutes: 5
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+      with:
+        name: "${{ (matrix.native_scope == 'tool-setup' || matrix.native_scope ==
+          'git-native') && format('macos-candidate-package-{0}', matrix.native_scope)
+          || format('mobile-release-kit-macos26-{0}-prepared', matrix.target) }}-${{
+          github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}"
+        path: "${{ steps.work.outputs.root }}/prepared/*"
+        if-no-files-found: error
+        retention-days: 14
+        compression-level: 0
+        overwrite: false
+    - name: Retain prepared signed input for failed-job-only installation retries
+      id: prepared_upload
+      if: "${{ !cancelled() && github.ref == 'refs/heads/verify/desktop-macos-candidate'
+        && steps.prepared_export.outcome == 'success' }}"
+      timeout-minutes: 1
+      shell: bash
+      env:
+        FIRST_OUTCOME: "${{ steps.prepared_upload_first.outcome }}"
+        RETRY_OUTCOME: "${{ steps.prepared_upload_retry.outcome }}"
+      run: |
+        set -euo pipefail
+        # A failed attempt stays failed; only an actual successful action
+        # establishes this checkpoint. Ambiguous remote state is never
+        # deleted or overwritten to make a retry appear successful.
+        printf 'Prepared upload original outcomes: first=%s retry=%s\n' "$FIRST_OUTCOME" "$RETRY_OUTCOME"
+        case "$FIRST_OUTCOME:$RETRY_OUTCOME" in
+          success:skipped|failure:success) exit 0 ;;
+          *) exit 1 ;;
+        esac
+    - name: Retire only the completed candidate's disposable compiler outputs
+      id: candidate_compiler_retire
+      if: always() && github.ref == 'refs/heads/verify/desktop-macos-candidate' &&
+        steps.prepared_upload.outcome == 'success'
+      timeout-minutes: 3
+      uses: "./.github/actions/macos-candidate-recipes/candidate_compiler_retire"
+  desktop26-carrier:
+    if: github.event_name == 'workflow_dispatch' && github.event.inputs.operation
+      == 'local-desktop-carrier'
+    environment: macos-developer-id
+    name: Prepare authenticated ordinary Desktop carrier for the owner Mac
+    runs-on: "${{ matrix.runner }}"
+    timeout-minutes: "${{ matrix.timeout }}"
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+        - target: aarch64-apple-darwin
+          group: local-carrier
+          native_scope: disabled
+          runner: macos-26
+          hosted_job: github-hosted-macos26-arm64
+          timeout: 65
+    env:
+      RUSTUP_TOOLCHAIN: 1.98.1
+      MRK_MACOS_TARGET: aarch64-apple-darwin
+      MRK_MACOS_RUNNER: "${{ matrix.runner }}"
+      MRK_MACOS_MACHINE: arm64
+      MRK_MACOS_HOSTED_JOB: "${{ matrix.hosted_job }}"
+      MRK_EXPECTED_SHA: "${{ github.sha }}"
+      MRK_MACOS_INSTALL_SOURCE_COMMIT: "${{ github.sha }}"
+      MRK_MACOS_PACKAGE_ROLE: ordinary-image
+      MRK_MACOS_NATIVE_SCOPE: disabled
+      MRK_MACOS_PREPARED_TEST: 'true'
+      MRK_MACOS_PREPARED_RESUME: "${{ github.event_name == 'workflow_dispatch' &&
+        'true' || 'false' }}"
+      MRK_MACOS_STORE_RUNTIME: signed-component
+      MRK_MACOS_SAME_PACKAGE_SCOPE: disabled
+      MACOSX_DEPLOYMENT_TARGET: '26.0'
+      DEVELOPER_DIR: "/Library/Developer/CommandLineTools"
+    steps:
+    - name: Admit only the disposable hosted prepared-input route
+      timeout-minutes: 1
+      shell: bash
+      env:
+        RUNNER_ENVIRONMENT: "${{ runner.environment }}"
+        SELECTED_OPERATION: "${{ github.event.inputs.operation }}"
+        SELECTED_SOURCE: "${{ github.event.inputs.prepared_source }}"
+        SELECTED_RUN: "${{ github.event.inputs.prepared_run }}"
+        SELECTED_GROUP: "${{ github.event.inputs.test_group }}"
+      run: |
+        set -euo pipefail
+        [[ "$RUNNER_ENVIRONMENT" == github-hosted && "$RUNNER_OS" == macOS && "$GITHUB_REF" == refs/heads/verify/desktop-macos-candidate ]] || exit 1
+        [[ "$GITHUB_SHA" == "$GITHUB_WORKFLOW_SHA" && "$GITHUB_REPOSITORY" == Apdelrahman1911/mobile-release-kit ]] || exit 1
+        if [[ "$GITHUB_EVENT_NAME" == workflow_dispatch && ( "$SELECTED_OPERATION" == git-cli-timing || "$SELECTED_OPERATION" == git-cli-process-data ) ]]; then
+          [[ "$SELECTED_SOURCE" == 4ab9e7b6c97136a15d6df8ce0bb09e1f5259e73c && "$SELECTED_RUN" == 41233002402 && "$SELECTED_GROUP" == git-local ]] || exit 1
+        fi
+        case "$MRK_MACOS_TARGET/$RUNNER_ARCH/$(/usr/bin/uname -m)" in
+          aarch64-apple-darwin/ARM64/arm64|x86_64-apple-darwin/X64/x86_64) ;;
+          *) exit 1 ;;
+        esac
+        expected_host_major=26
+        if [[ "$MRK_MACOS_NATIVE_SCOPE" == git-native ]]; then expected_host_major=27; fi
+        [[ "$(/usr/bin/id -u)" != 0 && "$(/usr/bin/sw_vers -productVersion)" == "$expected_host_major".* ]] || exit 1
+
+        [[ "$SELECTED_OPERATION" == local-desktop-carrier && "$SELECTED_SOURCE" == "$GITHUB_SHA" && "$MRK_MACOS_PACKAGE_ROLE" == ordinary-image && "$MRK_MACOS_NATIVE_SCOPE" == disabled ]] || exit 1
+    - name: Check signing credential availability before downloading the package
+      timeout-minutes: 1
+      shell: bash
+      env:
+        SIGNING_IDENTITY: "${{ secrets.MRK_MACOS_DEVELOPER_ID_P12_BASE64 }}"
+        SIGNING_PASSWORD: "${{ secrets.MRK_MACOS_DEVELOPER_ID_P12_PASSWORD }}"
+      run: |
+        set +x
+        set -euo pipefail
+        if [[ -z "$SIGNING_IDENTITY" || -z "$SIGNING_PASSWORD" ]]; then
+          printf '%s\n' '::error::The test job did not receive its macos-developer-id signing credentials.'
+          exit 1
+        fi
+        unset SIGNING_IDENTITY SIGNING_PASSWORD
+    - name: Check out the exact current harness source without credentials
+      timeout-minutes: 3
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      with:
+        ref: "${{ github.sha }}"
+        persist-credentials: false
+    - name: Select DATA Python, never the packaged interpreter
+      id: python
+      timeout-minutes: 3
+      uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+      with:
+        python-version: 3.14.7
+    - name: Reserve one fresh consumer work directory
+      id: work
+      timeout-minutes: 1
+      shell: bash
+      env:
+        MRK_PYTHON: "${{ steps.python.outputs.python-path }}"
+      run: |
+        set -euo pipefail
+        umask 077
+        [[ "$RUNNER_TEMP" == /Users/runner/work/_temp && "$GITHUB_WORKSPACE" == /Users/runner/work/mobile-release-kit/mobile-release-kit ]] || exit 1
+        [[ "$(/usr/bin/git rev-parse HEAD)" == "$GITHUB_SHA" ]] || exit 1
+        tree=$(/usr/bin/git rev-parse 'HEAD^{tree}')
+        [[ "$tree" =~ ^[0-9a-f]{40}$ ]] || exit 1
+        root=$(/usr/bin/mktemp -d "$RUNNER_TEMP/mrk-macos-installed.XXXXXXXX")
+        printf 'root=%s\n' "$root" >> "$GITHUB_OUTPUT"
+        printf 'MRK_MACOS_WORK=%s\nMRK_PYTHON=%s\nMRK_CONSUMER_TREE=%s\nCARGO_TARGET_DIR=%s/cargo-target\n' "$root" "$MRK_PYTHON" "$tree" "$root" >> "$GITHUB_ENV"
+    - name: Select the one closed upstream target checkpoint without matrix output
+        ambiguity
+      id: prepared
+      timeout-minutes: 4
+      shell: bash
+      env:
+        RUNNER_ENVIRONMENT: "${{ runner.environment }}"
+        PRODUCER_SOURCE: "${{ github.event_name == 'workflow_dispatch' && github.event.inputs.prepared_source
+          || github.sha }}"
+        PRODUCER_RUN: "${{ github.event_name == 'workflow_dispatch' && github.event.inputs.prepared_run
+          || github.run_id }}"
+        GH_TOKEN: "${{ github.token }}"
+        GH_HOST: github.com
+      run: |
+        set +x
+        set -euo pipefail
+        set -o noclobber
+        umask 077
+        ulimit -c 0
+        [[ "$PRODUCER_SOURCE" =~ ^[0-9a-f]{40}$ && "$PRODUCER_RUN" =~ ^[1-9][0-9]{0,19}$ ]] || exit 1
+        fetch() { (ulimit -f 16384; gh api "$1" > "$2"); }
+        fetch "repos/$GITHUB_REPOSITORY/actions/runs/$PRODUCER_RUN/artifacts?per_page=100" "$MRK_MACOS_WORK/prepared-artifacts.json"
+        printf '0\n' > "$MRK_MACOS_WORK/prepared-artifact-api.status"
+        "$MRK_PYTHON" -I -S -B desktop/tools/macos_prepared_package.py producer-attempt --target "$MRK_MACOS_TARGET" \
+          --producer-source "$PRODUCER_SOURCE" --producer-run "$PRODUCER_RUN" > "$MRK_MACOS_WORK/prepared-producer-attempt.txt"
+        IFS= read -r producer_attempt < "$MRK_MACOS_WORK/prepared-producer-attempt.txt"
+        [[ "$producer_attempt" =~ ^[1-9][0-9]{0,19}$ ]] || exit 1
+        fetch "repos/$GITHUB_REPOSITORY/actions/runs/$PRODUCER_RUN/attempts/$producer_attempt/jobs?per_page=100" "$MRK_MACOS_WORK/prepared-jobs.json"
+        "$MRK_PYTHON" -I -S -B desktop/tools/macos_prepared_package.py image-attempt --target "$MRK_MACOS_TARGET" \
+          --producer-source "$PRODUCER_SOURCE" --producer-run "$PRODUCER_RUN" > "$MRK_MACOS_WORK/prepared-image-attempt.txt"
+        IFS= read -r image_attempt < "$MRK_MACOS_WORK/prepared-image-attempt.txt"
+        [[ "$image_attempt" =~ ^[1-9][0-9]{0,15}$ ]] || exit 1
+        fetch "repos/$GITHUB_REPOSITORY/actions/runs/$PRODUCER_RUN/attempts/$image_attempt/jobs?per_page=100" "$MRK_MACOS_WORK/prepared-image-jobs.json"
+        fetch "repos/$GITHUB_REPOSITORY/actions/runs/$PRODUCER_RUN/attempts/$image_attempt" "$MRK_MACOS_WORK/prepared-image-run.json"
+        fetch "repos/$GITHUB_REPOSITORY/git/commits/$PRODUCER_SOURCE" "$MRK_MACOS_WORK/prepared-commit.json"
+        printf '0\n' > "$MRK_MACOS_WORK/prepared-api.status"
+        unset GH_TOKEN
+        "$MRK_PYTHON" -I -S -B desktop/tools/macos_prepared_package.py select --target "$MRK_MACOS_TARGET" \
+          --producer-source "$PRODUCER_SOURCE" --producer-run "$PRODUCER_RUN" > "$MRK_MACOS_WORK/prepared-selection.txt"
+        /bin/cat "$MRK_MACOS_WORK/prepared-selection.txt" >> "$GITHUB_OUTPUT"
+    - name: Capture the exact selected producer attempt, not the current rerun attempt
+      timeout-minutes: 2
+      shell: bash
+      env:
+        PRODUCER_RUN: "${{ github.event_name == 'workflow_dispatch' && github.event.inputs.prepared_run
+          || github.run_id }}"
+        PRODUCER_ATTEMPT: "${{ steps.prepared.outputs.producer-attempt }}"
+        PRODUCER_SOURCE: "${{ steps.prepared.outputs.producer-source }}"
+        GH_TOKEN: "${{ github.token }}"
+        GH_HOST: github.com
+      run: |
+        set +x
+        set -euo pipefail
+        set -o noclobber
+        umask 077
+        [[ "$PRODUCER_RUN" =~ ^[1-9][0-9]{0,19}$ && "$PRODUCER_ATTEMPT" =~ ^[1-9][0-9]{0,19}$ && "$PRODUCER_SOURCE" =~ ^[0-9a-f]{40}$ ]] || exit 1
+        (ulimit -f 16384; gh api "repos/$GITHUB_REPOSITORY/actions/runs/$PRODUCER_RUN/attempts/$PRODUCER_ATTEMPT" > "$MRK_MACOS_WORK/prepared-service/run.json")
+        if [[ "$MRK_MACOS_PREPARED_RESUME" == true && "$PRODUCER_SOURCE" != "$GITHUB_SHA" ]]; then
+          (ulimit -f 16384; gh api "repos/$GITHUB_REPOSITORY/compare/$PRODUCER_SOURCE...$GITHUB_SHA" > "$MRK_MACOS_WORK/prepared-service/compatibility.json")
+        fi
+        printf '0\n' > "$MRK_MACOS_WORK/prepared-service/metadata.status"
+    - name: Download only the selected prepared artifact with service digest verification
+      timeout-minutes: 5
+      uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+      with:
+        artifact-ids: "${{ steps.prepared.outputs.artifact-id }}"
+        github-token: "${{ github.token }}"
+        repository: Apdelrahman1911/mobile-release-kit
+        run-id: "${{ github.event_name == 'workflow_dispatch' && github.event.inputs.prepared_run
+          || github.run_id }}"
+        path: "${{ steps.work.outputs.root }}/prepared-input"
+        merge-multiple: true
+        digest-mismatch: error
+        skip-decompress: 'false'
+    - name: Check out the immutable producer source for its package reader and producer
+        build
+      if: github.event_name == 'workflow_dispatch'
+      timeout-minutes: 3
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+      with:
+        ref: "${{ steps.prepared.outputs.producer-source }}"
+        path: prepared-built-source
+        persist-credentials: false
+    - name: Reconstruct fresh script originals and repeat full finalized product audit
+      timeout-minutes: 5
+      shell: bash
+      env:
+        RUNNER_ENVIRONMENT: "${{ runner.environment }}"
+      run: |
+        set -euo pipefail
+        ulimit -c 0
+        "$MRK_PYTHON" -I -S -B desktop/tools/macos_prepared_package.py hydrate --target "$MRK_MACOS_TARGET" --consumer-tree "$MRK_CONSUMER_TREE" > "$MRK_MACOS_WORK/prepared-runtime.env"
+        /bin/cat "$MRK_MACOS_WORK/prepared-runtime.env" >> "$GITHUB_ENV"
+    - name: Install and verify only the pinned producer toolchain
+      timeout-minutes: 8
+      shell: bash
+      run: "/bin/bash desktop/tools/macos_installed_direct_rust.sh"
+    - name: Fetch only the exact producer source dependencies before its unchanged
+        offline build
+      timeout-minutes: 8
+      shell: bash
+      env:
+        BUILT_SOURCE: "${{ steps.prepared.outputs.producer-source }}"
+      run: |
+        set -euo pipefail
+        checkout="$GITHUB_WORKSPACE"
+        if [[ "$BUILT_SOURCE" != "$GITHUB_SHA" ]]; then checkout="$checkout/prepared-built-source"; fi
+        [[ "$(/usr/bin/git -C "$checkout" rev-parse HEAD)" == "$BUILT_SOURCE" ]] || exit 1
+        /usr/bin/env -i PATH="/Users/runner/.rustup/toolchains/${RUSTUP_TOOLCHAIN}-$MRK_MACOS_TARGET/bin:/usr/bin:/bin:/usr/sbin:/sbin" \
+          HOME=/Users/runner CARGO_HOME=/Users/runner/.cargo RUSTUP_HOME=/Users/runner/.rustup \
+          RUSTUP_TOOLCHAIN="$RUSTUP_TOOLCHAIN" RUSTUP_AUTO_INSTALL=0 \
+          DEVELOPER_DIR="$DEVELOPER_DIR" MACOSX_DEPLOYMENT_TARGET=26.0 \
+          "/Users/runner/.rustup/toolchains/${RUSTUP_TOOLCHAIN}-$MRK_MACOS_TARGET/bin/cargo" fetch \
+            --manifest-path "$checkout/desktop/src-tauri/Cargo.toml" --locked --target "$MRK_MACOS_TARGET"
+    - name: Standard Installer only is privileged; never execute the app or Python
+        as root
+      if: success()
+      id: package_install
+      timeout-minutes: 25
+      shell: bash
+      env:
+        RUNNER_ENVIRONMENT: "${{ runner.environment }}"
+        MRK_MACOS_DEVELOPER_ID_P12_BASE64: "${{ secrets.MRK_MACOS_DEVELOPER_ID_P12_BASE64
+          }}"
+        MRK_MACOS_DEVELOPER_ID_P12_PASSWORD: "${{ secrets.MRK_MACOS_DEVELOPER_ID_P12_PASSWORD
+          }}"
+      run: |
+        set +x
+        set +a
+        export -n MRK_MACOS_DEVELOPER_ID_P12_BASE64 MRK_MACOS_DEVELOPER_ID_P12_PASSWORD
+        set -euo pipefail
+        set -o noclobber
+        umask 077
+        # Existing owner/deadlines cover signature, readonly mount, Installer
+        # and V2 readback; earlier construction is not installation evidence.
+        set +e
+        MRK_MACOS_DEVELOPER_ID_P12_BASE64="$MRK_MACOS_DEVELOPER_ID_P12_BASE64" \
+        MRK_MACOS_DEVELOPER_ID_P12_PASSWORD="$MRK_MACOS_DEVELOPER_ID_P12_PASSWORD" \
+          "$MRK_PYTHON" -I -S -B desktop/tools/macos_prepared_package.py package-install --target "$MRK_MACOS_TARGET" --consumer-tree "$MRK_CONSUMER_TREE" \
+          > "$MRK_MACOS_WORK/package-install.stdout"
+        package_status=$?
+        printf '%s\n' "$package_status" > "$MRK_MACOS_WORK/package-install.status"
+        package_status_saved=$?
+        set -e
+        if [[ "$package_status" != 0 ]]; then exit "$package_status"; fi
+        [[ "$package_status_saved" == 0 ]] || exit "$package_status_saved"
+        # The receipt is not its own exit proof: only this original0, the
+        # saved Installer0, same-request readback and known detach permit use.
+        # Unknown resources remain retained; no forced detach or root Python.
+        unset MRK_MACOS_DEVELOPER_ID_P12_BASE64 MRK_MACOS_DEVELOPER_ID_P12_PASSWORD
+    - name: Retain bounded image signing and detach diagnostics
+      if: "${{ !cancelled() && (steps.package_install.outcome == 'success' || steps.package_install.outcome
+        == 'failure') }}"
+      timeout-minutes: 2
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+      with:
+        name: candidate-install-diagnostics-${{ matrix.group }}-${{ github.sha }}-${{
+          github.run_id }}-${{ github.run_attempt }}
+        path: |
+          ${{ steps.work.outputs.root }}/android-helper-distribution-sign.stderr
+          ${{ steps.work.outputs.root }}/android-helper-distribution-sign.stdout
+          ${{ steps.work.outputs.root }}/android-helper-distribution-sign.status
+          ${{ steps.work.outputs.root }}/android-helper-observation-sign.stderr
+          ${{ steps.work.outputs.root }}/android-helper-observation-sign.stdout
+          ${{ steps.work.outputs.root }}/android-helper-observation-sign.status
+          ${{ steps.work.outputs.root }}/android-helper-distribution-detach.stderr
+          ${{ steps.work.outputs.root }}/android-helper-distribution-detach.status
+        if-no-files-found: ignore
+        retention-days: 14
+    - name: Bind the closed Tool owner output for local transport
+      id: local_carrier_export
+      if: matrix.group == 'local-carrier' && steps.package_install.outcome == 'success'
+      timeout-minutes: 1
+      shell: bash
+      run: |
+        set -euo pipefail
+        umask 077
+        "$MRK_PYTHON" -I -S -B - <<'PY'
+        import os, stat, sys
+        from pathlib import Path
+        root = Path('/Users/runner/work/mobile-release-kit/mobile-release-kit')
+        sys.path.insert(0, str(root))
+        from desktop.tools import macos_prepared_package as P
+        work = Path(os.environ['MRK_MACOS_WORK'])
+        assert work.parent == Path('/Users/runner/work/_temp')
+        fields = ('st_dev','st_ino','st_mode','st_uid','st_gid','st_nlink','st_size','st_mtime_ns','st_ctime_ns','st_flags')
+        def identity(info): return tuple(getattr(info,k) for k in fields)
+        held, parents, values = [], {}, {}
+        try:
+            work_fd = os.open(work, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+            held.append(work_fd)
+            work_pre = identity(os.fstat(work_fd))
+            assert work_pre == identity(work.lstat())
+            assert os.fstat(work_fd).st_uid == os.getuid() and stat.S_IMODE(os.fstat(work_fd).st_mode) == 0o700
+            for name, wanted in (('producer-root', {'Install.pkg','producer.json','producer.sig'}), ('prepared-input', set(P.NAMES))):
+                before = os.stat(name, dir_fd=work_fd, follow_symlinks=False)
+                fd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=work_fd)
+                held.append(fd)
+                assert identity(os.fstat(fd)) == identity(before)
+                assert before.st_uid == os.getuid() and before.st_flags == 0 and set(os.listdir(fd)) == wanted
+                parents[name] = (fd, identity(before))
+            for name, limit in P.LOCAL_CARRIER_FILES.items():
+                parent, leaf = name.rsplit('/',1) if '/' in name else ('',name)
+                parent_fd = parents[parent][0] if parent else work_fd
+                before = os.stat(leaf, dir_fd=parent_fd, follow_symlinks=False)
+                assert stat.S_ISREG(before.st_mode) and before.st_uid == os.getuid() and before.st_nlink == 1
+                assert before.st_flags == 0 and not stat.S_IMODE(before.st_mode) & 0o7022 and 0 < before.st_size <= limit
+                fd = os.open(leaf, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=parent_fd)
+                held.append(fd)
+                assert identity(os.fstat(fd)) == identity(before)
+                body = os.pread(fd, before.st_size, 0)
+                assert len(body) == before.st_size and not os.pread(fd, 1, before.st_size)
+                assert identity(os.fstat(fd)) == identity(os.stat(leaf, dir_fd=parent_fd, follow_symlinks=False)) == identity(before)
+                values[name] = body
+            consumer = P.consumer_data(os.environ, os.environ['MRK_CONSUMER_TREE'], os.environ['MRK_MACOS_TARGET'])
+            record = P.canonical(P.ordinary_local_carrier_transport_data(values, consumer))
+            for name, (fd, before) in parents.items():
+                assert identity(os.fstat(fd)) == identity(os.stat(name, dir_fd=work_fd, follow_symlinks=False)) == before
+            assert identity(os.fstat(work_fd)) == identity(work.lstat()) == work_pre
+            fd = os.open('LOCAL-CARRIER.json', os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600, dir_fd=work_fd)
+            held.append(fd)
+            offset = 0
+            while offset < len(record):
+                count = os.write(fd, record[offset:]); assert count > 0; offset += count
+            os.fchmod(fd, 0o444); os.fsync(fd)
+            assert os.pread(fd, len(record)+1, 0) == record
+            assert identity(os.fstat(fd)) == identity(os.stat('LOCAL-CARRIER.json', dir_fd=work_fd, follow_symlinks=False))
+        finally:
+            for fd in reversed(held): os.close(fd)
+        print('Closed ordinary Desktop package files bound for transport; local installation and service remain unqualified.')
+        PY
+    - name: Retain only authenticated files for the owner local installation
+      if: matrix.group == 'local-carrier' && steps.local_carrier_export.outcome ==
+        'success'
+      timeout-minutes: 2
+      uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+      with:
+        name: candidate-local-carrier-${{ steps.prepared.outputs.producer-source }}-${{
+          steps.prepared.outputs.producer-attempt }}-${{ github.sha }}-${{ github.run_id
+          }}-${{ github.run_attempt }}
+        path: |
+          ${{ steps.work.outputs.root }}/producer-root/producer.json
+          ${{ steps.work.outputs.root }}/producer-root/producer.sig
+          ${{ steps.work.outputs.root }}/prepared-input/PREPARED.json
+          ${{ steps.work.outputs.root }}/android-helper-package-install.json
+          ${{ steps.work.outputs.root }}/package-install.status
+          ${{ steps.work.outputs.root }}/LOCAL-CARRIER.json
+        if-no-files-found: error
+        retention-days: 14
+        overwrite: false

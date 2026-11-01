@@ -44,6 +44,8 @@ ROSTER = {
     'frontend': ('dist',),
     'observer': ('work/observer-build.jsonl', 'work/observer-build.status',
                  'work/cargo-target/aarch64-apple-darwin/debug/deps'),
+    'image': ('work/normal-build.jsonl', 'work/normal-build.status',
+              'work/cargo-target/aarch64-apple-darwin/release/libmrk_desktop_image.dylib'),
     'remover': ('work/remover-target/aarch64-apple-darwin/release/mrk-macos-remove',
                 'work/remover-build.jsonl', 'work/remover-build.status'),
     'cli': ('work/installed-cli-target/aarch64-apple-darwin/release/mrk',
@@ -78,22 +80,32 @@ RECEIPTS = {
 }
 
 
+def roster(part, origin=None):
+    need(part in ROSTER, 'part-export-purpose')
+    if origin is not None:
+        need(part in P.parts(origin), 'part-profile-roster')
+    if part == 'assemble' and origin and origin['nativeScope'] == 'disabled':
+        return (*ROSTER[part], 'work/android-helper-sign-applications-launcher.json',
+                'work/android-helper-sign-desktop-image.json')
+    return ROSTER[part]
+
+
 def sig(info):
     return S.signature(info)
 
 
 @contextlib.contextmanager
-def original(path, limit, *, alias_prefix=None):
+def original(path, limit, *, alias_prefix=None, alias_name=None):
     with S.parent(path) as (parent, name):
         before = os.stat(name, dir_fd=parent, follow_symlinks=False)
         need(stat.S_ISREG(before.st_mode) and before.st_uid == os.getuid() and before.st_gid == os.getgid()
              and 0 <= before.st_size <= limit and getattr(before, 'st_flags', 0) == 0
-             and (before.st_nlink == 1 or alias_prefix and before.st_nlink == 2), 'part-original-policy')
+             and (before.st_nlink == 1 or (alias_prefix or alias_name) and before.st_nlink == 2), 'part-original-policy')
         if before.st_nlink == 2:
             deps = path.parent / 'deps'
             names = os.listdir(deps)
             need(len(names) <= 8192, 'part-cargo-alias-count')
-            matches = [n for n in names if re.fullmatch(re.escape(alias_prefix) + '[0-9a-f]+', n)
+            matches = [n for n in names if (n == alias_name if alias_name else re.fullmatch(re.escape(alias_prefix) + '[0-9a-f]+', n))
                        and sig(os.stat(deps / n, follow_symlinks=False)) == sig(before)]
             need(len(matches) == 1, 'part-cargo-original-alias')
         fd = os.open(name, S.READ_FLAGS, dir_fd=parent)
@@ -146,12 +158,12 @@ def destination(name, work, workspace):
         workspace / 'desktop/dist' if name == 'dist' else work / name[5:])
 
 
-def permitted(part, name, observer_name=None):
+def permitted(part, name, observer_name=None, origin=None):
     P.part_name(part)
     need(part in ROSTER, 'part-export-purpose')
     if part == 'observer' and name.startswith(ROSTER[part][2] + '/'):
         return name == ROSTER[part][2] + '/' + observer_name
-    return any(name == root or name.startswith(root + '/') for root in ROSTER[part])
+    return any(name == root or name.startswith(root + '/') for root in roster(part, origin))
 
 
 def observer_name(work):
@@ -168,7 +180,7 @@ def observer_name(work):
     return path.name
 
 
-def selected_files(part, work, workspace):
+def selected_files(part, work, workspace, origin=None):
     files, directories = {}, {}
     observer = observer_name(work) if part == 'observer' else None
     if part == 'prepare':
@@ -196,12 +208,13 @@ def selected_files(part, work, workspace):
                          == sig(os.stat(leaf, dir_fd=parent, follow_symlinks=False)), 'part-directory-post')
                 finally: S.close_once(fd)
         else:
-            need(permitted(part, name, observer), 'part-source-roster')
-            with original(path, P.MEMBER_LIMIT, alias_prefix=ALIASES.get(name)) as (stream, before):
+            need(permitted(part, name, observer, origin), 'part-source-roster')
+            with original(path, P.MEMBER_LIMIT, alias_prefix=ALIASES.get(name),
+                          alias_name='libmrk_desktop_image.dylib' if part == 'image' and name == ROSTER['image'][2] else None) as (stream, before):
                 digest = hashlib.file_digest(stream, 'sha256').hexdigest()
             files[name] = {'path': name, 'bytes': before.st_size, 'mode': stat.S_IMODE(before.st_mode), 'sha256': digest}
         need(len(files) + len(directories) <= P.MAX_MEMBERS, 'part-total-roster-bound')
-    for name in ROSTER[part]:
+    for name in roster(part, origin):
         path = destination(name, work, workspace)
         if name in OPTIONAL and not os.path.lexists(path): continue
         if part == 'observer' and name == ROSTER[part][2]:
@@ -211,14 +224,17 @@ def selected_files(part, work, workspace):
 
 
 def receipt_checks(part, work, origin):
-    for phase in RECEIPTS.get(part, ()):
+    phases = RECEIPTS.get(part, ())
+    if part == 'assemble' and origin['nativeScope'] == 'disabled':
+        phases = (*phases, 'sign-applications-launcher', 'sign-desktop-image')
+    for phase in phases:
         row = json.loads(read(work / ('android-helper-' + phase + '.json'), 16384))
         need(row.get('phase') == phase and row.get('source') == row.get('workflowSource') == origin['source']
              and row.get('runId') == origin['runId'] and row.get('runAttempt') == origin['runAttempt']
              and row.get('target') == P.TARGET and row.get('passed') is True
              and row.get('targetRetired') is True and row.get('originalClosesKnown') is True,
              'part-original-owner-completion')
-    for prefix in {'observer': ('observer',), 'remover': ('remover',), 'cli': ('installed-cli',),
+    for prefix in {'observer': ('observer',), 'image': ('normal',), 'remover': ('remover',), 'cli': ('installed-cli',),
                    'vault': ('vault-helper',), 'scripts-package': ('package-tar', 'package-xar')}.get(part, ()):
         need(read(work / (prefix + ('.status' if prefix.startswith('package-') else '-build.status')), 8) == b'0\n',
              'part-original-caller-zero')
@@ -228,15 +244,20 @@ def signed_app_bindings(work, origin):
     """Recompute fixed signed-byte DATA; never copy a producer environment."""
     receipt_checks('assemble', work, origin)
     values = {}
-    for variable, leaf, phase in (
+    bindings = (
             ('MRK_MACOS_SIGNED_ENTRY_SHA256', S.ENTRY_BINARY, 'sign-root-app'),
-            ('MRK_MACOS_SIGNED_PAYLOAD_SHA256', S.APP_BINARY, 'sign-desktop-payload')):
+            ('MRK_MACOS_SIGNED_PAYLOAD_SHA256', S.APP_BINARY, 'sign-desktop-payload'))
+    if origin['nativeScope'] == 'disabled':
+        bindings += (('MRK_MACOS_SIGNED_DESKTOP_IMAGE_SHA256', S.DESKTOP_IMAGE, 'sign-desktop-image'),
+                     ('MRK_MACOS_APPLICATIONS_LAUNCHER_SHA256', S.LAUNCHER_EXECUTABLE, 'sign-applications-launcher'))
+    for variable, leaf, phase in bindings:
         row = json.loads(read(work / ('android-helper-' + phase + '.json'), 16384))
         with original(work / 'app' / S.APP_NAME / leaf, P.MEMBER_LIMIT) as (stream, info):
             digest = hashlib.file_digest(stream, 'sha256').hexdigest()
             # The original app constructor/writer creates these signed originals
             # as 0755. Only the later, fresh Installer input copy becomes 0555.
-            need(stat.S_IMODE(info.st_mode) == 0o755 and P.hex_data(row.get('signedBytesSha256'))
+            expected_mode = 0o555 if leaf == S.LAUNCHER_EXECUTABLE else 0o755
+            need(stat.S_IMODE(info.st_mode) == expected_mode and P.hex_data(row.get('signedBytesSha256'))
                  and digest == row['signedBytesSha256'], 'part-signed-app-correspondence')
         values[variable] = digest
     return values
@@ -252,7 +273,9 @@ def encode_archive(path, manifest, files, work, workspace):
                 info.create_system = 3
                 info.external_attr = (stat.S_IFREG | row['mode']) << 16
                 with original(destination(name, work, workspace), P.MEMBER_LIMIT,
-                              alias_prefix=ALIASES.get(name)) as (source, before):
+                              alias_prefix=ALIASES.get(name),
+                              alias_name='libmrk_desktop_image.dylib' if manifest['part'] == 'image'
+                              and name == ROSTER['image'][2] else None) as (source, before):
                     need(before.st_size == row['bytes'] and stat.S_IMODE(before.st_mode) == row['mode'], 'part-export-changed')
                     digest, count = hashlib.sha256(), 0
                     with archive.open(info, 'w') as output:
@@ -347,8 +370,8 @@ def archive_manifest(path):
         need(set(entries) == {'PART.json'} | {r['path'] for r in manifest['members']}, 'part-archive-exact-roster')
         observer = next((Path(r['path']).name for r in manifest['members']
                          if r['path'].startswith('work/cargo-target/' + P.TARGET + '/debug/deps/')), None)
-        need(all(permitted(manifest['part'], r['path'], observer) for r in manifest['members']), 'part-import-source-roster')
-        need(all(permitted(manifest['part'], r['path'], observer) for r in manifest['directories']), 'part-import-directory-roster')
+        need(all(permitted(manifest['part'], r['path'], observer, manifest['origin']) for r in manifest['members']), 'part-import-source-roster')
+        need(all(permitted(manifest['part'], r['path'], observer, manifest['origin']) for r in manifest['directories']), 'part-import-directory-roster')
         need(all(entries[r['path']][0].compress_type == 0 and entries[r['path']][0].file_size == r['bytes']
                  and entries[r['path']][0].external_attr >> 16 == stat.S_IFREG | r['mode']
                  for r in manifest['members']), 'part-archive-member-metadata')
@@ -456,7 +479,7 @@ def freeze(part, work, workspace):
     receipt_checks(part, work, origin)
     if part == 'assemble':
         signed_app_bindings(work, origin)
-    files, directories = selected_files(part, work, workspace)
+    files, directories = selected_files(part, work, workspace, origin)
     dependencies = P.decode(read(work / 'part-dependencies.json', P.MANIFEST_LIMIT)) if part != 'prepare' else []
     manifest = dict(schemaVersion=1, scope=P.SCOPE, part=part, origin=origin, workName=work.name,
         dependencies=dependencies, members=[files[name] for name in sorted(files)],
@@ -468,7 +491,7 @@ def freeze(part, work, workspace):
     encode_archive(path, manifest, files, work, workspace)
     need(archive_manifest(path) == manifest, 'part-final-archive-readback')
     # Recheck the original producer roster after the completed archive closes.
-    need(selected_files(part, work, workspace) == (files, directories), 'part-original-roster-post')
+    need(selected_files(part, work, workspace, origin) == (files, directories), 'part-original-roster-post')
     with open(os.environ['GITHUB_OUTPUT'], 'a', encoding='ascii') as out:
         out.write('artifact-name=' + P.artifact_name(part, origin) + '\narchive=' + str(path) + '\n')
 
@@ -480,7 +503,7 @@ def restore(part, work, workspace):
     artifacts = listing('repos/' + P.REPOSITORY + '/actions/runs/' + origin['runId'] + '/artifacts', 'artifacts')
     records, manifests, paths = {}, {}, {}
     staging = work / 'part-inputs'; staging.mkdir(mode=0o700)
-    for prior in P.ancestors(part):
+    for prior in P.ancestors(part, origin):
         candidates = []
         for job in jobs:
             if job.get('name') != P.job_name(prior, origin) or job.get('status') != 'completed' or job.get('conclusion') != 'success':
@@ -507,14 +530,14 @@ def restore(part, work, workspace):
         manifest = archive_manifest(inner)
         record = P.metadata_data(run, job, artifact, manifest)
         need(manifest['origin'] == prior_origin and manifest['workName'] == work.name
-             and manifest['dependencies'] == [records[p] for p in P.ancestors(prior)], 'part-original-dependency-chain')
+             and manifest['dependencies'] == [records[p] for p in P.ancestors(prior, prior_origin)], 'part-original-dependency-chain')
         records[prior], manifests[prior], paths[prior] = record, manifest, inner
     chosen, directory_modes = {}, {}
-    for prior in P.ancestors(part):
+    for prior in P.ancestors(part, origin):
         for row in manifests[prior]['members']: chosen[row['path']] = prior
         for row in manifests[prior]['directories']: directory_modes[row['path']] = row['mode']
     resource(work, sum(r['bytes'] for p in manifests for r in manifests[p]['members'] if chosen[r['path']] == p))
-    for prior in P.ancestors(part): project_archive(paths[prior], manifests[prior], work, workspace, chosen)
+    for prior in P.ancestors(part, origin): project_archive(paths[prior], manifests[prior], work, workspace, chosen)
     for name, mode in sorted(directory_modes.items(), reverse=True):
         target = destination(name, work, workspace)
         target.mkdir(mode=0o700, parents=True, exist_ok=True)
@@ -524,7 +547,7 @@ def restore(part, work, workspace):
                 need(os.fstat(fd).st_uid == os.getuid(), 'part-fresh-directory-owner')
                 S.no_xattrs(fd); os.fchmod(fd, mode); os.fsync(fd)
             finally: S.close_once(fd)
-    write(work / 'part-dependencies.json', P.canonical([records[p] for p in P.ancestors(part)]), 0o444)
+    write(work / 'part-dependencies.json', P.canonical([records[p] for p in P.ancestors(part, origin)]), 0o444)
     # Only immutable bindings/data are exported; no origin process environment.
     values = {}
     for env, path in (('MRK_MACOS_ANDROID_HELPER_SHA256', 'mrk-android-register'),
@@ -538,9 +561,15 @@ def restore(part, work, workspace):
             with original(work / path, P.MEMBER_LIMIT) as (stream, info):
                 values[env] = hashlib.file_digest(stream, 'sha256').hexdigest()
     if os.path.lexists(work / 'observer-build.jsonl'):
+        need(origin['nativeScope'] != 'disabled', 'part-observer-role')
         name = observer_name(work); path = work / 'cargo-target' / P.TARGET / 'debug/deps' / name
         with original(path, P.MEMBER_LIMIT) as (stream, info): values['MRK_MACOS_OBSERVER_SHA256'] = hashlib.file_digest(stream, 'sha256').hexdigest()
         values['MRK_MACOS_OBSERVER_BINARY'] = str(path)
+    if os.path.lexists(work / 'normal-build.jsonl'):
+        need(origin['nativeScope'] == 'disabled', 'part-desktop-role')
+        path = work / 'cargo-target' / P.TARGET / 'release/libmrk_desktop_image.dylib'
+        with original(path, P.MEMBER_LIMIT) as (stream, info):
+            values['MRK_MACOS_DESKTOP_IMAGE_SHA256'] = hashlib.file_digest(stream, 'sha256').hexdigest()
     if 'assemble' in manifests:
         values.update(signed_app_bindings(work, manifests['assemble']['origin']))
     if os.path.lexists(work / 'input-result.json'):
