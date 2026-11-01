@@ -2676,7 +2676,7 @@ mod installer {
             }
         }
         fn removal_archive_storage_sum_data(before:u64,bytes:u64)->Result<u64> {
-            before.checked_add(bytes).filter(|n|*n<=installation_record::PAYLOAD_LIMIT).ok_or("removal-prior-storage")
+            before.checked_add(bytes).filter(|n|*n<=transaction::MAINTENANCE_STORAGE_LIMIT).ok_or("removal-prior-storage")
         }
         #[derive(Clone,Copy,PartialEq,Eq)]
         enum RemovalArchivePhase { FirstReading,FirstComplete,SecondReading,SecondComplete,Taken,PostReading,PostComplete,Refused }
@@ -3997,7 +3997,7 @@ mod installer {
             for (name,inode) in &actual {
                 if wanted.contains(name) {continue;}
                 check(worker::removal_archive_name_data(name) && table.rows.len()<REMOVAL_ARCHIVE_COUNT,"removal-prior-foreign-or-bound")?;
-                let row=removal_archive_row(book,root,name,*inode,installation_record::PAYLOAD_LIMIT-table.storage_bytes)?;table.add(row)?;
+                let row=removal_archive_row(book,root,name,*inode,transaction::MAINTENANCE_STORAGE_LIMIT-table.storage_bytes)?;table.add(row)?;
             }
             drop(actual);
             table.resolve_history_data()?;removal_archive_pending_admissions(book,&mut table)?;
@@ -4658,7 +4658,7 @@ mod installer {
             check(records<=installation_record::ORIGINAL_LIMIT && existing_live.checked_add(5).is_some_and(|n|n<=96)
                 && plan_work<=REHOME_WORK && retained_work.checked_add(plan_work)
                     .and_then(|n|n.checked_add(65536+8192)).is_some_and(|n|n<=REMOVAL_SNAPSHOT_WORK as usize)
-                && other_storage.checked_add(control_storage).is_some_and(|n|n<=installation_record::PAYLOAD_LIMIT),
+                && other_storage.checked_add(control_storage).is_some_and(|n|n<=transaction::MAINTENANCE_STORAGE_LIMIT),
                 "rehome-data-audit-budget")?;Ok(records)
         }
 
@@ -5922,7 +5922,7 @@ mod installer {
             check(v.retry_count<=v.prior_invocations && v.prior_invocations<transaction::INVOCATION_LIMIT
                 && v.retry_count<transaction::INVOCATION_LIMIT,"partial-fresh-attempt-bound")?;
             check(v.physical_bytes.checked_add(v.incoming_bytes).and_then(|n|n.checked_add(v.evidence_bytes))
-                .and_then(|n|n.checked_add(v.producer_bytes)).is_some_and(|n|n<=installation_record::PAYLOAD_LIMIT)
+                .and_then(|n|n.checked_add(v.producer_bytes)).is_some_and(|n|n<=transaction::MAINTENANCE_STORAGE_LIMIT)
                 && v.control_bytes<=(installation_record::CONTROL_LIMIT as u64),"partial-fresh-storage-bound")?;
             let additional=v.directories.checked_mul(2).and_then(|n|n.checked_add(v.files))
                 .and_then(|n|n.checked_mul(v.audits));
@@ -6376,7 +6376,7 @@ mod installer {
                 retained_work:0,transient_work:2*PARTIAL_FRESH_BLOCK};
             partial_fresh_cost_data(cost).unwrap();
             for bad in [PartialFreshCostData{prior_invocations:64,..cost},PartialFreshCostData{retry_count:2,..cost},
-                PartialFreshCostData{physical_bytes:installation_record::PAYLOAD_LIMIT,..cost},
+                PartialFreshCostData{physical_bytes:transaction::MAINTENANCE_STORAGE_LIMIT,..cost},
                 PartialFreshCostData{evidence_bytes:u64::MAX,..cost},PartialFreshCostData{records:installation_record::ORIGINAL_LIMIT,..cost},
                 PartialFreshCostData{audits:usize::MAX,..cost},PartialFreshCostData{live:97,..cost},
                 PartialFreshCostData{retained_work:PARTIAL_FRESH_WORK,..cost}] {assert!(partial_fresh_cost_data(bad).is_err());}
@@ -6434,8 +6434,8 @@ mod installer {
                 +installation_record::RECORD_LIMIT+4*transaction::STATE_LIMIT+transaction::REQUEST_EXPORT_LIMIT
                 +paths::REGISTRATION_GATE_BYTES.len()+paths::MAINTENANCE_GATE_BYTES.len())as u64;
             assert_eq!(future,fixed+3);
-            assert_eq!(partial_fresh_storage_data(installation_record::PAYLOAD_LIMIT-future,0,0,1,1,1).unwrap(),installation_record::PAYLOAD_LIMIT);
-            assert!(partial_fresh_storage_data(installation_record::PAYLOAD_LIMIT-future+1,0,0,1,1,1).is_err());
+            assert_eq!(partial_fresh_storage_data(transaction::MAINTENANCE_STORAGE_LIMIT-future,0,0,1,1,1).unwrap(),transaction::MAINTENANCE_STORAGE_LIMIT);
+            assert!(partial_fresh_storage_data(transaction::MAINTENANCE_STORAGE_LIMIT-future+1,0,0,1,1,1).is_err());
             assert!(partial_fresh_storage_data(u64::MAX,1,0,1,1,1).is_err());
             assert!(partial_fresh_storage_data(0,u64::MAX,1,1,1,1).is_err());
             for (inventory,producer,signature) in [(0,1,1),(1,0,1),(1,1,0),
@@ -7344,7 +7344,7 @@ mod installer {
                 .ok_or("partial-fresh-storage-budget")?;
             prior.checked_add(suffix).and_then(|n|n.checked_add(payload))
                 .and_then(|n|n.checked_add(inventory as u64)).and_then(|n|n.checked_add(fixed))
-                .filter(|n|*n<=installation_record::PAYLOAD_LIMIT).ok_or("partial-fresh-storage-budget")
+                .filter(|n|*n<=transaction::MAINTENANCE_STORAGE_LIMIT).ok_or("partial-fresh-storage-budget")
         }
         fn partial_fresh_quote(book:&mut Install,context:&worker::ReinstallPreservationContext<'_>)->Result<()> {
             context.post_source(book)?;let ledger=context.preservation();let census=context.archive_census(book)?;
@@ -7875,7 +7875,7 @@ mod installer {
             assert!(rehome_audit_quote_data(directories+1,files,1,0,0,0,0,0,0).is_err());
             assert!(rehome_audit_quote_data(directories,files+1,1,0,0,0,0,0,0).is_err());
             assert!(rehome_audit_quote_data(directories,files,1,0,0,0,REHOME_WORK+1,0,0).is_err());
-            assert!(rehome_audit_quote_data(directories,files,1,0,0,0,0,installation_record::PAYLOAD_LIMIT,1).is_err());
+            assert!(rehome_audit_quote_data(directories,files,1,0,0,0,0,transaction::MAINTENANCE_STORAGE_LIMIT,1).is_err());
             drop(plan);
             // Same real decoded State/Intent and sole parsed snapshot; every
             // foreign/missing/hash mutation is rejected by the production set.
@@ -8489,8 +8489,8 @@ mod installer {
             }
             let mut failed=RemovalArchiveScan::first(0);assert!(failed.take().is_err());
             assert!(failed.phase==RemovalArchivePhase::Refused);
-            assert_eq!(removal_archive_storage_sum_data(installation_record::PAYLOAD_LIMIT-1,1),Ok(installation_record::PAYLOAD_LIMIT));
-            assert!(removal_archive_storage_sum_data(installation_record::PAYLOAD_LIMIT,1).is_err());
+            assert_eq!(removal_archive_storage_sum_data(transaction::MAINTENANCE_STORAGE_LIMIT-1,1),Ok(transaction::MAINTENANCE_STORAGE_LIMIT));
+            assert!(removal_archive_storage_sum_data(transaction::MAINTENANCE_STORAGE_LIMIT,1).is_err());
             assert!(removal_archive_storage_sum_data(u64::MAX,1).is_err());
             assert_eq!(removal_archive_raw_hash(0,|_,_|Ok(0)).unwrap(),<[u8;32]>::from(Sha256::digest(b"")));
             assert!(removal_archive_raw_hash(1,|_,_|Ok(0)).is_err());
@@ -9708,7 +9708,7 @@ mod installer {
             }
             fn set_resume_quote_data(&mut self,control:u64,storage:u64)->Result<()> {
                 check(!self.complete && !self.failed && self.prior_archives.is_none()
-                    && control<=(installation_record::CONTROL_LIMIT as u64) && storage<=installation_record::PAYLOAD_LIMIT,
+                    && control<=(installation_record::CONTROL_LIMIT as u64) && storage<=transaction::MAINTENANCE_STORAGE_LIMIT,
                     "removal-resume-capture-quote")?;
                 // Existing initial and shared execution readers use (control,storage).
                 self.quote=Some((control,storage));Ok(())
@@ -9725,7 +9725,7 @@ mod installer {
             pub(super) fn finish(&mut self,prior:RemovalArchiveCensus)->Result<()> {
                 check(!self.failed && !self.complete && self.quote.is_some()
                     && self.directories.iter().any(|d|d.path.is_empty()),"removal-snapshot-capture-incomplete")?;
-                check(prior.rows().len()<=64 && prior.storage_bytes()<=installation_record::PAYLOAD_LIMIT,"removal-snapshot-prior-bound")?;
+                check(prior.rows().len()<=64 && prior.storage_bytes()<=transaction::MAINTENANCE_STORAGE_LIMIT,"removal-snapshot-prior-bound")?;
                 self.memory(prior.owned_bytes().map_err(|_|"removal-snapshot-memory")?)?;
                 self.prior_archives=Some(prior);
                 self.controls.sort_by(|a,b|a.path.cmp(&b.path));
@@ -10671,7 +10671,7 @@ mod installer {
                 let (_,end)=worker::removal_lifecycle_with_restore_data(book.originals.len(),files,directories,
                     capture.directory_count(),capture.controls.len(),post,true,capture.restore_originals_data()?,0).ok_or("removal-linked-originals")?;
                 let storage=self.storage.checked_add(5*mobile_release_desktop::macos_remove_record::RECORD_LIMIT as u64)
-                    .filter(|n|*n<=installation_record::PAYLOAD_LIMIT).ok_or("removal-linked-storage")?;
+                    .filter(|n|*n<=transaction::MAINTENANCE_STORAGE_LIMIT).ok_or("removal-linked-storage")?;
                 let control=self.control.max(removal_effective_control_bytes(book)?);
                 removal_payload_conversion_budget_data(control,self.plan.conversion_quote_data()?,512*1024+2*1024*1024)
                     .map_err(|_|"removal-linked-budget")?;
@@ -10793,7 +10793,7 @@ mod installer {
             check(plan.expected_files==forecast.files && plan.expected_directories==forecast.directories,"removal-resume-forecast-changed")?;
             let storage=payload.checked_add(evidence).and_then(|n|n.checked_add(source.history_storage_data().ok()?))
                 .and_then(|n|n.checked_add((paths::MAINTENANCE_GATE_BYTES.len()+paths::REGISTRATION_GATE_BYTES.len()) as u64))
-                .filter(|n|*n<=installation_record::PAYLOAD_LIMIT).ok_or("removal-resume-storage")?;
+                .filter(|n|*n<=transaction::MAINTENANCE_STORAGE_LIMIT).ok_or("removal-resume-storage")?;
             held_bytes(book,history.state_original,&history.state_bytes)?;
             let controls=if prior.is_some(){
                 let controls=removal_resume_retain_controls(book,source,&mut plan,versions,&mut history)?;
@@ -10927,7 +10927,7 @@ mod installer {
             assert_eq!(moved.quote,Some((17,storage)));
             moved.set_resume_quote_data(23,storage).unwrap();assert_eq!(moved.quote,Some((23,storage)));
             assert!(moved.set_resume_quote_data((installation_record::CONTROL_LIMIT as u64)+1,storage).is_err());
-            assert!(moved.set_resume_quote_data(23,installation_record::PAYLOAD_LIMIT+1).is_err());
+            assert!(moved.set_resume_quote_data(23,transaction::MAINTENANCE_STORAGE_LIMIT+1).is_err());
             assert_eq!(moved.quote,Some((23,storage)));
             let mut not_second=capture();assert!(not_second.set_resume_quote_data(23,storage).is_err());
             for change in 0..3 {let mut bad=capture();match change {0=>bad.complete=false,1=>bad.failed=true,_=>bad.prior_archives=None};
@@ -11691,7 +11691,7 @@ mod installer {
                 costs.push(incoming_cost);
             }
             // Gates are root-wide permanent storage, not release metadata or
-            // another generation. Charge both once inside unchanged aggregate caps.
+            // another generation. Charge both once in the combined storage quote.
             let root_cost = costs.first_mut().ok_or("maintenance-generation-missing")?;
             root_cost.files = root_cost.files.checked_add(2).ok_or("maintenance-payload-bound")?;
             root_cost.bytes = root_cost.bytes.checked_add((paths::MAINTENANCE_GATE_BYTES.len()
@@ -11722,7 +11722,7 @@ mod installer {
                 applications::OBSERVATION_CONTROL_QUOTE } else {0}).ok_or("maintenance-control-bound")?;
             // Convenience copies are physical bytes outside the embedded app.
             // Charge the maximum old+new extent during update before any writes;
-            // none of the original file/storage/original-descriptor caps grow.
+            // each generation's file/byte and original-descriptor caps remain.
             let mut copy_files = copy_files;
             if let Some(launcher) = &launcher {
                 let (physical_files,physical_bytes,new_files) = launcher.planned_cost()?;
@@ -11754,8 +11754,8 @@ mod installer {
             let live = book.originals.iter().filter(|r| r.fd.is_some()).count() as u64 + 2 * 16 + 12 + 1
                 + book.removal_live_reserved as u64 + if launcher.is_some() || launcher_removal.is_some() {20} else {0}
                 + if creates_launcher_phase {applications::PHASE_LIVE_QUOTE} else {0};
-            let budget=transaction::BudgetData::checked_data(&costs, invocation_count, planned_evidence, control_bound, records, live)
-                .map_err(|_| "maintenance-budget-admission")?;
+            let budget=transaction::BudgetData::checked_with_reason_data(&costs, invocation_count, planned_evidence, control_bound, records, live)
+                .map_err(transaction::BudgetRefusalData::reason_data)?;
             if restore_originals!=0 {
                 reserve_removal_original_storage(book,usize::try_from(records).map_err(|_|"restore-recovery-future-originals")?)?;
             }
@@ -11764,10 +11764,8 @@ mod installer {
                 book.removal_observation_reserved=book.removal_control_reserved;
             }
             let prior_archive_bytes=match archives.as_ref(){Some(archives)=>archives.storage()?,None=>removal_archive_storage_bytes(book)?};
-            let complete_storage=budget.payload_totals_data().1.checked_add(planned_evidence)
-                .and_then(|n|n.checked_add(costs.len() as u64*transaction::PRODUCER_CONTROL_LIMIT as u64))
-                .and_then(|n|n.checked_add(prior_archive_bytes))
-                .filter(|n|*n<=installation_record::PAYLOAD_LIMIT).ok_or("removal-snapshot-storage")?;
+            let complete_storage=budget.storage_with_archives_data(prior_archive_bytes)
+                .map_err(|_|"removal-snapshot-storage")?;
             if let Some(capture)=book.removal_snapshot_capture.as_mut() {
                 check(!capture.complete && !capture.failed && capture.quote.is_none(),"removal-snapshot-quote-once")?;
                 capture.quote=Some((control_bound,complete_storage));
@@ -15039,7 +15037,7 @@ mod installer {
             let extra=table.checked_add(future.checked_mul(255).ok_or("removal-snapshot-budget")?).ok_or("removal-snapshot-budget")?;
             let bound=control.checked_add(extra as u64).filter(|n|*n<=(installation_record::CONTROL_LIMIT as u64)).ok_or("removal-snapshot-budget")?;
             check(storage.checked_add(snapshot).and_then(|n|n.checked_add(mobile_release_desktop::macos_remove_record::RECORD_LIMIT as u64))
-                    .is_some_and(|n|n<=installation_record::PAYLOAD_LIMIT)
+                    .is_some_and(|n|n<=transaction::MAINTENANCE_STORAGE_LIMIT)
                 && live.checked_add(external).and_then(|n|n.checked_add(6)).is_some_and(|n|n<=96),"removal-snapshot-budget")?;
             Ok((future,bound))
         }
@@ -15490,7 +15488,7 @@ mod installer {
         fn removal_payload_allocation_data(control:u64,extra:usize,storage:u64,snapshot:u64)->bool {
             control.checked_add(extra as u64).is_some_and(|n|n<=(installation_record::CONTROL_LIMIT as u64))
                 && storage.checked_add(snapshot).and_then(|n|n.checked_add(5*mobile_release_desktop::macos_remove_record::RECORD_LIMIT as u64))
-                    .is_some_and(|n|n<=installation_record::PAYLOAD_LIMIT)
+                    .is_some_and(|n|n<=transaction::MAINTENANCE_STORAGE_LIMIT)
         }
         fn removal_payload_live_data(live:usize,external:usize)->bool {
             // Depth<=17 directories plus one leaf/roster; ONE generation
@@ -17587,7 +17585,7 @@ exec ./mrk-macos-remove --fixture-supervise "$1"
                         v.capture.directory_count(),v.capture.controls.len(),post,true,v.capture.restore_originals_data()?,0).ok_or("removal-linked-originals")?;
                     let (_,storage)=v.capture.quote.ok_or("removal-linked-capture-quote")?;
                     let total=storage.checked_add(5*mobile_release_desktop::macos_remove_record::RECORD_LIMIT as u64)
-                        .filter(|n|*n<=installation_record::PAYLOAD_LIMIT).ok_or("removal-linked-storage")?;
+                        .filter(|n|*n<=transaction::MAINTENANCE_STORAGE_LIMIT).ok_or("removal-linked-storage")?;
                     check(maintenance::removal_effective_control_bytes(book)?.checked_add(REMOVAL_LINKED_WORK)
                         .and_then(|n|n.checked_add(2*1024*1024)).is_some_and(|n|n<=(installation_record::CONTROL_LIMIT as u64)),"removal-linked-memory")?;
                     Ok((end,total))
@@ -17686,7 +17684,7 @@ exec ./mrk-macos-remove --fixture-supervise "$1"
             ->Option<(usize,u64)> {
             let end=continuation.checked_add(8)?.checked_add(post.checked_mul(2)?)?;
             let bytes=storage.checked_add(5*mobile_release_desktop::macos_remove_record::RECORD_LIMIT as u64)?;
-            if end>installation_record::ORIGINAL_LIMIT || bytes>installation_record::PAYLOAD_LIMIT
+            if end>installation_record::ORIGINAL_LIMIT || bytes>transaction::MAINTENANCE_STORAGE_LIMIT
                 || control.checked_add(REMOVAL_LINKED_WORK)?>(installation_record::CONTROL_LIMIT as u64) {return None;}
             Some((end,bytes))
         }
@@ -21269,7 +21267,7 @@ exec ./mrk-macos-remove --fixture-supervise "$1"
                 assert!(!removal_snapshot_root_delta_data(&before,&after,&name,30));
                 assert!(removal_snapshot_budget_data(4*1024*1024,1024,4096,50,256,12,4,0,40,3).is_ok());
                 assert!(removal_snapshot_budget_data((installation_record::CONTROL_LIMIT as u64),1024,4096,50,50,12,4,0,40,3).is_err());
-                assert!(removal_snapshot_budget_data(0,installation_record::PAYLOAD_LIMIT,1,0,0,0,0,0,0,0).is_err());
+                assert!(removal_snapshot_budget_data(0,transaction::MAINTENANCE_STORAGE_LIMIT,1,0,0,0,0,0,0,0).is_err());
                 assert!(removal_snapshot_budget_data(0,0,1,installation_record::ORIGINAL_LIMIT,installation_record::ORIGINAL_LIMIT,1,1,0,0,0).is_err());
                 assert!(removal_snapshot_budget_data(0,0,1,0,0,0,0,0,91,0).is_err());
                 assert!(removal_snapshot_budget_data(0,0,u64::MAX,0,0,0,0,0,0,0).is_err());
@@ -21576,7 +21574,7 @@ exec ./mrk-macos-remove --fixture-supervise "$1"
                 assert!(!maintenance::restore_recovery::transport_live_data(36,5,16));
                 assert!(!maintenance::restore_recovery::transport_live_data(0,0,usize::MAX));
                 let control=(installation_record::CONTROL_LIMIT as u64);let progress=5*mobile_release_desktop::macos_remove_record::RECORD_LIMIT as u64;
-                let storage=installation_record::PAYLOAD_LIMIT-progress-1;
+                let storage=transaction::MAINTENANCE_STORAGE_LIMIT-progress-1;
                 assert!(removal_payload_allocation_data(control-128,128,storage,1));
                 assert!(!removal_payload_allocation_data(control-127,128,storage,1));
                 assert!(!removal_payload_allocation_data(control-128,128,storage,2));
@@ -21687,9 +21685,9 @@ exec ./mrk-macos-remove --fixture-supervise "$1"
                 assert!(removal_linked_record_data(old.bytes_data(),&digest,&"3".repeat(32),&"4".repeat(32),1,
                     RemovalBindingData{payload_roster_sha256:&different,..binding}).is_err());
                 let post=8;let extra=8+2*post;
-                let storage=installation_record::PAYLOAD_LIMIT-5*mobile_release_desktop::macos_remove_record::RECORD_LIMIT as u64;
+                let storage=transaction::MAINTENANCE_STORAGE_LIMIT-5*mobile_release_desktop::macos_remove_record::RECORD_LIMIT as u64;
                 let control_budget=(installation_record::CONTROL_LIMIT as u64)-REMOVAL_LINKED_WORK;
-                assert_eq!(removal_linked_quote_data(installation_record::ORIGINAL_LIMIT-extra,post,storage,control_budget),Some((installation_record::ORIGINAL_LIMIT,installation_record::PAYLOAD_LIMIT)));
+                assert_eq!(removal_linked_quote_data(installation_record::ORIGINAL_LIMIT-extra,post,storage,control_budget),Some((installation_record::ORIGINAL_LIMIT,transaction::MAINTENANCE_STORAGE_LIMIT)));
                 assert!(removal_linked_quote_data((installation_record::ORIGINAL_LIMIT + 1)-extra,post,storage,control_budget).is_none());
                 assert!(removal_linked_quote_data(installation_record::ORIGINAL_LIMIT-extra,post,storage+1,control_budget).is_none());
                 assert!(removal_linked_quote_data(installation_record::ORIGINAL_LIMIT-extra,post,storage,control_budget+1).is_none());

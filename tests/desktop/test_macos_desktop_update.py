@@ -44,6 +44,30 @@ def inventory_fixture():
 
 
 class OrdinaryDesktopUpdateTests(unittest.TestCase):
+    def test_maintenance_payload_floor_keeps_each_generation_bounded(self):
+        inventories = [dict(files=[dict(size=n)]) for n in (283_826_469,331_920_402)]
+        proof = U.maintenance_payload_floor_data(inventories)
+        self.assertEqual(proof['payloadBytesLowerBound'],615_746_871)
+        self.assertFalse(proof['fullNativeBudgetAdmitted'])
+        self.assertFalse(proof['metadataAndLauncherCopiesIncluded'])
+        maximum = [dict(files=[dict(size=U.S.MAX_BYTES)])] * U.MAINTENANCE_GENERATION_LIMIT
+        self.assertEqual(U.maintenance_payload_floor_data(maximum)['payloadBytesLowerBound'],
+                         U.MAINTENANCE_GENERATION_LIMIT * U.S.MAX_BYTES)
+        for inventories in ([], maximum+[maximum[0]], [dict(files=[])],
+                            [dict(files=[dict(size=True)])], [dict(files=[dict(size=-1)])],
+                            [dict(files=[dict(size=U.S.MAX_BYTES+1)])],
+                            [dict(files=[dict(size=U.S.MAX_BYTES),dict(size=1)])]):
+            with self.subTest(inventories=repr(inventories)[:100]), self.assertRaises(U.S.Refused):
+                U.maintenance_payload_floor_data(inventories)
+        root=Path(__file__).resolve().parents[2]/'desktop/src-tauri/src'
+        maintenance=(root/'macos_install_maintenance.rs').read_text()
+        self.assertIn('pub const PREDECESSOR_LIMIT: usize = '+str(U.MAINTENANCE_GENERATION_LIMIT-1)+';',maintenance)
+        record=(root/'macos_install_record.rs').read_text()
+        self.assertIn('pub const PAYLOAD_LIMIT: u64 = 512 * 1024 * 1024;',record)
+        self.assertIn('pub const CONTROL_LIMIT: usize = 128 * 1024 * 1024;',record)
+        transaction=(root/'macos_install_transaction.rs').read_text()
+        self.assertIn('(PREDECESSOR_LIMIT as u64 + 1) * PAYLOAD_LIMIT + CONTROL_LIMIT as u64;',transaction)
+
     def test_scripts_package_exports_the_recipe_component_for_the_final_product(self):
         recipe = yaml('.github/actions/macos-candidate-recipes/'
                       'build-the-fixed-one-shot-root-installer-and-scripts-/action.yml')

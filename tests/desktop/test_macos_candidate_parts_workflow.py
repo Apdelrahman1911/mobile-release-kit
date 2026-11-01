@@ -22,6 +22,74 @@ def yaml(path):
 
 
 class CandidatePartsWorkflowTests(unittest.TestCase):
+    def test_original_maintenance_storage_and_recovery_arithmetic(self):
+        rustc = shutil.which('rustc')
+        self.assertIsNotNone(rustc, 'the existing Rust compiler is required; download nothing')
+        transaction = (ROOT/'desktop/src-tauri/src/macos_install_transaction.rs').read_text()
+        installer = (ROOT/'desktop/src-tauri/src/bin/macos_install.rs').read_text()
+        fixture = (ROOT/'tests/desktop/fixtures/maintenance_storage_data.rs').read_text()
+
+        def insert(marker, value):
+            nonlocal fixture
+            token = '/* '+marker+' */'
+            self.assertEqual(fixture.count(token), 1)
+            fixture = fixture.replace(token, value)
+
+        def declaration(source, name):
+            return re.search(r'(?m)^pub const '+name+r':[^;]+;', source).group(0)
+
+        def function(source, name):
+            first = source.index('fn '+name+'(')
+            opening = source.index('{', first)
+            depth = 1
+            last = opening+1
+            while depth:
+                depth += (source[last] == '{') - (source[last] == '}')
+                last += 1
+            return source[first:last]
+
+        constants = []
+        for path, names in (
+            ('macos_install_record.rs', ('CONTROL_LIMIT','FILE_LIMIT','ORIGINAL_LIMIT','PAYLOAD_LIMIT')),
+            ('macos_install_maintenance.rs', ('PREDECESSOR_LIMIT',)),
+            ('macos_install_transaction.rs', ('INTENT_LIMIT','STATE_LIMIT','CAPSULE_LIMIT',
+                                              'REQUEST_EXPORT_LIMIT','INVOCATION_LIMIT','PRODUCER_CONTROL_LIMIT',
+                                              'MAINTENANCE_STORAGE_LIMIT')),
+        ):
+            source = (ROOT/'desktop/src-tauri/src'/path).read_text()
+            constants += [declaration(source, name) for name in names]
+        producer = (ROOT/'desktop/src-tauri/src/macos_install_producer.rs').read_text()
+        constants += ['mod macos_install_producer { '+declaration(producer,'DESCRIPTOR_LIMIT')
+                      +declaration(producer,'SIGNATURE_LIMIT')+' }']
+        error = transaction[transaction.index('pub enum TransactionDataError '):transaction.index('fn hex(')]
+        insert('MRK_ORIGINAL_BUDGET_CONSTANTS', '\n'.join(constants)+
+               '\n#[derive(Clone, Copy, Debug, PartialEq, Eq)]\n'+error)
+        first = transaction.index('#[derive(Clone, Copy, Debug)]\npub struct GenerationCostData')
+        last = transaction.index('#[derive(Clone, Copy, Debug, PartialEq, Eq)]\npub enum StepData', first)
+        insert('MRK_ORIGINAL_BUDGET_TYPES_AND_METHODS',function(transaction,'maintenance_storage_sum_data')+
+               '\n'+transaction[first:last])
+        insert('MRK_ORIGINAL_EXISTING_BUDGET_REGRESSION',function(transaction,
+               'retained_storage_and_original_budget_arithmetic_refuse_before_effects'))
+        insert('MRK_ORIGINAL_UPDATE_BUDGET_REGRESSION',function(transaction,
+               'update_storage_and_first_refusal_preserve_individual_limits'))
+        removal_record = (ROOT/'desktop/src-tauri/src/macos_remove_record.rs').read_text()
+        insert('MRK_ORIGINAL_REMOVAL_RECORD_LIMIT',declaration(removal_record,'RECORD_LIMIT'))
+        insert('MRK_ORIGINAL_LINKED_WORK_LIMIT',re.search(r'const REMOVAL_LINKED_WORK:[^;]+;',installer).group(0))
+        for marker, name in (
+            ('MRK_ORIGINAL_ARCHIVE_STORAGE_SUM','removal_archive_storage_sum_data'),
+            ('MRK_ORIGINAL_REMOVAL_PAYLOAD_ALLOCATION','removal_payload_allocation_data'),
+            ('MRK_ORIGINAL_REMOVAL_LINKED_QUOTE','removal_linked_quote_data'),
+        ):
+            insert(marker, function(installer, name))
+        with tempfile.TemporaryDirectory(dir=os.environ.get('MRK_PART_TEST_ROOT')) as temporary:
+            source=Path(temporary)/'original-data.rs'; binary=Path(temporary)/'original-data'
+            source.write_text(fixture)
+            subprocess.run([rustc,'--edition=2021',str(source),'-o',str(binary)],
+                           check=True,capture_output=True,timeout=30)
+            result=subprocess.run([str(binary)],check=True,capture_output=True,timeout=5)
+        self.assertEqual(result.stdout,b'MRK_MAINTENANCE_STORAGE_DATA=PASS\n')
+        self.assertEqual(result.stderr,b'')
+
     def test_existing_app_macl_original_reader_with_inert_filesystem_returns(self):
         native=(ROOT/'desktop/native/macos-installed-native/src/native.m').read_text()
         start=native.index('int mrk_no_xattrs(')

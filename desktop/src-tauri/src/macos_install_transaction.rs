@@ -18,6 +18,16 @@ pub const REQUEST_EXPORT_LIMIT: usize = 64 * 1024;
 pub const PRODUCER_CONTROL_LIMIT: usize = crate::macos_install_producer::DESCRIPTOR_LIMIT
     + crate::macos_install_producer::SIGNATURE_LIMIT;
 pub const INVOCATION_LIMIT: usize = 64;
+/// Physical storage for current, retained and incoming generations together.
+/// Each generation still has its own PAYLOAD_LIMIT. Include the existing
+/// bounded control allowance for persisted evidence; this is a quota, never
+/// an allocation, available-disk observation or permission to retain a release.
+pub const MAINTENANCE_STORAGE_LIMIT: u64 =
+    (PREDECESSOR_LIMIT as u64 + 1) * PAYLOAD_LIMIT + CONTROL_LIMIT as u64;
+pub fn maintenance_storage_sum_data(before: u64, extra: u64) -> Result<u64> {
+    before.checked_add(extra).filter(|n| *n <= MAINTENANCE_STORAGE_LIMIT)
+        .ok_or(TransactionDataError::Limit)
+}
 pub const STATE_NAME: &str = "installation-v2.json";
 /// A request ID correlates one exact original Installer invocation with a
 /// unique pending export. It does not authenticate a package or grant writes.
@@ -880,40 +890,76 @@ pub fn correspondence_data(intent: &IntentData, previous: Option<(&StateData, &C
 
 #[derive(Clone, Copy, Debug)]
 pub struct GenerationCostData { pub files: u64, pub bytes: u64 }
+/// Closed first rejected predicate only. These labels convey no native facts
+/// or authority; the original observer must supply every complete input.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BudgetRefusalData {
+    Generations, Invocations, Control, Originals, LiveFds, GenerationFiles,
+    GenerationBytes, Evidence, Storage, Arithmetic,
+}
+impl BudgetRefusalData {
+    pub fn reason_data(self) -> &'static str {
+        match self {
+            Self::Generations => "maintenance-budget-generations",
+            Self::Invocations => "maintenance-budget-invocations",
+            Self::Control => "maintenance-budget-control",
+            Self::Originals => "maintenance-budget-originals",
+            Self::LiveFds => "maintenance-budget-live-fds",
+            Self::GenerationFiles => "maintenance-budget-generation-files",
+            Self::GenerationBytes => "maintenance-budget-generation-bytes",
+            Self::Evidence => "maintenance-budget-evidence",
+            Self::Storage => "maintenance-budget-storage",
+            Self::Arithmetic => "maintenance-budget-arithmetic",
+        }
+    }
+}
 #[derive(Debug)]
-pub struct BudgetData { payload_bytes: u64, payload_files: u64 }
+pub struct BudgetData { payload_bytes: u64, payload_files: u64, storage_bytes: u64 }
 impl BudgetData {
     /// Numbers supplied by an actual future inventory observer, including ALL
     /// retained/current physical payloads AND incoming staging, not merely a
     /// count of release names. This neither observes nor reserves those objects.
     pub fn checked_data(generations: &[GenerationCostData], invocation_count: usize, evidence_bytes: u64,
         control_bytes: u64, original_records: u64, live_fds: u64) -> Result<Self> {
-        require(!generations.is_empty() && generations.len() <= PREDECESSOR_LIMIT + 1
-            && invocation_count > 0 && invocation_count <= INVOCATION_LIMIT && control_bytes <= CONTROL_LIMIT as u64
-            && original_records <= ORIGINAL_LIMIT as u64 && live_fds <= 96, TransactionDataError::Limit)?;
+        Self::checked_with_reason_data(generations, invocation_count, evidence_bytes, control_bytes,
+            original_records, live_fds).map_err(|_| TransactionDataError::Limit)
+    }
+    pub fn checked_with_reason_data(generations: &[GenerationCostData], invocation_count: usize, evidence_bytes: u64,
+        control_bytes: u64, original_records: u64, live_fds: u64) -> std::result::Result<Self, BudgetRefusalData> {
+        use BudgetRefusalData as B;
+        if generations.is_empty() || generations.len() > PREDECESSOR_LIMIT + 1 { return Err(B::Generations); }
+        if invocation_count == 0 || invocation_count > INVOCATION_LIMIT { return Err(B::Invocations); }
+        if control_bytes > CONTROL_LIMIT as u64 { return Err(B::Control); }
+        if original_records > ORIGINAL_LIMIT as u64 { return Err(B::Originals); }
+        if live_fds > 96 { return Err(B::LiveFds); }
         let (mut payload_bytes, mut payload_files) = (0u64, 0u64);
         for generation in generations {
-            require(generation.files > 0 && generation.files <= FILE_LIMIT as u64 && generation.bytes <= PAYLOAD_LIMIT,
-                TransactionDataError::Limit)?;
-            payload_bytes = payload_bytes.checked_add(generation.bytes).ok_or(TransactionDataError::Limit)?;
-            payload_files = payload_files.checked_add(generation.files).ok_or(TransactionDataError::Limit)?;
+            if generation.files == 0 || generation.files > FILE_LIMIT as u64 { return Err(B::GenerationFiles); }
+            if generation.bytes > PAYLOAD_LIMIT { return Err(B::GenerationBytes); }
+            payload_bytes = payload_bytes.checked_add(generation.bytes).ok_or(B::Arithmetic)?;
+            payload_files = payload_files.checked_add(generation.files).ok_or(B::Arithmetic)?;
         }
-        // Includes each unique result alongside its linked records. The
-        // overall PAYLOAD_LIMIT is unchanged; exports cannot evade it merely
-        // because their fixed parent is Application Support, not install root.
+        // Includes each unique result alongside its linked records, even when
+        // its fixed parent is Application Support rather than the install root.
         let evidence_bound = (invocation_count as u64).checked_mul((INTENT_LIMIT + STATE_LIMIT + CAPSULE_LIMIT + REQUEST_EXPORT_LIMIT) as u64)
-            .ok_or(TransactionDataError::Limit)?;
+            .ok_or(B::Arithmetic)?;
         // The pair is persisted outside payload/record hashes, but occupies
         // actual storage in every current/retained generation. Reserve its full
         // bounded extent even before an incoming original pair is published.
         let producer_bound = (generations.len() as u64).checked_mul(PRODUCER_CONTROL_LIMIT as u64)
-            .ok_or(TransactionDataError::Limit)?;
-        require(evidence_bytes <= evidence_bound && payload_bytes.checked_add(evidence_bytes)
-                .and_then(|n| n.checked_add(producer_bound)).is_some_and(|n| n <= PAYLOAD_LIMIT)
-            && payload_files <= (PREDECESSOR_LIMIT as u64 + 1) * FILE_LIMIT as u64, TransactionDataError::Limit)?;
-        Ok(Self { payload_bytes, payload_files })
+            .ok_or(B::Arithmetic)?;
+        if evidence_bytes > evidence_bound { return Err(B::Evidence); }
+        let storage_bytes = maintenance_storage_sum_data(payload_bytes, evidence_bytes)
+            .and_then(|n| maintenance_storage_sum_data(n, producer_bound)).map_err(|_| B::Storage)?;
+        if payload_files > (PREDECESSOR_LIMIT as u64 + 1) * FILE_LIMIT as u64 { return Err(B::GenerationFiles); }
+        Ok(Self { payload_bytes, payload_files, storage_bytes })
     }
     pub fn payload_totals_data(&self) -> (u64, u64) { (self.payload_files, self.payload_bytes) }
+    /// Charge independently observed archives once against the same storage
+    /// quota used by update, snapshot and recovery; no payload cap substitution.
+    pub fn storage_with_archives_data(&self, archive_bytes: u64) -> Result<u64> {
+        maintenance_storage_sum_data(self.storage_bytes, archive_bytes)
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1831,7 +1877,7 @@ mod tests {
         let admitted = BudgetData::checked_data(&[one, one], 2, 4096, 4096, 100, 12).unwrap();
         assert_eq!(admitted.payload_totals_data(), (20, 2048));
         let record_and_result = (INTENT_LIMIT + STATE_LIMIT + CAPSULE_LIMIT + REQUEST_EXPORT_LIMIT) as u64;
-        let payload = GenerationCostData { files:1, bytes:PAYLOAD_LIMIT-record_and_result-PRODUCER_CONTROL_LIMIT as u64 };
+        let payload = GenerationCostData { files:1, bytes:PAYLOAD_LIMIT };
         assert!(BudgetData::checked_data(&[payload],1,record_and_result,0,2,2).is_ok());
         let too_large = GenerationCostData { files:1, bytes:payload.bytes+1 };
         assert!(BudgetData::checked_data(&[too_large],1,record_and_result,0,2,2).is_err());
@@ -1839,11 +1885,9 @@ mod tests {
         // Signed control bytes cannot evade the aggregate merely by living
         // outside versions/<release>. The payload-only accessor stays truthful.
         let nine = PREDECESSOR_LIMIT + 1;
-        let remaining = PAYLOAD_LIMIT-record_and_result-(nine as u64)*PRODUCER_CONTROL_LIMIT as u64;
-        let mut costs = vec![GenerationCostData { files:1, bytes:0 }; nine];
-        costs[0].bytes = remaining;
+        let mut costs = vec![GenerationCostData { files:1, bytes:PAYLOAD_LIMIT }; nine];
         assert_eq!(BudgetData::checked_data(&costs,1,record_and_result,0,ORIGINAL_LIMIT as u64,96).unwrap().payload_totals_data(),
-            (nine as u64, remaining));
+            (nine as u64, nine as u64 * PAYLOAD_LIMIT));
         costs[0].bytes += 1;
         assert!(BudgetData::checked_data(&costs,1,record_and_result,0,ORIGINAL_LIMIT as u64,96).is_err());
         // The actual Fresh observer charges three originals per copied leaf,
@@ -1864,8 +1908,51 @@ mod tests {
             assert!(BudgetData::checked_data(&[one], count, evidence, control, records, fds).is_err());
         }
         assert!(BudgetData::checked_data(&[one; PREDECESSOR_LIMIT+2], 1, 0, 0, 0, 0).is_err());
-        assert!(BudgetData::checked_data(&[GenerationCostData { files: 1, bytes: PAYLOAD_LIMIT }, one], 1,0,0,0,0).is_err());
+        assert!(BudgetData::checked_data(&[GenerationCostData { files: 1, bytes: PAYLOAD_LIMIT }, one], 1,0,0,0,0).is_ok());
         assert!(BudgetData::checked_data(&[GenerationCostData { files: u64::MAX, bytes: 0 }], 1,0,0,0,0).is_err());
         assert!(BudgetData::checked_data(&[], 1,0,0,0,0).is_err());
+    }
+    #[test]
+    fn update_storage_and_first_refusal_preserve_individual_limits() {
+        // Exact authenticated inventories from the original owner refusal.
+        // This lower bound is not a native observation of the omitted metadata,
+        // launcher copies, control quote, original records or live descriptors.
+        let observed = [GenerationCostData {files:7203,bytes:283_826_469},
+            GenerationCostData {files:7230,bytes:331_920_402}];
+        let budget = BudgetData::checked_data(&observed,2,0,0,0,0).unwrap();
+        assert_eq!(budget.payload_totals_data(), (14_433,615_746_871));
+        assert!(budget.payload_totals_data().1 > PAYLOAD_LIMIT);
+        let storage = budget.storage_with_archives_data(0).unwrap();
+        assert_eq!(storage,615_746_871+2*PRODUCER_CONTROL_LIMIT as u64);
+        let remaining = MAINTENANCE_STORAGE_LIMIT-storage;
+        assert_eq!(budget.storage_with_archives_data(remaining),Ok(MAINTENANCE_STORAGE_LIMIT));
+        assert!(budget.storage_with_archives_data(remaining+1).is_err());
+        assert!(budget.storage_with_archives_data(u64::MAX).is_err());
+        assert_eq!(maintenance_storage_sum_data(MAINTENANCE_STORAGE_LIMIT-1,1),Ok(MAINTENANCE_STORAGE_LIMIT));
+        assert!(maintenance_storage_sum_data(MAINTENANCE_STORAGE_LIMIT,1).is_err());
+        assert!(maintenance_storage_sum_data(u64::MAX,1).is_err());
+        let one = GenerationCostData {files:1,bytes:1};
+        use BudgetRefusalData as B;
+        for (n,e,c,r,f,want) in [(0,0,0,0,0,B::Invocations),
+            (INVOCATION_LIMIT+1,0,0,0,0,B::Invocations),
+            (1,0,CONTROL_LIMIT as u64+1,0,0,B::Control),
+            (1,0,0,ORIGINAL_LIMIT as u64+1,0,B::Originals),
+            (1,0,0,0,97,B::LiveFds),(1,u64::MAX,0,0,0,B::Evidence)] {
+            assert_eq!(BudgetData::checked_with_reason_data(&[one],n,e,c,r,f).unwrap_err(),want);
+        }
+        assert_eq!(BudgetData::checked_with_reason_data(&[],1,0,0,0,0).unwrap_err(),B::Generations);
+        assert_eq!(BudgetData::checked_with_reason_data(&[one;PREDECESSOR_LIMIT+2],1,0,0,0,0).unwrap_err(),B::Generations);
+        for bad in [GenerationCostData{files:0,..one},GenerationCostData{files:FILE_LIMIT as u64+1,..one}] {
+            assert_eq!(BudgetData::checked_with_reason_data(&[bad],1,0,0,0,0).unwrap_err(),B::GenerationFiles);
+        }
+        assert_eq!(BudgetData::checked_with_reason_data(&[GenerationCostData{bytes:PAYLOAD_LIMIT+1,..one}],1,0,0,0,0)
+            .unwrap_err(),B::GenerationBytes);
+        // First rejection is frozen in the same original check order.
+        assert_eq!(BudgetData::checked_with_reason_data(&[],0,u64::MAX,u64::MAX,u64::MAX,u64::MAX)
+            .unwrap_err(),B::Generations);
+        assert_eq!(BudgetData::checked_with_reason_data(&[one],1,0,u64::MAX,u64::MAX,u64::MAX)
+            .unwrap_err(),B::Control);
+        assert_eq!(B::GenerationBytes.reason_data(),"maintenance-budget-generation-bytes");
+        assert_eq!(B::LiveFds.reason_data(),"maintenance-budget-live-fds");
     }
 }
