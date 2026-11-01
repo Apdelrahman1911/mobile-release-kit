@@ -2,6 +2,7 @@
 import copy
 import json
 import os
+import plistlib
 import re
 from pathlib import Path
 import tempfile
@@ -43,6 +44,20 @@ def inventory_fixture():
 
 
 class OrdinaryDesktopUpdateTests(unittest.TestCase):
+    def test_current_launcher_versions_match_real_application_and_package(self):
+        # Run 41291931705 refused assembly before Swift compilation because
+        # the launcher still said 0.1.2 while the application/package was 0.1.3.
+        # This module is also run by the original DATA job before native builds.
+        root = Path(__file__).resolve().parents[2]
+        desktop = root / 'desktop'
+        application = json.loads((desktop / 'src-tauri/tauri.conf.json').read_bytes())['version']
+        package = json.loads((desktop / 'macos-installed-inputs/build-release.json').read_bytes())['packageVersion']
+        launcher = plistlib.loads((desktop / 'native/macos-applications-launcher/Info.plist').read_bytes())
+        self.assertEqual(application, package)
+        for key in ('CFBundleShortVersionString', 'CFBundleVersion'):
+            with self.subTest(key=key):
+                self.assertEqual(launcher[key], application)
+
     def test_matrix_job_names_match_strict_current_job_selector(self):
         # Actual run 41291021077/job 124802333160 added this suffix to the
         # original static name. Keep the selector strict; name jobs explicitly.
