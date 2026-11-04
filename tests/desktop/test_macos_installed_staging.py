@@ -11252,12 +11252,12 @@ sys.exit(status)
                         self.assertIn('certificate leaf[subject.OU] = "TEST000001"', requirement)
                         self.assertIn('certificate leaf[field.1.2.840.113635.100.6.1.13]', requirement)
         with (mock.patch.object(TOOL, "source_build_selection", return_value=selection),
-              mock.patch.object(TOOL, "read", side_effect=lambda path, *_: profile if path == TOOL.PRODUCER_PROFILE else service)):
+              mock.patch.object(TOOL, "source_packaging_input", side_effect=lambda role: profile if role == "producer-profile" else service)):
             preflight = TOOL.packaging_selection_command(SimpleNamespace(target=selection.target))
         self.assertFalse(preflight["nativeAuthority"])
         self.assertEqual((preflight["target"], preflight["packageVersion"]), (selection.target, "0.2.0"))
         with (mock.patch.object(TOOL, "source_build_selection", return_value=TOOL.BuildSelection(selection.target, "0.1.0", selection.release)),
-              mock.patch.object(TOOL, "read", side_effect=lambda path, *_: profile if path == TOOL.PRODUCER_PROFILE else service),
+              mock.patch.object(TOOL, "source_packaging_input", side_effect=lambda role: profile if role == "producer-profile" else service),
               self.assertRaises(TOOL.Refused)):
             TOOL.packaging_selection_command(SimpleNamespace(target=selection.target))
 

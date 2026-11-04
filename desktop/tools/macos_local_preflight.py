@@ -52,6 +52,8 @@ def main():
 
     run('installer-data', [sys.executable, '-m', 'unittest', 'discover', '-s', 'tests/desktop',
                           '-p', 'test_macos_distribution_detach.py'])
+    run('source-packaging-inputs', [sys.executable, '-m', 'unittest', 'discover', '-s', 'tests/desktop',
+                                  '-p', 'test_macos_source_packaging_inputs.py'])
     run('retained-source-bounds', [sys.executable, '-m', 'unittest', 'discover', '-s', 'tests/desktop',
         '-p', 'test_macos_candidate_bootstrap.py', '-k',
         'test_retained_workflow_adds_only_closed_git_operation_and_preserves_original_handoff_and_clocks'])

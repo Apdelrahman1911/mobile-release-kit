@@ -1950,8 +1950,9 @@ class FixedCarrierResumeData(unittest.TestCase):
         m = ADAPTER
         with mock.patch('subprocess.Popen', side_effect=AssertionError('no process/native execution')):
             tool = inert_module('candidate_history_stager_data', 'desktop/tools/stage_macos_installed.py')
-            history = tool.read(ROOT / 'desktop/macos-installed-inputs/producer-history.json', tool.PRODUCER_DESCRIPTOR_BYTES)
-            source = tool.packaging_signing_data(tool.read(tool.PRODUCER_PROFILE, 1024), tool.read(tool.SERVICE_PROFILE, 512))
+            history = tool.source_packaging_input('history')
+            source = tool.packaging_signing_data(tool.source_packaging_input('producer-profile'),
+                                               tool.source_packaging_input('service-profile'))
             selection = tool.source_build_selection(tool.ARM_TARGET)
             package, signature = b'INERT-NOT-A-PACKAGE-' * 3, b'INERT-NOT-A-SIGNATURE'
             encoded = tool.packaging_descriptor_data(history, source, selection, source_commit='1' * 40,
@@ -2136,8 +2137,9 @@ class FixedCarrierResumeData(unittest.TestCase):
             info = ('<pkg-info identifier="%s" version="%s" install-location="/" auth="root">'
                     '<scripts><postinstall file="./postinstall"/></scripts></pkg-info>'
                     % (tool.PACKAGE_ID, selection.package_version)).encode('ascii')
-            history = tool.read(ROOT / 'desktop/macos-installed-inputs/producer-history.json', tool.PRODUCER_DESCRIPTOR_BYTES)
-            signing = tool.packaging_signing_data(tool.read(tool.PRODUCER_PROFILE, 1024), tool.read(tool.SERVICE_PROFILE, 512))
+            history = tool.source_packaging_input('history')
+            signing = tool.packaging_signing_data(tool.source_packaging_input('producer-profile'),
+                                                tool.source_packaging_input('service-profile'))
 
             def cpio(body=inventory, *, mode=0o444, uid=0):
                 def odc(name, kind, value=b''):

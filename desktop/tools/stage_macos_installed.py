@@ -709,8 +709,9 @@ def no_xattrs(fd, *, source_metadata=False):
         need(count >= 0, "file-extended-attributes-query")
         if source_metadata and count:
             # macOS attaches this attribution metadata to locally created
-            # checkout files. Admit it only for the fixed SOURCE version JSON;
-            # package, payload and installed-file policies remain unchanged.
+            # checkout files. Admit it only through the fixed SOURCE version
+            # and packaging-input readers; package, payload and installed-file
+            # policies remain unchanged.
             expected = b"com.apple.provenance\0"
             need(count == len(expected), "file-extended-attributes")
             names = ctypes.create_string_buffer(count)
@@ -755,6 +756,21 @@ def read_at(fd, name, limit, *, zero_flags=False, source_metadata=False):
 def read(path, limit=MAX_BYTES):
     with parent(path) as (fd, name):
         return read_at(fd, name, limit)[0]
+
+
+def source_packaging_input(role):
+    # A SOURCE role selects its exact path and cap. No caller path, limit,
+    # installed record, environment nomination or fallback enters this reader.
+    need(type(role) is str and role in ("history", "producer-profile", "service-profile", "service-plist"),
+         "source-packaging-input-role")
+    path, limit = {
+        "history": (DESKTOP / "macos-installed-inputs/producer-history.json", PRODUCER_DESCRIPTOR_BYTES),
+        "producer-profile": (PRODUCER_PROFILE, 1024),
+        "service-profile": (SERVICE_PROFILE, 512),
+        "service-plist": (DESKTOP / "macos-installed-inputs" / Path(ANDROID_SERVICE_PLIST).name, 4096),
+    }[role]
+    with parent(path) as (fd, name):
+        return read_at(fd, name, limit, source_metadata=True)[0]
 
 
 def source_build_release(*, target=ARM_TARGET):
@@ -3474,7 +3490,7 @@ def source_entry_info(*, selection=None):
 
 
 def android_service_plist():
-    body = read(DESKTOP / "macos-installed-inputs" / Path(ANDROID_SERVICE_PLIST).name, 4096)
+    body = source_packaging_input("service-plist")
     try:
         value = plistlib.loads(body)
     except Exception:
@@ -5896,7 +5912,8 @@ def packaging_signing_data(producer, service, *, allow_unconfigured=False):
 
 def packaging_selection_command(args):
     selection = source_build_selection(command_target(args))
-    source = packaging_signing_data(read(PRODUCER_PROFILE, 1024), read(SERVICE_PROFILE, 512))
+    source = packaging_signing_data(source_packaging_input("producer-profile"),
+                                   source_packaging_input("service-profile"))
     need(selection.package_version != "0.1.0"
          and selection.release not in ("macos26-arm64-project-draft-01", "macos26-arm64-entry-m2a-01"),
          "source-production-release-required")
@@ -6037,7 +6054,8 @@ def removal_fixture_script_arguments(args):
 
 def remove_input_command(args):
     selection = source_build_selection(command_target(args))
-    source = packaging_signing_data(read(PRODUCER_PROFILE, 1024), read(SERVICE_PROFILE, 512))
+    source = packaging_signing_data(source_packaging_input("producer-profile"),
+                                   source_packaging_input("service-profile"))
     installed = read(args.installed_producer, PRODUCER_DESCRIPTOR_BYTES)
     signature = read(args.installed_signature, PRODUCER_SIGNATURE_BYTES)
     need(len(signature) == source.rsa_bits // 8, "remove-installed-signature-size")
