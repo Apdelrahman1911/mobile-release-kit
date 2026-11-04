@@ -1622,7 +1622,7 @@ class FixedCarrierResumeData(unittest.TestCase):
         stage = types.SimpleNamespace(**namespace)
         current = stage.build_release_data((ROOT / "desktop/macos-installed-inputs/build-release.json").read_bytes())
         namespace.update(PACKAGE_VERSION=current["packageVersion"], RELEASE=current["release"])
-        self.assertEqual(stage.source_build_selection().package_version, "0.1.3")
+        self.assertEqual(stage.source_build_selection().package_version, "0.1.4")
         manifest = "a" * 64
         paths = {"app/" + stage.ENTRY_BINARY, "app/" + stage.APP_BINARY, "app/" + stage.VAULT_HELPER,
                  "app/Contents/Info.plist", "app/" + stage.PAYLOAD_INFO, "runtime/python/bin/python3", "runtime/manifest.json"}
@@ -1667,7 +1667,7 @@ class FixedCarrierResumeData(unittest.TestCase):
                                expected_package=release["packageSha256"], input=Path("/synthetic-readback-input"), request_id="f" * 32)
         selection = stage.original_release_readback_selection(args, record)
         self.assertEqual(selection.package_version, "0.1.1")
-        self.assertEqual(stage.source_build_selection().package_version, "0.1.3")
+        self.assertEqual(stage.source_build_selection().package_version, "0.1.4")
         self.assertEqual(len(stage.observation_inventory_bytes(inventory, args.expected_inventory, manifest, selection=selection)), len(paths))
         with self.assertRaises(stage.Refused):
             stage.observation_inventory_bytes(inventory, args.expected_inventory, manifest)
@@ -1958,7 +1958,7 @@ class FixedCarrierResumeData(unittest.TestCase):
                 manifest='a' * 64, inventory='b' * 64, package=m.sha(package))
             descriptor = tool.maintenance_producer_data(encoded, target=tool.ARM_TARGET)
             current = descriptor['releaseSet']['current']
-            self.assertEqual(selection.package_version, '0.1.3')
+            self.assertEqual(selection.package_version, '0.1.4')
             self.assertEqual([old['packageVersion'] for old in descriptor['releaseSet']['acceptedPredecessors']], ['0.1.2'])
             self.assertEqual(descriptor['releaseSet']['acceptedPredecessors'],
                              tool.maintenance_json(history, tool.PRODUCER_DESCRIPTOR_BYTES)['targets'][tool.ARM_TARGET]['acceptedPredecessors'])
@@ -1987,8 +1987,8 @@ class FixedCarrierResumeData(unittest.TestCase):
                 with self.subTest(empty_history=candidate), self.assertRaisesRegex(tool.Refused, '^install-product-xar-header$'):
                     m.mounted_data(*inputs(empty), tool.ARM_TARGET, tool, candidate=candidate)
             for field, value in (('sourceCommit', '4' * 40), ('runtimeManifestSha256', '4' * 64),
-                    ('inventorySha256', '4' * 64), ('packageVersion', '0.1.4'),
-                    ('release', 'macos26-arm64-desktop-04'), ('packageSha256', '4' * 64)):
+                    ('inventorySha256', '4' * 64), ('packageVersion', '0.1.5'),
+                    ('release', 'macos26-arm64-desktop-05'), ('packageSha256', '4' * 64)):
                 changed = copy.deepcopy(descriptor); changed['releaseSet']['current'][field] = value
                 with self.subTest(current=field), self.assertRaisesRegex(m.Refused, '^enrollment-release-original$'):
                     m.mounted_data(*inputs(changed), tool.ARM_TARGET, tool, candidate=True)

@@ -736,7 +736,7 @@ class RetainedBindingFilesTests(InertOnly):
                      ("nativeScope", M.GIT_SCOPE), ("originalClosesKnown", False),
                      ("freshInstall", dict(self.receipt["freshInstall"], instance="6" * 32)),
                      ("release", dict(self.receipt["release"], runtimeManifestSha256="f" * 64)),
-                     ("release", dict(self.receipt["release"], packageVersion="0.1.4")))
+                     ("release", dict(self.receipt["release"], packageVersion="0.1.5")))
         for key, value in mutations:
             self.put(self.work / "retained-observer-install.json", STAGE.canonical(dict(self.receipt, **{key: value})))
             self.new_book()
