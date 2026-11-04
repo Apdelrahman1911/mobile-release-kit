@@ -232,7 +232,7 @@ fn installation_preparation_status(webview: Webview, request: tauri::ipc::Reques
     state.document.installation_preparation_status()
 }
 #[tauri::command]
-fn prepare_installation_quit(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::installation::PreparationStatus, BridgeError> {
+async fn prepare_installation_quit(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::installation::PreparationStatus, BridgeError> {
     fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
     edit_window(&webview)?;
     let confirmation = crate::installation::preparation_request(request_body(&request)?)?;

@@ -340,6 +340,49 @@ test('maintenance preparation lost or displaced Start reply only reconciles the 
   }
 });
 
+test('failed preparation keeps its error and replay veto when automatic or explicit status remains unchanged', async () => {
+  for (const failure of [{ code: 'macos_maintenance_unavailable' }, { code: 'cleanup_unknown' }, 'malformed']) {
+    const h = prepHarness();
+    try {
+      h.last('status').resolve(prepInitial()); await flush();
+      assert.equal(h.controller.start(true), true); await flush();
+      if (failure === 'malformed') h.last('start').resolve(prepInitial());
+      else h.last('start').reject(failure);
+      await flush();
+      const originalError = h.controller.snapshot().error;
+      assert(originalError);
+      h.last('status').resolve(prepInitial()); await flush();
+      assert.equal(h.controller.snapshot().status.phase, 'not-started');
+      assert.deepEqual(h.controller.snapshot().error, originalError);
+      assert.equal(h.controller.start(true), false);
+      void h.controller.refresh(); h.last('status').resolve(prepInitial()); await flush();
+      assert.deepEqual(h.controller.snapshot().error, originalError);
+      assert.equal(h.controller.start(true), false);
+      assert.equal(h.by('start').length, 1);
+      void h.controller.refresh(); h.last('status').reject({ code: 'busy' }); await flush();
+      assert.deepEqual(h.controller.snapshot().error, originalError);
+    } finally { h.controller.dispose(); }
+  }
+});
+
+test('failed preparation from a refused baseline clears only on a valid newer native original', async () => {
+  const h = prepHarness();
+  try {
+    h.last('status').resolve(prepRefused(1)); await flush();
+    assert.equal(h.controller.start(true), true); await flush();
+    h.last('start').reject({ code: 'macos_maintenance_unavailable' }); await flush();
+    const originalError = h.controller.snapshot().error;
+    h.last('status').resolve(prepRefused(1)); await flush();
+    assert.deepEqual(h.controller.snapshot().error, originalError);
+    assert.equal(h.controller.start(true), false);
+    void h.controller.refresh(); h.last('status').resolve(prepRunning(2)); await flush();
+    assert.equal(h.controller.snapshot().error, null);
+    assert.equal(h.controller.snapshot().status.generation, 2);
+    assert.equal(h.controller.start(true), false);
+    assert.equal(h.by('start').length, 1);
+  } finally { h.controller.dispose(); }
+});
+
 test('maintenance preparation refuses foreign generations, regressing phases and success or reopening after failure', async () => {
   const failed = prepRunning(1, { reason: 'cancelled' });
   const unknown = prepRunning(1, { phase: 'unknown', reason: 'cleanup-unknown' });

@@ -127,6 +127,7 @@ export class InstallationPreparationController {
   private pending = false;
   private refreshAgain = false;
   private timer: ReturnType<typeof setTimeout> | null = null;
+  private failedStart: { generation: number | null; error: ApiError } | null = null;
   private readonly api: InstallationPreparationApi | null;
   private readonly enabled: boolean;
   constructor(api: InstallationPreparationApi | null, enabled: boolean) { this.api = api; this.enabled = enabled; }
@@ -162,7 +163,14 @@ export class InstallationPreparationController {
         throw installationPreparationError(null);
       }
     }
-    this.update({ status: next, error: null });
+    // A failed Start followed by the unchanged pre-Start status does not
+    // explain that attempt. Keep its error and replay veto until the native
+    // Document identifies a newer original, including after explicit Refresh.
+    if (this.failedStart && next.generation !== null
+      && (this.failedStart.generation === null || next.generation > this.failedStart.generation)) {
+      this.failedStart = null;
+    }
+    this.update({ status: next, error: this.failedStart?.error ?? null });
   }
   private schedule(): void {
     this.clearTimer();
@@ -178,7 +186,7 @@ export class InstallationPreparationController {
       if (this.disposed) return;
       const status = await this.api.installationPreparationStatus();
       if (!this.disposed) this.accept(status);
-    } catch (error) { this.update({ error: installationPreparationError(error) }); }
+    } catch (error) { this.update({ error: this.failedStart?.error ?? installationPreparationError(error) }); }
     finally {
       this.pending = false; this.update({ refreshing: false });
       const again = this.refreshAgain; this.refreshAgain = false;
@@ -199,7 +207,11 @@ export class InstallationPreparationController {
       if (!next || next.generation === null || generation !== null && next.generation <= generation)
         throw installationPreparationError(null);
       this.accept(next);
-    }).catch((error: unknown) => { this.update({ error: installationPreparationError(error) }); })
+    }).catch((error: unknown) => {
+      const failure = installationPreparationError(error);
+      this.failedStart = { generation, error: failure };
+      this.update({ error: failure });
+    })
       .finally(() => {
         this.pending = false; this.refreshAgain = false; this.update({ starting: false });
         // Lost/malformed acknowledgement gets a read-only reconciliation, not
