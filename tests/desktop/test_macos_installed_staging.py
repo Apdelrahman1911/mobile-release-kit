@@ -12704,10 +12704,13 @@ class MacInstalledData(unittest.TestCase):
                     body[:-1] + b',"release":"macos26-arm64-example-02"}'):
             with self.subTest(raw=raw[:80]), self.assertRaises(TOOL.Refused):
                 TOOL.build_release_data(raw)
-        with mock.patch.object(TOOL, "read", return_value=body) as read:
+        with mock.patch.object(TOOL, "parent", wraps=TOOL.parent) as parent, \
+                mock.patch.object(TOOL, "read_at", return_value=(body, None)) as read:
             self.assertEqual(TOOL.source_build_release(), ("1.2.3", "macos26-arm64-example-02"))
-            read.assert_called_once_with(TOOL.BUILD_RELEASE_INPUT, TOOL.BUILD_RELEASE_LIMIT)
-        with mock.patch.object(TOOL, "read", side_effect=FileNotFoundError):
+            parent.assert_called_once_with(TOOL.BUILD_RELEASE_INPUT)
+            read.assert_called_once_with(mock.ANY, TOOL.BUILD_RELEASE_INPUT.name,
+                                         TOOL.BUILD_RELEASE_LIMIT, source_metadata=True)
+        with mock.patch.object(TOOL, "read_at", side_effect=FileNotFoundError):
             with self.assertRaises(FileNotFoundError):
                 TOOL.source_build_release()
 
@@ -12716,10 +12719,12 @@ class MacInstalledData(unittest.TestCase):
                                           ("x86_64-apple-darwin", "macos26-x86_64-", "build-release-intel.json")):
             selected = dict(valid, release=prefix + "example-02")
             selected_body = TOOL.canonical(selected)
-            with self.subTest(target=target), mock.patch.object(TOOL, "read", return_value=selected_body) as reader:
+            with self.subTest(target=target), mock.patch.object(TOOL, "parent", wraps=TOOL.parent) as parent, \
+                    mock.patch.object(TOOL, "read_at", return_value=(selected_body, None)) as reader:
                 self.assertEqual(TOOL.build_release_data(selected_body, target=target), selected)
                 self.assertEqual(TOOL.source_build_release(target=target), ("1.2.3", selected["release"]))
-                reader.assert_called_once_with(TOOL.DESKTOP / "macos-installed-inputs" / filename, TOOL.BUILD_RELEASE_LIMIT)
+                parent.assert_called_once_with(TOOL.DESKTOP / "macos-installed-inputs" / filename)
+                reader.assert_called_once_with(mock.ANY, filename, TOOL.BUILD_RELEASE_LIMIT, source_metadata=True)
                 if target == "x86_64-apple-darwin":
                     selection = TOOL.source_build_selection(target)
                     self.assertEqual(tuple(selection), (target, "1.2.3", selected["release"]))
@@ -12728,12 +12733,17 @@ class MacInstalledData(unittest.TestCase):
                 with self.assertRaises(TOOL.Refused): TOOL.build_release_data(selected_body, target=other)
         self.assertEqual((TOOL.PACKAGE_VERSION, TOOL.RELEASE), arm_identity)
         for invalid in (None, True, "x86_64h-apple-darwin", "aarch64-apple-ios", "universal", ""):
-            with self.subTest(target=invalid), mock.patch.object(TOOL, "read") as reader:
+            with self.subTest(target=invalid), mock.patch.object(TOOL, "parent") as parent, \
+                    mock.patch.object(TOOL, "read_at") as reader:
                 with self.assertRaises(TOOL.Refused): TOOL.source_build_release(target=invalid)
+                parent.assert_not_called()
                 reader.assert_not_called()
-        with mock.patch.object(TOOL, "read", side_effect=FileNotFoundError) as reader:
+        with mock.patch.object(TOOL, "parent", wraps=TOOL.parent) as parent, \
+                mock.patch.object(TOOL, "read_at", side_effect=FileNotFoundError) as reader:
             with self.assertRaises(FileNotFoundError): TOOL.source_build_selection("x86_64-apple-darwin")
-            reader.assert_called_once_with(TOOL.DESKTOP / "macos-installed-inputs/build-release-intel.json", TOOL.BUILD_RELEASE_LIMIT)
+            parent.assert_called_once_with(TOOL.DESKTOP / "macos-installed-inputs/build-release-intel.json")
+            reader.assert_called_once_with(mock.ANY, "build-release-intel.json",
+                                           TOOL.BUILD_RELEASE_LIMIT, source_metadata=True)
 
     def test_manifest_digest_and_original_roster_are_separate_checks(self):
         files = [{"path": name, "sha256": "1" * 64, "size": 1} for name in sorted(TOOL.BOOTSTRAPS | {"core.zip", "github-ca.pem", "python/bin/python3"})]

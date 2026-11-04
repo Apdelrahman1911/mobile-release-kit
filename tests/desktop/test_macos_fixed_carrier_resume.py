@@ -1592,7 +1592,7 @@ class FixedCarrierResumeData(unittest.TestCase):
         wanted = {"Refused", "need", "sha", "digest", "canonical", "pairs", "decode", "mac_target", "command_target",
                   "source_build_selection", "selected_build", "build_release_data", "safe_path", "directories",
                   "maintenance_hex", "maintenance_map", "maintenance_json", "maintenance_release_data",
-                  "maintenance_producer_data", "observation_inventory_bytes", "original_release_readback_selection",
+                  "maintenance_producer_data", "store_runtime_rows", "observation_inventory_bytes", "original_release_readback_selection",
                   "original_release_readback_members", "observation_command"}
         definitions = [n for n in tree.body if isinstance(n, (ast.FunctionDef, ast.ClassDef)) and n.name in wanted]
         self.assertEqual({n.name for n in definitions}, wanted)
@@ -1611,7 +1611,7 @@ class FixedCarrierResumeData(unittest.TestCase):
             for node in ast.walk(assignments[name].value):
                 if isinstance(node, ast.Call):
                     self.assertIsInstance(node.func, ast.Name)
-                    self.assertIn(node.func.id, {"Path", "namedtuple"})
+                    self.assertIn(node.func.id, {"Path", "namedtuple", "frozenset"})
                 if isinstance(node, ast.Name) and node.id.isupper() and node.id not in constants:
                     constants.add(node.id); pending.append(node.id)
         namespace = dict(__file__=str(path), __name__="stagea_actual_readback_data", Path=Path, namedtuple=namedtuple,
