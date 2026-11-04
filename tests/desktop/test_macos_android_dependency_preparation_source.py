@@ -34,6 +34,37 @@ def fixture_module(relative, name):
 
 
 class MacAndroidPreparationSourceTests(unittest.TestCase):
+    def test_catalogue_assets_have_closed_paths_byte_pins_and_read_accounting(self):
+        from unittest.mock import patch
+        helper = fixture_module('desktop/tools/macos_android_dependency_preparation.py', '_mrk_catalogue_assets')
+        class Clock:
+            def check(self): pass
+        for target in (helper.UI_TARGET, 'x86_64-apple-darwin'):
+            selected = helper.ui_selection(target)
+            source = (ROOT / selected[2]).read_bytes()
+            count, total = helper.UI_CATALOGUE_ASSETS[target]
+            prefix = source[:source.index(b"const CAT_N")].decode()
+            rows = helper.ui_catalogue_assets(prefix, target)
+            self.assertEqual(len(rows), 1)
+            self.assertEqual(helper.ui_catalogue_read_bytes(target), len(source) + total + 2)
+            for bad in (prefix.replace(rows[0][0], '../foreign.bin'),
+                        prefix.replace('split_at(0)', 'split_at(1)', 1),
+                        prefix.replace('const CAT_H0_PREFIX:', 'const CAT_H1_PREFIX:', 1),
+                        prefix + '\ninclude_bytes!("foreign");\n'):
+                with self.assertRaises(helper.Refused): helper.ui_catalogue_assets(bad, target)
+            reads = []
+            def altered(path, limit, *, clock):
+                relative = str(path.relative_to(ROOT))
+                reads.append((relative, limit))
+                if relative == selected[2]: return source, None
+                self.assertEqual(relative, 'desktop/src-tauri/src/' + rows[0][0])
+                self.assertEqual(limit, total)
+                return b'wrong bytes under the right digest name', None
+            with patch.object(helper, 'SOURCE', ROOT), patch.object(helper, 'read', side_effect=altered):
+                with self.assertRaisesRegex(helper.Refused, '^ui-catalogue-asset-pin$'):
+                    helper.ui_source_roster(Clock(), target=target)
+            self.assertEqual(len(reads), 2)
+
     def test_ui_two_target_source_selection_and_closed_acquisition_receipt(self):
         # Whole emitted catalogues are separately source-authenticated; this
         # bounded DATA group never projects those ~20MiB leaves or acquires tools.
@@ -43,10 +74,10 @@ class MacAndroidPreparationSourceTests(unittest.TestCase):
         normal=fixture_module('desktop/tools/macos_normal_ui_runner.py','_mrk_two_target_ui_normal')
         original_archives=copy.deepcopy(helper.ARCHIVES)
         self.assertEqual(helper.RUN_SCOPE,'prepare-b')
-        fixed=(('aarch64-apple-darwin','arm64','ARM64',20409744,
-                '24c72354fe4c21c0652eb2c7c33ace167ea92420a5a06a22b153a6e8174a5ee5',550,773497465,465051546),
-               ('x86_64-apple-darwin','x86_64','X64',20434472,
-                '0c14f0cd7490592f3a79d0fc8997d5079d37fe5a2ab33499fff31156c268c7cb',548,750044172,459778775))
+        fixed=(('aarch64-apple-darwin','arm64','ARM64',19000727,
+                'ab472c20fa9bd1e30dfc95ef7399987cded50e99a91d15824df703d4355d9f8f',550,773497465,465051546),
+               ('x86_64-apple-darwin','x86_64','X64',18999101,
+                '914e813291dd6ba70bae1fb849899df22460ba2002d723543ad27aa8d82f47bc',548,750044172,459778775))
         env={'GITHUB_SHA':'a'*40,'GITHUB_RUN_ID':'42','GITHUB_RUN_ATTEMPT':'1','GITHUB_REF':helper.UI_REF}
         for target,machine,arch,size,sha,jdk_count,tool_bytes,archive_bytes in fixed:
             with self.subTest(target=target):

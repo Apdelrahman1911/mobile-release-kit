@@ -13,6 +13,8 @@ use crate::{macos_install_maintenance::{ActionData, ReleaseData, ReleaseSetData,
 
 pub const STATE_LIMIT: usize = 16 * 1024;
 pub const INTENT_LIMIT: usize = 16 * 1024;
+/// Part of INTENT_LIMIT, never an additional record or allocation allowance.
+pub const FRESH_BIRTH_LIMIT: usize = 2 * 1024;
 pub const CAPSULE_LIMIT: usize = 64 * 1024;
 pub const REQUEST_EXPORT_LIMIT: usize = 64 * 1024;
 pub const PRODUCER_CONTROL_LIMIT: usize = crate::macos_install_producer::DESCRIPTOR_LIMIT
@@ -173,6 +175,103 @@ impl RestoreReferenceData {
     }
 }
 
+/// Comparison labels for the two existing registration protocols. A decoded
+/// label cannot attest lock acquisition, absence, creation or original close.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum FreshRegistrationOriginData {
+    ExistingExclusiveBeforeMaintenance,
+    AbsentBeforeMaintenanceCreatedUnderMaintenance,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct FreshBirthIdentityWire {
+    device: i64, inode: u64, birth_seconds: i64, birth_nanoseconds: i64,
+    volume_uuid: crate::macos_persistent_identity::VolumeUuid,
+}
+impl FreshBirthIdentityWire {
+    fn valid(&self) -> bool { self.device >= 0 && self.inode > 0 && self.birth_seconds > 0
+        && (0..1_000_000_000).contains(&self.birth_nanoseconds) }
+}
+/// Validated stable comparison DATA. Mandatory UUIDs have no legacy fallback.
+/// Native callers still owe held/name, protection and complete original POST.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FreshBirthIdentityData(FreshBirthIdentityWire);
+impl FreshBirthIdentityData {
+    pub fn from_original_fields_data(device: i64, inode: u64, birth_seconds: i64,
+        birth_nanoseconds: i64, volume_uuid: crate::macos_persistent_identity::VolumeUuid) -> Result<Self> {
+        let wire = FreshBirthIdentityWire {device,inode,birth_seconds,birth_nanoseconds,volume_uuid};
+        require(wire.valid(),TransactionDataError::Binding)?; Ok(Self(wire))
+    }
+    pub fn fields_data(&self) -> (i64,u64,i64,i64,crate::macos_persistent_identity::VolumeUuid) {
+        (self.0.device,self.0.inode,self.0.birth_seconds,self.0.birth_nanoseconds,self.0.volume_uuid)
+    }
+    /// Persistent correspondence tolerates device renumbering only. Live
+    /// original comparison must additionally compare the actual device value.
+    pub fn same_object_data(&self, other: &Self) -> bool {
+        self.0.volume_uuid == other.0.volume_uuid && self.0.inode == other.0.inode
+            && self.0.birth_seconds == other.0.birth_seconds && self.0.birth_nanoseconds == other.0.birth_nanoseconds
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct FreshBirthWire {
+    schema_version: u32, kind: String, producer_descriptor_sha256: String, producer_signature_sha256: String,
+    registration_origin: FreshRegistrationOriginData,
+    install_root: FreshBirthIdentityWire, versions_root: FreshBirthIdentityWire,
+    registration_gate: FreshBirthIdentityWire, maintenance_gate: FreshBirthIdentityWire,
+}
+impl FreshBirthWire {
+    fn validate(&self) -> Result<()> {
+        require(self.schema_version == 1 && self.kind == "mrk-macos-fresh-birth-v1"
+            && hex(&self.producer_descriptor_sha256,64) && hex(&self.producer_signature_sha256,64),
+            TransactionDataError::Binding)?;
+        let roles = [self.install_root,self.versions_root,self.registration_gate,self.maintenance_gate];
+        require(roles.iter().all(|r|r.valid() && r.volume_uuid == self.install_root.volume_uuid)
+            && roles.iter().enumerate().all(|(at,r)|roles[..at].iter().all(|old|old.inode != r.inode)),
+            TransactionDataError::Binding)?;
+        encode(self,FRESH_BIRTH_LIMIT)?; Ok(())
+    }
+}
+/// Bounded birth comparison DATA, not an authenticated attempt or GO token.
+/// The enclosing Intent binds target/IDs and its complete signed ReleaseData,
+/// including sourceCommit and package/inventory/runtime/policy commitments.
+/// No runtime Git tree is claimed or inferred from this record.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FreshBirthData(FreshBirthWire);
+impl FreshBirthData {
+    pub fn from_original_fields_data(producer_descriptor_sha256: &str, producer_signature_sha256: &str,
+        registration_origin: FreshRegistrationOriginData, install_root: FreshBirthIdentityData,
+        versions_root: FreshBirthIdentityData, registration_gate: FreshBirthIdentityData,
+        maintenance_gate: FreshBirthIdentityData) -> Result<Self> {
+        require(hex(producer_descriptor_sha256,64) && hex(producer_signature_sha256,64),TransactionDataError::Binding)?;
+        let wire = FreshBirthWire {schema_version:1,kind:"mrk-macos-fresh-birth-v1".into(),
+            producer_descriptor_sha256:producer_descriptor_sha256.into(),producer_signature_sha256:producer_signature_sha256.into(),
+            registration_origin,install_root:install_root.0,versions_root:versions_root.0,
+            registration_gate:registration_gate.0,maintenance_gate:maintenance_gate.0};
+        wire.validate()?; Ok(Self(wire))
+    }
+    fn shape(value: &serde_json::Value) -> Result<()> {
+        object(value)?;
+        require(field(value,"registrationOrigin")?.is_string(),TransactionDataError::Shape)?;
+        for key in ["installRoot","versionsRoot","registrationGate","maintenanceGate"] {record_field(value,key,false)?;}
+        Ok(())
+    }
+    pub fn parse_data(bytes: &[u8]) -> Result<Self> {
+        let value = raw(bytes,FRESH_BIRTH_LIMIT)?; Self::shape(&value)?;
+        let wire: FreshBirthWire = decode(value)?; wire.validate()?; Ok(Self(wire))
+    }
+    pub fn canonical_bytes_data(&self) -> Result<Vec<u8>> { encode(&self.0,FRESH_BIRTH_LIMIT) }
+    pub fn producer_digests_data(&self) -> (&str,&str) {(&self.0.producer_descriptor_sha256,&self.0.producer_signature_sha256)}
+    pub fn registration_origin_data(&self) -> FreshRegistrationOriginData {self.0.registration_origin}
+    /// Fixed order: install root, versions root, R, M. No input-selected roles.
+    pub fn identities_data(&self) -> [FreshBirthIdentityData;4] {
+        [self.0.install_root,self.0.versions_root,self.0.registration_gate,self.0.maintenance_gate].map(FreshBirthIdentityData)
+    }
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct IntentWire {
@@ -182,6 +281,8 @@ struct IntentWire {
     recovery: Option<RecoveryReferenceData>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     restore_recovery: Option<RestoreReferenceData>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    fresh_birth: Option<FreshBirthWire>,
 }
 /// Validated comparison input only; no Deserialize bypass or mutation methods.
 #[derive(Debug)]
@@ -201,6 +302,7 @@ impl IntentData {
         record_field(&value, "previousState", true)?;
         if value.get("recovery").is_some() { record_field(&value,"recovery",false)?; }
         if value.get("restoreRecovery").is_some() { record_field(&value,"restoreRecovery",false)?; }
+        if let Some(birth) = value.get("freshBirth") {FreshBirthData::shape(birth)?;}
         let wire: IntentWire = decode(value)?;
         header(wire.schema_version, &wire.kind, INTENT_KIND, &wire.target, &wire.invocation, &wire.request_id, expected)?;
         pair(expected, wire.action, wire.previous.as_ref(), &wire.next, current)?;
@@ -215,6 +317,12 @@ impl IntentData {
             && wire.action==ActionData::RestoreFixedApp && r.receipt_invocation==wire.invocation
             && wire.previous_state.as_ref().is_some_and(|old|old.invocation!=r.torn_invocation)),
             TransactionDataError::Binding)?;
+        if let Some(birth) = &wire.fresh_birth {
+            birth.validate()?;
+            require(wire.action == ActionData::FreshInstall && wire.previous.is_none() && wire.previous_state.is_none()
+                && wire.invocation != wire.request_id && wire.recovery.is_none() && wire.restore_recovery.is_none(),
+                TransactionDataError::Binding)?;
+        }
         Ok(Self { wire, body_sha256: digest(bytes) })
     }
     pub fn invocation_data(&self) -> &str { &self.wire.invocation }
@@ -222,6 +330,20 @@ impl IntentData {
     pub fn digest_data(&self) -> &str { &self.body_sha256 }
     pub fn recovery_data(&self) -> Option<&RecoveryReferenceData> { self.wire.recovery.as_ref() }
     pub fn restore_recovery_data(&self) -> Option<&RestoreReferenceData> {self.wire.restore_recovery.as_ref()}
+    pub fn fresh_birth_data(&self) -> Option<FreshBirthData> {self.wire.fresh_birth.clone().map(FreshBirthData)}
+    /// Exact encoder order and newline, retaining optional historical fields.
+    /// It neither changes the stored original digest nor nominates new work.
+    pub fn canonical_bytes_data(&self) -> Result<Vec<u8>> {encode(&self.wire,INTENT_LIMIT)}
+    pub fn parse_canonical_data(bytes: &[u8], expected: &ReleaseSetData, current: bool) -> Result<Self> {
+        let value = Self::parse_selected_data(bytes,expected,current)?;
+        require(value.canonical_bytes_data()? == bytes,TransactionDataError::Binding)?; Ok(value)
+    }
+    /// Strict comparison entry for a future birth-aware observer. Legacy and
+    /// torn records refuse here; even success supplies no native authority.
+    pub fn parse_fresh_birth_data(bytes: &[u8], expected: &ReleaseSetData) -> Result<Self> {
+        let value = Self::parse_canonical_data(bytes,expected,true)?;
+        require(value.wire.fresh_birth.is_some(),TransactionDataError::Binding)?; Ok(value)
+    }
     pub fn action_data(&self) -> ActionData { self.wire.action }
     pub fn next_data(&self) -> &ReleaseData { &self.wire.next }
     pub fn previous_data(&self) -> Option<&ReleaseData> { self.wire.previous.as_ref() }
@@ -261,6 +383,15 @@ impl IntentData {
         expected: &ReleaseSetData) -> Result<Vec<u8>> {
         Self::encode_with_references_data(invocation,request_id,action,previous,recovery,None,expected)
     }
+    pub fn encode_with_fresh_birth_data(invocation: &str, request_id: &str,
+        birth: &FreshBirthData, expected: &ReleaseSetData) -> Result<Vec<u8>> {
+        birth.0.validate()?;
+        let base = Self::encode_data(invocation,request_id,ActionData::FreshInstall,None,expected)?;
+        let mut intent = Self::parse_data(&base,expected)?;
+        intent.wire.fresh_birth = Some(birth.0.clone());
+        let bytes = intent.canonical_bytes_data()?;
+        Self::parse_fresh_birth_data(&bytes,expected)?; Ok(bytes)
+    }
     pub fn encode_with_restore_recovery_data(invocation:&str,request_id:&str,
         previous:(&StateData,&CapsuleData),reference:&RestoreReferenceData,expected:&ReleaseSetData) -> Result<Vec<u8>> {
         Self::encode_with_references_data(invocation,request_id,ActionData::RestoreFixedApp,
@@ -276,7 +407,7 @@ impl IntentData {
             previous: previous.map(|(state, _)| state.wire.current.release.clone()),
             next: expected.current_data().clone(), previous_state: previous.map(|(state, _)| StateLink {
                 invocation: state.wire.invocation.clone(), sha256: state.body_sha256.clone() }),
-            recovery:recovery.cloned(),restore_recovery:restore.cloned() };
+            recovery:recovery.cloned(),restore_recovery:restore.cloned(),fresh_birth:None };
         let bytes = encode(&wire, INTENT_LIMIT)?;
         let parsed = Self::parse_data(&bytes, expected)?;
         require(previous_matches(&parsed, previous), TransactionDataError::Binding)?;
@@ -1137,6 +1268,102 @@ mod tests {
             CapsuleData::parse_recorded_data(&bytes(&prior_capsule(v)), &expected).unwrap()));
         let s = StateData::parse_data(&bytes(s), &expected).unwrap(); let c = CapsuleData::parse_data(&bytes(c), &expected).unwrap();
         correspondence_data(&i, prior.as_ref().map(|(s,c)| (s,c)), Some(&s), Some(&c))
+    }
+    fn fresh_codec_vectors() -> Value {
+        serde_json::from_str(include_str!("../../../tests/desktop/fixtures/fresh_birth_codec_vectors.json")).unwrap()
+    }
+    fn fresh_codec_selected(vector: &Value) -> ReleaseSetData {
+        let target = match vector["target"].as_str().unwrap() {
+            "aarch64-apple-darwin" => MaintenanceTargetData::Arm64,
+            "x86_64-apple-darwin" => MaintenanceTargetData::Intel,
+            _ => panic!("closed codec target"),
+        };
+        ReleaseSetData::parse_for_target_data(&bytes(&vector["releaseSet"]),target).unwrap()
+    }
+    #[test]
+    fn fresh_birth_codecs_match_shared_exact_vectors_and_legacy_bytes() {
+        let corpus = fresh_codec_vectors();
+        for vector in corpus["vectors"].as_array().unwrap() {
+            let expected = fresh_codec_selected(vector);
+            let raw = vector["canonical"].as_str().unwrap().as_bytes();
+            assert_eq!(digest(raw),vector["sha256"].as_str().unwrap());
+            let parsed = IntentData::parse_canonical_data(raw,&expected,true).unwrap();
+            assert_eq!(parsed.canonical_bytes_data().unwrap(),raw);
+            assert_eq!(parsed.digest_data(),vector["sha256"].as_str().unwrap());
+            assert_eq!(parsed.fresh_birth_data().is_some(),vector["hasFreshBirth"].as_bool().unwrap());
+            if let Some(birth) = parsed.fresh_birth_data() {
+                let [root,versions,r,m] = birth.identities_data();
+                let (descriptor,signature) = birth.producer_digests_data();
+                let rebuilt = FreshBirthData::from_original_fields_data(descriptor,signature,
+                    birth.registration_origin_data(),root,versions,r,m).unwrap();
+                assert_eq!(birth,rebuilt);
+                assert!(birth.canonical_bytes_data().unwrap().len() <= FRESH_BIRTH_LIMIT);
+                assert_eq!(FreshBirthData::parse_data(&birth.canonical_bytes_data().unwrap()).unwrap(),birth);
+                assert_eq!(IntentData::encode_with_fresh_birth_data(parsed.invocation_data(),parsed.request_id_data(),
+                    &birth,&expected).unwrap(),raw);
+                assert!(IntentData::parse_fresh_birth_data(raw,&expected).is_ok());
+                assert!(FreshBirthData::from_original_fields_data(descriptor,signature,
+                    birth.registration_origin_data(),root,root,r,m).is_err());
+                let (dev,ino,sec,nsec,uuid) = root.fields_data();
+                let remounted = FreshBirthIdentityData::from_original_fields_data(dev+1,ino,sec,nsec,uuid).unwrap();
+                assert!(root.same_object_data(&remounted));
+                let replaced = FreshBirthIdentityData::from_original_fields_data(dev,ino,sec+1,nsec,uuid).unwrap();
+                assert!(!root.same_object_data(&replaced));
+                assert!(FreshBirthIdentityData::from_original_fields_data(dev,0,sec,nsec,uuid).is_err());
+            } else {
+                assert_eq!(IntentData::encode_data(parsed.invocation_data(),parsed.request_id_data(),
+                    ActionData::FreshInstall,None,&expected).unwrap(),raw);
+                assert!(IntentData::parse_recorded_data(raw,&expected).is_ok());
+                assert!(IntentData::parse_fresh_birth_data(raw,&expected).is_err());
+            }
+        }
+        assert_eq!((INTENT_LIMIT,FRESH_BIRTH_LIMIT),(16*1024,2*1024));
+    }
+    #[test]
+    fn fresh_birth_codecs_reject_shared_mutations_and_noncanonical_records() {
+        let corpus = fresh_codec_vectors(); let vector = &corpus["vectors"][1];
+        let expected = fresh_codec_selected(vector);
+        let raw = vector["canonical"].as_str().unwrap().as_bytes();
+        let original: Value = serde_json::from_slice(raw).unwrap();
+        for mutation in corpus["invalidMutations"].as_array().unwrap() {
+            let mut value = original.clone();
+            let (parent,key) = mutation["path"].as_str().unwrap().rsplit_once('/').unwrap();
+            let object = value.pointer_mut(parent).unwrap().as_object_mut().unwrap();
+            if mutation["delete"] == true {object.remove(key);} else {object.insert(key.into(),mutation["value"].clone());}
+            assert!(IntentData::parse_data(&bytes(&value),&expected).is_err(),"{}",mutation["name"]);
+        }
+        let mut changed = original.clone(); changed["target"] = json!("x86_64-apple-darwin");
+        assert!(IntentData::parse_data(&bytes(&changed),&expected).is_err());
+        for action in ["update","same-package-noop","restore-fixed-app","uninstall"] {
+            let mut changed = original.clone(); changed["action"] = json!(action);
+            assert!(IntentData::parse_data(&bytes(&changed),&expected).is_err());
+        }
+        let sorted = bytes(&original);
+        assert!(IntentData::parse_data(&sorted,&expected).is_ok());
+        assert!(IntentData::parse_fresh_birth_data(&sorted,&expected).is_err());
+        assert!(IntentData::parse_fresh_birth_data(&raw[..raw.len()-1],&expected).is_err());
+        assert!(IntentData::parse_data(&raw[..raw.len()-2],&expected).is_err());
+        let duplicate = String::from_utf8(raw.to_vec()).unwrap().replacen("\"freshBirth\":", "\"freshBirth\":null,\"freshBirth\":",1);
+        assert!(IntentData::parse_data(duplicate.as_bytes(),&expected).is_err());
+        assert!(FreshBirthData::parse_data(&vec![b' ';FRESH_BIRTH_LIMIT+1]).is_err());
+        assert!(IntentData::parse_data(&vec![b' ';INTENT_LIMIT+1],&expected).is_err());
+    }
+    #[test]
+    fn fresh_birth_recorded_membership_and_capsule_binding_remain_distinct() {
+        let corpus = fresh_codec_vectors(); let vector = &corpus["vectors"][1];
+        let expected = fresh_codec_selected(vector);
+        let mut value: Value = serde_json::from_str(vector["canonical"].as_str().unwrap()).unwrap();
+        value["next"] = vector["releaseSet"]["acceptedPredecessors"][0].clone();
+        let old = IntentData::parse_recorded_data(&bytes(&value),&expected).unwrap();
+        let old_raw = old.canonical_bytes_data().unwrap();
+        assert!(IntentData::parse_canonical_data(&old_raw,&expected,false).is_ok());
+        assert!(IntentData::parse_data(&old_raw,&expected).is_err());
+        assert!(IntentData::parse_fresh_birth_data(&old_raw,&expected).is_err());
+        let i: Value = serde_json::from_str(vector["canonical"].as_str().unwrap()).unwrap();
+        let s = state(3,9); let c = capsule(&i,&s,"applied");
+        assert_eq!(compare(&i,None,&s,&c),CorrespondenceData::MatchingRecordedData);
+        let mut altered = i.clone(); altered["freshBirth"]["producerDescriptorSha256"] = json!("e".repeat(64));
+        assert_eq!(compare(&altered,None,&s,&c),CorrespondenceData::Mismatch);
     }
     #[test]
     fn records_are_bounded_closed_objects_including_every_nested_record() {

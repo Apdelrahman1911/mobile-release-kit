@@ -12,6 +12,7 @@ import base64
 import binascii
 import hashlib
 import json
+import re
 from dataclasses import dataclass
 from typing import Callable, Mapping
 
@@ -1508,15 +1509,16 @@ def zip_literal(member):
 
 class Emitter:
     """At most one <=64KiB UTF8 chunk live; output always tentative until return."""
-    def __init__(self, sink: Callable[[bytes], None]):
-        need(callable(sink), "output-sink")
+    def __init__(self, sink: Callable[[bytes], None], *, reserved_bytes=0):
+        need(callable(sink) and 0 <= reserved_bytes <= OUTPUT_LIMIT, "output-sink")
         self.sink, self.total, self.digest = sink, 0, hashlib.sha256()
+        self.reserved_bytes = reserved_bytes
         self.buffer = bytearray()
 
     def put(self, line):
         need(type(line) is str and line.isascii(), "output-source-encoding")
         raw = line.encode("ascii")
-        need(len(raw) <= 65536 and self.total + len(raw) <= OUTPUT_LIMIT, "output-bound")
+        need(len(raw) <= 65536 and self.total + len(raw) + self.reserved_bytes <= OUTPUT_LIMIT, "output-bound")
         self.total += len(raw)
         self.digest.update(raw)
         if len(self.buffer) + len(raw) > 65536:
@@ -1534,11 +1536,97 @@ class Emitter:
         return {"bytes": self.total, "sha256": self.digest.hexdigest()}
 
 
-def render(projection, sink, *, profile="arm64"):
+class AssetEmitter:
+    """Pure bounded header pack; SOURCE and the asset form one tentative result.
+
+    The name commits the actual packed bytes. Header constants keep their slice
+    type and source order; offsets are computed here, never supplied by input.
+    The owner retains both streams and rejects all output on any exception.
+    """
+    def __init__(self, sink, profile):
+        need(callable(sink) and profile in ("arm64", "x86_64"), "asset-output-sink")
+        self.sink, self.profile, self.rows = sink, profile, []
+        self.buffer, self.assets, self.sealed = bytearray(), [], False
+
+    def put(self, name, raw):
+        ordinal, suffix = len(self.rows) // 2, ("PREFIX", "COMMANDS")[len(self.rows) % 2]
+        need(not self.sealed and name == f"CAT_H{ordinal}_{suffix}"
+             and len(self.rows) < 2 * RECORD_LIMIT
+             and type(raw) is bytes and 0 < len(raw) <= 16416
+             and len(self.buffer) + len(raw) <= 2 * 1024 * 1024, "asset-output-bound")
+        offset = len(self.buffer)
+        self.buffer.extend(raw)
+        self.rows.append({"name": name, "offset": offset, "bytes": len(raw),
+                          "sha256": hashlib.sha256(raw).hexdigest()})
+        return ("const " + name + ": &[u8] = CAT_HEADER_BYTES.split_at(" + str(offset)
+                + ").1.split_at(" + str(len(raw)) + ").0;\n")
+
+    def seal(self):
+        need(not self.sealed and len(self.rows) % 2 == 0, "asset-output-roster")
+        need(len(self.buffer) <= OUTPUT_LIMIT, "asset-output-total-bound")
+        self.sealed = True
+        if not self.rows:
+            return ""
+        raw = bytes(self.buffer)
+        sha = hashlib.sha256(raw).hexdigest()
+        path = "android_supplier_macos_catalogue_assets/" + self.profile + "_" + sha + ".bin"
+        for offset in range(0, len(raw), 65536):
+            self.sink(path, offset, raw[offset:offset + 65536])
+        self.assets.append({"path": path, "bytes": len(raw), "sha256": sha})
+        return 'const CAT_HEADER_BYTES: &[u8] = include_bytes!("' + path + '");\n'
+
+    def finish(self, source):
+        need(self.sealed and source["bytes"] + len(self.buffer) <= OUTPUT_LIMIT, "combined-output-bound")
+        return {**source, "assets": self.assets, "headers": self.rows}
+
+
+def _literal_headers(source):
+    """Read only the historical generator's exact bounded header grammar."""
+    need(type(source) is bytes and len(source) <= OUTPUT_LIMIT and source.isascii(), "literal-source-bound")
+    pattern = rb"(?m)^const (CAT_H(?:0|[1-9][0-9]*)_(?:PREFIX|COMMANDS)): &\[u8\] = &\[\n((?:    (?:[0-9]{1,3},)+\n)+)\];\n"
+    headers = []
+    for match in re.finditer(pattern, source):
+        need(len(headers) < 2 * RECORD_LIMIT and len(match[2]) <= 65536, "literal-header-bound")
+        ordinal, suffix = len(headers) // 2, ("PREFIX", "COMMANDS")[len(headers) % 2]
+        name = match[1].decode("ascii")
+        need(name == f"CAT_H{ordinal}_{suffix}", "literal-header-order")
+        values = [int(token) for token in match[2].replace(b"\n", b"").replace(b" ", b"").split(b",")[:-1]]
+        need(0 < len(values) <= 16416 and all(value <= 255 for value in values), "literal-header-bytes")
+        raw = bytes(values)
+        need(_signed_array(name, raw) == match[0], "literal-header-canonical")
+        headers.append((match.start(), match.end(), name, raw))
+    need(len(headers) % 2 == 0 and source.count(b"const CAT_H") == len(headers), "literal-header-roster")
+    return headers
+
+
+def externalize_literal_source(source, sink, *, asset_sink, profile):
+    """Representation only; input provenance remains the external owner's duty.
+
+    The complete original SOURCE is returned unchanged outside header literals.
+    This formatter grants no supplier authority and accepts no asset inputs.
+    """
+    assets = AssetEmitter(asset_sink, profile)
+    headers = _literal_headers(source)
+    replacements = [(start, end, assets.put(name, raw)) for start, end, name, raw in headers]
+    prefix = assets.seal()
+    output = Emitter(sink, reserved_bytes=len(assets.buffer))
+    previous = 0
+    for index, (start, end, replacement) in enumerate(replacements):
+        for at in range(previous, start, 65536):
+            output.put(source[at:min(at + 65536, start)].decode("ascii"))
+        if index == 0:
+            output.put(prefix)
+        output.put(replacement)
+        previous = end
+    for at in range(previous, len(source), 65536):
+        output.put(source[at:at + 65536].decode("ascii"))
+    return assets.finish(output.finish())
+
+
+def render(projection, sink, *, asset_sink, profile="arm64"):
     archives = _projection_profile(profile)
     need(projection.profile == profile, "projection-render-profile")
-    output = Emitter(sink)
-    put = output.put
+    assets = AssetEmitter(asset_sink, profile)
     headers, header_ids = [], {}
     for payload in projection.payload:
         kind = payload.classification
@@ -1551,16 +1639,20 @@ def render(projection, sink, *, profile="arm64"):
     def native(value):
         ordinal = header_ids[value]
         return "NativeHeader { prefix: CAT_H" + str(ordinal) + "_PREFIX, commands: CAT_H" + str(ordinal) + "_COMMANDS }"
+    declarations = []
+    for ordinal, (prefix, commands, _) in enumerate(headers):
+        for suffix, raw in (("PREFIX", prefix), ("COMMANDS", commands)):
+            declarations.append(assets.put("CAT_H" + str(ordinal) + "_" + suffix, raw))
+    prefix = assets.seal()
+    output = Emitter(sink, reserved_bytes=len(assets.buffer))
+    put = output.put
     put("// Generated proposed SOURCE from complete admitted official observation DATA.\n")
     put("// No IO, mutable runtime registration, reference digest or native qualification.\n")
     if profile == "x86_64":
         put("use super::*;\n")
-    for ordinal, (prefix, commands, _) in enumerate(headers):
-        for suffix, raw in (("PREFIX", prefix), ("COMMANDS", commands)):
-            put("const CAT_H" + str(ordinal) + "_" + suffix + ": &[u8] = &[\n")
-            for at in range(0, len(raw), 32):
-                put("    " + ",".join(str(byte) for byte in raw[at:at + 32]) + ",\n")
-            put("];\n")
+    put(prefix)
+    for declaration in declarations:
+        put(declaration)
     for ordinal, payload in enumerate(projection.payload):
         if payload.classification[0] != "JvmArchive" or not payload.classification[1]:
             continue
@@ -1679,12 +1771,16 @@ def render(projection, sink, *, profile="arm64"):
     put("    archives: CAT_ARCHIVES, trees: CAT_TREES, source_members: CAT_SOURCES, source_bindings: CAT_BINDINGS,\n")
     put("    support: CAT_SUPPORT, support_members: CAT_SUPPORT_MEMBERS, payload: CAT_PAYLOAD, classes: CAT_CLASSES,\n")
     put("    aliases: CAT_ALIASES, directories: CAT_DIRECTORIES,\n}];\n")
-    return output.finish()
+    return assets.finish(output.finish())
 
 
-def generate(documents: Mapping[str, bytes], sink: Callable[[bytes], None]):
+def generate(documents: Mapping[str, bytes], sink: Callable[[bytes], None], *, asset_sink):
     """Validate all DATA, then emit proposed SOURCE to the owner's private sink.
 
+    asset_sink receives (source_relative_path, offset, chunk), in increasing
+    offset order with chunks <=64KiB. SOURCE and the one profile pack share the
+    existing 32MiB output limit. The output receipt binds the source, complete
+    pack and each contiguous header range. The owner must retain them together.
     The normal return binds emitted bytes, not publication/owner finality and
     not native qualification. On any exception the owner must reject ALL output.
     No filesystem pathname is opened and no executable/native bytes are run.
@@ -1699,7 +1795,7 @@ def generate(documents: Mapping[str, bytes], sink: Callable[[bytes], None]):
     projection = Projection(outers, proofs)
     inputs.finish()
     summary = projection.summary()
-    summary["output"] = render(projection, sink)
+    summary["output"] = render(projection, sink, asset_sink=asset_sink)
     # These hashes bind exact supplied observation bytes, not a Python copy of
     # Reference's Rust/serde commitment. The existing Rust digest stays sole.
     summary["inputs"] = [{"path": path, "bytes": len(raw), "sha256": hashlib.sha256(raw).hexdigest()}
@@ -2591,7 +2687,7 @@ class _IntelProofs:
         return Proofs.release(self)
 
 
-def generate_intel(documents: Mapping[str, bytes], sink: Callable[[bytes], None]):
+def generate_intel(documents: Mapping[str, bytes], sink: Callable[[bytes], None], *, asset_sink):
     """Propose Intel SOURCE from the exact fresh nine; no runtime authority."""
     inputs = _FreshIntelInputs(documents)
     need(inputs.commitments == _INTEL_INPUT_COMMITMENTS, "intel-emission-input-commitments")
@@ -2601,12 +2697,13 @@ def generate_intel(documents: Mapping[str, bytes], sink: Callable[[bytes], None]
     summary = projection.summary()
     summary["profile"] = "android-registered-macos-x86_64-v1"
     summary["inputs"] = [{"path": name, "bytes": size, "sha256": digest} for name, size, digest in data.commitments]
-    summary["output"] = render(projection, sink, profile="x86_64")
+    summary["output"] = render(projection, sink, asset_sink=asset_sink, profile="x86_64")
     return summary
 
 # This route consumes the fixed publicly signed capsule, not original vendor
 # observation documents. Only the enumerated installed-support regions change;
-# original official arrays and REFERENCES remain byte-for-byte unchanged.
+# official table metadata and REFERENCES remain byte-for-byte unchanged. These
+# are historical literal-input pins, never pins of the externalized output.
 SIGNED_CATALOGUES = {
     "arm64": (20409741, "1d1c1f0f49836180853285d49e114b12c44c9d72c41250b103c5dd34fa792203"),
     "x86_64": (20434427, "e88c50067e1b7f70b33d2d6f31abaa11e9f3c8f020b0b74294836984e1fa1b9a"),
@@ -2688,9 +2785,10 @@ def _signed_array(name, raw):
         "    " + ",".join(map(str, raw[at:at + 32])) + ",\n" for at in range(0, len(raw), 32)) + "];\n").encode("ascii")
 
 
-def _signed_regions(source, rows, archives, profile):
+def _signed_regions(source, rows, archives, profile, assets):
     """Fixed regional templates; no supplied patch, Rust expression or selector."""
-    need(profile in SIGNED_CATALOGUES and type(source) is bytes, "signed-region-profile")
+    need(profile in SIGNED_CATALOGUES and type(source) is bytes
+         and isinstance(assets, AssetEmitter) and assets.profile == profile, "signed-region-profile")
     changes = []
 
     def region(marker, tail, replacement, *, within=None):
@@ -2722,13 +2820,21 @@ def _signed_regions(source, rows, archives, profile):
     selected = {"arm64": (("bundletool-aapt2", 0), ("agp-aapt2", 5)),
                 "x86_64": (("bundletool-jna", 0), ("bundletool-aapt2", 1), ("agp-aapt2", 7))}[profile]
     cpu = ARM64 if profile == "arm64" else 0x01000007
+    replacements = {}
     for role, index in selected:
         row = rows[role]
         matches = [item for item in row["slices"] if item[0] == cpu]
         need(len(matches) == 1, "signed-selected-slice")
         for suffix, raw in (("PREFIX", row["prefix"]), ("COMMANDS", matches[0][4])):
             name = f"CAT_H{index}_{suffix}"
-            region(("const " + name + ":").encode("ascii"), b"\n];\n", _signed_array(name, raw))
+            replacements[name] = raw
+    headers = _literal_headers(source)
+    need(set(replacements) <= {header[2] for header in headers}, "signed-header-roster")
+    for start, end, name, original in headers:
+        changes.append((start, end, assets.put(name, replacements.get(name, original)).encode("ascii")))
+    prefix = assets.seal().encode("ascii")
+    first = changes[0]
+    changes[0] = (first[0], first[1], prefix + first[2])
     native_scope, payload_scope = block("CAT_N0"), block("CAT_PAYLOAD")
     for role in ("bundletool-jna", "bundletool-aapt2"):
         member = rows[role]["member"]
@@ -2753,12 +2859,12 @@ def _signed_regions(source, rows, archives, profile):
            lambda before: replace_pin(replace_pin(before, "size", member.upstream, member.derived),
                                       "bytes", archive.upstream, archive.derived), within=payload_scope)
     changes.sort()
-    need(len(changes) == (11 if profile == "arm64" else 13)
+    need(len(changes) == len(headers) + 7
          and all(left[1] <= right[0] for left, right in zip(changes, changes[1:])), "signed-regions-overlap")
     return tuple(changes)
 
 
-def derive_signed_support(original_source, signed_inputs, sink, *, profile):
+def derive_signed_support(original_source, signed_inputs, sink, *, asset_sink, profile):
     """Reproducible proposed SOURCE, not native or shipping authorization.
 
     The external owner binds this module and its fixed passive sibling import,
@@ -2780,16 +2886,17 @@ def derive_signed_support(original_source, signed_inputs, sink, *, profile):
     rows = {member.role: _signed_member(archive_bytes[next(a.file_name for a in relation.archives
                                                        if a.identity == member.archive_id)], member)
             for member in relation.members}
-    changes = _signed_regions(original_source, rows, {a.identity: a for a in relation.archives}, profile)
-    output, previous = Emitter(sink), 0
+    assets = AssetEmitter(asset_sink, profile)
+    changes = _signed_regions(original_source, rows, {a.identity: a for a in relation.archives}, profile, assets)
+    output, previous = Emitter(sink, reserved_bytes=len(assets.buffer)), 0
     for start, end, replacement in (*changes, (len(original_source), len(original_source), b"")):
         for at in range(previous, start, 65536):
             output.put(original_source[at:min(at + 65536, start)].decode("ascii"))
         if replacement:
             output.put(replacement.decode("ascii"))
         previous = end
-    result = output.finish()
-    return {"schemaVersion": 1, "kind": "signed-support-catalogue-source-projection-v1", "profile": profile,
+    result = assets.finish(output.finish())
+    return {"schemaVersion": 2, "kind": "signed-support-catalogue-source-projection-v2", "profile": profile,
             "before": {"bytes": len(original_source), "sha256": hashlib.sha256(original_source).hexdigest()},
             "output": result, "nominationSha256": relation.sha256,
             "regions": [{"start": start, "end": end, "beforeSha256": hashlib.sha256(original_source[start:end]).hexdigest(),

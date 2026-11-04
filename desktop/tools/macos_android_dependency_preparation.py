@@ -889,7 +889,8 @@ UI_REF = 'refs/heads/verify/desktop-macos-installed'
 UI_REFS = (UI_REF, 'refs/heads/verify/desktop-macos-candidate')
 UI_TARGET = 'aarch64-apple-darwin'
 UI_CATALOGUE = 'desktop/src-tauri/src/android_supplier_macos_catalogue.rs'
-UI_CATALOGUE_PIN = [20409744, '24c72354fe4c21c0652eb2c7c33ace167ea92420a5a06a22b153a6e8174a5ee5']
+UI_CATALOGUE_PIN = [19000727, 'ab472c20fa9bd1e30dfc95ef7399987cded50e99a91d15824df703d4355d9f8f']
+UI_CATALOGUE_ASSETS = {UI_TARGET: (186, 574528), 'x86_64-apple-darwin': (190, 582616)}
 UI_ALIAS = 'mrk-disposable-android-ui'  # Public disposable identifier, not a password.
 UI_INPUT_ENV = 'TEST_RUNNER_MRK_NORMAL_UI_ANDROID_INPUT_FIXTURE'
 UI_PASSWORD_ENV = ('MRK_ANDROID_UI_STORE_PASSWORD', 'MRK_ANDROID_UI_KEY_PASSWORD')
@@ -908,7 +909,7 @@ def ui_selection(target):
         'url': 'https://github.com/adoptium/temurin17-binaries/releases/download/jdk-17.0.20.1%2B1/OpenJDK17U-jdk_x64_mac_hotspot_17.0.20.1_1.tar.gz',
         'archivePrefix': 'jdk-17.0.20.1+1'}
     return ('x86_64', 'X64', 'desktop/src-tauri/src/android_supplier_macos_intel_catalogue.rs',
-            [20434472, '0c14f0cd7490592f3a79d0fc8997d5079d37fe5a2ab33499fff31156c268c7cb'],
+            [18999101, '914e813291dd6ba70bae1fb849899df22460ba2002d723543ad27aa8d82f47bc'],
             [jdk, *ARCHIVES[1:4]], {'Jdk': 548, 'Sdk': 14197, 'Gradle': 322}, 750044172)
 
 
@@ -963,6 +964,35 @@ def ui_context():
     return work, target
 
 
+def ui_catalogue_read_bytes(target):
+    """Exact SOURCE and one packed asset, with an EOF read for each."""
+    pin = ui_selection(target)[3]
+    _, size = UI_CATALOGUE_ASSETS[target]
+    return pin[0] + size + 2
+
+
+def ui_catalogue_assets(text, target):
+    """Closed SOURCE-relative pack and contiguous header ranges before IO."""
+    profile = ui_selection(target)[0]
+    count, total = UI_CATALOGUE_ASSETS[target]
+    pattern = re.compile(r'^const CAT_HEADER_BYTES: &\[u8\] = include_bytes!\("'
+        r'(android_supplier_macos_catalogue_assets/' + profile + r'_([a-f0-9]{64})\.bin)"\);$', re.MULTILINE)
+    assets = list(pattern.finditer(text))
+    headers = list(re.finditer(r'^const CAT_H([0-9]{1,3})_(PREFIX|COMMANDS): &\[u8\] = '
+        r'CAT_HEADER_BYTES\.split_at\(([0-9]{1,7})\)\.1\.split_at\(([0-9]{1,5})\)\.0;$', text, re.MULTILINE))
+    need(len(assets) == 1 == text.count('include_bytes!(')
+         and len(headers) == count == text.count('const CAT_H') - 1, 'ui-catalogue-asset-roster')
+    offset = 0
+    for index, row in enumerate(headers):
+        ordinal, suffix, start, size = row.groups()
+        need(ordinal == str(index // 2) and suffix == ('PREFIX', 'COMMANDS')[index % 2]
+             and start == str(offset) and 0 < int(size) <= 16416, 'ui-catalogue-asset-order')
+        offset += int(size)
+        need(offset <= total, 'ui-catalogue-asset-bound')
+    need(offset == total, 'ui-catalogue-asset-bytes')
+    return [assets[0].groups()]
+
+
 def ui_source_roster(clock, *, target=UI_TARGET):
     # A closed reader of this one checksum-pinned emitted SOURCE section, not a
     # Rust parser or a replacement for SourceSlots' later original admission.
@@ -970,6 +1000,15 @@ def ui_source_roster(clock, *, target=UI_TARGET):
     raw, _ = read(SOURCE / catalogue, pin[0], clock=clock)
     need([len(raw), digest(raw)] == pin, 'ui-catalogue-source-pin')
     text = raw.decode('utf-8', 'strict')
+    assets = ui_catalogue_assets(text, target)
+    total_assets = 0
+    for path, sha in assets:
+        clock.check()
+        asset, _ = read(SOURCE / 'desktop/src-tauri/src' / path, UI_CATALOGUE_ASSETS[target][1], clock=clock)
+        total_assets += len(asset)
+        need(0 < len(asset) and digest(asset) == sha
+             and total_assets <= UI_CATALOGUE_ASSETS[target][1], 'ui-catalogue-asset-pin')
+    need(total_assets == UI_CATALOGUE_ASSETS[target][1], 'ui-catalogue-asset-bytes')
     start = 'const CAT_SOURCES: &[SourceMemberSpec] = &[\n'
     stop = '];\nconst CAT_BINDINGS:'
     need(text.count(start) == 1 and text.count(stop) == 1, 'ui-catalogue-section')
@@ -1052,10 +1091,10 @@ class UiAcquisition(Acquisition):
     def __init__(self, work, *, target=UI_TARGET):
         _, _, _, pin, self.archives, _, _ = ui_selection(target)
         super().__init__(work)
+        source_reads = ui_catalogue_read_bytes(target)
+        for at in range(0, source_reads, CHUNK):
+            self.charge_read(min(CHUNK, source_reads - at))
         self.expected = ui_source_roster(self.clock, target=target)
-        for at in range(0, pin[0], CHUNK):
-            self.charge_read(min(CHUNK, pin[0] - at))
-        self.charge_read(1)
 
     def target(self, name):
         need(self.role in self.archives, 'ui-fixed-four-archives')
@@ -1368,7 +1407,7 @@ def prepare_ui_inputs(work, *, private=None, target=UI_TARGET):
         # roster EOFs, fixed private readbacks and source metadata before key entry.
         # An unknown read consumes this allowance; no refund or renewed8GiB budget.
         reserved_reads = (3 * (TOOL_BYTES + FILES + 2 * ((4 << 20) + 1))
-                          + 2 * (pin[0] + 1) + (8 << 20))
+                          + 2 * ui_catalogue_read_bytes(target) + (8 << 20))
         need(acquired['readBytes'] + reserved_reads <= READ_BYTES, 'ui-whole-preparation-read-bound')
         expected = ui_source_roster(clock, target=target)
         tools = ui_tool_post(stage, clock, expected)

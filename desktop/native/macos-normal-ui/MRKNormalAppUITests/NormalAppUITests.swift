@@ -2467,11 +2467,11 @@ final class NormalAppUITests: XCTestCase {
             #if arch(arm64)
             static let target = "aarch64-apple-darwin"
             private static let hostedJob = "github-hosted-macos26-arm64"
-            private static let catalogue = "24c72354fe4c21c0652eb2c7c33ace167ea92420a5a06a22b153a6e8174a5ee5"
+            private static let catalogue = "ab472c20fa9bd1e30dfc95ef7399987cded50e99a91d15824df703d4355d9f8f"
             #elseif arch(x86_64)
             static let target = "x86_64-apple-darwin"
             private static let hostedJob = "github-hosted-macos26-x86_64"
-            private static let catalogue = "0c14f0cd7490592f3a79d0fc8997d5079d37fe5a2ab33499fff31156c268c7cb"
+            private static let catalogue = "914e813291dd6ba70bae1fb849899df22460ba2002d723543ad27aa8d82f47bc"
             #endif
 
             private static func matches(_ value: String, _ pattern: String) -> Bool {

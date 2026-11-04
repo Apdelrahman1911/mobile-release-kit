@@ -91,7 +91,7 @@ def parent_read_reserve(a):
     # Two complete parent POST allowances plus both catalogue reads, all three
     # rosters/EOFs and bounded private output. Same8GiB aggregate, not three new
     # whole-preparation quotas. Unknown reads are never refunded.
-    return 2 * (a.TOOL_BYTES + 3 * (a.FILES + 2 * ((4 << 20) + 1))) + 2 * (a.UI_CATALOGUE_PIN[0] + 1) + (8 << 20)
+    return 2 * (a.TOOL_BYTES + 3 * (a.FILES + 2 * ((4 << 20) + 1))) + 2 * a.ui_catalogue_read_bytes(TARGET) + (8 << 20)
 
 
 class _Reads:
@@ -245,9 +245,9 @@ def _child(a, work, private, clock):
     for source in sources:
         a.need(os.listdir(source["fds"][-1]) == [], "tool-input-source-already-populated")
     shared = _Reads(a, clock)
-    for offset in range(0, a.UI_CATALOGUE_PIN[0], a.CHUNK):
-        shared.read(min(a.CHUNK, a.UI_CATALOGUE_PIN[0] - offset))
-    shared.read(1)
+    source_reads = a.ui_catalogue_read_bytes(TARGET)
+    for offset in range(0, source_reads, a.CHUNK):
+        shared.read(min(a.CHUNK, source_reads - offset))
     expected = expected_cases(a, a.ui_source_roster(clock, target=TARGET))
     for offset in range(0, 1 << 20, a.CHUNK):
         shared.read(a.CHUNK)

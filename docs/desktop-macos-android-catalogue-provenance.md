@@ -35,6 +35,48 @@ installed toolchain, picker selection, native provider or Store operation is
 valid. The inventory binds the current generation, not earlier observation
 attempts or an inferred successful run.
 
+## Current binary storage representation
+
+The generation pins above and the observation-pin JSON are historical literal
+SOURCE bindings. They retain their original meaning. The current
+[storage inventory](desktop-macos-android-catalogue-storage.json) separately
+binds frozen base `b6a819abb1f8caae3b5b969fc14618ecbe8f090e`, both catalogue
+source files, their two packed binary assets, and every header range.
+
+Each profile now has one content-addressed `include_bytes!` constant. All
+existing `CAT_Hn_PREFIX` and `CAT_Hn_COMMANDS` constants retain type `&[u8]` and
+use checked, compile-time `split_at` calls into that profile's pack. Packing
+preserves all 186 ARM and 190 Intel header windows, in the original order, with
+contiguous nonoverlapping ranges and no padding. Expanding those ranges back
+to the original numeric declarations reconstructs both frozen source files
+byte for byte. Table metadata, profile selection, native/header bytes, typed
+rows and runtime behavior are unchanged by this representation.
+
+The pure generator's `render`, `generate`, `generate_intel` and
+`derive_signed_support` entry points require an `asset_sink(path, offset,
+chunk)`. Asset chunks are at most 64 KiB and ordered from offset zero. The normal
+return binds SOURCE, the full pack, and every range's name, offset, length and
+digest. SOURCE plus asset bytes share the existing 32 MiB output limit. The
+external owner must reject both streams on any exception and retain all
+outputs together. No filesystem writes, downloads or native execution occur
+inside the generator.
+
+Signed-support derivation still authenticates the fixed historical literal
+preimages in `SIGNED_CATALOGUES`. It replaces only the same selected signed
+header values and seven existing metadata regions, then emits the complete
+profile pack and updated constant ranges. The version 2 derivation receipt
+binds all output assets and header ranges. The installed-UI source reader
+checks the complete pinned SOURCE, exact per-profile range roster, and actual
+pack bytes before issuing its existing `catalogueSha256` receipt. That source
+hash commits the pack's expected digest through the include path. Read quotas
+include SOURCE, pack, and both EOF reads; existing quotas are unchanged.
+
+Two packed files keep the complete source roster within its existing 4095-tracked-file
+limit. A per-header-file layout was rejected during source review because it
+would exceed that limit. This storage change has not yet demonstrated lower
+compiler memory use or successful compilation; those require separately
+reviewed compiler evidence.
+
 ## How the application uses it
 
 The supplier includes the table privately in its existing module. There is no

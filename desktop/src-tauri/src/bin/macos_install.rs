@@ -166,11 +166,13 @@ mod installer {
         entered: bool, creation: &'static str, written: u64, sealed: bool, persisted: bool, parent_persisted: bool,
         parent: Option<usize>, writer: Option<usize>, participant: Option<usize>, verified: bool,
         lock_attempted: bool, exclusive_acquired: bool, closed_under_maintenance: bool, verified_after_go: bool,
+        // Captured from the actual R reader before its consuming parent close.
+        fresh_birth: Option<(transaction::FreshBirthIdentityData,transaction::FreshRegistrationOriginData)>,
     }
     impl RegistrationReservation {
         fn new() -> Self { Self { entered:false,creation:"not-attempted",written:0,sealed:false,persisted:false,
             parent_persisted:false,parent:None,writer:None,participant:None,verified:false,
-            lock_attempted:false,exclusive_acquired:false,closed_under_maintenance:false,verified_after_go:false } }
+            lock_attempted:false,exclusive_acquired:false,closed_under_maintenance:false,verified_after_go:false,fresh_birth:None } }
     }
     struct Install {
         originals: Vec<Original>, creations: Vec<Creation>, end: Instant, unknown: bool,
@@ -181,9 +183,10 @@ mod installer {
         // `end` remains the original legacy-entry clock. The private B2 path
         // never uses it: both processes receive this same absolute deadline.
         worker_deadline: Option<worker::Deadline>, worker_stderr_is_gate: bool, worker_go_eof: bool,
-        // Zero for all ordinary install/worker/fixture paths. The removal
-        // Parent debits native peer and retained-source costs in the SAME book.
+        // Shared native control pool: removal costs and the separately debited
+        // bounded Fresh birth observations use the SAME effective ceiling.
         removal_live_reserved: usize, removal_control_reserved: u64, removal_original_storage_reserved:u64,
+        fresh_birth_control_reserved: bool,
         removal_snapshot_capture: Option<maintenance::RemovalSnapshotCapture>,
         removal_snapshot_work_reserved: bool, archived_install_reserved:bool,
         removal_payload_plan:Option<maintenance::RemovalPayloadPlan>,
@@ -210,6 +213,9 @@ mod installer {
     struct PreparedFresh {
         input: usize, inventory: Inventory, inventory_bytes: Vec<u8>,
         destination: usize, versions: usize,
+    }
+    enum StageAdmission<'a> {
+        Fresh(&'a worker::FreshWorkerBirthReady,&'a transaction::IntentData), Update, Restore,
     }
     fn check(ok: bool, why: &'static str) -> Result<()> { if ok { Ok(()) } else { Err(why) } }
     fn sha(value: &str) -> bool { value.len() == 64 && value.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)) }
@@ -567,6 +573,7 @@ mod installer {
                 legacy_volumes:[None;mobile_release_desktop::macos_install_maintenance::PREDECESSOR_LIMIT+1],
                 worker_deadline:None,worker_stderr_is_gate:false,worker_go_eof:false,payload_written:0,payload_write_calls:0,launcher_writes:applications::WriteCounts::default(),launcher_effects:None,
                 removal_live_reserved:0,removal_control_reserved:0,removal_original_storage_reserved:0,removal_snapshot_capture:None,removal_snapshot_work_reserved:false,archived_install_reserved:false,removal_payload_plan:None,removal_observation_control:None,removal_observation_reserved:0,removal_archive_scan:None,
+                fresh_birth_control_reserved:false,
                 #[cfg(feature = "macos-installed-removal-observer")]
                 removal_observer_projection:None,
                 stage:None,stage_name:None,app:None,runtime:None,runtime_publication:"not-attempted",app_publication:"not-attempted",payload_verified:false,
@@ -1154,6 +1161,54 @@ mod installer {
             self.registration.exclusive_acquired = true;
             self.clock()?; self.registration_protected(reader)
         }
+        fn fresh_birth_quote(&mut self) -> Result<()> {
+            if self.fresh_birth_control_reserved { return self.clock(); }
+            // Retained birth/ready/pending values, canonical round trips and
+            // held readback overlap. No extra originals or independent pool.
+            let quote=4*transaction::INTENT_LIMIT as u64;
+            check(maintenance::removal_effective_control_bytes(self)?.checked_add(quote)
+                .is_some_and(|n|n<=installation_record::CONTROL_LIMIT as u64),"fresh-birth-control-bound")?;
+            self.removal_control_reserved=self.removal_control_reserved.checked_add(quote)
+                .ok_or("fresh-birth-control-bound")?;
+            self.fresh_birth_control_reserved=true; self.clock()
+        }
+        fn fresh_original_birth(&self,n:usize,directory:bool) -> Result<transaction::FreshBirthIdentityData> {
+            // Directory metadata may change only through the existing book's
+            // admitted effects. Birth identity does not pretend to freeze ctime.
+            self.check_name(n,!directory)?;
+            self.protected(n,directory,Some(if directory {0o755}else{0o444}))?;
+            native::no_xattrs(self.fd(n)?.as_fd()).map_err(|_|"fresh-birth-attributes")?;
+            let held=stat::fstat(self.fd(n)?).map_err(|_|"fresh-birth-stat")?;
+            let row=&self.originals[n];
+            let named=self.named(row.parent,&row.name).map_err(|_|"fresh-birth-name")?;
+            let uuid=mobile_release_desktop::macos_persistent_identity::observe_volume(self.fd(n)?.as_fd())
+                .map_err(|_|"fresh-birth-volume")?;
+            check(Identity::of(&held)==Identity::of(&named) && held.st_birthtime==named.st_birthtime
+                && held.st_birthtime_nsec==named.st_birthtime_nsec && held.st_flags==0 && named.st_flags==0,
+                "fresh-birth-original")?;
+            let value=transaction::FreshBirthIdentityData::from_original_fields_data(i64::from(held.st_dev),
+                held.st_ino,held.st_birthtime,held.st_birthtime_nsec,uuid).map_err(|_|"fresh-birth-identity")?;
+            self.check_name(n,!directory)?; Ok(value)
+        }
+        fn fresh_parent_birth(&self,root:usize,versions:usize,descriptor:&str,signature:&str)
+            -> Result<transaction::FreshBirthData> {
+            self.registration_ready()?;
+            check(!self.worker_stderr_is_gate && self.fresh_birth_control_reserved
+                && self.gate.parent==Some(root) && self.registration.parent==Some(root)
+                && self.originals[versions].parent==Some(root) && self.originals[versions].name=="versions",
+                "fresh-birth-parent")?;
+            let (registration,origin)=self.registration.fresh_birth.ok_or("fresh-birth-registration-missing")?;
+            let named=self.named(Some(root),paths::REGISTRATION_GATE_NAME).map_err(|_|"fresh-birth-registration-name")?;
+            let (dev,ino,seconds,nanos,volume)=registration.fields_data();
+            check(i64::from(named.st_dev)==dev && named.st_ino==ino && named.st_birthtime==seconds
+                && named.st_birthtime_nsec==nanos && named.st_flags==0,"fresh-birth-registration-original")?;
+            let install=self.fresh_original_birth(root,true)?;
+            check(install.fields_data().4==volume,"fresh-birth-registration-volume")?;
+            let maintenance=self.gate.participant.ok_or("fresh-birth-maintenance")?;
+            transaction::FreshBirthData::from_original_fields_data(descriptor,signature,origin,install,
+                self.fresh_original_birth(versions,true)?,registration,self.fresh_original_birth(maintenance,false)?)
+                .map_err(|_|"fresh-birth-binding")
+        }
         fn registration_complete_admitted(&mut self, destination: usize, action: ActionData) -> Result<()> {
             // Only two fixed callers: exact fresh roster, or fully authenticated
             // maintenance::observe + current incoming producer controls. No repair.
@@ -1166,6 +1221,13 @@ mod installer {
                 && self.gate.parent == Some(destination) && self.originals[maintenance].state == State::Owned,
                 "registration-maintenance-required")?;
             self.gate_protected(maintenance)?;
+            let fresh_origin=if action==ActionData::FreshInstall {
+                self.fresh_birth_quote()?;
+                check(self.registration.fresh_birth.is_none(),"fresh-birth-registration-once")?;
+                Some(if self.registration.creation=="absent-observed" {
+                    transaction::FreshRegistrationOriginData::AbsentBeforeMaintenanceCreatedUnderMaintenance
+                }else {transaction::FreshRegistrationOriginData::ExistingExclusiveBeforeMaintenance})
+            }else{None};
             if self.registration.creation == "absent-observed" {
                 // Same-current/no-op or restore of an R-capable release cannot
                 // repair a missing reservation. Update was admitted from an
@@ -1185,6 +1247,9 @@ mod installer {
             }
             let reader = self.registration.participant.ok_or("registration-original")?;
             self.registration_protected(reader)?; self.gate_protected(maintenance)?;
+            if let Some(origin)=fresh_origin {
+                self.registration.fresh_birth=Some((self.fresh_original_birth(reader,false)?,origin));
+            }
             // Consume R only with the actual original M_EX already held. A
             // failed/unknown close bars all payload/worker effects; M stays last.
             check(self.close(reader), "registration-close-unknown")?;
@@ -1297,12 +1362,10 @@ mod installer {
                 "closedUnderMaintenance":self.registration.closed_under_maintenance,"verifiedAfterGo":self.registration.verified_after_go,
                 "cleanup":"original-closes-only-permanent-reservation-retained"})
         }
-        fn install(&mut self, source: &str) -> Result<()> {
-            let prepared = self.prepare_fresh(source)?;
-            let mut nonce = [0u8;16]; getrandom::fill(&mut nonce).map_err(|_| "stage-identity")?;
-            check(nonce.iter().any(|byte| *byte != 0), "stage-identity")?;
-            let invocation = nonce.iter().map(|b| format!("{b:02x}")).collect::<String>();
-            self.install_prepared(prepared, &invocation)
+        fn install(&mut self, _source: &str) -> Result<()> {
+            // No legacy or fixture entry may bypass the actual completed
+            // producer, durable birth, or private writer readiness protocol.
+            Err("fresh-birth-unselected-refused")
         }
         fn prepare_fresh(&mut self, source: &str) -> Result<PreparedFresh> {
             let (input, inventory, inventory_bytes) = self.input(source)?;
@@ -1362,35 +1425,16 @@ mod installer {
             self.registration_before_maintenance(destination)?;self.maintenance_gate(destination)?;
             Ok(PreparedFresh{input,inventory,inventory_bytes,destination,versions})
         }
-        fn install_prepared(&mut self, prepared: PreparedFresh, invocation: &str) -> Result<()> {
-            check(!self.worker_stderr_is_gate || self.worker_go_eof, "worker-go-eof-required")?;
-            check(worker::invocation_valid(invocation), "stage-identity")?;
-            self.registration_ready()?;
-            let (stage, app, runtime) = self.stage_payload(&prepared, invocation, true)?;
-            let runtime = runtime.ok_or("stage-missing")?;
-            let PreparedFresh { input: _, inventory: _, inventory_bytes, destination, versions } = prepared;
-            // The fresh version parent is also exclusively created; failure
-            // preserves an existing user's version and our unpublished staging.
-            self.absent(destination, paths::APP_NAME)?;
-            let release = self.directory(versions, paths::RELEASE, true, 0o755)?;
-            #[cfg(feature = "macos-installed-installer-fixture")]
-            self.fixture_before_runtime_publication(release)?;
-            self.publish(runtime, stage, "runtime", release, "runtime", true)?;
-            self.receipt("runtime-publication-confirmed")?;
-            self.record_metadata(destination, release, invocation, &inventory_bytes)?;
-            #[cfg(feature = "macos-installed-installer-fixture")]
-            self.fixture_before_app_publication(destination)?;
-            self.publish(app, stage, "app", destination, paths::APP_NAME, false)?;
-            // Not an "installed/settled" receipt: remaining original descriptors
-            // still have to close. Only final exit/output can report that fact.
-            self.receipt("both-publications-confirmed")?; Ok(())
-        }
         // Sole payload copier. Restore selects the App subset, never a second
-        // publisher/copy engine. Legacy fresh still calls it once in the same order.
-        fn stage_payload(&mut self, prepared: &PreparedFresh, invocation: &str, with_runtime: bool)
+        // publisher/copy engine. Fresh always carries its completed native birth.
+        fn stage_payload(&mut self, prepared: &PreparedFresh, invocation: &str, admission:StageAdmission<'_>)
             -> Result<(usize, usize, Option<usize>)> {
             check(!self.worker_stderr_is_gate || self.worker_go_eof, "worker-go-eof-required")?;
             check(worker::invocation_valid(invocation), "stage-identity")?;
+            let with_runtime=match admission {
+                StageAdmission::Fresh(ready,intent)=>{ready.post(self,prepared,intent,invocation)?;true},
+                StageAdmission::Update=>true,StageAdmission::Restore=>false,
+            };
             let indexed = prepared.inventory.index()?;
             let name = format!(".install-{invocation}");
             self.stage_name = Some(name.clone()); // Reserve before the actual mkdir.
@@ -2290,6 +2334,8 @@ mod installer {
             pub prepared: PreparedFresh, pub selected: ReleaseSetData, pub action: ActionData,
             pub history: Option<History>, pub old_app: Option<usize>, pub old_release: Option<usize>,
             pub intent: Option<IntentData>, pub intent_original: Option<usize>,
+            pub(super) fresh_birth: Option<transaction::FreshBirthData>,
+            pub(super) fresh_worker: Option<worker::FreshWorkerBirthState>,
             controls: Option<ProducerControls>, pub(super) archives:Option<InstallArchiveObservation>,
             pub(super) launcher: Option<applications::Observation>,
             launcher_removal: Option<applications::RemovalPreparation>,
@@ -5900,7 +5946,9 @@ mod installer {
             check(intent.invocation_data()==invocation && intent.action_data()==ActionData::FreshInstall
                 && intent.previous_data().is_none() && intent.previous_state_data().is_none()
                 && intent.request_id_data()!=invocation,"partial-fresh-intent-binding")?;
-            let expected=data(IntentData::encode_data(invocation,intent.request_id_data(),ActionData::FreshInstall,None,selected))?;
+            // Preserve the validated optional birth in canonical historical DATA.
+            // This existing archive reader does not gain no-history authority.
+            let expected=data(intent.canonical_bytes_data())?;
             check(raw==expected,"partial-fresh-intent-canonical")?;Ok(intent)
         }
         fn partial_fresh_prefix_data(sides:&[PartialFreshSide])->Result<usize> {
@@ -11217,6 +11265,14 @@ mod installer {
                 if let Some(namespace)=&self.restore_namespace {namespace.fresh_ids(invocation,request)?;}
                 if let Some(restore)=&self.restore {restore.fresh_ids(invocation,request)?;}
                 let Some(archives)=&self.archives else{return Ok(());};
+                if self.action==ActionData::FreshInstall && self.fresh_birth.is_none() {
+                    // Before the actual R-close/birth snapshot (or before the
+                    // child's held Intent read), check prospective IDs only.
+                    let census=archives.census.as_ref().ok_or("archived-census-pending")?;
+                    let count=census.install_invocation_union_data(self.history.iter().flat_map(|h|
+                        h.originals.values().chain(std::iter::once(&h.current))).map(|r|&r.intent),None)?;
+                    return check(count<transaction::INVOCATION_LIMIT,"fresh-birth-aggregate-invocations");
+                }
                 if self.restore.is_some() && self.restore_ref.is_none() {
                     // The immutable ownAttempt receipt has not been written.
                     // Use existing prospective ID admission, not a fabricated
@@ -11429,7 +11485,9 @@ mod installer {
             begin_removal_archive_census(book,source.root_original(),true)?;
             let RemovalObserved { inner,inventory_original,record_original,record_bytes }=old;
             let Observed { prepared,selected,action,history,old_app,old_release,intent,intent_original,controls,archives,launcher,launcher_removal,noop,recovery_ref,
-                restore,restore_namespace,restore_ref,restore_root_names,invocations:_,removal_invocations:_,restore_joined }=inner;
+                restore,restore_namespace,restore_ref,restore_root_names,invocations:_,removal_invocations:_,restore_joined,
+                fresh_birth,fresh_worker }=inner;
+            check(fresh_birth.is_none() && fresh_worker.is_none(),"removal-fresh-birth-forbidden")?;
             check(noop.is_none() && recovery_ref.is_none() && restore.is_none() && restore_ref.is_none(),"removal-pending-recovery")?;
             check(restore_namespace.as_ref().is_none_or(|n|n.names.is_empty()),"restore-transport-independent-qualification-required")?;
             check(restore_root_names.is_none(),"removal-pending-restore-census")?;
@@ -11788,7 +11846,8 @@ mod installer {
             let recovery_ref=noop.as_ref().map(|n|n.reference().clone());
             let restore_ref=restore.as_ref().and_then(|r|r.reference().cloned());
             Ok(Observed { prepared, selected, action, history, old_app, old_release, intent:None, intent_original:None,controls,archives,launcher,launcher_removal,noop,recovery_ref,
-                restore,restore_namespace,restore_ref,restore_root_names,invocations,removal_invocations,restore_joined:None })
+                restore,restore_namespace,restore_ref,restore_root_names,invocations,removal_invocations,restore_joined:None,
+                fresh_birth:None,fresh_worker:None })
         }
         impl Observed {
             pub(super) fn controls_post(&self, book: &Install) -> Result<()> {
@@ -11827,6 +11886,12 @@ mod installer {
                 self.history.as_ref().map(|h| (&h.current.state, &h.current.capsule))
             }
             fn intent_bytes(&self, invocation: &str, request_id: &str) -> Result<Vec<u8>> {
+                if self.action==ActionData::FreshInstall {
+                    check(self.history.is_none() && self.restore.is_none() && self.recovery_ref.is_none(),"fresh-birth-action")?;
+                    return data(IntentData::encode_with_fresh_birth_data(invocation,request_id,
+                        self.fresh_birth.as_ref().ok_or("fresh-birth-required")?,&self.selected));
+                }
+                check(self.fresh_birth.is_none() && self.fresh_worker.is_none(),"fresh-birth-action")?;
                 if self.restore.is_some() {
                     return data(IntentData::encode_with_restore_recovery_data(invocation,request_id,
                         self.previous().ok_or("restore-recovery-history")?,
@@ -11867,17 +11932,31 @@ mod installer {
                     &bytes, Role::ReceiptWriter)?;
                 self.intent_original = Some(original); // Custody before persistence veto.
                 book.persist(self.prepared.destination, false)?; held_bytes(book, original, &bytes)?;
-                self.intent = Some(data(IntentData::parse_data(&bytes, &self.selected))?);
+                self.intent = Some(if self.action==ActionData::FreshInstall {
+                    data(IntentData::parse_fresh_birth_data(&bytes,&self.selected))?
+                }else{data(IntentData::parse_data(&bytes, &self.selected))?});
                 if let Some(noop)=self.noop.as_mut(){noop.prepare_receipt(book,self.history.as_ref().ok_or("noop-recovery-history")?,
                     self.intent.as_ref().ok_or("maintenance-intent-missing")?,original,&bytes)?;}
                 Ok(())
             }
             pub(super) fn read_intent(&mut self, book: &mut Install, invocation: &str, request_id: &str) -> Result<()> {
+                if self.action==ActionData::FreshInstall {book.fresh_birth_quote()?;}
                 self.check_archived_invocation(book,invocation,request_id)?;
                 check(self.intent.is_none() && self.intent_original.is_none(), "maintenance-intent-once")?;
                 let (original, bytes) = metadata_original(book, self.prepared.destination,
                     &data(transaction::intent_name_data(invocation))?, transaction::INTENT_LIMIT)?;
                 self.intent_original = Some(original);
+                if self.action==ActionData::FreshInstall {
+                    // The child did not witness the parent's earlier R protocol.
+                    // Parse its bound DATA now; native readiness comes only after
+                    // the complete private binding, actual GO/EOF and its own R.
+                    check(book.worker_stderr_is_gate && !book.worker_go_eof
+                        && self.fresh_birth.is_none() && self.fresh_worker.is_none(),"fresh-birth-worker-order")?;
+                    let parsed=data(IntentData::parse_fresh_birth_data(&bytes,&self.selected))?;
+                    check(parsed.invocation_data()==invocation && parsed.request_id_data()==request_id,
+                        "fresh-birth-worker-intent")?;
+                    self.fresh_birth=parsed.fresh_birth_data();
+                }
                 check(bytes == self.intent_bytes(invocation, request_id)?, "maintenance-intent-binding")?;
                 self.intent = Some(data(IntentData::parse_data(&bytes, &self.selected))?);
                 if let Some(noop)=&self.noop {noop.ready(book,self.history.as_ref().ok_or("noop-recovery-history")?)?;}
@@ -12211,7 +12290,16 @@ mod installer {
                 book.payload_verified = true; // Entire original App/runtime was actually read above.
                 observed.history.as_ref().ok_or("maintenance-history-missing")?.current.state.current_data()
             } else {
-                let staged = book.stage_payload(&observed.prepared,invocation,observed.action != ActionData::RestoreFixedApp);
+                let admission=match observed.action {
+                    ActionData::FreshInstall=>match observed.fresh_worker.as_ref() {
+                        Some(worker::FreshWorkerBirthState::Ready(ready))=>StageAdmission::Fresh(ready,intent),
+                        _=>return Err("fresh-birth-worker-not-ready"),
+                    },
+                    ActionData::Update=>StageAdmission::Update,
+                    ActionData::RestoreFixedApp=>StageAdmission::Restore,
+                    _=>return Err("maintenance-stage-action"),
+                };
+                let staged = book.stage_payload(&observed.prepared,invocation,admission);
                 let succeeded = staged.is_ok();
                 step(book,StepData::Prepared,if succeeded { ReturnedData::KnownSuccess } else { ReturnedData::KnownRefusal },
                     staged.as_ref().map(|_| ()).map_err(|e| *e),false)?;
@@ -12291,6 +12379,13 @@ mod installer {
             check(book.worker_stderr_is_gate && book.worker_go_eof && book.maintenance.is_none()
                 && book.launcher_effects.is_none(), "maintenance-original-go-required")?;
             book.registration_ready()?;
+            if observed.action==ActionData::FreshInstall {
+                match observed.fresh_worker.as_ref() {
+                    Some(worker::FreshWorkerBirthState::Ready(ready))=>ready.post(book,&observed.prepared,
+                        observed.intent.as_ref().ok_or("fresh-birth-worker-intent")?,invocation)?,
+                    _=>return Err("fresh-birth-worker-not-ready"),
+                }
+            }
             let deadline = book.worker_deadline.as_ref().ok_or("worker-clock-missing")?;
             let at = deadline.check_work()?;
             let progress = data(ProgressData::new_data(observed.action,at,deadline.original_endpoint()))?;
@@ -13063,6 +13158,95 @@ mod installer {
         struct Source {
             script: usize, image: usize, input: usize, image_sha: String,
             executable: String, directory: String, source: String,
+        }
+        // These private, non-Clone values have no DATA/parser constructor.
+        // Pending is issued only after the entire private init binding matched;
+        // Ready additionally consumes the actual GO/EOF and R observation.
+        pub(super) struct FreshWorkerBirthPending {
+            birth:transaction::FreshBirthData, intent_original:usize, intent_identity:Identity,
+            intent_digest:String, source:[(usize,Identity);3],
+        }
+        pub(super) struct FreshWorkerBirthReady { pending:FreshWorkerBirthPending }
+        pub(super) enum FreshWorkerBirthState {
+            Pending(FreshWorkerBirthPending), Ready(FreshWorkerBirthReady),
+        }
+        impl FreshWorkerBirthPending {
+            fn capture(book:&Install,source:&Source,observed:&maintenance::Observed)->Result<Self> {
+                check(book.worker_stderr_is_gate && !book.worker_go_eof && book.fresh_birth_control_reserved
+                    && observed.action==ActionData::FreshInstall && observed.fresh_worker.is_none(),
+                    "fresh-birth-worker-order")?;
+                book.source_post(source)?;
+                let intent=observed.intent.as_ref().ok_or("fresh-birth-worker-intent")?;
+                let original=observed.intent_original.ok_or("fresh-birth-worker-intent")?;
+                let birth=observed.fresh_birth.as_ref().ok_or("fresh-birth-required")?.clone();
+                check(intent.fresh_birth_data().as_ref()==Some(&birth)
+                    && intent.next_data()==observed.selected.current_data(),"fresh-birth-worker-binding")?;
+                let value=Self{birth,intent_original:original,intent_identity:book.identity(original)?,
+                    intent_digest:intent.digest_data().to_owned(),source:[
+                        (source.script,book.identity(source.script)?),(source.image,book.identity(source.image)?),
+                        (source.input,book.identity(source.input)?)]};
+                value.post(book,&observed.prepared,intent,false)?;Ok(value)
+            }
+            fn post(&self,book:&Install,prepared:&PreparedFresh,intent:&transaction::IntentData,with_registration:bool)->Result<()> {
+                check(book.worker_stderr_is_gate && book.fresh_birth_control_reserved
+                    && intent.action_data()==ActionData::FreshInstall && intent.digest_data()==self.intent_digest
+                    && intent.fresh_birth_data().as_ref()==Some(&self.birth)
+                    && book.identity(self.intent_original)?==self.intent_identity
+                    && book.originals[self.intent_original].parent==Some(prepared.destination)
+                    && self.source[2].0==prepared.input,"fresh-birth-worker-binding")?;
+                for (original,identity) in self.source {
+                    check(book.identity(original)?==identity,"fresh-birth-source-original")?;
+                    book.check_name(original,true)?;
+                }
+                maintenance::held_bytes(book,self.intent_original,
+                    &intent.canonical_bytes_data().map_err(|_|"fresh-birth-worker-intent")?)?;
+                let expected=self.birth.identities_data();
+                let m=book.gate.participant.ok_or("fresh-birth-maintenance")?;
+                check(book.gate.verified && !book.gate.lock_attempted && !book.gate.exclusive_acquired
+                    && book.gate.parent==Some(prepared.destination)
+                    && book.originals[prepared.versions].parent==Some(prepared.destination)
+                    && book.originals[prepared.versions].name=="versions","fresh-birth-worker-gate")?;
+                book.gate_protected(m)?;
+                check(book.fresh_original_birth(prepared.destination,true)?==expected[0]
+                    && book.fresh_original_birth(prepared.versions,true)?==expected[1]
+                    && book.fresh_original_birth(m,false)?==expected[3],"fresh-birth-worker-original")?;
+                if with_registration {
+                    book.registration_ready()?;
+                    let r=book.registration.participant.ok_or("fresh-birth-registration-missing")?;
+                    check(book.worker_go_eof && book.registration.verified_after_go
+                        && book.fresh_original_birth(r,false)?==expected[2],"fresh-birth-worker-registration")?;
+                }
+                book.clock()
+            }
+            fn after_go(self,book:&Install,observed:&maintenance::Observed)->Result<FreshWorkerBirthReady> {
+                self.post(book,&observed.prepared,observed.intent.as_ref().ok_or("fresh-birth-worker-intent")?,true)?;
+                Ok(FreshWorkerBirthReady{pending:self})
+            }
+        }
+        impl FreshWorkerBirthReady {
+            pub(super) fn post(&self,book:&Install,prepared:&PreparedFresh,intent:&transaction::IntentData,
+                invocation:&str)->Result<()> {
+                check(intent.invocation_data()==invocation,"fresh-birth-worker-invocation")?;
+                self.pending.post(book,prepared,intent,true)
+            }
+        }
+        fn prepare_fresh_worker_birth(book:&Install,source:&Source,observed:&mut maintenance::Observed)->Result<()> {
+            if observed.action==ActionData::FreshInstall {
+                observed.fresh_worker=Some(FreshWorkerBirthState::Pending(FreshWorkerBirthPending::capture(book,source,observed)?));
+            }else{check(observed.fresh_birth.is_none() && observed.fresh_worker.is_none(),"fresh-birth-action")?;}
+            Ok(())
+        }
+        fn finish_fresh_worker_birth(book:&Install,observed:&mut maintenance::Observed)->Result<()> {
+            if observed.action==ActionData::FreshInstall {
+                let pending=match observed.fresh_worker.take() {
+                    Some(FreshWorkerBirthState::Pending(value))=>value,_=>return Err("fresh-birth-worker-pending"),
+                };
+                observed.fresh_worker=Some(FreshWorkerBirthState::Ready(pending.after_go(book,observed)?));
+            }else{check(observed.fresh_birth.is_none() && observed.fresh_worker.is_none(),"fresh-birth-action")?;}
+            Ok(())
+        }
+        struct FreshParentBirthReady {
+            birth:transaction::FreshBirthData,intent_original:usize,intent_identity:Identity,intent_digest:String,
         }
         #[cfg(feature="macos-installed-app-absence-fixture")]
         pub(super) mod app_absence_fixture {
@@ -19147,10 +19331,8 @@ exec ./mrk-macos-remove --fixture-supervise "$1"
                     let producer=self.producer.as_ref().ok_or("entry-producer-original")?;
                     observed.incoming_controls(&self.book,producer.input.descriptor_data(),producer.input.signature_data())?;
                     self.book.registration_complete_admitted(root,observed.action)?;
-                    self.request_export=Some(RequestExport::reserve(&mut self.book,root,&request)?);
-                    self.request_export.as_ref().ok_or("maintenance-request-missing")?.persist_reservation(&mut self.book)?;
-                    observed.create_intent(&mut self.book,&self.invocation,&request)?;
-                    self.maintenance=Some(observed);self.spawn_admitted_writer()
+                    self.maintenance=Some(observed);self.create_intent_and_reserve_request(&request)?;
+                    self.spawn_admitted_writer()
                 }
             }
         }
@@ -19279,6 +19461,7 @@ exec ./mrk-macos-remove --fixture-supervise "$1"
             fn drop(&mut self){let _=self.retain_pending();} // memory only, no allocate/clock/native/close
         }
         struct Parent {
+            fresh_birth_ready:Option<FreshParentBirthReady>,
             book: Install, entered: bool, command: Option<ManuallyDrop<Command>>, child: Option<Child>,
             source: Option<Source>, invocation: String, init_sha: String,
             maintenance: Option<maintenance::Observed>, request_export: Option<RequestExport>,
@@ -19313,7 +19496,7 @@ exec ./mrk-macos-remove --fixture-supervise "$1"
                 // The original entry sample preceded argv collection, not just
                 // input/gate admission. Do not renew it after argument work.
                 deadline.check_work()?;
-                Ok(Self { book:Install::with_worker_deadline(deadline,false),entered:false,
+                Ok(Self { book:Install::with_worker_deadline(deadline,false),entered:false,fresh_birth_ready:None,
                     command:None,child:None,source:None,invocation:String::new(),init_sha:String::new(),maintenance:None,request_export:None,producer:None,
                     removal:None,removal_observed:None,
                     removal_request:None,
@@ -19627,9 +19810,7 @@ exec ./mrk-macos-remove --fixture-supervise "$1"
                 // Preserve actual R-close phase before late result veto. Neither
                 // late/refused outcome can proceed to reservation/intent/spawn.
                 closed?;returned?;self.archived_post(true)?;
-                self.request_export=Some(RequestExport::reserve(&mut self.book,root,&request)?);
-                self.request_export.as_ref().ok_or("archived-request")?.persist_reservation(&mut self.book)?;
-                self.maintenance.as_mut().ok_or("archived-observed")?.create_intent(&mut self.book,&self.invocation,&request)?;
+                self.create_intent_and_reserve_request(&request)?;
                 self.archived_post(true)
             }
             fn admit_reinstall_source_inputs(&mut self,source_path:&str,completed:&str)->Result<()> {
@@ -20126,18 +20307,71 @@ exec ./mrk-macos-remove --fixture-supervise "$1"
                         observed.incoming_controls(&self.book,producer.input.descriptor_data(),producer.input.signature_data())?;
                     }
                     self.book.registration_complete_admitted(observed.prepared.destination, observed.action)?;
-                    // This fixed sibling is reserved before intent or worker
-                    // payload. Request spelling supplies correlation, not EX,
-                    // producer trust, a source tuple, or package identity.
-                    self.request_export = Some(RequestExport::reserve(&mut self.book,observed.prepared.destination,&request_id)?);
-                    self.request_export.as_ref().ok_or("maintenance-request-missing")?.persist_reservation(&mut self.book)?;
-                    observed.create_intent(&mut self.book,&self.invocation,&request_id)?;
                     self.maintenance = Some(observed);
-                } else { let _prepared = self.book.prepare_fresh_input(input,inventory,inventory_bytes)?; }
-                self.source=Some(actual);
+                    self.source=Some(actual);
+                    self.create_intent_and_reserve_request(&request_id)?;
+                } else { return Err("fresh-birth-unselected-refused"); }
                 self.spawn_admitted_writer()
             }
+            fn fresh_parent_post(&self)->Result<()> {
+                let observed=self.maintenance.as_ref().ok_or("fresh-birth-observation")?;
+                if observed.action!=ActionData::FreshInstall {
+                    return check(self.fresh_birth_ready.is_none() && observed.fresh_birth.is_none(),"fresh-birth-action");
+                }
+                let ready=self.fresh_birth_ready.as_ref().ok_or("fresh-birth-parent-not-ready")?;
+                let source=self.source.as_ref().ok_or("fresh-birth-source")?;
+                let producer=self.producer.as_ref().ok_or("fresh-birth-producer")?;
+                producer.authenticated_post(&self.book,source,true)?;
+                let descriptor=hash(producer.input.descriptor_data());let signature=hash(producer.input.signature_data());
+                let actual=self.book.fresh_parent_birth(observed.prepared.destination,observed.prepared.versions,&descriptor,&signature)?;
+                let intent=observed.intent.as_ref().ok_or("fresh-birth-intent")?;
+                check(actual==ready.birth && observed.fresh_birth.as_ref()==Some(&ready.birth)
+                    && intent.fresh_birth_data().as_ref()==Some(&ready.birth)
+                    && intent.invocation_data()==self.invocation
+                    && intent.digest_data()==ready.intent_digest
+                    && observed.intent_original==Some(ready.intent_original)
+                    && self.book.identity(ready.intent_original)?==ready.intent_identity,"fresh-birth-parent-binding")?;
+                maintenance::held_bytes(&self.book,ready.intent_original,
+                    &intent.canonical_bytes_data().map_err(|_|"fresh-birth-intent")?)
+            }
+            fn create_intent_and_reserve_request(&mut self,request:&str)->Result<()> {
+                check(self.request_export.is_none() && self.fresh_birth_ready.is_none(),"maintenance-request-once")?;
+                let observed=self.maintenance.as_ref().ok_or("fresh-birth-observation")?;
+                let fresh=observed.action==ActionData::FreshInstall;
+                let root=observed.prepared.destination;
+                if fresh {
+                    // The actual verified source and completed producer still
+                    // own this snapshot. No caller-supplied tuple constructs it.
+                    let source=self.source.as_ref().ok_or("fresh-birth-source")?;
+                    let producer=self.producer.as_ref().ok_or("fresh-birth-producer")?;
+                    producer.authenticated_post(&self.book,source,true)?;
+                    check(observed.selected==*producer.descriptor.as_ref().ok_or("fresh-birth-producer")?.release_set_data()
+                        && observed.fresh_birth.is_none(),"fresh-birth-source-selection")?;
+                    let birth=self.book.fresh_parent_birth(root,observed.prepared.versions,
+                        &hash(producer.input.descriptor_data()),&hash(producer.input.signature_data()))?;
+                    let observed=self.maintenance.as_mut().ok_or("fresh-birth-observation")?;
+                    observed.fresh_birth=Some(birth);
+                    observed.create_intent(&mut self.book,&self.invocation,request)?;
+                    let original=observed.intent_original.ok_or("fresh-birth-intent")?;
+                    let intent=observed.intent.as_ref().ok_or("fresh-birth-intent")?;
+                    self.fresh_birth_ready=Some(FreshParentBirthReady{
+                        birth:observed.fresh_birth.as_ref().ok_or("fresh-birth-required")?.clone(),
+                        intent_original:original,intent_identity:self.book.identity(original)?,
+                        intent_digest:intent.digest_data().to_owned()});
+                    self.fresh_parent_post()?;
+                }
+                // Fresh's durable held/read-back birth precedes this external
+                // request effect. Other actions retain their established order.
+                self.request_export=Some(RequestExport::reserve(&mut self.book,root,request)?);
+                self.request_export.as_ref().ok_or("maintenance-request-missing")?.persist_reservation(&mut self.book)?;
+                if !fresh {
+                    self.maintenance.as_mut().ok_or("maintenance-observation")?
+                        .create_intent(&mut self.book,&self.invocation,request)?;
+                }
+                self.fresh_parent_post()
+            }
             fn spawn_admitted_writer(&mut self)->Result<()> {
+                self.fresh_parent_post()?;
                 check(self.entered && self.source.is_some() && self.command.is_none() && self.child.is_none(),"worker-spawn-once")?;
                 let gate = self.book.gate.participant.ok_or("worker-gate-original")?;
                 check(self.book.gate.exclusive_acquired && self.book.gate.lock_attempted, "worker-parent-exclusive-required")?;
@@ -20209,6 +20443,7 @@ exec ./mrk-macos-remove --fixture-supervise "$1"
                 self.original_wait(); check(self.wait.is_none() && !self.wait_unknown, "worker-exited-before-go")?;
                 self.producer_post(true)?; // Same originals/content again, BEFORE the sole GO.
                 self.archived_post(true)?;
+                self.fresh_parent_post()?;
                 write_frame(self.book.fd(command_n)?.as_fd(),&control("go",&self.invocation,&self.init_sha,end,parent,child,worker_command,worker_result),
                     CONTROL_LIMIT,self.book.shared_deadline()?,true)?;
                 // Actual EOF is part of the child's pre-mutation barrier.
@@ -20544,11 +20779,12 @@ exec ./mrk-macos-remove --fixture-supervise "$1"
             let directory = executable.parent().and_then(Path::to_str).ok_or("worker-script-parent")?;
             Ok(format!("{directory}/input"))
         }
-        enum PreparedWorker { Fresh(PreparedFresh), Maintenance(maintenance::Observed), ArchivedMaintenance(maintenance::Observed) }
+        enum PreparedWorker { Maintenance(maintenance::Observed), ArchivedMaintenance(maintenance::Observed) }
         fn prepare_worker(custody: &mut ArchivedWorkerCustody<'_>, init: &Value, gate_fd: BorrowedFd<'_>, invocation: &str, end: u64) -> Result<PreparedWorker> {
             let ArchivedWorkerCustody{book,source:source_backing,input:input_backing,prefix,retained}=custody;
             check(!*retained,"archived-worker-custody-retained")?;let book=&mut **book;
             let maintenance_value = init.get("maintenance");
+            check(maintenance_value.is_some(),"fresh-birth-unselected-refused")?;
             let archive_value=init.get("archives");
             archived_init_shape_data(init)?;
             check(init["schemaVersion"] == 2 && init["kind"] == "private-writer-init" && init["invocation"] == invocation
@@ -20625,15 +20861,17 @@ exec ./mrk-macos-remove --fixture-supervise "$1"
                     let request_id=value["requestId"].as_str().ok_or("maintenance-request-shape")?;
                     observed.read_intent(book,invocation,request_id)?;
                     check(observed.binding(book)?==*value,"maintenance-init-binding")?;
+                    prepare_fresh_worker_birth(book,source,&mut observed)?;
                     Ok(PreparedWorker::ArchivedMaintenance(observed))
                 }else{
                     let mut observed=maintenance::observe(book,prepared,selected,Some(invocation))?;
                     let request_id=value["requestId"].as_str().ok_or("maintenance-request-shape")?;
                     observed.read_intent(book,invocation,request_id)?;
                     check(observed.binding(book)?==*value,"maintenance-init-binding")?;
+                    prepare_fresh_worker_birth(book,&source,&mut observed)?;
                     Ok(PreparedWorker::Maintenance(observed))
                 }
-            } else { Ok(PreparedWorker::Fresh(prepared)) }
+            } else { Err("fresh-birth-unselected-refused") }
         }
         fn dispatch_private(args: &[String]) -> i32 {
             // The deadline is decoded BEFORE the first potentially blocking read.
@@ -20658,7 +20896,7 @@ exec ./mrk-macos-remove --fixture-supervise "$1"
                 nonblocking(stdin.as_fd(),custody.book.shared_deadline()?)?; nonblocking(stdout.as_fd(),custody.book.shared_deadline()?)?;
                 let (init,bytes) = read_frame(stdin.as_fd(),INIT_LIMIT,custody.book.shared_deadline()?)?;
                 init_sha = hash(&bytes);
-                let prepared = prepare_worker(&mut custody,&init,stderr.as_fd(),&args[3],end)?;
+                let mut prepared = prepare_worker(&mut custody,&init,stderr.as_fd(),&args[3],end)?;
                 if let PreparedWorker::ArchivedMaintenance(observed)=&prepared {
                     custody.input.as_ref().ok_or("archived-worker-input")?.post(custody.book,
                         custody.source.as_ref().ok_or("archived-worker-source")?,&observed.selected,true)?;
@@ -20675,10 +20913,13 @@ exec ./mrk-macos-remove --fixture-supervise "$1"
                 check(unistd::getppid().as_raw() == parent as i32, "worker-parent-changed")?;
                 custody.book.worker_go_eof = true; // Actual complete GO and EOF, not parsed permission DATA alone.
                 let destination = match &prepared {
-                    PreparedWorker::Fresh(prepared) => prepared.destination,
                     PreparedWorker::Maintenance(observed) | PreparedWorker::ArchivedMaintenance(observed) => observed.prepared.destination,
                 };
                 custody.book.registration_after_go(destination)?;
+                match &mut prepared {
+                    PreparedWorker::Maintenance(observed) | PreparedWorker::ArchivedMaintenance(observed)=>
+                        finish_fresh_worker_birth(custody.book,observed)?,
+                }
                 if let PreparedWorker::ArchivedMaintenance(observed)=&prepared {
                     let source=custody.source.as_ref().ok_or("archived-worker-source")?;
                     let backing=custody.input.as_ref().ok_or("archived-worker-input")?;
@@ -20689,7 +20930,6 @@ exec ./mrk-macos-remove --fixture-supervise "$1"
                         custody.prefix.as_mut().ok_or("archived-worker-prefix")?)?;
                 }
                 match prepared {
-                    PreparedWorker::Fresh(prepared) => custody.book.install_prepared(prepared,&args[3]),
                     PreparedWorker::Maintenance(observed) => maintenance::execute(&mut *custody.book,observed,&args[3]),
                     PreparedWorker::ArchivedMaintenance(observed)=>maintenance::execute(custody.book,observed,&args[3]),
                 }

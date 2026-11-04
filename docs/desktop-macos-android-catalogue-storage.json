@@ -1,0 +1,2311 @@
+{
+  "baseCommit": "b6a819abb1f8caae3b5b969fc14618ecbe8f090e",
+  "catalogues": [
+    {
+      "allOtherSourceBytesUnchanged": true,
+      "before": {
+        "bytes": 20409744,
+        "sha256": "24c72354fe4c21c0652eb2c7c33ace167ea92420a5a06a22b153a6e8174a5ee5"
+      },
+      "exactOriginalReconstruction": true,
+      "output": {
+        "assets": [
+          {
+            "bytes": 574528,
+            "path": "android_supplier_macos_catalogue_assets/arm64_05a9962e247aa65b647535a349cad6446820fd2fa876325e47d4ea4f6e8e7b18.bin",
+            "sha256": "05a9962e247aa65b647535a349cad6446820fd2fa876325e47d4ea4f6e8e7b18"
+          }
+        ],
+        "bytes": 19000727,
+        "headers": [
+          {
+            "bytes": 4096,
+            "name": "CAT_H0_PREFIX",
+            "offset": 0,
+            "sha256": "3e426bf96704fdf2839b0dcc5abc6aa7312fc3984f601119a6697439dbfd219c"
+          },
+          {
+            "bytes": 2512,
+            "name": "CAT_H0_COMMANDS",
+            "offset": 4096,
+            "sha256": "4cfe26f5628db0ab4a64d8abf85d722286013cae978495442ca882e0227f37f4"
+          },
+          {
+            "bytes": 4096,
+            "name": "CAT_H1_PREFIX",
+            "offset": 6608,
+            "sha256": "4c75b50be4a78b757603e49aa038d0bea1a4021ab0aaf0c1eeb7e22eb6aa04b0"
+          },
+          {
+            "bytes": 2368,
+            "name": "CAT_H1_COMMANDS",
+            "offset": 10704,
+            "sha256": "6eefed6454f8f764925c8ca88a7a10fc73653eecd938b5db3c3bb8ad11ca8868"
+          },
+          {
+            "bytes": 4096,
+            "name": "CAT_H2_PREFIX",
+            "offset": 13072,
+            "sha256": "b2ee4c894bd30aa9883eab6db53cf74f82cb2161a1490d8fa7a4af3d04989f47"
+          },
+          {
+            "bytes": 1432,
+            "name": "CAT_H2_COMMANDS",
+            "offset": 17168,
+            "sha256": "86cbf117754c5978219ed6fbb921bc57055b986d2d1db79e2c42c452aaf0353c"
+          },
+          {
+            "bytes": 4096,
+            "name": "CAT_H3_PREFIX",
+            "offset": 18600,
+            "sha256": "48c35a4911a1f873adcacb33118cf65b7cd6f73508d28654b02709d2eae29605"
+          },
+          {
+            "bytes": 1632,
+            "name": "CAT_H3_COMMANDS",
+            "offset": 22696,
+            "sha256": "75890f34188e47a4a5c89d13d03bf9afc8a161493d11ab1cac10c1d7bac15150"
+          },
+          {
+            "bytes": 4096,
+            "name": "CAT_H4_PREFIX",
+            "offset": 24328,
+            "sha256": "c81b143159f18fa781ea2b778bf4bb23d32c67ef5219d0b95fef88d9fa6976bb"
+          },
+          {
+            "bytes": 1576,
+            "name": "CAT_H4_COMMANDS",
+            "offset": 28424,
+            "sha256": "6ffaf4709d7bfbe6d7be57fba8020d06078995f416fcf5b7e20b08638edc96e7"
+          },
+          {
+            "bytes": 4096,
+            "name": "CAT_H5_PREFIX",
+            "offset": 30000,
+            "sha256": "660ebcb765bffb0a838cd74a921da15744fa8917da502314ae5c119bbc23458e"
+          },
+          {
+            "bytes": 2624,
+            "name": "CAT_H5_COMMANDS",
+            "offset": 34096,
+            "sha256": "8f8da2de3e72b448a26b1a216fdc3a9d1a3e87f5843ac718806b56526e14abd1"
+          },
+          {
+            "bytes": 4096,
+            "name": "CAT_H6_PREFIX",
+            "offset": 36720,
+            "sha256": "a69e71ca440e5664e069f67df8d05af5ecb41e7b25c94f085199651c94f26c0f"
+          },
+          {
+            "bytes": 1904,
+            "name": "CAT_H6_COMMANDS",
+            "offset": 40816,
+            "sha256": "ef2ba338a4d0915c69b2fb01ca0ccf3b47effe8d13bbc544a4fcde3570c064a6"
+          },
+          {
+            "bytes": 4096,
+            "name": "CAT_H7_PREFIX",
+            "offset": 42720,
+            "sha256": "adfb52ad634cc896febbc2db158bc8bfadb30bac8accd7ce894a59d387f0510b"
+          },
+          {
+            "bytes": 1904,
+            "name": "CAT_H7_COMMANDS",
+            "offset": 46816,
+            "sha256": "f03f73bc040f338a1aef0304dfcd5decc842915cd88c5627aacde6ae8667816a"
+          },
+          {
+            "bytes": 4096,
+            "name": "CAT_H8_PREFIX",
+            "offset": 48720,
+            "sha256": "ede2f2280dd632c1c4322098e231f5eedf454c2241ae0103d4e6661ead98a757"
+          },
+          {
+            "bytes": 1904,
+            "name": "CAT_H8_COMMANDS",
+            "offset": 52816,
+            "sha256": "481b50738668eddfc3d0a0047e5283fd2a481a57ca784a3ab32c6b4f810ab0f9"
+          },
+          {
+            "bytes": 4096,
+            "name": "CAT_H9_PREFIX",
+            "offset": 54720,
+            "sha256": "467e3f2172ad919033c544582201051b702b4ff2964f06566d92b1c519020070"
+          },
+          {
+            "bytes": 1904,
+            "name": "CAT_H9_COMMANDS",
+            "offset": 58816,
+            "sha256": "59ad97d854eb58f030501fd1771ee81d490fe4377b323f0fbf9f499b28ec9e43"
+          },
+          {
+            "bytes": 4096,
+            "name": "CAT_H10_PREFIX",
+            "offset": 60720,
+            "sha256": "eed46b663fffc82c541850e7f703eb6cb8328976d2acb356ec2ebdcab8ea5732"
+          },
+          {
+            "bytes": 1904,
+            "name": "CAT_H10_COMMANDS",
+            "offset": 64816,
+            "sha256": "dd8c5c38d35a33dd65095fc8c44860501be48acce7d34e51897b12bc8255692d"
+          },
+          {
+            "bytes": 4096,
+            "name": "CAT_H11_PREFIX",
+            "offset": 66720,
+            "sha256": "eab183dc78c24f01e837923a0be850a065dcebbebc20d90fa59b6ec66fd621fd"
+          },
+          {
+            "bytes": 1904,
+            "name": "CAT_H11_COMMANDS",
+            "offset": 70816,
+            "sha256": "1039661d394725ba7da0aeb3f87aa2036469a0fe3b744772f24c476370cc5224"
+          },
+          {
+            "bytes": 4096,
+            "name": "CAT_H12_PREFIX",
+            "offset": 72720,
+            "sha256": "7c5aa80d8cd9a87b0705c1382b90527ceccfd00bf6bcfee0e32782385bf5a8d7"
+          },
+          {
+            "bytes": 1904,
+            "name": "CAT_H12_COMMANDS",
+            "offset": 76816,
+            "sha256": "10b5c6f119fdb56bcc2f8654f28a223a86cb16a1d26498e8e8c238ea2e593f17"
+          },
+          {
+            "bytes": 4096,
+            "name": "CAT_H13_PREFIX",
+            "offset": 78720,
+            "sha256": "a7c19e64c0759493287fd75117dc4da7b4357f24e36bbf97ba2ed4ec14847625"
+          },
+          {
+            "bytes": 1904,
+            "name": "CAT_H13_COMMANDS",
+            "offset": 82816,
+            "sha256": "e3d7e38bd048b636a4c6d65c4a7ad10a5571e488201ab3be92574903cff25bff"
+          },
+          {
+            "bytes": 4096,
+            "name": "CAT_H14_PREFIX",
+            "offset": 84720,
+            "sha256": "213b2be4a3a58d861d6b4bbf9c1ff8c24e5e4b02a6fea646e45874510f6cd165"
+          },
+          {
+            "bytes": 1904,
+            "name": "CAT_H14_COMMANDS",
+            "offset": 88816,
+            "sha256": "e5b94ef1b77dde3fd6ad1f762a727d8b46a9c6bbfd8d985fac975d282dd28da5"
+          },
+          {
+            "bytes": 4096,
+            "name": "CAT_H15_PREFIX",
+            "offset": 90720,
+            "sha256": "515aaae101cac6611e19801ddaa9702c508a86a37ced72538547ac62e49ff7a5"
+          },
+          {
+            "bytes": 1904,
+            "name": "CAT_H15_COMMANDS",
+            "offset": 94816,
+            "sha256": "9308b3e1b03d90e0bdd79aae53c3bfbced108848bbacb4dd404a120f65d31e92"
+          },
+          {
+            "bytes": 4096,
+            "name": "CAT_H16_PREFIX",
+            "offset": 96720,
+            "sha256": "af1a8e56858102d4937d9ebf8f1116b678e722e5d2f36c2b093dbef90811494b"
+          },
+          {
+            "bytes": 1904,
+            "name": "CAT_H16_COMMANDS",
+            "offset": 100816,
+            "sha256": "382543aefbe9fce3e7fce194c0dd824528ef86833d12721cc6386b1235a44ab5"
+          },
+          {
+            "bytes": 4096,
+            "name": "CAT_H17_PREFIX",
+            "offset": 102720,
+            "sha256": "596e4e7ee74a9ad7be008db88b83e1561f5e54ba59a2a8897763912cc5040292"
+          },
+          {
+            "bytes": 1904,
+            "name": "CAT_H17_COMMANDS",
+            "offset": 106816,
+            "sha256": "48957eac1ba519b63a62776feaf2c5310d48438fd24be5307422fcdc684c0923"
+          },
+          {
+            "bytes": 4096,
+            "name": "CAT_H18_PREFIX",
+            "offset": 108720,
+            "sha256": "4519d71c6c97fdf69e1cab403427f2fb5c108acbf04889b70c02d79738745a03"
+          },
+          {
+            "bytes": 1904,
+            "name": "CAT_H18_COMMANDS",
+            "offset": 112816,
+            "sha256": "f5cce32096dd9c0cb8322ebd2fc82251f9b3d0c5185ebb1eaf1d4da5492bb40f"
+          },
+          {
+            "bytes": 4096,
+            "name": "CAT_H19_PREFIX",
+            "offset": 114720,
+            "sha256": "16c0c8e650aa89be03c281c51ff8970e746468d752255ab165af27f3e4ff5f2c"
+          },
+          {
+            "bytes": 1904,
+            "name": "CAT_H19_COMMANDS",
+            "offset": 118816,
+            "sha256": "0e905d84de5ddd3790bf56971c2f38e6c7fb81df8826541e128dbfb763d19d6b"
+          },
+          {
+            "bytes": 4096,
+            "name": "CAT_H20_PREFIX",
+            "offset": 120720,
+            "sha256": "a6e8e7171b048aa6f66ff8e6deeafba66a96ca4c01705587f50adc6780fd3fe7"
+          },
+          {
+            "bytes": 1904,
+            "name": "CAT_H20_COMMANDS",
+            "offset": 124816,
+            "sha256": "4a3c231449dd55dd334cfb2b00b192258da743ed403d3d8bbda0f05bcd801846"
+          },
+          {
+            "bytes": 4096,
+            "name": "CAT_H21_PREFIX",
+            "offset": 126720,
+            "sha256": "db5057e2f3bbdddc6d32bfd1a43644807dc2325a59006f1ba264b9dee8ca2b17"
+          },
+          {
+            "bytes": 1904,
+            "name": "CAT_H21_COMMANDS",
+            "offset": 130816,
+            "sha256": "1099be60788715e2e8471925548112910bbf9270c1eff0194ccdfbb0edb904e2"
+          },
+          {
+            "bytes": 4096,
+            "name": "CAT_H22_PREFIX",
+            "offset": 132720,
+            "sha256": "42e54588578e73186732ad7d49f66a5381cbcf1560c46e90800f1ef7a549697a"
+          },
+          {
+            "bytes": 1904,
+            "name": "CAT_H22_COMMANDS",
+            "offset": 136816,
+            "sha256": "bda5570207c8134f6cec0031094269d40774ef217a6478cbe442c2d862762679"
+          },
+          {
+            "bytes": 4096,
+            "name": "CAT_H23_PREFIX",
+            "offset": 138720,
+            "sha256": "a8cb05917e7aa70550e31c26040c9d801e613d268020d7fc5216ac5ad5fe7ae8"
+          },
+          {
+            "bytes": 1904,
+            "name": "CAT_H23_COMMANDS",
+            "offset": 142816,
+            "sha256": "0096e5af87d7f90af3cd93281c21fa7970d7cd377c8ff41a50fdb9b8ac0e4965"
+          },
+          {
+            "bytes": 4096,
+            "name": "CAT_H24_PREFIX",
+            "offset": 144720,
+            "sha256": "be1203dd2929066440192d842cf8f2d89dadb685d0c87e6f1c0895c21817a432"
+          },
+          {
+            "bytes": 1904,
+            "name": "CAT_H24_COMMANDS",
+            "offset": 148816,
+            "sha256": "020e586fede9fd6ce9277c3bdddf63d381e8218dd1569285e770add45d85de28"
+          },
+          {
+            "bytes": 4096,
+            "name": "CAT_H25_PREFIX",
+            "offset": 150720,
+            "sha256": "764eaec74eaff7b2d9237256906e04221df00ecf4729a81e2484813bdd114325"
+          },
+          {
+            "bytes": 1904,
+            "name": "CAT_H25_COMMANDS",
+            "offset": 154816,
+            "sha256": "4bd5e82bc234409ae9bf84d17ed7ac60404056f320f24e442f805c8f603266e0"
+          },
+          {
+            "bytes": 4096,
+            "name": "CAT_H26_PREFIX",
+            "offset": 156720,
+            "sha256": "6c69de25dc3ce0e79f0397ef07779f0508896615c145241c0972bd9cc62ff6a8"
+          },
+          {
+            "bytes": 1904,
+            "name": "CAT_H26_COMMANDS",
+            "offset": 160816,
+            "sha256": "ab611d3979cec2ae3d531b5634d70471fa74ec2a6fc22e0e2c91d2cabca9f32d"
+          },
+          {
+            "bytes": 4096,
+            "name": "CAT_H27_PREFIX",
+            "offset": 162720,
+            "sha256": "13922c137c85385af5a2e1952cf09fff4c06f3bc7cf5574d38b42aaa18bc503a"
+          },
+          {
+            "bytes": 1904,
+            "name": "CAT_H27_COMMANDS",
+            "offset": 166816,
+            "sha256": "1e961900eaf6b4be5715dc859f6c800fcad540c9ade39d785a7b5822f56c9ce4"
+          },
+          {
+            "bytes": 4096,
+            "name": "CAT_H28_PREFIX",
+            "offset": 168720,
+            "sha256": "b042e6bef47c682332a7ce76e0fa99c046947a7f809a3a48842b80d784623e94"
+          },
+          {
+            "bytes": 1904,
+            "name": "CAT_H28_COMMANDS",
+            "offset": 172816,
+            "sha256": "80d64976e66076fc9c74cb09d580e9fa36cd270cf920cb3c9d2f6554fa50d4d9"
+          },
+          {
+            "bytes": 4096,
+            "name": "CAT_H29_PREFIX",
+            "offset": 174720,
+            "sha256": "a144ae28b9b5e4760fa99649386ee8f7922e35f3d83198cabba25a93d8510ba2"
+          },
+          {
+            "bytes": 1904,
+            "name": "CAT_H29_COMMANDS",
+            "offset": 178816,
+            "sha256": "b1b7d9364195a23d0e46207453f4c729972a8c18c40aa44a0e954d735a5a0ad2"
+          },
+          {
+            "bytes": 4096,
+            "name": "CAT_H30_PREFIX",
+            "offset": 180720,
+            "sha256": "f34c6aa53d12a35ae3b8785750b6fed6b20da4d9204321548a3ac0fe407a6937"
+          },
+          {
+            "bytes": 1904,
+            "name": "CAT_H30_COMMANDS",
+            "offset": 184816,
+            "sha256": "384d92de1c853361a53cf7ba764e24572ab3d2115310de674c6ecf20c3a0f09a"
+          },
+          {
+            "bytes": 4096,
+            "name": "CAT_H31_PREFIX",
+            "offset": 186720,
+            "sha256": "1944c0db18d910e87962f3aaa016564aa5adc29a10ac7ec90799a6324a40ff7c"
+          },
+          {
+            "bytes": 1904,
+            "name": "CAT_H31_COMMANDS",
+            "offset": 190816,
+            "sha256": "a6219e55dbb53c08bbd481bac9d564d0d36f32ac4da863ed3ecef90f62dc31e9"
+          },
+          {
+            "bytes": 4096,
+            "name": "CAT_H32_PREFIX",
+            "offset": 192720,
+            "sha256": "da1a281f1ff098103c7f8b42ed0ff66f8b5bd38c9fdb9a2bc2e8eaf977a18de0"
+          },
+          {
+            "bytes": 1904,
+            "name": "CAT_H32_COMMANDS",
+            "offset": 196816,
+            "sha256": "50cabbf5086377d2c29f6affa836dca99fa4a00351c5c373b37abc3efcf2d30d"
+          },
+          {
+            "bytes": 4096,
+            "name": "CAT_H33_PREFIX",
+            "offset": 198720,
+            "sha256": "2f72430af795d3aa01fea30abf182cbc03d0154a0eb4e5ad4aa1208534467f6d"
+          },
+          {
+            "bytes": 1904,
+            "name": "CAT_H33_COMMANDS",
+            "offset": 202816,
+            "sha256": "9f0580bf73f5d27b1796d518c6c727d91c70878ec075bba6bfc6d883455d19df"
+          },
+          {
+            "bytes": 4096,
+            "name": "CAT_H34_PREFIX",
+            "offset": 204720,
+            "sha256": "2136eccb8c8b10fcd46b414f82a66c358ec8a6fea6b4c004134b274a41cdbc49"
+          },
+          {
+            "bytes": 1576,
+            "name": "CAT_H34_COMMANDS",
+            "offset": 208816,
+            "sha256": "5820206411f05fe727c9c952031928bf75639ea5e1e7e909bbd6c265dcfecd5c"
+          },
+          {
+            "bytes": 4096,
+            "name": "CAT_H35_PREFIX",
+            "offset": 210392,
+            "sha256": "86ff9751cd8864bc4f640c92f9e7d5f1d6ad6c1fbe96a5b6601cb42021d3e402"
+          },
+          {
+            "bytes": 2584,
+            "name": "CAT_H35_COMMANDS",
+            "offset": 214488,
+            "sha256": "55980713cf82f5ccb411483d1713ca4e8b8341e0514795370641e021525dc028"
+          },
+          {
+            "bytes": 4096,
+            "name": "CAT_H36_PREFIX",
+            "offset": 217072,
+            "sha256": "d00eb1df3f22d3b37c351dc64e1cc014ff4f15713ce9403e350e5462e86c9acb"
+          },
+          {
+            "bytes": 2024,
+            "name": "CAT_H36_COMMANDS",
+            "offset": 221168,
+            "sha256": "5bcda65633e9475b99adce393d84d145093c7ead279266aeff63efa5f51b5f6d"
+          },
+          {
+            "bytes": 4096,
+            "name": "CAT_H37_PREFIX",
+            "offset": 223192,
+            "sha256": "783d5d077782a46ae06e863b908eddf3e1ec459650d76c6b394cb5efb89e2b32"
+          },
+          {
+            "bytes": 2720,
+            "name": "CAT_H37_COMMANDS",
+            "offset": 227288,
+            "sha256": "ba15aa097f9675bd3f1c5e5f126ff9df0b13d28bf4c28b59a61775526be44c4e"
+          },
+          {
+            "bytes": 4096,
+            "name": "CAT_H38_PREFIX",
+            "offset": 230008,
+            "sha256": "fe71612f678286f30767f60ef377da9110dd43bccaffef1d00cb4d9cf23b9b61"
+          },
+          {
+            "bytes": 1608,
+            "name": "CAT_H38_COMMANDS",
+            "offset": 234104,
+            "sha256": "6ac13bf4d377ce935beaa1c9f3f45bed877fc862de994a6daf4d7837cb7c471d"
+          },
+          {
+            "bytes": 4096,
+            "name": "CAT_H39_PREFIX",
+            "offset": 235712,
+            "sha256": "0902c50e4b235039f6a32503afbbe5cf34c34cce4f18712a61b5f23774d2c97a"
+          },
+          {
+            "bytes": 2168,
+            "name": "CAT_H39_COMMANDS",
+            "offset": 239808,
+            "sha256": "575609f4984ed613877e8f50e1f03946db69f08bcc03d9b17daeef6ad04dd376"
+          },
+          {
+            "bytes": 4096,
+            "name": "CAT_H40_PREFIX",
+            "offset": 241976,
+            "sha256": "a42942e4fc95f14aa811c1d83c457b1de112360e99ff0bfa4443372f80d3304a"
+          },
+          {
+            "bytes": 1832,
+            "name": "CAT_H40_COMMANDS",
+            "offset": 246072,
+            "sha256": "1340cd81c7b2ba1f63826693554b1638ac99e77b1222615786aced39a2b6ba13"
+          },
+          {
+            "bytes": 4096,
+            "name": "CAT_H41_PREFIX",
+            "offset": 247904,
+            "sha256": "d9dcfb0de287b182c6779799427e5a68d6f1c9a2b2816321219f749d350eb167"
+          },
+          {
+            "bytes": 2568,
+            "name": "CAT_H41_COMMANDS",
+            "offset": 252000,
+            "sha256": "c500e7f044a771db98a93666269abd45c5d301223b53591e0642cc026507aa74"
+          },
+          {
+            "bytes": 4096,
+            "name": "CAT_H42_PREFIX",
+            "offset": 254568,
+            "sha256": "02511543daad02fac1fa80872a6b36bde23a10f7f69463ce127d1cf2fc020cf9"
+          },
+          {
+            "bytes": 1576,
+            "name": "CAT_H42_COMMANDS",
+            "offset": 258664,
+            "sha256": "604ef8a399557b7feddd81d505e946a1419565a25e2e161978a360f4f8739487"
+          },
+          {
+            "bytes": 4096,
+            "name": "CAT_H43_PREFIX",
+            "offset": 260240,
+            "sha256": "d4816306ccb1eaf498e0c13c5d93aa17cc4f0951a485a060285a222eac1fe732"
+          },
+          {
+            "bytes": 1784,
+            "name": "CAT_H43_COMMANDS",
+            "offset": 264336,
+            "sha256": "39afe0f7e7f9bb4be519257163c3a51b16479e6901f2aa68265cf55d8328fdd2"
+          },
+          {
+            "bytes": 4096,
+            "name": "CAT_H44_PREFIX",
+            "offset": 266120,
+            "sha256": "5017912d5ca187bc2c633ea6a2e5bf8bbca44580f9569a2ef3555649d32bd496"
+          },
+          {
+            "bytes": 2408,
+            "name": "CAT_H44_COMMANDS",
+            "offset": 270216,
+            "sha256": "27f3b95b1696f8512a173a5ee3f87cbd9af2a67efc7e62014499997ba668c862"
+          },
+          {
+            "bytes": 4096,
+            "name": "CAT_H45_PREFIX",
+            "offset": 272624,
+            "sha256": "1971f636d24d6bfaf94b39e142ef4a6fca27e4b074e949830103e78b9e6d708a"
+          },
+          {
+            "bytes": 2512,
+            "name": "CAT_H45_COMMANDS",
+            "offset": 276720,
+            "sha256": "95448e55077f380bad0d446aeddeb2e7574166f0fc7395d17c03197ed4f35b47"
+          },
+          {
+            "bytes": 4096,
+            "name": "CAT_H46_PREFIX",
+            "offset": 279232,
+            "sha256": "b7abc398794a3df3dde66fdd307bed2b8620391a1806e82d322ae1fcedb44013"
+          },
+          {
+            "bytes": 5208,
+            "name": "CAT_H46_COMMANDS",
+            "offset": 283328,
+            "sha256": "c3afa5e4073fe15c3469906cf55fa61af1cb7c96f8332afbb33540f2fc89410a"
+          },
+          {
+            "bytes": 4096,
+            "name": "CAT_H47_PREFIX",
+            "offset": 288536,
+            "sha256": "709e45b1c7f08af7d2066437871de13d033641576bbc75436890c9fd860dd905"
+          },
+          {
+            "bytes": 2464,
+            "name": "CAT_H47_COMMANDS",
+            "offset": 292632,
+            "sha256": "6bddbaf14a03552723e7de068c63444e38505c4aca5143dc74c0616e9f400af7"
+          },
+          {
+            "bytes": 4096,
+            "name": "CAT_H48_PREFIX",
+            "offset": 295096,
+            "sha256": "a42a4f338dab4bea4d122f52620562cb1732ef541424f3495b5a09e3703bed75"
+          },
+          {
+            "bytes": 1536,
+            "name": "CAT_H48_COMMANDS",
+            "offset": 299192,
+            "sha256": "0a293e16bf09f4fc912bfc83a4a817ed8f9873491a1045428eef818813428c05"
+          },
+          {
+            "bytes": 4096,
+            "name": "CAT_H49_PREFIX",
+            "offset": 300728,
+            "sha256": "9e8f8d3d18b549f26796cd13c0352b6bf0fb97e2519c7a4903dfb96833924286"
+          },
+          {
+            "bytes": 1872,
+            "name": "CAT_H49_COMMANDS",
+            "offset": 304824,
+            "sha256": "566d1fbcc15115e954765adc0c7867d03c9705c34d9c3bce56369cce7480e4a3"
+          },
+          {
+            "bytes": 4096,
+            "name": "CAT_H50_PREFIX",
+            "offset": 306696,
+            "sha256": "8a51e7243a7abd496b56918bbae3dc85b8d149ecb248cb7b5975a9b9a0157e24"
+          },
+          {
+            "bytes": 1248,
+            "name": "CAT_H50_COMMANDS",
+            "offset": 310792,
+            "sha256": "3d17e8d1d9445a3f997324b3ed0185323d431cc9549c4c794a38844377876ddf"
+          },
+          {
+            "bytes": 4096,
+            "name": "CAT_H51_PREFIX",
+            "offset": 312040,
+            "sha256": "24c523ef44509477a200348152fe3b826bfa5c01c67d539a10e95dfd15c338e3"
+          },
+          {
+            "bytes": 2672,
+            "name": "CAT_H51_COMMANDS",
+            "offset": 316136,
+            "sha256": "59b21714ef5e4eb7ba54aa7cd1d9865941bfd3a7f4349b6475da26e6fe146c42"
+          },
+          {
+            "bytes": 4096,
+            "name": "CAT_H52_PREFIX",
+            "offset": 318808,
+            "sha256": "c249a088a2b7d9b5dd044dee3611357b289b6d610e43ed9bae5e636b904dbb27"
+          },
+          {
+            "bytes": 1832,
+            "name": "CAT_H52_COMMANDS",
+            "offset": 322904,
+            "sha256": "d9bd1bd67cea2666eb9fcaa2a7ce7d1fb489436dcd16643cc7e7c8e4c13e7fb6"
+          },
+          {
+            "bytes": 4096,
+            "name": "CAT_H53_PREFIX",
+            "offset": 324736,
+            "sha256": "43b7accc902a71c1008b4956e0b5fda9348d6a89f3b20ee7b64cfb8dbdd31123"
+          },
+          {
+            "bytes": 1632,
+            "name": "CAT_H53_COMMANDS",
+            "offset": 328832,
+            "sha256": "ffd71e64406496f6ddae12a55d1eebf178f548b8d5326c98f348c276a9eab97d"
+          },
+          {
+            "bytes": 4096,
+            "name": "CAT_H54_PREFIX",
+            "offset": 330464,
+            "sha256": "11855fc8a57d5c4f9c60877a41235d2bdf553db4ce68abaf24f1e8bbb969e79e"
+          },
+          {
+            "bytes": 3104,
+            "name": "CAT_H54_COMMANDS",
+            "offset": 334560,
+            "sha256": "ccf3f951681d2be3f426cd57e5c46a3b6458b0c6c82391df1fa0d56661ec4058"
+          },
+          {
+            "bytes": 4096,
+            "name": "CAT_H55_PREFIX",
+            "offset": 337664,
+            "sha256": "8a1439d49b65d14cdf076ad63cd98699437926dced9897f000fec309ecf458bf"
+          },
+          {
+            "bytes": 4632,
+            "name": "CAT_H55_COMMANDS",
+            "offset": 341760,
+            "sha256": "0fcccd6bc1268ec703519c397a1c824fd0b37cfce3f2d728e73d3b4081c25ff2"
+          },
+          {
+            "bytes": 4096,
+            "name": "CAT_H56_PREFIX",
+            "offset": 346392,
+            "sha256": "24df56495d85659cfa9a202709b021637417d71f38c2a7834faa5eb37515af48"
+          },
+          {
+            "bytes": 4120,
+            "name": "CAT_H56_COMMANDS",
+            "offset": 350488,
+            "sha256": "ac0e1a60eba322b922bcc3d9f8d9ff5eb9c7ee244f46cc23c639b02ac4dc4c0b"
+          },
+          {
+            "bytes": 4096,
+            "name": "CAT_H57_PREFIX",
+            "offset": 354608,
+            "sha256": "9a6b5055f2aec1a32b3abf6ea85aa4325b9232b4c38fe1cfe27d70746653713a"
+          },
+          {
+            "bytes": 3344,
+            "name": "CAT_H57_COMMANDS",
+            "offset": 358704,
+            "sha256": "5f8996334dd5e8c1cc774e8da64c5dff2bb40d66d86fb57cb1b8d7b76e86a7b7"
+          },
+          {
+            "bytes": 4096,
+            "name": "CAT_H58_PREFIX",
+            "offset": 362048,
+            "sha256": "72af516595aa054024ed9b2dc2f06b42427ba4fc878f6f67e12118eabd4c32c3"
+          },
+          {
+            "bytes": 2032,
+            "name": "CAT_H58_COMMANDS",
+            "offset": 366144,
+            "sha256": "a811950afc23460fdd481ddee89cfdbb0bbf1bd980f5128619f517a8296b1b5a"
+          },
+          {
+            "bytes": 4096,
+            "name": "CAT_H59_PREFIX",
+            "offset": 368176,
+            "sha256": "0d158c40f7e0dc7a54f8a94c2114ef542bf555c032cbc66b695c2322205106eb"
+          },
+          {
+            "bytes": 1552,
+            "name": "CAT_H59_COMMANDS",
+            "offset": 372272,
+            "sha256": "4f3d862f339e65e9f05d2c05e9300aa4d6987df77883424ab51825b299e0ea54"
+          },
+          {
+            "bytes": 4096,
+            "name": "CAT_H60_PREFIX",
+            "offset": 373824,
+            "sha256": "8131f8229e57f86e089a0c0414ffb9d27140c7ebc3ff3941b15e0d705e92f5a6"
+          },
+          {
+            "bytes": 1856,
+            "name": "CAT_H60_COMMANDS",
+            "offset": 377920,
+            "sha256": "14170c78ae26df08c66060cc66259d3150d390dc13849ce86f25c7e5fdc44206"
+          },
+          {
+            "bytes": 4096,
+            "name": "CAT_H61_PREFIX",
+            "offset": 379776,
+            "sha256": "e2fd1c47f643109da628764161437a0cff379c0a4126458a1aa29822164ff2f6"
+          },
+          {
+            "bytes": 1336,
+            "name": "CAT_H61_COMMANDS",
+            "offset": 383872,
+            "sha256": "ca5be22595ea80a27d0dac1cdf3b0de40ca70cad061ef3c65c0de6002b58b4b6"
+          },
+          {
+            "bytes": 4096,
+            "name": "CAT_H62_PREFIX",
+            "offset": 385208,
+            "sha256": "2bfd8c08c11fc8f53b30dc1e561ca0a6913ef0362048cc91df00d98bf9365ee2"
+          },
+          {
+            "bytes": 1608,
+            "name": "CAT_H62_COMMANDS",
+            "offset": 389304,
+            "sha256": "0170321b65c0f6971eaf7206813e925c9956bde972cd26f7583dc9acf877c894"
+          },
+          {
+            "bytes": 4096,
+            "name": "CAT_H63_PREFIX",
+            "offset": 390912,
+            "sha256": "5c31d7c6bc75189a75ba8ce8ac39d8e872ca8469702566f032a4bf9efa5dca4b"
+          },
+          {
+            "bytes": 2640,
+            "name": "CAT_H63_COMMANDS",
+            "offset": 395008,
+            "sha256": "739cebafc9cc727f0b34797754a9e1bfda57505cd377bb1808e637aa0d824892"
+          },
+          {
+            "bytes": 4096,
+            "name": "CAT_H64_PREFIX",
+            "offset": 397648,
+            "sha256": "d14db42aa3626c6cbdf045d48e432ff835337b412ec7efde5ac13dfd3021ac25"
+          },
+          {
+            "bytes": 1448,
+            "name": "CAT_H64_COMMANDS",
+            "offset": 401744,
+            "sha256": "56f26ee391c975b3a706366d555e710217a4565649c4fd141bcdd1e2d977559d"
+          },
+          {
+            "bytes": 4096,
+            "name": "CAT_H65_PREFIX",
+            "offset": 403192,
+            "sha256": "1ee039c359a984b05440cba20cec37d53a58d6fbc5f235336bcc2b6160c5374f"
+          },
+          {
+            "bytes": 1544,
+            "name": "CAT_H65_COMMANDS",
+            "offset": 407288,
+            "sha256": "cf1204e6e3e6d0e51e74109aa06f76d4ead31674610d352ac7144853e2faace0"
+          },
+          {
+            "bytes": 4096,
+            "name": "CAT_H66_PREFIX",
+            "offset": 408832,
+            "sha256": "bc665e93021f092dbbe35e0103c3c6091d6c0f844c62fd879c978ebd02e1a43a"
+          },
+          {
+            "bytes": 1536,
+            "name": "CAT_H66_COMMANDS",
+            "offset": 412928,
+            "sha256": "51d88f235e9532055626ed261f13f3b0314a37a28a0ad1e7ec56149f23f0e362"
+          },
+          {
+            "bytes": 4096,
+            "name": "CAT_H67_PREFIX",
+            "offset": 414464,
+            "sha256": "7fd522459f9437945c4206896291f21a0fd5046ecd2352021075b65f2da2dc0f"
+          },
+          {
+            "bytes": 2680,
+            "name": "CAT_H67_COMMANDS",
+            "offset": 418560,
+            "sha256": "8e0fa2fea573ab0056601697c33bbaec888b5a1ab461387cbe77be8efcd8a6e2"
+          },
+          {
+            "bytes": 4096,
+            "name": "CAT_H68_PREFIX",
+            "offset": 421240,
+            "sha256": "3f2c8c14571118f7f8e732a105de18c6121412f35cc1361e4590aed82c02dfbd"
+          },
+          {
+            "bytes": 800,
+            "name": "CAT_H68_COMMANDS",
+            "offset": 425336,
+            "sha256": "6eea9dcb1bec37c1488127501d1207fb76f0dba70d9094256cf8b2d04a971fa8"
+          },
+          {
+            "bytes": 4096,
+            "name": "CAT_H69_PREFIX",
+            "offset": 426136,
+            "sha256": "25dfbf9858a080d336761db51c91a15743b3c7b6c4014777196ee6ca508fdff2"
+          },
+          {
+            "bytes": 1536,
+            "name": "CAT_H69_COMMANDS",
+            "offset": 430232,
+            "sha256": "56bab82e7d9d746751f7bf5adc56ea45232a1c3c8cc6eda1eec2022476e2ff82"
+          },
+          {
+            "bytes": 4096,
+            "name": "CAT_H70_PREFIX",
+            "offset": 431768,
+            "sha256": "025d5d0bf1e2f73360903d765af66f931d4ea6b51f8426b45300047495c779f9"
+          },
+          {
+            "bytes": 1840,
+            "name": "CAT_H70_COMMANDS",
+            "offset": 435864,
+            "sha256": "1886e2515d24177901078c5d151a6e67f98abe3dc1338dd1bbc1f6d06d9eafb6"
+          },
+          {
+            "bytes": 4096,
+            "name": "CAT_H71_PREFIX",
+            "offset": 437704,
+            "sha256": "1d400c75f9c46bc79e138a9b2ddc1d0d0189c7aa57626728ef3ce19e80570033"
+          },
+          {
+            "bytes": 2032,
+            "name": "CAT_H71_COMMANDS",
+            "offset": 441800,
+            "sha256": "2c87bed1e51b555b5204489c65070b7fec4aa5d2ffbb19d4978f7774445920f5"
+          },
+          {
+            "bytes": 4096,
+            "name": "CAT_H72_PREFIX",
+            "offset": 443832,
+            "sha256": "fa713d3b5c6717de38a4e36b9438fce2e84100a89a7772f95c38a7a1b8277b17"
+          },
+          {
+            "bytes": 1480,
+            "name": "CAT_H72_COMMANDS",
+            "offset": 447928,
+            "sha256": "8690884888e0b5de9734d584935ce8e16ae898f2730ba4612e1ef37355a60a0d"
+          },
+          {
+            "bytes": 4096,
+            "name": "CAT_H73_PREFIX",
+            "offset": 449408,
+            "sha256": "213a0935b96e25fa402c1ed0804af38747f38a4caf3e3e98abaed65a3b7c2136"
+          },
+          {
+            "bytes": 1712,
+            "name": "CAT_H73_COMMANDS",
+            "offset": 453504,
+            "sha256": "b47349ce52afd805cc72be1fcdc8c05d6d9b03bbee98a1b2e5b9d0b6d7e90143"
+          },
+          {
+            "bytes": 4096,
+            "name": "CAT_H74_PREFIX",
+            "offset": 455216,
+            "sha256": "19ce2735eaecb88e1357eb2b0f812735f754c00c40d8a630f47103c6bd46a6ed"
+          },
+          {
+            "bytes": 1416,
+            "name": "CAT_H74_COMMANDS",
+            "offset": 459312,
+            "sha256": "4bb722382fc9a5b0952c9c00326cc1cb750f1d1ff42bf197f603d9b177371b65"
+          },
+          {
+            "bytes": 4096,
+            "name": "CAT_H75_PREFIX",
+            "offset": 460728,
+            "sha256": "22e5e64c92f1376a2a63d083971964b7205ef4707e69c876999446351a01ade3"
+          },
+          {
+            "bytes": 1368,
+            "name": "CAT_H75_COMMANDS",
+            "offset": 464824,
+            "sha256": "ab0f96f517fd4341df38665cd2209499e392791a0b2f69a56e97fa36f9706b29"
+          },
+          {
+            "bytes": 4096,
+            "name": "CAT_H76_PREFIX",
+            "offset": 466192,
+            "sha256": "db60a15d9d1304fbc39fdf19528f3ccfd0fe5e89a9640667d692a9fbbf6fec40"
+          },
+          {
+            "bytes": 2720,
+            "name": "CAT_H76_COMMANDS",
+            "offset": 470288,
+            "sha256": "1b12b617e666a3dafbf009903e600f1fd7c9a81f0aab1356546eddd4a82b1381"
+          },
+          {
+            "bytes": 4096,
+            "name": "CAT_H77_PREFIX",
+            "offset": 473008,
+            "sha256": "315ccc58556ee3e00430748e2948b01c57a85fb3e2f8a0c0b3243de5140dd6b2"
+          },
+          {
+            "bytes": 2352,
+            "name": "CAT_H77_COMMANDS",
+            "offset": 477104,
+            "sha256": "9d6b621b221f5b728c509ce2bd6ed59833ee919feaaa09ff92e0ea7d6b98374d"
+          },
+          {
+            "bytes": 4096,
+            "name": "CAT_H78_PREFIX",
+            "offset": 479456,
+            "sha256": "49ec3ed11203ebf579ea1d40377a0f029dd0a9c54b020051dd3f806d9db8720c"
+          },
+          {
+            "bytes": 2544,
+            "name": "CAT_H78_COMMANDS",
+            "offset": 483552,
+            "sha256": "43e23d2a0b904bd4ba94ed741405ea74c68e9e32f11d52dd65ffbc6fc7182a48"
+          },
+          {
+            "bytes": 4096,
+            "name": "CAT_H79_PREFIX",
+            "offset": 486096,
+            "sha256": "920a986231c07942593cde7b66119ef3811a24bc7189be7a3d1b0ed2e39426dc"
+          },
+          {
+            "bytes": 2192,
+            "name": "CAT_H79_COMMANDS",
+            "offset": 490192,
+            "sha256": "aa388d5c380b404acf495d5b2b93e3ea965c00f6a873d9d5a4ce555373390e19"
+          },
+          {
+            "bytes": 4096,
+            "name": "CAT_H80_PREFIX",
+            "offset": 492384,
+            "sha256": "c341dbb177b076fc8bebc73dda781304943ff6c72ea4bd010e8c188782cc7a69"
+          },
+          {
+            "bytes": 2264,
+            "name": "CAT_H80_COMMANDS",
+            "offset": 496480,
+            "sha256": "f344621c1293e365565f31a04457b3faaba8ca9bc0973ce658942fdfc2eb317f"
+          },
+          {
+            "bytes": 4096,
+            "name": "CAT_H81_PREFIX",
+            "offset": 498744,
+            "sha256": "699bfa33ec851b6396854376e7363735c250bad5cdeed71c90321a99b838b911"
+          },
+          {
+            "bytes": 2304,
+            "name": "CAT_H81_COMMANDS",
+            "offset": 502840,
+            "sha256": "661ffb55618a908d6241fe495e0f6e5d88d40251ff2a4a3203ceb70452ed906d"
+          },
+          {
+            "bytes": 4096,
+            "name": "CAT_H82_PREFIX",
+            "offset": 505144,
+            "sha256": "873cb2ccea68948ee3f7bfb2a2ec0942696d67898fe9a7fd370ca92974d4e8a2"
+          },
+          {
+            "bytes": 2280,
+            "name": "CAT_H82_COMMANDS",
+            "offset": 509240,
+            "sha256": "1a7056daa5babb7646a573093fa729b4cf1476bafe3911c4f3e0f7cfbee633b1"
+          },
+          {
+            "bytes": 4096,
+            "name": "CAT_H83_PREFIX",
+            "offset": 511520,
+            "sha256": "f39e3b7e0410917f49857ac220d14992df5666f4ed6906f6d025a6e5d966e022"
+          },
+          {
+            "bytes": 2216,
+            "name": "CAT_H83_COMMANDS",
+            "offset": 515616,
+            "sha256": "6ddb18ed66ef875e2fc2f37bb0576592c7637082626b14d87f64fcf555ebf551"
+          },
+          {
+            "bytes": 4096,
+            "name": "CAT_H84_PREFIX",
+            "offset": 517832,
+            "sha256": "ee1812eff7184d3b8b1dc708b33c8d05988fd7f51cd6041ae6c7cab25604fc64"
+          },
+          {
+            "bytes": 2088,
+            "name": "CAT_H84_COMMANDS",
+            "offset": 521928,
+            "sha256": "cbeca805e85735346a9e1a3bfd515c85b2d60ebd8942386d6dec55a9c4644649"
+          },
+          {
+            "bytes": 4096,
+            "name": "CAT_H85_PREFIX",
+            "offset": 524016,
+            "sha256": "07c5b35026ed9801abe00d48de0796fde9a082e08363b619b2d0a93cf65a2df7"
+          },
+          {
+            "bytes": 2000,
+            "name": "CAT_H85_COMMANDS",
+            "offset": 528112,
+            "sha256": "d86880418b74d38ca0a7d939e77a65bfbe3cc8eed60caf5b42382e6cd012363f"
+          },
+          {
+            "bytes": 4096,
+            "name": "CAT_H86_PREFIX",
+            "offset": 530112,
+            "sha256": "24895761943a46058297e8359de1ba9c515bf643b19888f65e7ccd7b8aaf8c4f"
+          },
+          {
+            "bytes": 2384,
+            "name": "CAT_H86_COMMANDS",
+            "offset": 534208,
+            "sha256": "6be2435505df675752d813ea97adcefe8fef6b90fb9a6d781a4ea3eca9726468"
+          },
+          {
+            "bytes": 4096,
+            "name": "CAT_H87_PREFIX",
+            "offset": 536592,
+            "sha256": "b79ebf9a9832318af63f408f8cff3806264324e49395e7ca403854a474ef68a3"
+          },
+          {
+            "bytes": 1872,
+            "name": "CAT_H87_COMMANDS",
+            "offset": 540688,
+            "sha256": "dd652586353c581a6a21a644be09eb679d7a9bf4476ce64820b4e8b1171e0feb"
+          },
+          {
+            "bytes": 4096,
+            "name": "CAT_H88_PREFIX",
+            "offset": 542560,
+            "sha256": "ed969e5871fca79dad666331c0f791b23b0166dab4ffe56c65e4763c7ca52be6"
+          },
+          {
+            "bytes": 2256,
+            "name": "CAT_H88_COMMANDS",
+            "offset": 546656,
+            "sha256": "c477312b7355b52b235ac7e4b038a4be68c15b28296804a263368a55db0698d1"
+          },
+          {
+            "bytes": 4096,
+            "name": "CAT_H89_PREFIX",
+            "offset": 548912,
+            "sha256": "be1a7394058d55d6748318e0c06fbfee2ba1d2e29a25955a6a0f4748b6482e12"
+          },
+          {
+            "bytes": 2256,
+            "name": "CAT_H89_COMMANDS",
+            "offset": 553008,
+            "sha256": "289daac5738de276562aa1718d148b9e260be6af3c4d609a64da786dd9c853d9"
+          },
+          {
+            "bytes": 4096,
+            "name": "CAT_H90_PREFIX",
+            "offset": 555264,
+            "sha256": "febe07ee54145688955025033ddabfc3114cce43f5a59b5a32833264b981c219"
+          },
+          {
+            "bytes": 2432,
+            "name": "CAT_H90_COMMANDS",
+            "offset": 559360,
+            "sha256": "b2611257dbf60f951f21fe187d8fbfd0ba5b3e35c5b656ce411b3538a9883620"
+          },
+          {
+            "bytes": 4096,
+            "name": "CAT_H91_PREFIX",
+            "offset": 561792,
+            "sha256": "d3d93682f0ff416294194ce0c3945df0814c026b6fe746b22a74be6185481d01"
+          },
+          {
+            "bytes": 2352,
+            "name": "CAT_H91_COMMANDS",
+            "offset": 565888,
+            "sha256": "f7939d25c2d25c3f2e6ec5cdc8ea703b2750dee8dbf17ad1184a4ed6c1503f23"
+          },
+          {
+            "bytes": 4096,
+            "name": "CAT_H92_PREFIX",
+            "offset": 568240,
+            "sha256": "3030336b4daf07bad228897f90bb92b7c7b6747ff35122c545c1cacfd15b12e1"
+          },
+          {
+            "bytes": 2192,
+            "name": "CAT_H92_COMMANDS",
+            "offset": 572336,
+            "sha256": "00da9fad5cfd6b4734931e95b1e141b927d3578e156e981abc84242e935f5a0c"
+          }
+        ],
+        "sha256": "ab472c20fa9bd1e30dfc95ef7399987cded50e99a91d15824df703d4355d9f8f"
+      },
+      "path": "desktop/src-tauri/src/android_supplier_macos_catalogue.rs",
+      "profile": "arm64"
+    },
+    {
+      "allOtherSourceBytesUnchanged": true,
+      "before": {
+        "bytes": 20434472,
+        "sha256": "0c14f0cd7490592f3a79d0fc8997d5079d37fe5a2ab33499fff31156c268c7cb"
+      },
+      "exactOriginalReconstruction": true,
+      "output": {
+        "assets": [
+          {
+            "bytes": 582616,
+            "path": "android_supplier_macos_catalogue_assets/x86_64_7ea3b0fecccb9b3dcaaff6af0c59469d3976dd4422a02fecd81d23920b3c3a70.bin",
+            "sha256": "7ea3b0fecccb9b3dcaaff6af0c59469d3976dd4422a02fecd81d23920b3c3a70"
+          }
+        ],
+        "bytes": 18999101,
+        "headers": [
+          {
+            "bytes": 4096,
+            "name": "CAT_H0_PREFIX",
+            "offset": 0,
+            "sha256": "83e1b118811ef01b4228b5f56cd91aca73ce72d99e090b0051b8e3a040d13398"
+          },
+          {
+            "bytes": 1904,
+            "name": "CAT_H0_COMMANDS",
+            "offset": 4096,
+            "sha256": "6ac348ffebf22c44e30d69a6b7421db7dd201465cff1c589e6b8d10a671eb00c"
+          },
+          {
+            "bytes": 4096,
+            "name": "CAT_H1_PREFIX",
+            "offset": 6000,
+            "sha256": "3e426bf96704fdf2839b0dcc5abc6aa7312fc3984f601119a6697439dbfd219c"
+          },
+          {
+            "bytes": 2504,
+            "name": "CAT_H1_COMMANDS",
+            "offset": 10096,
+            "sha256": "ce703e58ae5f4b1c50ba7a31a5912674dd2703af356a13353470bf36d0ad75b9"
+          },
+          {
+            "bytes": 4096,
+            "name": "CAT_H2_PREFIX",
+            "offset": 12600,
+            "sha256": "b23bc10e1ecb787ec08785f7808fa846ebe1d5c2fb87e068961fee7f3c690bb9"
+          },
+          {
+            "bytes": 2352,
+            "name": "CAT_H2_COMMANDS",
+            "offset": 16696,
+            "sha256": "ec9c0749c8d0cbb613edf11823437f50995bf01d870117c8eb2f0c84a6b669a6"
+          },
+          {
+            "bytes": 4096,
+            "name": "CAT_H3_PREFIX",
+            "offset": 19048,
+            "sha256": "59304b588c332d6cf314a7508b7b779847af4356a550622dda6199b3b0b5dc8d"
+          },
+          {
+            "bytes": 1376,
+            "name": "CAT_H3_COMMANDS",
+            "offset": 23144,
+            "sha256": "dfc37deef8df976028e14a9b128d2015ee8ca96d536365456aaa11b9d56b26ef"
+          },
+          {
+            "bytes": 4096,
+            "name": "CAT_H4_PREFIX",
+            "offset": 24520,
+            "sha256": "43543aae647a399d2ab3698a87780736df221dddddaf3b2f3980bce3e6af82c1"
+          },
+          {
+            "bytes": 1400,
+            "name": "CAT_H4_COMMANDS",
+            "offset": 28616,
+            "sha256": "0a17447709b2ccbf93be7b0ca2c8313091d15f75bafd90f87f5c9a0a1f02a517"
+          },
+          {
+            "bytes": 4096,
+            "name": "CAT_H5_PREFIX",
+            "offset": 30016,
+            "sha256": "66c4ef9b6f87cbc04f737d736eb5f6cad4e23e9d56e2a23443d5658c86a91ff2"
+          },
+          {
+            "bytes": 1528,
+            "name": "CAT_H5_COMMANDS",
+            "offset": 34112,
+            "sha256": "bb9c009f99b07212108296d2df4654a44e35f517a15b5a944915e88b7d4083b1"
+          },
+          {
+            "bytes": 4096,
+            "name": "CAT_H6_PREFIX",
+            "offset": 35640,
+            "sha256": "db88f1d8266717f2773f007393d220f0a7f81b8329a1e5c889465b9ffbb9dfa7"
+          },
+          {
+            "bytes": 1472,
+            "name": "CAT_H6_COMMANDS",
+            "offset": 39736,
+            "sha256": "3e3433923025805ba1590e8b5920e8b81136f07c10422f86de469d97fa21d483"
+          },
+          {
+            "bytes": 4096,
+            "name": "CAT_H7_PREFIX",
+            "offset": 41208,
+            "sha256": "660ebcb765bffb0a838cd74a921da15744fa8917da502314ae5c119bbc23458e"
+          },
+          {
+            "bytes": 2552,
+            "name": "CAT_H7_COMMANDS",
+            "offset": 45304,
+            "sha256": "67a2953a9b4896ee58dbbb27d30877dc165a3f4c3c21280b9818289b5f77ead3"
+          },
+          {
+            "bytes": 4096,
+            "name": "CAT_H8_PREFIX",
+            "offset": 47856,
+            "sha256": "02aa56e03d6a1e7bf40fdb05cb04538b76aacc71af9a8aca76607f4bdb170f99"
+          },
+          {
+            "bytes": 1904,
+            "name": "CAT_H8_COMMANDS",
+            "offset": 51952,
+            "sha256": "71ecdc7356d73ad7dfebe6d40cab29601d2fba0805613d88f05eaf3184eda14b"
+          },
+          {
+            "bytes": 4096,
+            "name": "CAT_H9_PREFIX",
+            "offset": 53856,
+            "sha256": "1d1c371f0469f662ce8f8328728da01a4a8f9ce6f85cffa537d507f2eacb2ad7"
+          },
+          {
+            "bytes": 1904,
+            "name": "CAT_H9_COMMANDS",
+            "offset": 57952,
+            "sha256": "30bb565b5beec2e75de7be14991e94b256479254425c2668a8e5fbaea2f86146"
+          },
+          {
+            "bytes": 4096,
+            "name": "CAT_H10_PREFIX",
+            "offset": 59856,
+            "sha256": "3067eb787c2cb3ddd32084eef52e1824677b06e7e7856cacda1def5a507199c8"
+          },
+          {
+            "bytes": 1904,
+            "name": "CAT_H10_COMMANDS",
+            "offset": 63952,
+            "sha256": "543cbe949d3f6ee2bec5b909690d5ea31128340506265b9ca44a5804c59fed80"
+          },
+          {
+            "bytes": 4096,
+            "name": "CAT_H11_PREFIX",
+            "offset": 65856,
+            "sha256": "625a6e99e9c249b7eb81b647f0ca952d5775067f61564139731378d0d39157c1"
+          },
+          {
+            "bytes": 1904,
+            "name": "CAT_H11_COMMANDS",
+            "offset": 69952,
+            "sha256": "b873428149587e888af241a6606996a410307050b1bb128279c1944dafc07f19"
+          },
+          {
+            "bytes": 4096,
+            "name": "CAT_H12_PREFIX",
+            "offset": 71856,
+            "sha256": "259563ec1b5b1b39cc251d0fc3c386499c1cdd5ba863ae01cf93bbda343a4b1e"
+          },
+          {
+            "bytes": 1904,
+            "name": "CAT_H12_COMMANDS",
+            "offset": 75952,
+            "sha256": "9c095ea2f282f34953f463c77b786a50ab830fced151165a5b007cdc1a3a1217"
+          },
+          {
+            "bytes": 4096,
+            "name": "CAT_H13_PREFIX",
+            "offset": 77856,
+            "sha256": "42d27dda0c238d15a7af51c927b6bce844b1f0010916625d78e48bd11ce8d549"
+          },
+          {
+            "bytes": 1904,
+            "name": "CAT_H13_COMMANDS",
+            "offset": 81952,
+            "sha256": "709123719c59651f74ddfc945239d28a34226542e00ca60193c8e4378ccbecf4"
+          },
+          {
+            "bytes": 4096,
+            "name": "CAT_H14_PREFIX",
+            "offset": 83856,
+            "sha256": "652fcc8f0f6a4b46adb5f75a2370c24c1f293f49f05c3a1add17dd7e39666700"
+          },
+          {
+            "bytes": 1904,
+            "name": "CAT_H14_COMMANDS",
+            "offset": 87952,
+            "sha256": "5b61b2ef7627d0ee31de3d3e54c6e3a620dbd7ec3015b97e22f0117bada16ddd"
+          },
+          {
+            "bytes": 4096,
+            "name": "CAT_H15_PREFIX",
+            "offset": 89856,
+            "sha256": "4e923977a558c3d6ecda06996c53d7b4ca28ec8b5b3cb93fb830f1a2b64fe17e"
+          },
+          {
+            "bytes": 1904,
+            "name": "CAT_H15_COMMANDS",
+            "offset": 93952,
+            "sha256": "5601ea1139e4036a48a4de8d33737e0daf1605a8c4fa3b91e70333c3ac5e74c6"
+          },
+          {
+            "bytes": 4096,
+            "name": "CAT_H16_PREFIX",
+            "offset": 95856,
+            "sha256": "884842a7ff8fb56b13c0229b9d0780c2ebfb9330c1f6f671aaa0974663ba83bf"
+          },
+          {
+            "bytes": 1904,
+            "name": "CAT_H16_COMMANDS",
+            "offset": 99952,
+            "sha256": "72b4354b39ad0dad322b2a7799cf9838593154691fa6a7e08a6a454bebbcc407"
+          },
+          {
+            "bytes": 4096,
+            "name": "CAT_H17_PREFIX",
+            "offset": 101856,
+            "sha256": "4285a1aaaddb17721118b9f3003e726bcbe94278d093e21f78a423fa272792ef"
+          },
+          {
+            "bytes": 1904,
+            "name": "CAT_H17_COMMANDS",
+            "offset": 105952,
+            "sha256": "50283c07a855ffe64f8604085cb9d4abe6fbd8670d71e4f30ec2f6e529217186"
+          },
+          {
+            "bytes": 4096,
+            "name": "CAT_H18_PREFIX",
+            "offset": 107856,
+            "sha256": "48404e8dd2684d9aace0cbc5610e06e906b81159c3f7efa278647b3fa7644a6b"
+          },
+          {
+            "bytes": 1904,
+            "name": "CAT_H18_COMMANDS",
+            "offset": 111952,
+            "sha256": "e64e8560d5bd3754a66ac8a1e2dcceb238426398eb0417dfe3ad5d38f9c00510"
+          },
+          {
+            "bytes": 4096,
+            "name": "CAT_H19_PREFIX",
+            "offset": 113856,
+            "sha256": "dbcdc92b3128139ea9ccd402ffd96173fc52c996c0fe950af35d03da8623c6b1"
+          },
+          {
+            "bytes": 1904,
+            "name": "CAT_H19_COMMANDS",
+            "offset": 117952,
+            "sha256": "f4c1c6bce45594ac1276b41ceb2c0e73fbe73be67d771c0062ba1151e540edf4"
+          },
+          {
+            "bytes": 4096,
+            "name": "CAT_H20_PREFIX",
+            "offset": 119856,
+            "sha256": "7b527763cbb9460687ac1f6df6791d978028bc97f38056ccc93ea072f2e70840"
+          },
+          {
+            "bytes": 1904,
+            "name": "CAT_H20_COMMANDS",
+            "offset": 123952,
+            "sha256": "c0da1b792cc0ff872fbc083fb2b846f57ac6a971da5a32844b081cc3d9148747"
+          },
+          {
+            "bytes": 4096,
+            "name": "CAT_H21_PREFIX",
+            "offset": 125856,
+            "sha256": "c604d1ee53683ab9a68b1fb1c92b123909ef213fe6400b79346bb8a8469909fd"
+          },
+          {
+            "bytes": 1904,
+            "name": "CAT_H21_COMMANDS",
+            "offset": 129952,
+            "sha256": "26d8e5f3488a417135045c053e0ce8c6d500905a0d09131d7e3971ff4a41cfe4"
+          },
+          {
+            "bytes": 4096,
+            "name": "CAT_H22_PREFIX",
+            "offset": 131856,
+            "sha256": "c6cb06beaddcc60dd5af1cfe3c663be622a18b888ce4d9fc85003c8952136862"
+          },
+          {
+            "bytes": 1904,
+            "name": "CAT_H22_COMMANDS",
+            "offset": 135952,
+            "sha256": "77b38991689da32975d274388f9b6a6b70761ea78a7a002fa026bfc656ddef40"
+          },
+          {
+            "bytes": 4096,
+            "name": "CAT_H23_PREFIX",
+            "offset": 137856,
+            "sha256": "9331ae535ba8ba20c5fd3d7749561efb85ffdbf10f064fe89e6351dbbfc21de8"
+          },
+          {
+            "bytes": 1904,
+            "name": "CAT_H23_COMMANDS",
+            "offset": 141952,
+            "sha256": "6e998dfb9b4b01067c82cddff5bb9d29535b2b000744002dc551a4ef839ab36d"
+          },
+          {
+            "bytes": 4096,
+            "name": "CAT_H24_PREFIX",
+            "offset": 143856,
+            "sha256": "a1e1fe01d0691fc46c2aa25d0f48c3197a93ee6c6df3120c71dac114168976a1"
+          },
+          {
+            "bytes": 1904,
+            "name": "CAT_H24_COMMANDS",
+            "offset": 147952,
+            "sha256": "4756aebcaa5ae7a76d0a24d26e089fcc3ef3c786b6bdecbba2761fe3dc6fdb0b"
+          },
+          {
+            "bytes": 4096,
+            "name": "CAT_H25_PREFIX",
+            "offset": 149856,
+            "sha256": "947decd81b60d400d63b177adceb150b4df711623de6303716371f3a2bf02330"
+          },
+          {
+            "bytes": 1904,
+            "name": "CAT_H25_COMMANDS",
+            "offset": 153952,
+            "sha256": "fcb7935751fa38f04b8ab841d1495826c62ef7a010c8de43dd97b2487f3f4356"
+          },
+          {
+            "bytes": 4096,
+            "name": "CAT_H26_PREFIX",
+            "offset": 155856,
+            "sha256": "f1264470411147cf241896b19818391b3ac3c8fce9ed6a8b8cffdbe424ac193a"
+          },
+          {
+            "bytes": 1904,
+            "name": "CAT_H26_COMMANDS",
+            "offset": 159952,
+            "sha256": "5ecaf75ae9049e6dc9402a17a65d4e27289de7917772d4aedd3f5f369540c66e"
+          },
+          {
+            "bytes": 4096,
+            "name": "CAT_H27_PREFIX",
+            "offset": 161856,
+            "sha256": "68fb15a0038ba39014356b5f98f8a31968fd8e1ab592d6ea0c53f25d110c3d96"
+          },
+          {
+            "bytes": 1904,
+            "name": "CAT_H27_COMMANDS",
+            "offset": 165952,
+            "sha256": "6cb7ed3908dfe65619357399f3d5c403d0667a17ebf839352d10dc8846c9122b"
+          },
+          {
+            "bytes": 4096,
+            "name": "CAT_H28_PREFIX",
+            "offset": 167856,
+            "sha256": "b6f0f464c1c266fe8740a20df0d933e52f5d76bf924131197d54b2defd3a7497"
+          },
+          {
+            "bytes": 1904,
+            "name": "CAT_H28_COMMANDS",
+            "offset": 171952,
+            "sha256": "ec7b1cc69cc00cec93e4f8f96aea67afd7a6661227597a1d2afbaa20d2e05adc"
+          },
+          {
+            "bytes": 4096,
+            "name": "CAT_H29_PREFIX",
+            "offset": 173856,
+            "sha256": "b9191e459d9c85bdf7ed5f4f22e866524c9b29c173dd9bd1cfba1c6e94c95c0b"
+          },
+          {
+            "bytes": 1904,
+            "name": "CAT_H29_COMMANDS",
+            "offset": 177952,
+            "sha256": "a148f071e66aeaf4b3ab988da0f6e1cc5903ce1a5ee6440d875402ab1de5cd0d"
+          },
+          {
+            "bytes": 4096,
+            "name": "CAT_H30_PREFIX",
+            "offset": 179856,
+            "sha256": "46736d527742e57bc54a87fdea522b1bb078b08816a4f441861a4cf9381ce145"
+          },
+          {
+            "bytes": 1904,
+            "name": "CAT_H30_COMMANDS",
+            "offset": 183952,
+            "sha256": "c90288f34f5cc26b700355327d4b6368c1db69ba89cbe5c477464d00873f148b"
+          },
+          {
+            "bytes": 4096,
+            "name": "CAT_H31_PREFIX",
+            "offset": 185856,
+            "sha256": "7c0d590e75d605c3b090d9a82f7466c7baf9d2c5b002f63c505cdfa9edeed53d"
+          },
+          {
+            "bytes": 1904,
+            "name": "CAT_H31_COMMANDS",
+            "offset": 189952,
+            "sha256": "4bb37375838465014029735fcf87c000aa9a70622ffbaca6d478a7da7b6920d6"
+          },
+          {
+            "bytes": 4096,
+            "name": "CAT_H32_PREFIX",
+            "offset": 191856,
+            "sha256": "b4b9e66a312197d1160a03ea4937d7f920dd9acc900693a921e440b63ea4abee"
+          },
+          {
+            "bytes": 1904,
+            "name": "CAT_H32_COMMANDS",
+            "offset": 195952,
+            "sha256": "12c8a752793779e3131fe3e2668898c695e8959cbcad451f8190c0a6339b8981"
+          },
+          {
+            "bytes": 4096,
+            "name": "CAT_H33_PREFIX",
+            "offset": 197856,
+            "sha256": "efa56754e1cfd6a310aa3b26876d96ab28261ac038380e21e86ee938f11a30a6"
+          },
+          {
+            "bytes": 1904,
+            "name": "CAT_H33_COMMANDS",
+            "offset": 201952,
+            "sha256": "3ace31d26c72638c5e6ed9db45bd5e6523da9c6fe0048db96e4b9e4c3a9d6e81"
+          },
+          {
+            "bytes": 4096,
+            "name": "CAT_H34_PREFIX",
+            "offset": 203856,
+            "sha256": "e486cf0b7f892f828c6fdedd250671c1aedb415af490f9fa63b126d4e87ebe59"
+          },
+          {
+            "bytes": 1904,
+            "name": "CAT_H34_COMMANDS",
+            "offset": 207952,
+            "sha256": "e376e6d974cb6d31cfc9cbdbba15177e70642c4d23763933c5f2e462e18fa569"
+          },
+          {
+            "bytes": 4096,
+            "name": "CAT_H35_PREFIX",
+            "offset": 209856,
+            "sha256": "6fda50de9fc412dd6deaba04d5c701bf0c1a60261cb9cbcda2c76d4071c80178"
+          },
+          {
+            "bytes": 1904,
+            "name": "CAT_H35_COMMANDS",
+            "offset": 213952,
+            "sha256": "e7b1bc384408a70322ffd69152ca9d759538217c69c1869c3a5abeb8c4b0d0fc"
+          },
+          {
+            "bytes": 4096,
+            "name": "CAT_H36_PREFIX",
+            "offset": 215856,
+            "sha256": "155157cabc860c8c6a416ee2cde176c746cade450f74729f65ab42a9a50fe9b5"
+          },
+          {
+            "bytes": 1496,
+            "name": "CAT_H36_COMMANDS",
+            "offset": 219952,
+            "sha256": "24e4ffb298457be733c447f6ba02f6bf5ba0f32bfb0283853bfe54ab1ba40759"
+          },
+          {
+            "bytes": 4096,
+            "name": "CAT_H37_PREFIX",
+            "offset": 221448,
+            "sha256": "bd3cc5e07435d927d108f22037c9dcd08b6833ddcca1ecb665b1bafeb2b89940"
+          },
+          {
+            "bytes": 2504,
+            "name": "CAT_H37_COMMANDS",
+            "offset": 225544,
+            "sha256": "07822d9599f9c975ded60f4f1491b3342a19eaaf469a2543a191d2863a02bc04"
+          },
+          {
+            "bytes": 4096,
+            "name": "CAT_H38_PREFIX",
+            "offset": 228048,
+            "sha256": "20612a90be623fd73cbb95b26084a0f011a0a5b484e7d15f75bd9218a413a4ee"
+          },
+          {
+            "bytes": 1944,
+            "name": "CAT_H38_COMMANDS",
+            "offset": 232144,
+            "sha256": "2e0bd3d762110c56e57770227c6f291a4c6a2b8a5672f520b6f8c319915526d2"
+          },
+          {
+            "bytes": 4096,
+            "name": "CAT_H39_PREFIX",
+            "offset": 234088,
+            "sha256": "29697f208265d686102673c8fad93d14c07b1fb1614cc7612279a2237569228c"
+          },
+          {
+            "bytes": 2560,
+            "name": "CAT_H39_COMMANDS",
+            "offset": 238184,
+            "sha256": "f259873700050b0fa2073fff89261a2b966ed31da2e6d879f5c14384cbd396b5"
+          },
+          {
+            "bytes": 4096,
+            "name": "CAT_H40_PREFIX",
+            "offset": 240744,
+            "sha256": "c4335814221095a7b488c8904bd64c469e6fa9b14288ef4094a853a6227e0942"
+          },
+          {
+            "bytes": 1608,
+            "name": "CAT_H40_COMMANDS",
+            "offset": 244840,
+            "sha256": "61d1841f673574515d2bd19376a3d9f52c0859634728c96e06699bcd45299267"
+          },
+          {
+            "bytes": 4096,
+            "name": "CAT_H41_PREFIX",
+            "offset": 246448,
+            "sha256": "50606c933c2188dff50f98fbb145768b63439ee2990a846476245d5ba47fcc88"
+          },
+          {
+            "bytes": 2168,
+            "name": "CAT_H41_COMMANDS",
+            "offset": 250544,
+            "sha256": "4c64635cbb0ddeb07594f08d07dc6955142b428f793c3751887a82bc4e14833e"
+          },
+          {
+            "bytes": 4096,
+            "name": "CAT_H42_PREFIX",
+            "offset": 252712,
+            "sha256": "8047b2ed7d81042e34d68f4a70309613e5a9afbeae630eb68179071ee1c9a5d2"
+          },
+          {
+            "bytes": 1832,
+            "name": "CAT_H42_COMMANDS",
+            "offset": 256808,
+            "sha256": "eb500bfd2d657ce023381ea2fcafd2a7bf45d578e59d68e150d5270905f2310e"
+          },
+          {
+            "bytes": 4096,
+            "name": "CAT_H43_PREFIX",
+            "offset": 258640,
+            "sha256": "1186294de4b49dbf42fe5ee9ae9b7f2dcdc4fe6df899f15ae71a8ffc4147fd25"
+          },
+          {
+            "bytes": 2488,
+            "name": "CAT_H43_COMMANDS",
+            "offset": 262736,
+            "sha256": "54288989f1d7e15a5e0f7b71a9eeb74800495cc0f1ebe4627808c7666e0ba710"
+          },
+          {
+            "bytes": 4096,
+            "name": "CAT_H44_PREFIX",
+            "offset": 265224,
+            "sha256": "26f1c73b4338f6e75c34d50e48de80ea3565e255b8e4de82f3cc97a0dfc5d47d"
+          },
+          {
+            "bytes": 1576,
+            "name": "CAT_H44_COMMANDS",
+            "offset": 269320,
+            "sha256": "5d92a1d0a36d1d229c7c61acb97fc995e63c4f31646f4a608b1d8eccad29662f"
+          },
+          {
+            "bytes": 4096,
+            "name": "CAT_H45_PREFIX",
+            "offset": 270896,
+            "sha256": "6516986928eaca49da655b2c49a76e5211d72bed567b8af2e9c7d89f325345dc"
+          },
+          {
+            "bytes": 1704,
+            "name": "CAT_H45_COMMANDS",
+            "offset": 274992,
+            "sha256": "2cafb6f58f62310c2ebe13489c4862b8b13950c9960c9fd36a865eac2cc6219a"
+          },
+          {
+            "bytes": 4096,
+            "name": "CAT_H46_PREFIX",
+            "offset": 276696,
+            "sha256": "b3ceb536037203ea6d7585e9612588c07fb7ee0340c7bcc4de29d87e925a6088"
+          },
+          {
+            "bytes": 2408,
+            "name": "CAT_H46_COMMANDS",
+            "offset": 280792,
+            "sha256": "767a6949cac424a65a03e313a6a1011c5903171bc65e98cc8f1e6acc5b99570b"
+          },
+          {
+            "bytes": 4096,
+            "name": "CAT_H47_PREFIX",
+            "offset": 283200,
+            "sha256": "9b3365b3cb092717a2a872b27da6346766bdf33dd0be90715b34006726f0cd99"
+          },
+          {
+            "bytes": 2432,
+            "name": "CAT_H47_COMMANDS",
+            "offset": 287296,
+            "sha256": "e85e04c52263df4ecee004a5530c95b1926c9118fd1c0274b886a355b3684f4d"
+          },
+          {
+            "bytes": 4096,
+            "name": "CAT_H48_PREFIX",
+            "offset": 289728,
+            "sha256": "fe23678dd89b62913f0e29eca1a3fddcded2c1d9fe0b56c19d59a8452c4ba228"
+          },
+          {
+            "bytes": 5128,
+            "name": "CAT_H48_COMMANDS",
+            "offset": 293824,
+            "sha256": "4ca776208d23b29d9373008dee58195c295ca205c02074c31b0cf0f88fafb124"
+          },
+          {
+            "bytes": 4096,
+            "name": "CAT_H49_PREFIX",
+            "offset": 298952,
+            "sha256": "d09685b2036634852de78ca7700253c71f785554afc0e65eeacdaa9382d462bd"
+          },
+          {
+            "bytes": 2384,
+            "name": "CAT_H49_COMMANDS",
+            "offset": 303048,
+            "sha256": "874b866d18c46243dc1a13c3325eb1482b6ccb37830e38b58f3349930ecb2765"
+          },
+          {
+            "bytes": 4096,
+            "name": "CAT_H50_PREFIX",
+            "offset": 305432,
+            "sha256": "729a3b3773d49ee45d7092cb6136d9438d1ba30f9caa4142e1ddf27c375a794f"
+          },
+          {
+            "bytes": 1536,
+            "name": "CAT_H50_COMMANDS",
+            "offset": 309528,
+            "sha256": "74d3701d60c49c4e0d6b2ce483bc45efaed9e25334d276f5494b3e27dcb25a19"
+          },
+          {
+            "bytes": 4096,
+            "name": "CAT_H51_PREFIX",
+            "offset": 311064,
+            "sha256": "ab0a897d6a77f6bb207fcbe4f61d85e754aa598691afbc19b5c5387e7b56300b"
+          },
+          {
+            "bytes": 1792,
+            "name": "CAT_H51_COMMANDS",
+            "offset": 315160,
+            "sha256": "41e6d3e951278bbe24e5b653b09b7651096d6d4ea5ee54b61b920dfd0e600f67"
+          },
+          {
+            "bytes": 4096,
+            "name": "CAT_H52_PREFIX",
+            "offset": 316952,
+            "sha256": "9ca4adbf1ee0beeb7cb1765a0a7dababda3ef8b5969f75cf41a4308032194cbf"
+          },
+          {
+            "bytes": 1248,
+            "name": "CAT_H52_COMMANDS",
+            "offset": 321048,
+            "sha256": "33d4a3534f89414703806b5e9cde3de1892f0465f2f12aaa301e829c3ec20452"
+          },
+          {
+            "bytes": 4096,
+            "name": "CAT_H53_PREFIX",
+            "offset": 322296,
+            "sha256": "82208c8c079c85c2dce9e672ce773b30e92cd3370a26a7c66254e7ab85409fd8"
+          },
+          {
+            "bytes": 2592,
+            "name": "CAT_H53_COMMANDS",
+            "offset": 326392,
+            "sha256": "e19f51635ba605dad732086ec5c648ec363a6287d3c2af20876fe02839d15c14"
+          },
+          {
+            "bytes": 4096,
+            "name": "CAT_H54_PREFIX",
+            "offset": 328984,
+            "sha256": "a747dd4838c23b52d2471e53421430993359f3cc9633e21e2224b25ac53cd888"
+          },
+          {
+            "bytes": 1832,
+            "name": "CAT_H54_COMMANDS",
+            "offset": 333080,
+            "sha256": "73aab4eb8c984ffe423fc8d62b74996a29f1c31594a9944a81837caab95e5a05"
+          },
+          {
+            "bytes": 4096,
+            "name": "CAT_H55_PREFIX",
+            "offset": 334912,
+            "sha256": "d8677d420117198e00ed1789236d52c888b1c678b5021c6560f1ee08e532fda3"
+          },
+          {
+            "bytes": 1552,
+            "name": "CAT_H55_COMMANDS",
+            "offset": 339008,
+            "sha256": "e68ddad42c6bba24e7beae21aedb9ecbfb823cd5b0aa266ecf94c4e3de585839"
+          },
+          {
+            "bytes": 4096,
+            "name": "CAT_H56_PREFIX",
+            "offset": 340560,
+            "sha256": "99e8455065005e17d448b6c7b122052643778fd0d367e105851f803736672df5"
+          },
+          {
+            "bytes": 2944,
+            "name": "CAT_H56_COMMANDS",
+            "offset": 344656,
+            "sha256": "c80716061661bc83caacc455709c8e510c6696b836c5df743a31be6c52d85da6"
+          },
+          {
+            "bytes": 4096,
+            "name": "CAT_H57_PREFIX",
+            "offset": 347600,
+            "sha256": "eec499defee858761e74d60af83c3f8d7a3c5c76747bf3ad5a95b513b15b19b4"
+          },
+          {
+            "bytes": 4552,
+            "name": "CAT_H57_COMMANDS",
+            "offset": 351696,
+            "sha256": "5a7ab4a2dda2fa7df532c509efbaea454337e8e753536dc4ae520d99096092c0"
+          },
+          {
+            "bytes": 4096,
+            "name": "CAT_H58_PREFIX",
+            "offset": 356248,
+            "sha256": "b15ae042d519d678a69222a2d5bc88b124933c7aa38532f7b5554d135f7e0192"
+          },
+          {
+            "bytes": 4040,
+            "name": "CAT_H58_COMMANDS",
+            "offset": 360344,
+            "sha256": "c55bc50adbd3dff6954a30c6236596f43a0cad8d7afbb7d94e3d77ab2b24679b"
+          },
+          {
+            "bytes": 4096,
+            "name": "CAT_H59_PREFIX",
+            "offset": 364384,
+            "sha256": "491b1899e3754b5f658f073a28fa81da113330370a487948efa77ddb570920e5"
+          },
+          {
+            "bytes": 3184,
+            "name": "CAT_H59_COMMANDS",
+            "offset": 368480,
+            "sha256": "18611e0b446514f24136494db7031fc831f0c30268734c57741bfdaa2e689c33"
+          },
+          {
+            "bytes": 4096,
+            "name": "CAT_H60_PREFIX",
+            "offset": 371664,
+            "sha256": "4435da9b47ee6660cae09a834c227c301e18289ebbf3cd519a26cf7c4f0b6ab0"
+          },
+          {
+            "bytes": 2032,
+            "name": "CAT_H60_COMMANDS",
+            "offset": 375760,
+            "sha256": "b4897dd865dac2e1c4817cb0c767836a62552e91aef11ac2679fe4592698c8ba"
+          },
+          {
+            "bytes": 4096,
+            "name": "CAT_H61_PREFIX",
+            "offset": 377792,
+            "sha256": "fa03180b55b04097b29e6e51b0bd8463b432f7dcfab104138b43598e54484ca6"
+          },
+          {
+            "bytes": 1552,
+            "name": "CAT_H61_COMMANDS",
+            "offset": 381888,
+            "sha256": "f987c70134abb201bc5afafab4cbee56e3ca8107b0789c5a67e3003b0dd3d535"
+          },
+          {
+            "bytes": 4096,
+            "name": "CAT_H62_PREFIX",
+            "offset": 383440,
+            "sha256": "f61358c95a682e05197d780d7dfd7d3faec902b7ebafe0cdcd55de3228347cdf"
+          },
+          {
+            "bytes": 1856,
+            "name": "CAT_H62_COMMANDS",
+            "offset": 387536,
+            "sha256": "2666e07362528068251cf4cddfc0f706f21ef074ecda5b333397491d9052479b"
+          },
+          {
+            "bytes": 4096,
+            "name": "CAT_H63_PREFIX",
+            "offset": 389392,
+            "sha256": "3ae4313a80e0536468a333e0339604fe4c4af8ea856631045b0585ecb0de223e"
+          },
+          {
+            "bytes": 1336,
+            "name": "CAT_H63_COMMANDS",
+            "offset": 393488,
+            "sha256": "bf733c53dfea75f8eba7a589f1380a1e3f21e2bdb235e0e7952e1744b4de8322"
+          },
+          {
+            "bytes": 4096,
+            "name": "CAT_H64_PREFIX",
+            "offset": 394824,
+            "sha256": "6036da32281c221a95beb25a672106905aa3ad7585b6817840b339a61368d154"
+          },
+          {
+            "bytes": 1608,
+            "name": "CAT_H64_COMMANDS",
+            "offset": 398920,
+            "sha256": "336cd99cc97e0c627ebe188fd3d14c5235f01db8f96481f2c313b55e9c795eda"
+          },
+          {
+            "bytes": 4096,
+            "name": "CAT_H65_PREFIX",
+            "offset": 400528,
+            "sha256": "24d0af3a0679d9796db63b698c0cbc7478599458ab891dff16fbfa028012cca3"
+          },
+          {
+            "bytes": 2560,
+            "name": "CAT_H65_COMMANDS",
+            "offset": 404624,
+            "sha256": "7bd00b4c0fcf4f0b40e0366ebdd415518278933fa6fa2a2c88f68cdb5676373c"
+          },
+          {
+            "bytes": 4096,
+            "name": "CAT_H66_PREFIX",
+            "offset": 407184,
+            "sha256": "54bd6692fcf6fff6bebb60fc7d3dca47c9ea6d634ee575b3ba1293ea30895916"
+          },
+          {
+            "bytes": 1448,
+            "name": "CAT_H66_COMMANDS",
+            "offset": 411280,
+            "sha256": "a293dfa8e361a2372edbf97b11dbe5befc7ca57fe47958910f8a998ff1b93ec7"
+          },
+          {
+            "bytes": 4096,
+            "name": "CAT_H67_PREFIX",
+            "offset": 412728,
+            "sha256": "0a7091a91559bbd1618a9895c3b398144b973b51590088c17b4c4f0e3d15e855"
+          },
+          {
+            "bytes": 1464,
+            "name": "CAT_H67_COMMANDS",
+            "offset": 416824,
+            "sha256": "0440fc308ac8aa850b725537d98bfaca69a13ea6cf5273c141a475755c202d1f"
+          },
+          {
+            "bytes": 4096,
+            "name": "CAT_H68_PREFIX",
+            "offset": 418288,
+            "sha256": "bfd56a63645238dd90aafab615c53326f83b5c2e9034fc85ecbb35c1fc0da0f0"
+          },
+          {
+            "bytes": 1536,
+            "name": "CAT_H68_COMMANDS",
+            "offset": 422384,
+            "sha256": "b479619d891395d339f04f0565b6e06ba0929c6131ae8e9f6d34e7de40414423"
+          },
+          {
+            "bytes": 4096,
+            "name": "CAT_H69_PREFIX",
+            "offset": 423920,
+            "sha256": "d08426dd556b89719bedc7da14c77fb17d795f87263aa2424f64421bfe8ae4f0"
+          },
+          {
+            "bytes": 2520,
+            "name": "CAT_H69_COMMANDS",
+            "offset": 428016,
+            "sha256": "05f2e25a419473751d57ec675a41b677a9a6a2bbd69f22c22a57d18ae79ff734"
+          },
+          {
+            "bytes": 4096,
+            "name": "CAT_H70_PREFIX",
+            "offset": 430536,
+            "sha256": "1154ba3688e8b6c36788f161d1bbd6a160c88d7474bf2f7cca90e4f42864394a"
+          },
+          {
+            "bytes": 800,
+            "name": "CAT_H70_COMMANDS",
+            "offset": 434632,
+            "sha256": "dcf68c38adea3c4ec90f60dcebd39fbed69e9680482b6f4a2afd47822a654f3e"
+          },
+          {
+            "bytes": 4096,
+            "name": "CAT_H71_PREFIX",
+            "offset": 435432,
+            "sha256": "039c4cf177930bbff53ed00e4bc56e87c90a5ed7e3d564a806f6719efc9bc0a2"
+          },
+          {
+            "bytes": 1536,
+            "name": "CAT_H71_COMMANDS",
+            "offset": 439528,
+            "sha256": "dacfa1a095c58b9a241e2aeafdba09abcd4876eef2f4a83aa7be20c8dfdf7270"
+          },
+          {
+            "bytes": 4096,
+            "name": "CAT_H72_PREFIX",
+            "offset": 441064,
+            "sha256": "ab04bdec10b945a817b370a6ca78edda948f575dc68ef7795cacf8c72a4fac49"
+          },
+          {
+            "bytes": 1840,
+            "name": "CAT_H72_COMMANDS",
+            "offset": 445160,
+            "sha256": "102e4cf7ac3d25d9aa4571e74bfef7d5c6a13090151ae8a16db9ce6285b6ea5f"
+          },
+          {
+            "bytes": 4096,
+            "name": "CAT_H73_PREFIX",
+            "offset": 447000,
+            "sha256": "b5c98cf8727e50ecd11f3547c321188ad93b9642720be069959b59a261d354d8"
+          },
+          {
+            "bytes": 1952,
+            "name": "CAT_H73_COMMANDS",
+            "offset": 451096,
+            "sha256": "7a39418a30571af042282559035c16b41a57d56bee960a48a45c8e6400aeab9e"
+          },
+          {
+            "bytes": 4096,
+            "name": "CAT_H74_PREFIX",
+            "offset": 453048,
+            "sha256": "43d2df12657502d15d73e779e930233381db4d365b4f0ef282ff9ef7d4cec4ca"
+          },
+          {
+            "bytes": 1480,
+            "name": "CAT_H74_COMMANDS",
+            "offset": 457144,
+            "sha256": "76c0237af58d2e7457b98b3ea67a20198a4b2d98a811e829ce50ac1d92176f7d"
+          },
+          {
+            "bytes": 4096,
+            "name": "CAT_H75_PREFIX",
+            "offset": 458624,
+            "sha256": "fc4569f81de94d66e6b8999515c79de38455d5675f38c657473589e19e2fc9c0"
+          },
+          {
+            "bytes": 1712,
+            "name": "CAT_H75_COMMANDS",
+            "offset": 462720,
+            "sha256": "1d4c75120b7ee23beb85b5ac6a28fc06f53fce94ed1145383dc8e2f56c9173f8"
+          },
+          {
+            "bytes": 4096,
+            "name": "CAT_H76_PREFIX",
+            "offset": 464432,
+            "sha256": "e3f3346ddd8eef35425cea46fd45b904497e94c34f59a025710cc2e25b6346d6"
+          },
+          {
+            "bytes": 1416,
+            "name": "CAT_H76_COMMANDS",
+            "offset": 468528,
+            "sha256": "16a3d0d38a7a2ec226c2ce712d337456ae1d1d2d4ab3da0e19dd8106fabb3040"
+          },
+          {
+            "bytes": 4096,
+            "name": "CAT_H77_PREFIX",
+            "offset": 469944,
+            "sha256": "be8014845b5ba9a81d389d249182b97d97422e07c211ee5fad42f64dcde30cf6"
+          },
+          {
+            "bytes": 1368,
+            "name": "CAT_H77_COMMANDS",
+            "offset": 474040,
+            "sha256": "0e820c1e285bb78e570957ec9f7892742c80407fca78b1d510d12eb0a3418830"
+          },
+          {
+            "bytes": 4096,
+            "name": "CAT_H78_PREFIX",
+            "offset": 475408,
+            "sha256": "5bf78ea9a7893c8a8232e1c5d62e8b10610d02b4814c5f6469c1201659a21b44"
+          },
+          {
+            "bytes": 2560,
+            "name": "CAT_H78_COMMANDS",
+            "offset": 479504,
+            "sha256": "d2306df0f1b5428caeac4a0b58e4d83a53cb28a6c6a6cfe8869948fce5049d09"
+          },
+          {
+            "bytes": 4096,
+            "name": "CAT_H79_PREFIX",
+            "offset": 482064,
+            "sha256": "315ccc58556ee3e00430748e2948b01c57a85fb3e2f8a0c0b3243de5140dd6b2"
+          },
+          {
+            "bytes": 2280,
+            "name": "CAT_H79_COMMANDS",
+            "offset": 486160,
+            "sha256": "6de7f7eee7bbb64d57e589748a95e1411eda370fff8d0715b1f3219d19c1ae1b"
+          },
+          {
+            "bytes": 4096,
+            "name": "CAT_H80_PREFIX",
+            "offset": 488440,
+            "sha256": "49ec3ed11203ebf579ea1d40377a0f029dd0a9c54b020051dd3f806d9db8720c"
+          },
+          {
+            "bytes": 2472,
+            "name": "CAT_H80_COMMANDS",
+            "offset": 492536,
+            "sha256": "713999e29c39826c60b77798f3de0da0d82fc4289707f3615c5d4d8b0642edb9"
+          },
+          {
+            "bytes": 4096,
+            "name": "CAT_H81_PREFIX",
+            "offset": 495008,
+            "sha256": "920a986231c07942593cde7b66119ef3811a24bc7189be7a3d1b0ed2e39426dc"
+          },
+          {
+            "bytes": 2200,
+            "name": "CAT_H81_COMMANDS",
+            "offset": 499104,
+            "sha256": "4e46b6476a616ce1f02307fb2ed2195bd2bc6f2629e6e63c9f21192e2fcdb861"
+          },
+          {
+            "bytes": 4096,
+            "name": "CAT_H82_PREFIX",
+            "offset": 501304,
+            "sha256": "c341dbb177b076fc8bebc73dda781304943ff6c72ea4bd010e8c188782cc7a69"
+          },
+          {
+            "bytes": 2192,
+            "name": "CAT_H82_COMMANDS",
+            "offset": 505400,
+            "sha256": "be69a96e087909d2f4b954ae3742cc1f5411896eaf3737c4e99e60cdd75fbc28"
+          },
+          {
+            "bytes": 4096,
+            "name": "CAT_H83_PREFIX",
+            "offset": 507592,
+            "sha256": "699bfa33ec851b6396854376e7363735c250bad5cdeed71c90321a99b838b911"
+          },
+          {
+            "bytes": 2232,
+            "name": "CAT_H83_COMMANDS",
+            "offset": 511688,
+            "sha256": "0ae462f94e092d6d2a1a39bfb529315b92aaa8bcbd450abb494c9fb604de056a"
+          },
+          {
+            "bytes": 4096,
+            "name": "CAT_H84_PREFIX",
+            "offset": 513920,
+            "sha256": "873cb2ccea68948ee3f7bfb2a2ec0942696d67898fe9a7fd370ca92974d4e8a2"
+          },
+          {
+            "bytes": 2192,
+            "name": "CAT_H84_COMMANDS",
+            "offset": 518016,
+            "sha256": "1e70d3d81dfbb1e58e906329986b6c282c526fe54b3a322a5d4e53918041b985"
+          },
+          {
+            "bytes": 4096,
+            "name": "CAT_H85_PREFIX",
+            "offset": 520208,
+            "sha256": "f39e3b7e0410917f49857ac220d14992df5666f4ed6906f6d025a6e5d966e022"
+          },
+          {
+            "bytes": 2144,
+            "name": "CAT_H85_COMMANDS",
+            "offset": 524304,
+            "sha256": "dae7b696b5820305a5cd743aaa4410954b7da38b9ce3190aa66f8414e80650ec"
+          },
+          {
+            "bytes": 4096,
+            "name": "CAT_H86_PREFIX",
+            "offset": 526448,
+            "sha256": "ee1812eff7184d3b8b1dc708b33c8d05988fd7f51cd6041ae6c7cab25604fc64"
+          },
+          {
+            "bytes": 2016,
+            "name": "CAT_H86_COMMANDS",
+            "offset": 530544,
+            "sha256": "1dc74793b6b2d82b1174eb5b4b3cddc96538348d3452b9202b6b6166f9566fab"
+          },
+          {
+            "bytes": 4096,
+            "name": "CAT_H87_PREFIX",
+            "offset": 532560,
+            "sha256": "07c5b35026ed9801abe00d48de0796fde9a082e08363b619b2d0a93cf65a2df7"
+          },
+          {
+            "bytes": 2000,
+            "name": "CAT_H87_COMMANDS",
+            "offset": 536656,
+            "sha256": "d86880418b74d38ca0a7d939e77a65bfbe3cc8eed60caf5b42382e6cd012363f"
+          },
+          {
+            "bytes": 4096,
+            "name": "CAT_H88_PREFIX",
+            "offset": 538656,
+            "sha256": "24895761943a46058297e8359de1ba9c515bf643b19888f65e7ccd7b8aaf8c4f"
+          },
+          {
+            "bytes": 2312,
+            "name": "CAT_H88_COMMANDS",
+            "offset": 542752,
+            "sha256": "e31dfbf2c5b866b12caa771dbe8a9a904de84e012f0d5a94b4a4093aeb266f88"
+          },
+          {
+            "bytes": 4096,
+            "name": "CAT_H89_PREFIX",
+            "offset": 545064,
+            "sha256": "b79ebf9a9832318af63f408f8cff3806264324e49395e7ca403854a474ef68a3"
+          },
+          {
+            "bytes": 1872,
+            "name": "CAT_H89_COMMANDS",
+            "offset": 549160,
+            "sha256": "dd652586353c581a6a21a644be09eb679d7a9bf4476ce64820b4e8b1171e0feb"
+          },
+          {
+            "bytes": 4096,
+            "name": "CAT_H90_PREFIX",
+            "offset": 551032,
+            "sha256": "ed969e5871fca79dad666331c0f791b23b0166dab4ffe56c65e4763c7ca52be6"
+          },
+          {
+            "bytes": 2168,
+            "name": "CAT_H90_COMMANDS",
+            "offset": 555128,
+            "sha256": "7d3cdb171b0287efe23bd218c96b39b978cd2c78f103f5dcf0bf3b4f0b0c507a"
+          },
+          {
+            "bytes": 4096,
+            "name": "CAT_H91_PREFIX",
+            "offset": 557296,
+            "sha256": "be1a7394058d55d6748318e0c06fbfee2ba1d2e29a25955a6a0f4748b6482e12"
+          },
+          {
+            "bytes": 2256,
+            "name": "CAT_H91_COMMANDS",
+            "offset": 561392,
+            "sha256": "289daac5738de276562aa1718d148b9e260be6af3c4d609a64da786dd9c853d9"
+          },
+          {
+            "bytes": 4096,
+            "name": "CAT_H92_PREFIX",
+            "offset": 563648,
+            "sha256": "febe07ee54145688955025033ddabfc3114cce43f5a59b5a32833264b981c219"
+          },
+          {
+            "bytes": 2360,
+            "name": "CAT_H92_COMMANDS",
+            "offset": 567744,
+            "sha256": "7fcabfd95346e6b924703ad6d8b0746615cc3cbd16747a0b92aae60772ce33ef"
+          },
+          {
+            "bytes": 4096,
+            "name": "CAT_H93_PREFIX",
+            "offset": 570104,
+            "sha256": "d3d93682f0ff416294194ce0c3945df0814c026b6fe746b22a74be6185481d01"
+          },
+          {
+            "bytes": 2280,
+            "name": "CAT_H93_COMMANDS",
+            "offset": 574200,
+            "sha256": "dc4f2d618a4d58e78c504b603786b868a28f4c319a36a4ea8fa35b91785a0659"
+          },
+          {
+            "bytes": 4096,
+            "name": "CAT_H94_PREFIX",
+            "offset": 576480,
+            "sha256": "3030336b4daf07bad228897f90bb92b7c7b6747ff35122c545c1cacfd15b12e1"
+          },
+          {
+            "bytes": 2040,
+            "name": "CAT_H94_COMMANDS",
+            "offset": 580576,
+            "sha256": "b3bdd358c6a2fa59da41831fd390284587a5f8ff4ac10e97e09e2e8aad972f96"
+          }
+        ],
+        "sha256": "914e813291dd6ba70bae1fb849899df22460ba2002d723543ad27aa8d82f47bc"
+      },
+      "path": "desktop/src-tauri/src/android_supplier_macos_intel_catalogue.rs",
+      "profile": "x86_64"
+    }
+  ],
+  "compilerRun": false,
+  "kind": "catalogue-binary-storage-representation",
+  "representation": "one content-addressed pack per profile; contiguous const slice ranges",
+  "schemaVersion": 1
+}

@@ -1,0 +1,683 @@
+{
+  "kind": "unsigned-fresh-birth-codec-comparison-v1",
+  "scope": "Synthetic codec DATA only, never native/producer/birth authority",
+  "vectors": [
+    {
+      "name": "arm64-legacy",
+      "target": "aarch64-apple-darwin",
+      "releaseSet": {
+        "schemaVersion": 2,
+        "current": {
+          "profile": "fixed-macos26-arm64-maintenance-v2",
+          "packageIdentifier": "dev.mobile-release-kit.desktop.installed",
+          "bundleIdentifier": "dev.mobile-release-kit.desktop",
+          "packageVersion": "0.3.0",
+          "release": "macos26-arm64-data-3",
+          "sourceCommit": "0000000000000000000000000000000000000003",
+          "protocolSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "runtimeManifestSha256": "0000000000000000000000000000000000000000000000000000000000000003",
+          "inventorySha256": "0000000000000000000000000000000000000000000000000000000000000017",
+          "signingPolicySha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "packageSha256": "000000000000000000000000000000000000000000000000000000000000002b"
+        },
+        "acceptedPredecessors": [
+          {
+            "profile": "fixed-macos26-arm64-maintenance-v2",
+            "packageIdentifier": "dev.mobile-release-kit.desktop.installed",
+            "bundleIdentifier": "dev.mobile-release-kit.desktop",
+            "packageVersion": "0.2.0",
+            "release": "macos26-arm64-data-2",
+            "sourceCommit": "0000000000000000000000000000000000000002",
+            "protocolSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "runtimeManifestSha256": "0000000000000000000000000000000000000000000000000000000000000002",
+            "inventorySha256": "0000000000000000000000000000000000000000000000000000000000000016",
+            "signingPolicySha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "packageSha256": "000000000000000000000000000000000000000000000000000000000000002a"
+          }
+        ]
+      },
+      "hasFreshBirth": false,
+      "canonical": "{\"schemaVersion\":2,\"kind\":\"mrk-macos-maintenance-intent-v2\",\"target\":\"aarch64-apple-darwin\",\"invocation\":\"00000000000000000000000000000009\",\"requestId\":\"0000000000000000000000000000006d\",\"action\":\"fresh-install\",\"previous\":null,\"next\":{\"profile\":\"fixed-macos26-arm64-maintenance-v2\",\"packageIdentifier\":\"dev.mobile-release-kit.desktop.installed\",\"bundleIdentifier\":\"dev.mobile-release-kit.desktop\",\"packageVersion\":\"0.3.0\",\"release\":\"macos26-arm64-data-3\",\"sourceCommit\":\"0000000000000000000000000000000000000003\",\"protocolSha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"runtimeManifestSha256\":\"0000000000000000000000000000000000000000000000000000000000000003\",\"inventorySha256\":\"0000000000000000000000000000000000000000000000000000000000000017\",\"signingPolicySha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"packageSha256\":\"000000000000000000000000000000000000000000000000000000000000002b\"},\"previousState\":null}\n",
+      "sha256": "799c30d8eebb35c6a891ded924b453dda6263e6e797109386be1b94ed426770f"
+    },
+    {
+      "name": "arm64-absent-r",
+      "target": "aarch64-apple-darwin",
+      "releaseSet": {
+        "schemaVersion": 2,
+        "current": {
+          "profile": "fixed-macos26-arm64-maintenance-v2",
+          "packageIdentifier": "dev.mobile-release-kit.desktop.installed",
+          "bundleIdentifier": "dev.mobile-release-kit.desktop",
+          "packageVersion": "0.3.0",
+          "release": "macos26-arm64-data-3",
+          "sourceCommit": "0000000000000000000000000000000000000003",
+          "protocolSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "runtimeManifestSha256": "0000000000000000000000000000000000000000000000000000000000000003",
+          "inventorySha256": "0000000000000000000000000000000000000000000000000000000000000017",
+          "signingPolicySha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "packageSha256": "000000000000000000000000000000000000000000000000000000000000002b"
+        },
+        "acceptedPredecessors": [
+          {
+            "profile": "fixed-macos26-arm64-maintenance-v2",
+            "packageIdentifier": "dev.mobile-release-kit.desktop.installed",
+            "bundleIdentifier": "dev.mobile-release-kit.desktop",
+            "packageVersion": "0.2.0",
+            "release": "macos26-arm64-data-2",
+            "sourceCommit": "0000000000000000000000000000000000000002",
+            "protocolSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "runtimeManifestSha256": "0000000000000000000000000000000000000000000000000000000000000002",
+            "inventorySha256": "0000000000000000000000000000000000000000000000000000000000000016",
+            "signingPolicySha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "packageSha256": "000000000000000000000000000000000000000000000000000000000000002a"
+          }
+        ]
+      },
+      "hasFreshBirth": true,
+      "canonical": "{\"schemaVersion\":2,\"kind\":\"mrk-macos-maintenance-intent-v2\",\"target\":\"aarch64-apple-darwin\",\"invocation\":\"00000000000000000000000000000009\",\"requestId\":\"0000000000000000000000000000006d\",\"action\":\"fresh-install\",\"previous\":null,\"next\":{\"profile\":\"fixed-macos26-arm64-maintenance-v2\",\"packageIdentifier\":\"dev.mobile-release-kit.desktop.installed\",\"bundleIdentifier\":\"dev.mobile-release-kit.desktop\",\"packageVersion\":\"0.3.0\",\"release\":\"macos26-arm64-data-3\",\"sourceCommit\":\"0000000000000000000000000000000000000003\",\"protocolSha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"runtimeManifestSha256\":\"0000000000000000000000000000000000000000000000000000000000000003\",\"inventorySha256\":\"0000000000000000000000000000000000000000000000000000000000000017\",\"signingPolicySha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"packageSha256\":\"000000000000000000000000000000000000000000000000000000000000002b\"},\"previousState\":null,\"freshBirth\":{\"schemaVersion\":1,\"kind\":\"mrk-macos-fresh-birth-v1\",\"producerDescriptorSha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"producerSignatureSha256\":\"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\",\"registrationOrigin\":\"absent-before-maintenance-created-under-maintenance\",\"installRoot\":{\"device\":1,\"inode\":101,\"birthSeconds\":1700000000,\"birthNanoseconds\":42,\"volumeUuid\":\"11111111111111111111111111111111\"},\"versionsRoot\":{\"device\":1,\"inode\":102,\"birthSeconds\":1700000000,\"birthNanoseconds\":42,\"volumeUuid\":\"11111111111111111111111111111111\"},\"registrationGate\":{\"device\":1,\"inode\":103,\"birthSeconds\":1700000000,\"birthNanoseconds\":42,\"volumeUuid\":\"11111111111111111111111111111111\"},\"maintenanceGate\":{\"device\":1,\"inode\":104,\"birthSeconds\":1700000000,\"birthNanoseconds\":42,\"volumeUuid\":\"11111111111111111111111111111111\"}}}\n",
+      "sha256": "db394be055317ea239a04b701c1dd788792d022cd23594ff3de1c43c6ef7e28b"
+    },
+    {
+      "name": "arm64-existing-r",
+      "target": "aarch64-apple-darwin",
+      "releaseSet": {
+        "schemaVersion": 2,
+        "current": {
+          "profile": "fixed-macos26-arm64-maintenance-v2",
+          "packageIdentifier": "dev.mobile-release-kit.desktop.installed",
+          "bundleIdentifier": "dev.mobile-release-kit.desktop",
+          "packageVersion": "0.3.0",
+          "release": "macos26-arm64-data-3",
+          "sourceCommit": "0000000000000000000000000000000000000003",
+          "protocolSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "runtimeManifestSha256": "0000000000000000000000000000000000000000000000000000000000000003",
+          "inventorySha256": "0000000000000000000000000000000000000000000000000000000000000017",
+          "signingPolicySha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "packageSha256": "000000000000000000000000000000000000000000000000000000000000002b"
+        },
+        "acceptedPredecessors": [
+          {
+            "profile": "fixed-macos26-arm64-maintenance-v2",
+            "packageIdentifier": "dev.mobile-release-kit.desktop.installed",
+            "bundleIdentifier": "dev.mobile-release-kit.desktop",
+            "packageVersion": "0.2.0",
+            "release": "macos26-arm64-data-2",
+            "sourceCommit": "0000000000000000000000000000000000000002",
+            "protocolSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "runtimeManifestSha256": "0000000000000000000000000000000000000000000000000000000000000002",
+            "inventorySha256": "0000000000000000000000000000000000000000000000000000000000000016",
+            "signingPolicySha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "packageSha256": "000000000000000000000000000000000000000000000000000000000000002a"
+          }
+        ]
+      },
+      "hasFreshBirth": true,
+      "canonical": "{\"schemaVersion\":2,\"kind\":\"mrk-macos-maintenance-intent-v2\",\"target\":\"aarch64-apple-darwin\",\"invocation\":\"00000000000000000000000000000009\",\"requestId\":\"0000000000000000000000000000006d\",\"action\":\"fresh-install\",\"previous\":null,\"next\":{\"profile\":\"fixed-macos26-arm64-maintenance-v2\",\"packageIdentifier\":\"dev.mobile-release-kit.desktop.installed\",\"bundleIdentifier\":\"dev.mobile-release-kit.desktop\",\"packageVersion\":\"0.3.0\",\"release\":\"macos26-arm64-data-3\",\"sourceCommit\":\"0000000000000000000000000000000000000003\",\"protocolSha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"runtimeManifestSha256\":\"0000000000000000000000000000000000000000000000000000000000000003\",\"inventorySha256\":\"0000000000000000000000000000000000000000000000000000000000000017\",\"signingPolicySha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"packageSha256\":\"000000000000000000000000000000000000000000000000000000000000002b\"},\"previousState\":null,\"freshBirth\":{\"schemaVersion\":1,\"kind\":\"mrk-macos-fresh-birth-v1\",\"producerDescriptorSha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"producerSignatureSha256\":\"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\",\"registrationOrigin\":\"existing-exclusive-before-maintenance\",\"installRoot\":{\"device\":1,\"inode\":101,\"birthSeconds\":1700000000,\"birthNanoseconds\":42,\"volumeUuid\":\"11111111111111111111111111111111\"},\"versionsRoot\":{\"device\":1,\"inode\":102,\"birthSeconds\":1700000000,\"birthNanoseconds\":42,\"volumeUuid\":\"11111111111111111111111111111111\"},\"registrationGate\":{\"device\":1,\"inode\":103,\"birthSeconds\":1700000000,\"birthNanoseconds\":42,\"volumeUuid\":\"11111111111111111111111111111111\"},\"maintenanceGate\":{\"device\":1,\"inode\":104,\"birthSeconds\":1700000000,\"birthNanoseconds\":42,\"volumeUuid\":\"11111111111111111111111111111111\"}}}\n",
+      "sha256": "5a7e74a453c3f74d0637599f559d67fc925bc9000e0935fe6ecf809403955383"
+    },
+    {
+      "name": "x86_64-legacy",
+      "target": "x86_64-apple-darwin",
+      "releaseSet": {
+        "schemaVersion": 2,
+        "current": {
+          "profile": "fixed-macos26-x86_64-maintenance-v2",
+          "packageIdentifier": "dev.mobile-release-kit.desktop.installed",
+          "bundleIdentifier": "dev.mobile-release-kit.desktop",
+          "packageVersion": "0.3.0",
+          "release": "macos26-x86_64-data-3",
+          "sourceCommit": "0000000000000000000000000000000000000003",
+          "protocolSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "runtimeManifestSha256": "0000000000000000000000000000000000000000000000000000000000000003",
+          "inventorySha256": "0000000000000000000000000000000000000000000000000000000000000017",
+          "signingPolicySha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "packageSha256": "000000000000000000000000000000000000000000000000000000000000002b"
+        },
+        "acceptedPredecessors": [
+          {
+            "profile": "fixed-macos26-x86_64-maintenance-v2",
+            "packageIdentifier": "dev.mobile-release-kit.desktop.installed",
+            "bundleIdentifier": "dev.mobile-release-kit.desktop",
+            "packageVersion": "0.2.0",
+            "release": "macos26-x86_64-data-2",
+            "sourceCommit": "0000000000000000000000000000000000000002",
+            "protocolSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "runtimeManifestSha256": "0000000000000000000000000000000000000000000000000000000000000002",
+            "inventorySha256": "0000000000000000000000000000000000000000000000000000000000000016",
+            "signingPolicySha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "packageSha256": "000000000000000000000000000000000000000000000000000000000000002a"
+          }
+        ]
+      },
+      "hasFreshBirth": false,
+      "canonical": "{\"schemaVersion\":2,\"kind\":\"mrk-macos-maintenance-intent-v2\",\"target\":\"x86_64-apple-darwin\",\"invocation\":\"00000000000000000000000000000009\",\"requestId\":\"0000000000000000000000000000006d\",\"action\":\"fresh-install\",\"previous\":null,\"next\":{\"profile\":\"fixed-macos26-x86_64-maintenance-v2\",\"packageIdentifier\":\"dev.mobile-release-kit.desktop.installed\",\"bundleIdentifier\":\"dev.mobile-release-kit.desktop\",\"packageVersion\":\"0.3.0\",\"release\":\"macos26-x86_64-data-3\",\"sourceCommit\":\"0000000000000000000000000000000000000003\",\"protocolSha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"runtimeManifestSha256\":\"0000000000000000000000000000000000000000000000000000000000000003\",\"inventorySha256\":\"0000000000000000000000000000000000000000000000000000000000000017\",\"signingPolicySha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"packageSha256\":\"000000000000000000000000000000000000000000000000000000000000002b\"},\"previousState\":null}\n",
+      "sha256": "18fbdd8ce200543344e8560aa2cb8413cbc460658de4c17e92e5c17357b035ae"
+    },
+    {
+      "name": "x86_64-absent-r",
+      "target": "x86_64-apple-darwin",
+      "releaseSet": {
+        "schemaVersion": 2,
+        "current": {
+          "profile": "fixed-macos26-x86_64-maintenance-v2",
+          "packageIdentifier": "dev.mobile-release-kit.desktop.installed",
+          "bundleIdentifier": "dev.mobile-release-kit.desktop",
+          "packageVersion": "0.3.0",
+          "release": "macos26-x86_64-data-3",
+          "sourceCommit": "0000000000000000000000000000000000000003",
+          "protocolSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "runtimeManifestSha256": "0000000000000000000000000000000000000000000000000000000000000003",
+          "inventorySha256": "0000000000000000000000000000000000000000000000000000000000000017",
+          "signingPolicySha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "packageSha256": "000000000000000000000000000000000000000000000000000000000000002b"
+        },
+        "acceptedPredecessors": [
+          {
+            "profile": "fixed-macos26-x86_64-maintenance-v2",
+            "packageIdentifier": "dev.mobile-release-kit.desktop.installed",
+            "bundleIdentifier": "dev.mobile-release-kit.desktop",
+            "packageVersion": "0.2.0",
+            "release": "macos26-x86_64-data-2",
+            "sourceCommit": "0000000000000000000000000000000000000002",
+            "protocolSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "runtimeManifestSha256": "0000000000000000000000000000000000000000000000000000000000000002",
+            "inventorySha256": "0000000000000000000000000000000000000000000000000000000000000016",
+            "signingPolicySha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "packageSha256": "000000000000000000000000000000000000000000000000000000000000002a"
+          }
+        ]
+      },
+      "hasFreshBirth": true,
+      "canonical": "{\"schemaVersion\":2,\"kind\":\"mrk-macos-maintenance-intent-v2\",\"target\":\"x86_64-apple-darwin\",\"invocation\":\"00000000000000000000000000000009\",\"requestId\":\"0000000000000000000000000000006d\",\"action\":\"fresh-install\",\"previous\":null,\"next\":{\"profile\":\"fixed-macos26-x86_64-maintenance-v2\",\"packageIdentifier\":\"dev.mobile-release-kit.desktop.installed\",\"bundleIdentifier\":\"dev.mobile-release-kit.desktop\",\"packageVersion\":\"0.3.0\",\"release\":\"macos26-x86_64-data-3\",\"sourceCommit\":\"0000000000000000000000000000000000000003\",\"protocolSha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"runtimeManifestSha256\":\"0000000000000000000000000000000000000000000000000000000000000003\",\"inventorySha256\":\"0000000000000000000000000000000000000000000000000000000000000017\",\"signingPolicySha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"packageSha256\":\"000000000000000000000000000000000000000000000000000000000000002b\"},\"previousState\":null,\"freshBirth\":{\"schemaVersion\":1,\"kind\":\"mrk-macos-fresh-birth-v1\",\"producerDescriptorSha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"producerSignatureSha256\":\"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\",\"registrationOrigin\":\"absent-before-maintenance-created-under-maintenance\",\"installRoot\":{\"device\":1,\"inode\":101,\"birthSeconds\":1700000000,\"birthNanoseconds\":42,\"volumeUuid\":\"11111111111111111111111111111111\"},\"versionsRoot\":{\"device\":1,\"inode\":102,\"birthSeconds\":1700000000,\"birthNanoseconds\":42,\"volumeUuid\":\"11111111111111111111111111111111\"},\"registrationGate\":{\"device\":1,\"inode\":103,\"birthSeconds\":1700000000,\"birthNanoseconds\":42,\"volumeUuid\":\"11111111111111111111111111111111\"},\"maintenanceGate\":{\"device\":1,\"inode\":104,\"birthSeconds\":1700000000,\"birthNanoseconds\":42,\"volumeUuid\":\"11111111111111111111111111111111\"}}}\n",
+      "sha256": "5e23669a23651d9e309adbac909540c30352ac1f6a8bb2f9e1d25066bba96b0d"
+    },
+    {
+      "name": "x86_64-existing-r",
+      "target": "x86_64-apple-darwin",
+      "releaseSet": {
+        "schemaVersion": 2,
+        "current": {
+          "profile": "fixed-macos26-x86_64-maintenance-v2",
+          "packageIdentifier": "dev.mobile-release-kit.desktop.installed",
+          "bundleIdentifier": "dev.mobile-release-kit.desktop",
+          "packageVersion": "0.3.0",
+          "release": "macos26-x86_64-data-3",
+          "sourceCommit": "0000000000000000000000000000000000000003",
+          "protocolSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+          "runtimeManifestSha256": "0000000000000000000000000000000000000000000000000000000000000003",
+          "inventorySha256": "0000000000000000000000000000000000000000000000000000000000000017",
+          "signingPolicySha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+          "packageSha256": "000000000000000000000000000000000000000000000000000000000000002b"
+        },
+        "acceptedPredecessors": [
+          {
+            "profile": "fixed-macos26-x86_64-maintenance-v2",
+            "packageIdentifier": "dev.mobile-release-kit.desktop.installed",
+            "bundleIdentifier": "dev.mobile-release-kit.desktop",
+            "packageVersion": "0.2.0",
+            "release": "macos26-x86_64-data-2",
+            "sourceCommit": "0000000000000000000000000000000000000002",
+            "protocolSha256": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
+            "runtimeManifestSha256": "0000000000000000000000000000000000000000000000000000000000000002",
+            "inventorySha256": "0000000000000000000000000000000000000000000000000000000000000016",
+            "signingPolicySha256": "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+            "packageSha256": "000000000000000000000000000000000000000000000000000000000000002a"
+          }
+        ]
+      },
+      "hasFreshBirth": true,
+      "canonical": "{\"schemaVersion\":2,\"kind\":\"mrk-macos-maintenance-intent-v2\",\"target\":\"x86_64-apple-darwin\",\"invocation\":\"00000000000000000000000000000009\",\"requestId\":\"0000000000000000000000000000006d\",\"action\":\"fresh-install\",\"previous\":null,\"next\":{\"profile\":\"fixed-macos26-x86_64-maintenance-v2\",\"packageIdentifier\":\"dev.mobile-release-kit.desktop.installed\",\"bundleIdentifier\":\"dev.mobile-release-kit.desktop\",\"packageVersion\":\"0.3.0\",\"release\":\"macos26-x86_64-data-3\",\"sourceCommit\":\"0000000000000000000000000000000000000003\",\"protocolSha256\":\"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa\",\"runtimeManifestSha256\":\"0000000000000000000000000000000000000000000000000000000000000003\",\"inventorySha256\":\"0000000000000000000000000000000000000000000000000000000000000017\",\"signingPolicySha256\":\"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb\",\"packageSha256\":\"000000000000000000000000000000000000000000000000000000000000002b\"},\"previousState\":null,\"freshBirth\":{\"schemaVersion\":1,\"kind\":\"mrk-macos-fresh-birth-v1\",\"producerDescriptorSha256\":\"cccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccccc\",\"producerSignatureSha256\":\"dddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddddd\",\"registrationOrigin\":\"existing-exclusive-before-maintenance\",\"installRoot\":{\"device\":1,\"inode\":101,\"birthSeconds\":1700000000,\"birthNanoseconds\":42,\"volumeUuid\":\"11111111111111111111111111111111\"},\"versionsRoot\":{\"device\":1,\"inode\":102,\"birthSeconds\":1700000000,\"birthNanoseconds\":42,\"volumeUuid\":\"11111111111111111111111111111111\"},\"registrationGate\":{\"device\":1,\"inode\":103,\"birthSeconds\":1700000000,\"birthNanoseconds\":42,\"volumeUuid\":\"11111111111111111111111111111111\"},\"maintenanceGate\":{\"device\":1,\"inode\":104,\"birthSeconds\":1700000000,\"birthNanoseconds\":42,\"volumeUuid\":\"11111111111111111111111111111111\"}}}\n",
+      "sha256": "c60a781550a71a25b530d170695a8d38dd217c2c86917d2ab48ecc24ce7eb0cc"
+    }
+  ],
+  "invalidMutations": [
+    {
+      "name": "birth-null",
+      "path": "/freshBirth",
+      "value": null
+    },
+    {
+      "name": "birth-array",
+      "path": "/freshBirth",
+      "value": []
+    },
+    {
+      "name": "wrong-version",
+      "path": "/freshBirth/schemaVersion",
+      "value": 2
+    },
+    {
+      "name": "boolean-version",
+      "path": "/freshBirth/schemaVersion",
+      "value": true
+    },
+    {
+      "name": "wrong-kind",
+      "path": "/freshBirth/kind",
+      "value": "mrk-macos-fresh-birth-v2"
+    },
+    {
+      "name": "invented-tree",
+      "path": "/freshBirth/sourceTree",
+      "value": "1111111111111111111111111111111111111111"
+    },
+    {
+      "name": "wrong-origin",
+      "path": "/freshBirth/registrationOrigin",
+      "value": "claimed-lock"
+    },
+    {
+      "name": "source-commit-mismatch",
+      "path": "/next/sourceCommit",
+      "value": "ffffffffffffffffffffffffffffffffffffffff"
+    },
+    {
+      "name": "package-mismatch",
+      "path": "/next/packageSha256",
+      "value": "ffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff"
+    },
+    {
+      "name": "request-invocation-reuse",
+      "path": "/requestId",
+      "value": "00000000000000000000000000000009"
+    },
+    {
+      "name": "producer-zero",
+      "path": "/freshBirth/producerDescriptorSha256",
+      "value": "0000000000000000000000000000000000000000000000000000000000000000"
+    },
+    {
+      "name": "signature-invalid",
+      "path": "/freshBirth/producerSignatureSha256",
+      "value": "FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF"
+    },
+    {
+      "name": "mixed-noop-reference",
+      "path": "/recovery",
+      "value": {
+        "stageInvocation": "00000000000000000000000000000001",
+        "tornInvocation": "00000000000000000000000000000002",
+        "receiptSha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+      }
+    },
+    {
+      "name": "mixed-restore-reference",
+      "path": "/restoreRecovery",
+      "value": {
+        "tornInvocation": "00000000000000000000000000000001",
+        "receiptInvocation": "00000000000000000000000000000009",
+        "receiptSha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+      }
+    },
+    {
+      "name": "previous-state",
+      "path": "/previousState",
+      "value": {
+        "invocation": "00000000000000000000000000000002",
+        "sha256": "eeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeeee"
+      }
+    },
+    {
+      "name": "installRoot-device--1",
+      "path": "/freshBirth/installRoot/device",
+      "value": -1
+    },
+    {
+      "name": "installRoot-device-True",
+      "path": "/freshBirth/installRoot/device",
+      "value": true
+    },
+    {
+      "name": "installRoot-device-9223372036854775808",
+      "path": "/freshBirth/installRoot/device",
+      "value": 9223372036854775808
+    },
+    {
+      "name": "installRoot-inode-0",
+      "path": "/freshBirth/installRoot/inode",
+      "value": 0
+    },
+    {
+      "name": "installRoot-inode-18446744073709551616",
+      "path": "/freshBirth/installRoot/inode",
+      "value": 18446744073709551616
+    },
+    {
+      "name": "installRoot-birthSeconds-0",
+      "path": "/freshBirth/installRoot/birthSeconds",
+      "value": 0
+    },
+    {
+      "name": "installRoot-birthSeconds-9223372036854775808",
+      "path": "/freshBirth/installRoot/birthSeconds",
+      "value": 9223372036854775808
+    },
+    {
+      "name": "installRoot-birthNanoseconds--1",
+      "path": "/freshBirth/installRoot/birthNanoseconds",
+      "value": -1
+    },
+    {
+      "name": "installRoot-birthNanoseconds-1000000000",
+      "path": "/freshBirth/installRoot/birthNanoseconds",
+      "value": 1000000000
+    },
+    {
+      "name": "installRoot-birthNanoseconds-False",
+      "path": "/freshBirth/installRoot/birthNanoseconds",
+      "value": false
+    },
+    {
+      "name": "installRoot-volumeUuid-None",
+      "path": "/freshBirth/installRoot/volumeUuid",
+      "value": null
+    },
+    {
+      "name": "installRoot-volumeUuid-00000000000000000000000000000000",
+      "path": "/freshBirth/installRoot/volumeUuid",
+      "value": "00000000000000000000000000000000"
+    },
+    {
+      "name": "installRoot-volumeUuid-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+      "path": "/freshBirth/installRoot/volumeUuid",
+      "value": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+    },
+    {
+      "name": "installRoot-array",
+      "path": "/freshBirth/installRoot",
+      "value": [
+        1,
+        101,
+        1700000000,
+        42,
+        "11111111111111111111111111111111"
+      ]
+    },
+    {
+      "name": "installRoot-unknown",
+      "path": "/freshBirth/installRoot/authority",
+      "value": true
+    },
+    {
+      "name": "installRoot-missing-uuid",
+      "path": "/freshBirth/installRoot/volumeUuid",
+      "delete": true
+    },
+    {
+      "name": "versionsRoot-device--1",
+      "path": "/freshBirth/versionsRoot/device",
+      "value": -1
+    },
+    {
+      "name": "versionsRoot-device-True",
+      "path": "/freshBirth/versionsRoot/device",
+      "value": true
+    },
+    {
+      "name": "versionsRoot-device-9223372036854775808",
+      "path": "/freshBirth/versionsRoot/device",
+      "value": 9223372036854775808
+    },
+    {
+      "name": "versionsRoot-inode-0",
+      "path": "/freshBirth/versionsRoot/inode",
+      "value": 0
+    },
+    {
+      "name": "versionsRoot-inode-18446744073709551616",
+      "path": "/freshBirth/versionsRoot/inode",
+      "value": 18446744073709551616
+    },
+    {
+      "name": "versionsRoot-birthSeconds-0",
+      "path": "/freshBirth/versionsRoot/birthSeconds",
+      "value": 0
+    },
+    {
+      "name": "versionsRoot-birthSeconds-9223372036854775808",
+      "path": "/freshBirth/versionsRoot/birthSeconds",
+      "value": 9223372036854775808
+    },
+    {
+      "name": "versionsRoot-birthNanoseconds--1",
+      "path": "/freshBirth/versionsRoot/birthNanoseconds",
+      "value": -1
+    },
+    {
+      "name": "versionsRoot-birthNanoseconds-1000000000",
+      "path": "/freshBirth/versionsRoot/birthNanoseconds",
+      "value": 1000000000
+    },
+    {
+      "name": "versionsRoot-birthNanoseconds-False",
+      "path": "/freshBirth/versionsRoot/birthNanoseconds",
+      "value": false
+    },
+    {
+      "name": "versionsRoot-volumeUuid-None",
+      "path": "/freshBirth/versionsRoot/volumeUuid",
+      "value": null
+    },
+    {
+      "name": "versionsRoot-volumeUuid-00000000000000000000000000000000",
+      "path": "/freshBirth/versionsRoot/volumeUuid",
+      "value": "00000000000000000000000000000000"
+    },
+    {
+      "name": "versionsRoot-volumeUuid-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+      "path": "/freshBirth/versionsRoot/volumeUuid",
+      "value": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+    },
+    {
+      "name": "versionsRoot-array",
+      "path": "/freshBirth/versionsRoot",
+      "value": [
+        1,
+        101,
+        1700000000,
+        42,
+        "11111111111111111111111111111111"
+      ]
+    },
+    {
+      "name": "versionsRoot-unknown",
+      "path": "/freshBirth/versionsRoot/authority",
+      "value": true
+    },
+    {
+      "name": "versionsRoot-missing-uuid",
+      "path": "/freshBirth/versionsRoot/volumeUuid",
+      "delete": true
+    },
+    {
+      "name": "registrationGate-device--1",
+      "path": "/freshBirth/registrationGate/device",
+      "value": -1
+    },
+    {
+      "name": "registrationGate-device-True",
+      "path": "/freshBirth/registrationGate/device",
+      "value": true
+    },
+    {
+      "name": "registrationGate-device-9223372036854775808",
+      "path": "/freshBirth/registrationGate/device",
+      "value": 9223372036854775808
+    },
+    {
+      "name": "registrationGate-inode-0",
+      "path": "/freshBirth/registrationGate/inode",
+      "value": 0
+    },
+    {
+      "name": "registrationGate-inode-18446744073709551616",
+      "path": "/freshBirth/registrationGate/inode",
+      "value": 18446744073709551616
+    },
+    {
+      "name": "registrationGate-birthSeconds-0",
+      "path": "/freshBirth/registrationGate/birthSeconds",
+      "value": 0
+    },
+    {
+      "name": "registrationGate-birthSeconds-9223372036854775808",
+      "path": "/freshBirth/registrationGate/birthSeconds",
+      "value": 9223372036854775808
+    },
+    {
+      "name": "registrationGate-birthNanoseconds--1",
+      "path": "/freshBirth/registrationGate/birthNanoseconds",
+      "value": -1
+    },
+    {
+      "name": "registrationGate-birthNanoseconds-1000000000",
+      "path": "/freshBirth/registrationGate/birthNanoseconds",
+      "value": 1000000000
+    },
+    {
+      "name": "registrationGate-birthNanoseconds-False",
+      "path": "/freshBirth/registrationGate/birthNanoseconds",
+      "value": false
+    },
+    {
+      "name": "registrationGate-volumeUuid-None",
+      "path": "/freshBirth/registrationGate/volumeUuid",
+      "value": null
+    },
+    {
+      "name": "registrationGate-volumeUuid-00000000000000000000000000000000",
+      "path": "/freshBirth/registrationGate/volumeUuid",
+      "value": "00000000000000000000000000000000"
+    },
+    {
+      "name": "registrationGate-volumeUuid-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+      "path": "/freshBirth/registrationGate/volumeUuid",
+      "value": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+    },
+    {
+      "name": "registrationGate-array",
+      "path": "/freshBirth/registrationGate",
+      "value": [
+        1,
+        101,
+        1700000000,
+        42,
+        "11111111111111111111111111111111"
+      ]
+    },
+    {
+      "name": "registrationGate-unknown",
+      "path": "/freshBirth/registrationGate/authority",
+      "value": true
+    },
+    {
+      "name": "registrationGate-missing-uuid",
+      "path": "/freshBirth/registrationGate/volumeUuid",
+      "delete": true
+    },
+    {
+      "name": "maintenanceGate-device--1",
+      "path": "/freshBirth/maintenanceGate/device",
+      "value": -1
+    },
+    {
+      "name": "maintenanceGate-device-True",
+      "path": "/freshBirth/maintenanceGate/device",
+      "value": true
+    },
+    {
+      "name": "maintenanceGate-device-9223372036854775808",
+      "path": "/freshBirth/maintenanceGate/device",
+      "value": 9223372036854775808
+    },
+    {
+      "name": "maintenanceGate-inode-0",
+      "path": "/freshBirth/maintenanceGate/inode",
+      "value": 0
+    },
+    {
+      "name": "maintenanceGate-inode-18446744073709551616",
+      "path": "/freshBirth/maintenanceGate/inode",
+      "value": 18446744073709551616
+    },
+    {
+      "name": "maintenanceGate-birthSeconds-0",
+      "path": "/freshBirth/maintenanceGate/birthSeconds",
+      "value": 0
+    },
+    {
+      "name": "maintenanceGate-birthSeconds-9223372036854775808",
+      "path": "/freshBirth/maintenanceGate/birthSeconds",
+      "value": 9223372036854775808
+    },
+    {
+      "name": "maintenanceGate-birthNanoseconds--1",
+      "path": "/freshBirth/maintenanceGate/birthNanoseconds",
+      "value": -1
+    },
+    {
+      "name": "maintenanceGate-birthNanoseconds-1000000000",
+      "path": "/freshBirth/maintenanceGate/birthNanoseconds",
+      "value": 1000000000
+    },
+    {
+      "name": "maintenanceGate-birthNanoseconds-False",
+      "path": "/freshBirth/maintenanceGate/birthNanoseconds",
+      "value": false
+    },
+    {
+      "name": "maintenanceGate-volumeUuid-None",
+      "path": "/freshBirth/maintenanceGate/volumeUuid",
+      "value": null
+    },
+    {
+      "name": "maintenanceGate-volumeUuid-00000000000000000000000000000000",
+      "path": "/freshBirth/maintenanceGate/volumeUuid",
+      "value": "00000000000000000000000000000000"
+    },
+    {
+      "name": "maintenanceGate-volumeUuid-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+      "path": "/freshBirth/maintenanceGate/volumeUuid",
+      "value": "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+    },
+    {
+      "name": "maintenanceGate-array",
+      "path": "/freshBirth/maintenanceGate",
+      "value": [
+        1,
+        101,
+        1700000000,
+        42,
+        "11111111111111111111111111111111"
+      ]
+    },
+    {
+      "name": "maintenanceGate-unknown",
+      "path": "/freshBirth/maintenanceGate/authority",
+      "value": true
+    },
+    {
+      "name": "maintenanceGate-missing-uuid",
+      "path": "/freshBirth/maintenanceGate/volumeUuid",
+      "delete": true
+    },
+    {
+      "name": "role-alias",
+      "path": "/freshBirth/versionsRoot/inode",
+      "value": 101
+    },
+    {
+      "name": "foreign-volume",
+      "path": "/freshBirth/registrationGate/volumeUuid",
+      "value": "22222222222222222222222222222222"
+    },
+    {
+      "name": "origin-object-enum",
+      "path": "/freshBirth/registrationOrigin",
+      "value": {
+        "existing-exclusive-before-maintenance": null
+      }
+    }
+  ]
+}

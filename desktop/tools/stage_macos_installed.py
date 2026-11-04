@@ -6673,11 +6673,43 @@ def maintenance_state_data(body, producer):
     return value
 
 
+FRESH_BIRTH_BYTES = 2 * 1024  # Included in the existing 16 KiB Intent limit.
+FRESH_BIRTH_IDENTITY_FIELDS = ("device", "inode", "birthSeconds", "birthNanoseconds", "volumeUuid")
+FRESH_BIRTH_ROLES = ("installRoot", "versionsRoot", "registrationGate", "maintenanceGate")
+FRESH_BIRTH_FIELDS = ("schemaVersion", "kind", "producerDescriptorSha256", "producerSignatureSha256",
+                     "registrationOrigin", *FRESH_BIRTH_ROLES)
+
+
+def maintenance_fresh_birth_data(value):
+    """Closed comparison DATA only; no native creation, exclusion or GO proof."""
+    maintenance_map(value, FRESH_BIRTH_FIELDS, "maintenance-fresh-birth-shape")
+    need(type(value["schemaVersion"]) is int and value["schemaVersion"] == 1
+         and value["kind"] == "mrk-macos-fresh-birth-v1"
+         and maintenance_hex(value["producerDescriptorSha256"], 64)
+         and maintenance_hex(value["producerSignatureSha256"], 64)
+         and type(value["registrationOrigin"]) is str
+         and value["registrationOrigin"] in ("existing-exclusive-before-maintenance",
+             "absent-before-maintenance-created-under-maintenance"), "maintenance-fresh-birth-binding")
+    identities = []
+    for role in FRESH_BIRTH_ROLES:
+        identity = maintenance_map(value[role], FRESH_BIRTH_IDENTITY_FIELDS, "maintenance-fresh-birth-identity")
+        need(all(type(identity[key]) is int for key in FRESH_BIRTH_IDENTITY_FIELDS[:-1])
+             and 0 <= identity["device"] < (1 << 63) and 0 < identity["inode"] < (1 << 64)
+             and 0 < identity["birthSeconds"] < (1 << 63) and 0 <= identity["birthNanoseconds"] < 1_000_000_000
+             and maintenance_hex(identity["volumeUuid"], 32), "maintenance-fresh-birth-identity")
+        identities.append(identity)
+    need(all(row["volumeUuid"] == identities[0]["volumeUuid"] for row in identities)
+         and len({row["inode"] for row in identities}) == len(FRESH_BIRTH_ROLES), "maintenance-fresh-birth-roles")
+    need(len(canonical(value)) + 1 <= FRESH_BIRTH_BYTES, "maintenance-fresh-birth-byte-bound")
+    return value
+
+
 def maintenance_intent_data(body, producer, *, current):
     value = maintenance_json(body, 16 * 1024)
     maintenance_map(value, ("schemaVersion", "kind", "target", "invocation", "requestId", "action", "previous", "next", "previousState")
                     + (("recovery",) if "recovery" in value else ())
-                    + (("restoreRecovery",) if "restoreRecovery" in value else ()), "maintenance-intent-shape")
+                    + (("restoreRecovery",) if "restoreRecovery" in value else ())
+                    + (("freshBirth",) if "freshBirth" in value else ()), "maintenance-intent-shape")
     maintenance_record_header(value, "mrk-macos-maintenance-intent-v2", producer)
     maintenance_pair_data(value["action"], value["previous"], value["next"], producer, current=current)
     maintenance_noop_recovery_data(value, value["action"])
@@ -6692,6 +6724,55 @@ def maintenance_intent_data(body, producer, *, current):
     restore = maintenance_restore_recovery_data(value, value["action"])
     need(restore is None or previous is not None and previous["invocation"] != restore["tornInvocation"],
          "maintenance-restore-intent-binding")
+    if "freshBirth" in value:
+        maintenance_fresh_birth_data(value["freshBirth"])
+        need(value["action"] == "fresh-install" and value["previous"] is None and previous is None
+             and value["invocation"] != value["requestId"] and "recovery" not in value and "restoreRecovery" not in value,
+             "maintenance-fresh-birth-intent-binding")
+    return value
+
+
+def maintenance_intent_canonical_bytes_data(body, producer, *, current):
+    """Mirror the Rust typed encoder order, preserving every optional field.
+
+    This differs from generic sorted JSON and never replaces an original hash.
+    Source commit and the full existing release tuple remain the package binding;
+    there is no fabricated runtime tree or independently trusted birth label.
+    """
+    value = maintenance_intent_data(body, producer, current=current)
+    fields = ("schemaVersion", "kind", "target", "invocation", "requestId", "action", "previous", "next", "previousState")
+    ordered = {key: value[key] for key in fields}
+    release_fields = ("profile", "packageIdentifier", "bundleIdentifier", "packageVersion", "release", "sourceCommit",
+                      "protocolSha256", "runtimeManifestSha256", "inventorySha256", "signingPolicySha256", "packageSha256")
+    for key in ("previous", "next"):
+        if ordered[key] is not None:
+            ordered[key] = {field: ordered[key][field] for field in release_fields}
+    if ordered["previousState"] is not None:
+        ordered["previousState"] = {key: value["previousState"][key] for key in ("invocation", "sha256")}
+    for key, nested_fields in (("recovery", ("stageInvocation", "tornInvocation", "receiptSha256")),
+                               ("restoreRecovery", ("tornInvocation", "receiptInvocation", "receiptSha256"))):
+        if key in value:
+            ordered[key] = {field: value[key][field] for field in nested_fields}
+    if "freshBirth" in value:
+        birth = {key: value["freshBirth"][key] for key in FRESH_BIRTH_FIELDS}
+        for role in FRESH_BIRTH_ROLES:
+            birth[role] = {key: birth[role][key] for key in FRESH_BIRTH_IDENTITY_FIELDS}
+        ordered["freshBirth"] = birth
+    raw = json.dumps(ordered, ensure_ascii=False, separators=(",", ":"), allow_nan=False).encode("utf-8") + b"\n"
+    need(len(raw) <= 16 * 1024, "maintenance-record-byte-bound")
+    return raw
+
+
+def maintenance_canonical_intent_data(body, producer, *, current):
+    value = maintenance_intent_data(body, producer, current=current)
+    need(body == maintenance_intent_canonical_bytes_data(body, producer, current=current), "maintenance-intent-canonical")
+    return value
+
+
+def maintenance_fresh_birth_intent_data(body, producer):
+    """Future-observer DATA entry only. Legacy/torn records supply no birth."""
+    value = maintenance_canonical_intent_data(body, producer, current=True)
+    need("freshBirth" in value, "maintenance-fresh-birth-required")
     return value
 
 

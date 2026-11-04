@@ -28,6 +28,15 @@ _SPEC.loader.exec_module(M)
 HASH = "a" * 64
 
 
+def collect_assets(target):
+    def collect(path, offset, raw):
+        assert type(raw) is bytes and 0 < len(raw) <= 65536
+        body = target.setdefault(path, bytearray())
+        assert len(body) == offset
+        body.extend(raw)
+    return collect
+
+
 def member(name, *, label="jdk", kind="file", mode=0o100644, size=1, hint=None, target=None):
     if kind != "file":
         size = 0
@@ -967,7 +976,7 @@ class CatalogueProjectionDataTests(unittest.TestCase):
                     changed.finish()
         emitted = []
         with self.assertRaises(M.Refused):
-            M.generate({}, emitted.append)
+            M.generate({}, emitted.append, asset_sink=lambda *_: None)
         self.assertEqual(emitted, [])
 
         # Fresh inputs are a distinct closed mapping. These inert bytes exercise
@@ -1013,7 +1022,7 @@ class CatalogueProjectionDataTests(unittest.TestCase):
         with self.assertRaises(M.Refused):
             M._fresh_selected_bytes(M._FreshIntelInputs(originals), SimpleNamespace(by_name={selected[1]: selected_member}))
         with self.assertRaises(M.Refused):
-            M.generate(originals, emitted.append)
+            M.generate(originals, emitted.append, asset_sink=lambda *_: None)
         self.assertEqual(emitted, [])
         self.assertTrue(callable(M.generate_intel))
         self.assertEqual(M.ARCHIVES["jdk"][0], 185851019)  # ARM default untouched.
@@ -1057,7 +1066,7 @@ class CatalogueProjectionDataTests(unittest.TestCase):
         with self.assertRaises(M.Refused):
             M._fresh_intel_data(documents)
         with self.assertRaises(M.Refused):
-            M.generate(documents, emitted.append)
+            M.generate(documents, emitted.append, asset_sink=lambda *_: None)
         self.assertEqual(emitted, [])
         self.assertTrue(callable(M.generate_intel))
 
@@ -1072,7 +1081,7 @@ class CatalogueProjectionDataTests(unittest.TestCase):
                         {**documents, "extra": b"x"}):
             emitted = []
             with self.subTest(intel_inputs=list(changed)), self.assertRaises(M.Refused):
-                M.generate_intel(changed, emitted.append)
+                M.generate_intel(changed, emitted.append, asset_sink=lambda *_: None)
             self.assertEqual(emitted, [])
         empty = M._FreshIntelData((), (), (), (), ())
         with self.assertRaises(M.Refused):
@@ -1113,11 +1122,11 @@ class CatalogueProjectionDataTests(unittest.TestCase):
             aapt=member("aapt2", label="aapt2", mode=0o100755, size=64), vendor="inert-test", version="0")
         projection.outers["jdk"].members = [member(src.prefix)]
         first, second = [], []
-        receipt = M.render(projection, first.append)
-        self.assertEqual(receipt, M.render(projection, second.append))
+        receipt = M.render(projection, first.append, asset_sink=lambda *_: None)
+        self.assertEqual(receipt, M.render(projection, second.append, asset_sink=lambda *_: None))
         self.assertEqual(first, second)
         raw = b"".join(first)
-        self.assertEqual(receipt, {"bytes": len(raw), "sha256": hashlib.sha256(raw).hexdigest()})
+        self.assertEqual(receipt, {"bytes": len(raw), "sha256": hashlib.sha256(raw).hexdigest(), "assets": [], "headers": []})
         self.assertTrue(all(len(chunk) <= 65536 for chunk in first))
         self.assertIn(b"SourceDisposition::Payload(0)", raw)
         self.assertIn(b"Component::Aapt2", raw)
@@ -1131,22 +1140,22 @@ class CatalogueProjectionDataTests(unittest.TestCase):
             b'OfficialArchive { component: Component::Gradle, official_source: '
             b'"https://github.com/gradle/gradle-distributions/releases/download/v8.14.5/gradle-8.14.5-bin.zip"', raw)
         with mock.patch.object(M, "OUTPUT_LIMIT", 8), self.assertRaises(M.Refused):
-            M.render(projection, lambda _: None)
+            M.render(projection, lambda _: None, asset_sink=lambda *_: None)
         class SinkFailure(Exception):
             pass
         def reject(_):
             raise SinkFailure()
         with self.assertRaises(SinkFailure):
-            M.render(projection, reject)
+            M.render(projection, reject, asset_sink=lambda *_: None)
 
         explicit = []
-        self.assertEqual(receipt, M.render(projection, explicit.append, profile="arm64"))
+        self.assertEqual(receipt, M.render(projection, explicit.append, profile="arm64", asset_sink=lambda *_: None))
         self.assertEqual(first, explicit)  # Default ARM byte stream is unchanged.
         intel = copy.deepcopy(projection)
         intel.profile = "x86_64"
         emitted, repeated = [], []
-        result = M.render(intel, emitted.append, profile="x86_64")
-        self.assertEqual(result, M.render(intel, repeated.append, profile="x86_64"))
+        result = M.render(intel, emitted.append, profile="x86_64", asset_sink=lambda *_: None)
+        self.assertEqual(result, M.render(intel, repeated.append, profile="x86_64", asset_sink=lambda *_: None))
         self.assertEqual(emitted, repeated)
         actual = b"".join(emitted)
         expected = raw.replace(b"185851019", b"180578248").replace(
@@ -1158,18 +1167,144 @@ class CatalogueProjectionDataTests(unittest.TestCase):
             b"// No IO, mutable runtime registration, reference digest or native qualification.\n",
             b"// No IO, mutable runtime registration, reference digest or native qualification.\nuse super::*;\n")
         self.assertEqual(actual, expected)
-        self.assertEqual(result, {"bytes": len(actual), "sha256": hashlib.sha256(actual).hexdigest()})
+        self.assertEqual(result, {"bytes": len(actual), "sha256": hashlib.sha256(actual).hexdigest(), "assets": [], "headers": []})
         self.assertTrue(all(len(chunk) <= 65536 for chunk in emitted))
         for selected, profile in ((projection, "x86_64"), (intel, "arm64"), (intel, "amd64")):
             discarded = []
             with self.subTest(profile=profile), self.assertRaises(M.Refused):
-                M.render(selected, discarded.append, profile=profile)
+                M.render(selected, discarded.append, profile=profile, asset_sink=lambda *_: None)
             self.assertEqual(discarded, [])
         with mock.patch.object(M, "OUTPUT_LIMIT", 8), self.assertRaises(M.Refused):
-            M.render(intel, lambda _: None, profile="x86_64")
+            M.render(intel, lambda _: None, profile="x86_64", asset_sink=lambda *_: None)
         with self.assertRaises(SinkFailure):
-            M.render(intel, reject, profile="x86_64")
+            M.render(intel, reject, profile="x86_64", asset_sink=lambda *_: None)
+        for selected in (projection, intel):
+            native = copy.deepcopy(selected)
+            native.payload = [M.Payload(path, 1, HASH, 0o444, ("Picked", "Jdk", "Contents/data"),
+                                       ("MachO", (b"\0prefix", b"\xffcommands", None)))]
+            generated, assets = [], {}
+            result = M.render(native, generated.append, profile=native.profile,
+                asset_sink=collect_assets(assets))
+            self.assertEqual(list(assets.values()), [b"\0prefix\xffcommands"])
+            self.assertEqual(len(result["assets"]), 1)
+            self.assertEqual(len(result["headers"]), 2)
+            self.assertEqual(b"".join(generated).count(b"include_bytes!"), 1)
+            self.assertIn(b"FileClass::MachO(NativeHeader { prefix: CAT_H0_PREFIX, commands: CAT_H0_COMMANDS })",
+                          b"".join(generated))
+            with self.assertRaises(SinkFailure):
+                M.render(native, lambda _: None, profile=native.profile, asset_sink=lambda *_: reject(None))
 
+
+    def test_binary_storage_is_exact_bounded_profile_separated_and_failure_closed(self):
+        original = (b"// metadata stays exact\n" + M._signed_array("CAT_H0_PREFIX", bytes(range(256)))
+                    + M._signed_array("CAT_H0_COMMANDS", b"\0\xffcommands")
+                    + b"const REFERENCES: &[Reference] = &[Unchanged];\n")
+        for profile in ("arm64", "x86_64"):
+            source, assets = [], {}
+            receipt = M.externalize_literal_source(original, source.append, profile=profile,
+                asset_sink=collect_assets(assets))
+            emitted = b"".join(source)
+            self.assertEqual(receipt["bytes"], len(emitted))
+            self.assertEqual(receipt["sha256"], hashlib.sha256(emitted).hexdigest())
+            self.assertEqual(len(assets), 1)
+            path, packed = next(iter(assets.items()))
+            self.assertEqual(packed, bytes(range(256)) + b"\0\xffcommands")
+            sha = hashlib.sha256(packed).hexdigest()
+            self.assertEqual(path, f"android_supplier_macos_catalogue_assets/{profile}_{sha}.bin")
+            self.assertEqual(receipt["assets"], [{"path": path, "bytes": len(packed), "sha256": sha}])
+            include = f'const CAT_HEADER_BYTES: &[u8] = include_bytes!("{path}");\n'.encode()
+            self.assertEqual(emitted.count(include), 1)
+            restored = emitted.replace(include, b"")
+            offset = 0
+            for index, header in enumerate(receipt["headers"]):
+                name = "CAT_H0_" + ("PREFIX", "COMMANDS")[index]
+                size = header["bytes"]
+                raw = packed[offset:offset + size]
+                self.assertEqual(header, {"name": name, "offset": offset, "bytes": len(raw),
+                                          "sha256": hashlib.sha256(raw).hexdigest()})
+                declaration = f'const {name}: &[u8] = CAT_HEADER_BYTES.split_at({offset}).1.split_at({size}).0;\n'.encode()
+                self.assertEqual(restored.count(declaration), 1)
+                restored = restored.replace(declaration, M._signed_array(name, raw))
+                offset += size
+            self.assertEqual(offset, len(packed))
+            self.assertEqual(restored, original)
+            repeated, repeated_assets = [], {}
+            self.assertEqual(receipt, M.externalize_literal_source(original, repeated.append, profile=profile,
+                asset_sink=collect_assets(repeated_assets)))
+            self.assertEqual((source, assets), (repeated, repeated_assets))
+        for changed in (original.replace(b"0,1,2,", b"256,1,2,"), original.replace(b"CAT_H0_PREFIX", b"CAT_H1_PREFIX"),
+                        original + M._signed_array("CAT_H0_PREFIX", b"duplicate"),
+                        original.replace(b"const CAT_H0_COMMANDS", b"const CAT_H1_COMMANDS")):
+            source, assets = [], []
+            with self.assertRaises(M.Refused):
+                M.externalize_literal_source(changed, source.append, profile="arm64",
+                    asset_sink=lambda *row: assets.append(row))
+            self.assertEqual((source, assets), ([], []))
+        emitted = []
+        def reject(*_):
+            raise RuntimeError("asset sink failure")
+        with self.assertRaisesRegex(RuntimeError, "asset sink failure"):
+            M.externalize_literal_source(original, emitted.append, profile="arm64", asset_sink=reject)
+        self.assertEqual(emitted, [])
+        with self.assertRaises(TypeError):
+            M.externalize_literal_source(original, emitted.append, profile="arm64")
+        assets = M.AssetEmitter(lambda *_: None, "arm64")
+        assets.put("CAT_H0_PREFIX", b"first")
+        for name, raw in (("CAT_H0_PREFIX", b"duplicate"), ("../CAT_H0_COMMANDS", b"foreign"),
+                          ("CAT_H0_COMMANDS", b"x" * 16417), ("CAT_H0_COMMANDS", b"")):
+            with self.assertRaises(M.Refused): assets.put(name, raw)
+        with mock.patch.object(M, "RECORD_LIMIT", 0), self.assertRaises(M.Refused):
+            M.AssetEmitter(lambda *_: None, "arm64").put("CAT_H0_PREFIX", b"x")
+        with self.assertRaises(M.Refused): assets.seal()  # Missing matching COMMANDS.
+
+    def test_committed_asset_rosters_reconstruct_both_frozen_sources(self):
+        root = _SOURCE.parents[2]
+        manifest = json.loads((root / "docs/desktop-macos-android-catalogue-storage.json").read_bytes())
+        actual_paths = set()
+        for catalogue in manifest["catalogues"]:
+            source = root / catalogue["path"]
+            raw = source.read_bytes()
+            output = catalogue["output"]
+            self.assertEqual((len(raw), hashlib.sha256(raw).hexdigest()), (output["bytes"], output["sha256"]))
+            self.assertEqual(len(output["assets"]), 1)
+            row = output["assets"][0]
+            path = source.parent / row["path"]
+            self.assertFalse(path.is_symlink())
+            packed = path.read_bytes()
+            self.assertEqual((len(packed), hashlib.sha256(packed).hexdigest()), (row["bytes"], row["sha256"]))
+            self.assertEqual(row["path"], f'android_supplier_macos_catalogue_assets/{catalogue["profile"]}_{row["sha256"]}.bin')
+            include = f'const CAT_HEADER_BYTES: &[u8] = include_bytes!("{row["path"]}");\n'.encode()
+            self.assertEqual(raw.count(include), 1)
+            cursor = raw.index(include)
+            reconstructed = hashlib.sha256()
+            reconstructed.update(raw[:cursor])
+            reconstructed_bytes = cursor
+            cursor += len(include)
+            offset = 0
+            for index, header in enumerate(output["headers"]):
+                name = f"CAT_H{index // 2}_" + ("PREFIX", "COMMANDS")[index % 2]
+                size = header["bytes"]
+                self.assertEqual((header["name"], header["offset"]), (name, offset))
+                self.assertTrue(0 < size <= 16416)
+                asset = packed[offset:offset + size]
+                self.assertEqual((len(asset), hashlib.sha256(asset).hexdigest()), (size, header["sha256"]))
+                declaration = f'const {name}: &[u8] = CAT_HEADER_BYTES.split_at({offset}).1.split_at({size}).0;\n'.encode()
+                self.assertTrue(raw.startswith(declaration, cursor))
+                cursor += len(declaration)
+                literal = M._signed_array(name, asset)
+                reconstructed.update(literal)
+                reconstructed_bytes += len(literal)
+                offset += size
+            self.assertEqual(offset, len(packed))
+            self.assertEqual(raw.find(b"include_bytes!", cursor), -1)
+            reconstructed.update(memoryview(raw)[cursor:])
+            reconstructed_bytes += len(raw) - cursor
+            self.assertEqual((reconstructed_bytes, reconstructed.hexdigest()),
+                             (catalogue["before"]["bytes"], catalogue["before"]["sha256"]))
+            actual_paths.add(path)
+        asset_root = root / "desktop/src-tauri/src/android_supplier_macos_catalogue_assets"
+        self.assertEqual(actual_paths, {p for p in asset_root.rglob("*") if p.is_file()})
+        self.assertEqual(len(actual_paths), 2)
 
     def test_signed_support_native_windows_keep_all_slices_and_zip_identity(self):
         import binascii
@@ -1240,7 +1375,7 @@ class CatalogueProjectionDataTests(unittest.TestCase):
                 "local": 0, "data": 35, "compressed": 10, "method": 8, "flags": 2048, "crc32": 123}
         for profile, indexes in (("arm64", (0, 5)), ("x86_64", (0, 1, 7))):
             source = b"// original vendor bytes remain here\nconst CAT_A4: &[u8] = &[1,2,3];\n"
-            for index in indexes:
+            for index in range(max(indexes) + 1):
                 for suffix in ("PREFIX", "COMMANDS"):
                     source += M._signed_array(f"CAT_H{index}_{suffix}", b"original")
             source += b"const CAT_N0: &[NestedNative] = &[\n"
@@ -1257,8 +1392,10 @@ class CatalogueProjectionDataTests(unittest.TestCase):
             source += ('    PayloadSource { installed: CanonicalFile { path: "gradle/native/aapt2/aapt2", size: 10, sha256: "'
                        + "c" * 64 + '" }, archive: ArchivePin { bytes: 20, sha256: "' + "a" * 64 + '" } },\n').encode()
             source += b"];\nconst REFERENCES: &[Reference] = &[Unchanged];\n"
-            changes = M._signed_regions(source, rows, archive, profile)
-            self.assertEqual(len(changes), 11 if profile == "arm64" else 13)
+            emitted_assets = {}
+            assets = M.AssetEmitter(collect_assets(emitted_assets), profile)
+            changes = M._signed_regions(source, rows, archive, profile, assets)
+            self.assertEqual(len(changes), 2 * (max(indexes) + 1) + 7)
             pieces, previous = [], 0
             for start, end, body in changes:
                 pieces.extend((source[previous:start], body)); previous = end
@@ -1266,15 +1403,23 @@ class CatalogueProjectionDataTests(unittest.TestCase):
             self.assertTrue(transformed.startswith(b"// original vendor bytes remain here\nconst CAT_A4: &[u8] = &[1,2,3];\n"))
             self.assertTrue(transformed.endswith(b"const REFERENCES: &[Reference] = &[Unchanged];\n"))
             self.assertIn(b"kind: Unchanged", transformed)
-            self.assertIn(b"105,110,116,101,108" if profile == "x86_64" else b"97,114,109", transformed)
+            self.assertEqual(len(emitted_assets), 1)
+            packed = next(iter(emitted_assets.values()))
+            self.assertEqual(len(assets.rows), 2 * (max(indexes) + 1))
+            for index, header in enumerate(assets.rows):
+                body = packed[header["offset"]:header["offset"] + header["bytes"]]
+                expected = (b"prefix" if index % 2 == 0 else b"intel" if profile == "x86_64" else b"arm") if index // 2 in indexes else b"original"
+                self.assertEqual(body, expected)
+                self.assertEqual(hashlib.sha256(body).hexdigest(), header["sha256"])
+            self.assertNotIn(b"const CAT_H0_PREFIX: &[u8] = &[", transformed)
             for bad in (source + b"const CAT_N0:\n];\n", source.replace(b"const CAT_N0:", b"const NO_N0:"),
                         source.replace(b"bytes: 10, sha256:", b"bytes: 11, sha256:", 1)):
-                with self.assertRaises(M.Refused): M._signed_regions(bad, rows, archive, profile)
+                with self.assertRaises(M.Refused): M._signed_regions(bad, rows, archive, profile, M.AssetEmitter(lambda *_: None, profile))
             # These tiny fixtures can never claim the complete source/capsule gate.
             output = []
-            with self.assertRaises(M.Refused): M.derive_signed_support(source, {}, output.append, profile=profile)
+            with self.assertRaises(M.Refused): M.derive_signed_support(source, {}, output.append, profile=profile, asset_sink=lambda *_: None)
             self.assertEqual(output, [])
-        with self.assertRaises(M.Refused): M._signed_regions(b"", rows, archive, "amd64")
+        with self.assertRaises(M.Refused): M._signed_regions(b"", rows, archive, "amd64", None)
 
 
 

@@ -1092,7 +1092,7 @@ ANDROID_CURRENT_SCOPE = "current-candidate-android-candidate-only-v1"
 ANDROID_INPUT_ENV = "TEST_RUNNER_MRK_NORMAL_UI_ANDROID_INPUT_FIXTURE"
 ANDROID_RUN_ENV = "TEST_RUNNER_MRK_NORMAL_UI_ANDROID_RUN_ID"
 ANDROID_ATTEMPT_ENV = "TEST_RUNNER_MRK_NORMAL_UI_ANDROID_RUN_ATTEMPT"
-ANDROID_CATALOGUE = "24c72354fe4c21c0652eb2c7c33ace167ea92420a5a06a22b153a6e8174a5ee5"
+ANDROID_CATALOGUE = "ab472c20fa9bd1e30dfc95ef7399987cded50e99a91d15824df703d4355d9f8f"
 ANDROID_ROOTS = {"jdk": "tools/jdk/temurin-17.jdk", "sdk": "tools/sdk", "gradle": "tools/gradle"}
 ANDROID_PRIVATE_FILES = ("upload.jks", "upload.der", "scalars.json")
 
@@ -1100,7 +1100,7 @@ ANDROID_PRIVATE_FILES = ("upload.jks", "upload.der", "scalars.json")
 def android_catalogue(target):
     normal_target_data(target)
     return (ANDROID_CATALOGUE if target == ARM_TARGET else
-            "0c14f0cd7490592f3a79d0fc8997d5079d37fe5a2ab33499fff31156c268c7cb")
+            "914e813291dd6ba70bae1fb849899df22460ba2002d723543ad27aa8d82f47bc")
 
 
 def android_input_document(body, *, source, run, attempt, root, target=ARM_TARGET, expected_ref=ANDROID_REF):
