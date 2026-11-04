@@ -152,7 +152,7 @@ impl ConnectionState {
         let effect=serde_json::to_value(o.effect).ok().and_then(|v|serde_json::from_value::<wire::Effect>(v).ok());
         let (Some(reason),Some(effect))=(reason,effect) else {e.unknown(wire::Reason::CleanupUnknown);return;};
         let result=(||->Result<Option<wire::operation::Snapshot>,BridgeError>{
-            use wire::{dispatch::Hex, operation::{Record,Snapshot}};
+            use self::wire::{dispatch::Hex, operation::{Record,Snapshot}};
             let snapshot=match e.scope().review.kind() {
                 wire::Kind::FailedJobsPrepare if reason==wire::Reason::None => {
                     let c=st.consent.as_ref().ok_or_else(no)?;

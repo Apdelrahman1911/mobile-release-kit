@@ -422,4 +422,4 @@ impl DocumentBinding {
 
 #[path="asset_session_apple_provisioning_saved.rs"]
 mod apple_provisioning;
-pub(crate) use apple_provisioning::AppleProvisioningSavedInput;
+pub(crate) use self::apple_provisioning::AppleProvisioningSavedInput;

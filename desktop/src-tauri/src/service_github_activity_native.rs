@@ -280,7 +280,7 @@ pub(super) fn accepted(
 // Native-only borrowed projection. The standalone CLI wire/Entry needs no
 // Connection protocol or transport module.
 use crate::{github_activity_protocol as native, service_protocol::Error};
-use wire::activity::{
+use self::wire::activity::{
     decimal, Conclusion, Coverage, Pull, PullState, Run, RunState, Section, SectionReason,
     SectionState, ROWS,
 };
