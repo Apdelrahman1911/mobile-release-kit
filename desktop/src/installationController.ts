@@ -117,12 +117,12 @@ export type InstallationPreparationApi = Pick<DesktopApi, 'installationPreparati
 export interface InstallationPreparationView {
   status: InstallationPreparationStatus | null; error: ApiError | null; starting: boolean; refreshing: boolean;
 }
-// One serialized UI connection, not a native owner. Disposing this view only
-// retires its own polling timer; the original Document/Completion still owns Quit.
+// One app connection owns attempts; a panel only borrows its presentation.
+// Detaching never cancels a request. Only connection teardown disposes this
+// observer; the original Document/Completion still owns native work and Quit.
 export class InstallationPreparationController {
   private view: InstallationPreparationView = { status: null, error: null, starting: false, refreshing: false };
-  private listener: ((view: InstallationPreparationView) => void) | null = null;
-  private attached = false;
+  private subscription: { listener: (view: InstallationPreparationView) => void } | null = null;
   private disposed = false;
   private pending = false;
   private refreshAgain = false;
@@ -132,14 +132,22 @@ export class InstallationPreparationController {
   private readonly enabled: boolean;
   constructor(api: InstallationPreparationApi | null, enabled: boolean) { this.api = api; this.enabled = enabled; }
   snapshot(): InstallationPreparationView { return this.view; }
-  attach(listener: (view: InstallationPreparationView) => void): void {
-    if (this.disposed || this.attached) return;
-    this.attached = true; this.listener = listener; listener(this.view);
-    if (this.enabled && this.api) void this.refresh();
+  attach(listener: (view: InstallationPreparationView) => void): () => void {
+    if (this.disposed) return () => {};
+    const subscription = { listener };
+    this.subscription = subscription; listener(this.view);
+    if (!this.disposed && this.subscription === subscription && this.enabled && this.api) void this.refresh();
+    return () => {
+      if (this.subscription !== subscription) return;
+      this.subscription = null; this.refreshAgain = false; this.clearTimer();
+    };
+  }
+  retainsAttempt(): boolean {
+    return this.pending || this.failedStart !== null || this.view.status?.newWorkClosed === true;
   }
   private update(change: Partial<InstallationPreparationView>): void {
     if (this.disposed) return;
-    this.view = { ...this.view, ...change }; this.listener?.(this.view);
+    this.view = { ...this.view, ...change }; this.subscription?.listener(this.view);
   }
   private clearTimer(): void {
     if (this.timer !== null) clearTimeout(this.timer);
@@ -174,7 +182,7 @@ export class InstallationPreparationController {
   }
   private schedule(): void {
     this.clearTimer();
-    if (!this.disposed && !this.view.error && installationPreparationActive(this.view.status)) {
+    if (!this.disposed && this.subscription && !this.view.error && installationPreparationActive(this.view.status)) {
       this.timer = setTimeout(() => { this.timer = null; void this.refresh(); }, 1000);
     }
   }
@@ -194,7 +202,7 @@ export class InstallationPreparationController {
     }
   }
   start(confirmed: boolean): boolean {
-    if (confirmed !== true || this.disposed || !this.enabled || !this.api || this.pending
+    if (confirmed !== true || this.disposed || !this.subscription || !this.enabled || !this.api || this.pending
       || this.view.error || !this.view.status?.canStart) return false;
     const generation = this.view.status.generation;
     this.clearTimer(); this.pending = true; this.update({ starting: true, error: null });
@@ -221,6 +229,33 @@ export class InstallationPreparationController {
     return true;
   }
   dispose(): void {
-    this.disposed = true; this.listener = null; this.refreshAgain = false; this.clearTimer();
+    this.disposed = true; this.subscription = null; this.refreshAgain = false; this.clearTimer();
+  }
+}
+
+// One bounded slot per App, never a global API cache. A wrapper reconnect is
+// not a new native Document and cannot erase an unresolved preparation attempt.
+export class InstallationPreparationConnection {
+  private binding: { api: InstallationPreparationApi; controller: InstallationPreparationController } | null = null;
+  private disposed = false;
+  current(api: InstallationPreparationApi | null): InstallationPreparationController | null {
+    return !this.disposed && this.binding?.api === api ? this.binding.controller : null;
+  }
+  reconnectionError(): ApiError | null {
+    return this.binding?.controller.retainsAttempt() ? {
+      code: 'macos_maintenance_busy', retryable: false,
+      message: 'The original preparation request or cleanup is unresolved. Refresh its status before reconnecting. Reconnecting does not cancel preparation or confirm that the app has exited.',
+    } : null;
+  }
+  connect(api: InstallationPreparationApi, enabled: boolean): boolean {
+    if (this.disposed) return false;
+    if (this.binding?.api === api) return true;
+    if (this.reconnectionError()) return false;
+    this.binding?.controller.dispose();
+    this.binding = { api, controller: new InstallationPreparationController(api, enabled) };
+    return true;
+  }
+  dispose(): void {
+    this.disposed = true; this.binding?.controller.dispose(); this.binding = null;
   }
 }

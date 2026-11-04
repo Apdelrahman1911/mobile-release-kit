@@ -5,7 +5,7 @@ import test from 'node:test';
 import { createNativeApi } from '../src/bridge.ts';
 import { previewApi } from '../src/preview.ts';
 import { InstallationCheckController } from '../src/installationController.ts';
-import { InstallationPreparationController } from '../src/installationController.ts';
+import { InstallationPreparationController, InstallationPreparationConnection } from '../src/installationController.ts';
 import { installationCheckActive, installationCheckError, installationCheckHelp, INSTALLATION_CHECK_GUIDANCE,
   parseInstallationCancel, parseInstallationStatus } from '../src/installation.ts';
 import { PREPARE_QUIT_CONFIRMATION, parseInstallationPreparationRequest, parseInstallationPreparationStatus,
@@ -414,7 +414,7 @@ test('maintenance preparation refuses foreign generations, regressing phases and
   } finally { h.controller.dispose(); }
 });
 
-test('maintenance preparation disposes only its timer and never turns UI unmount or status into native Quit', async (t) => {
+test('maintenance preparation connection disposal and status never become native Quit', async (t) => {
   t.mock.timers.enable({ apis: ['setTimeout'] });
   const h = prepHarness(), notIssued = prepHarness();
   try {
@@ -431,4 +431,173 @@ test('maintenance preparation disposes only its timer and never turns UI unmount
     assert.equal(h.frames.length, frames); assert.equal(h.controller.snapshot(), view);
     assert.equal(h.by('start').length, 0); assert(h.calls.every((call) => call.kind === 'status'));
   } finally { h.controller.dispose(); notIssued.controller.dispose(); t.mock.timers.reset(); }
+});
+
+
+function prepConnectionHarness() {
+  const connection = new InstallationPreparationConnection(), calls = [];
+  const makeApi = (identity) => {
+    const call = (kind, input) => { const task = deferred(); calls.push({ identity, kind, input, ...task }); return task.promise; };
+    return { installationPreparationStatus: () => call('status'), prepareInstallationQuit: (input) => call('start', input) };
+  };
+  const api = makeApi('original');
+  assert.equal(connection.connect(api, true), true);
+  const controller = connection.current(api);
+  const mount = (owner = controller) => {
+    const frames = [], detach = owner.attach((view) => frames.push(view));
+    return { frames, detach };
+  };
+  return { connection, api, controller, makeApi, mount, calls,
+    by: (kind) => calls.filter((row) => row.kind === kind),
+    last: (kind) => calls.filter((row) => row.kind === kind).at(-1),
+  };
+}
+
+test('app connection retains one pending preparation across panel detach/remount and stops hidden polling', async (t) => {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  const h = prepConnectionHarness();
+  try {
+    const first = h.mount(); h.last('status').resolve(prepInitial()); await flush();
+    assert.equal(h.controller.start(true), true); await flush();
+    const original = h.last('start'); first.detach();
+    const frameCount = first.frames.length, second = h.mount();
+    assert.equal(second.frames[0].starting, true);
+    assert.equal(h.controller.start(true), false);
+    assert.equal(h.by('start').length, 1); assert.equal(h.by('status').length, 1);
+    original.resolve(prepRunning()); await flush();
+    assert.equal(first.frames.length, frameCount);
+    assert.equal(h.by('status').length, 2);
+    h.last('status').resolve(prepRunning(1, { phase: 'settling' })); await flush();
+    second.detach(); t.mock.timers.tick(5000); await flush();
+    assert.equal(h.by('status').length, 2);
+    const third = h.mount();
+    assert.equal(third.frames[0].status.phase, 'settling');
+    assert.equal(h.by('status').length, 3);
+    h.last('status').resolve(prepRunning(1, { phase: 'prepared' })); await flush();
+    t.mock.timers.tick(5000); await flush();
+    assert.equal(h.controller.start(true), false); assert.equal(h.by('start').length, 1);
+    assert.equal(h.by('status').length, 3);
+  } finally { h.connection.dispose(); t.mock.timers.reset(); }
+});
+
+test('failed preparation stays visible across remount, unchanged automatic/manual status and read errors', async () => {
+  for (const failure of [{ code: 'macos_maintenance_unavailable' }, { code: 'cleanup_unknown' }, 'malformed']) {
+    const h = prepConnectionHarness();
+    try {
+      const first = h.mount(); h.last('status').resolve(prepInitial()); await flush();
+      h.controller.start(true); await flush();
+      if (failure === 'malformed') h.last('start').resolve(prepInitial()); else h.last('start').reject(failure);
+      await flush(); const error = h.controller.snapshot().error; assert(error);
+      first.detach(); h.last('status').resolve(prepInitial()); await flush();
+      const second = h.mount(); assert.deepEqual(second.frames[0].error, error);
+      h.last('status').resolve(prepInitial()); await flush();
+      assert.equal(h.controller.start(true), false);
+      void h.controller.refresh(); h.last('status').reject({ code: 'busy', message: 'INERT_PRIVATE_CANARY' }); await flush();
+      assert.deepEqual(h.controller.snapshot().error, error);
+      void h.controller.refresh(); h.last('status').resolve(prepInitial()); await flush();
+      assert.deepEqual(h.controller.snapshot().error, error);
+      assert.equal(h.controller.start(true), false); assert.equal(h.by('start').length, 1);
+      assert(!JSON.stringify(h.controller.snapshot()).includes('INERT_PRIVATE_CANARY'));
+      assert(h.connection.reconnectionError());
+    } finally { h.connection.dispose(); }
+  }
+});
+
+test('an original preparation rejection while hidden is retained and reconciled once without publishing to the old panel', async () => {
+  const h = prepConnectionHarness();
+  try {
+    const first = h.mount(); h.last('status').resolve(prepInitial()); await flush(); h.controller.start(true); await flush();
+    first.detach(); const frameCount = first.frames.length;
+    h.last('start').reject({ code: 'macos_maintenance_unavailable' }); await flush();
+    assert.equal(first.frames.length, frameCount); assert.equal(h.by('status').length, 2);
+    h.last('status').resolve(prepInitial()); await flush();
+    const second = h.mount();
+    assert.equal(second.frames[0].error.code, 'macos_maintenance_unavailable');
+    h.last('status').resolve(prepInitial()); await flush();
+    assert.equal(h.controller.start(true), false); assert.equal(h.by('start').length, 1);
+  } finally { h.connection.dispose(); }
+});
+
+test('reattached failed preparation clears only for valid newer native generation and needs new explicit consent', async () => {
+  const h = prepConnectionHarness();
+  try {
+    const first = h.mount(); h.last('status').resolve(prepRefused(1)); await flush(); h.controller.start(true); await flush();
+    h.last('start').reject({ code: 'macos_maintenance_unavailable' }); await flush();
+    h.last('status').resolve(prepRefused(1)); await flush(); const error = h.controller.snapshot().error;
+    first.detach(); h.mount(); h.last('status').resolve(prepRunning(2, { extra: true })); await flush();
+    assert.deepEqual(h.controller.snapshot().error, error); assert.equal(h.controller.start(true), false);
+    void h.controller.refresh(); h.last('status').resolve(prepRefused(1)); await flush();
+    assert.deepEqual(h.controller.snapshot().error, error);
+    void h.controller.refresh(); h.last('status').resolve(prepRefused(2)); await flush();
+    assert.equal(h.controller.snapshot().error, null); assert.equal(h.connection.reconnectionError(), null);
+    assert.equal(h.by('start').length, 1); assert.equal(h.controller.start(false), false);
+    assert.equal(h.controller.start(true), true); assert.equal(h.controller.start(true), false); await flush();
+    assert.equal(h.by('start').length, 2);
+    h.last('start').resolve(prepRunning(3)); await flush(); h.last('status').resolve(prepRunning(3)); await flush();
+    assert.equal(h.controller.snapshot().status.generation, 3); assert.equal(h.controller.start(true), false);
+  } finally { h.connection.dispose(); }
+});
+
+test('connection replacement cannot erase a pending, failed or closed preparation and never redirects its original API', async () => {
+  const h = prepConnectionHarness(), replacement = h.makeApi('replacement');
+  try {
+    h.mount(); h.last('status').resolve(prepInitial()); await flush(); h.controller.start(true); await flush();
+    assert.equal(h.connection.connect(h.api, true), true);
+    assert.equal(h.connection.connect(replacement, true), false); assert.equal(h.connection.current(replacement), null);
+    assert.equal(h.connection.current(h.api), h.controller);
+    h.last('start').reject({ code: 'macos_maintenance_unavailable' }); await flush();
+    h.last('status').resolve(prepInitial()); await flush();
+    assert.equal(h.connection.connect(replacement, true), false);
+    void h.controller.refresh(); h.last('status').resolve(prepRunning()); await flush();
+    assert.equal(h.controller.snapshot().error, null);
+    assert.equal(h.connection.connect(replacement, true), false);
+    void h.controller.refresh(); h.last('status').resolve(prepRunning(1, { phase: 'prepared' })); await flush();
+    assert.equal(h.connection.connect(replacement, true), false);
+    assert(h.calls.every((row) => row.identity === 'original'));
+  } finally { h.connection.dispose(); }
+});
+
+test('a settled idle connection can be replaced once and retired controller cannot publish or start', async () => {
+  const h = prepConnectionHarness(), replacement = h.makeApi('replacement');
+  try {
+    const first = h.mount(); assert.equal(h.connection.connect(replacement, true), false);
+    h.last('status').resolve(prepInitial()); await flush();
+    assert.equal(h.connection.reconnectionError(), null); assert.equal(h.connection.connect(replacement, true), true);
+    assert.equal(h.connection.current(h.api), null); assert.equal(h.controller.start(true), false);
+    const frameCount = first.frames.length; let retiredPublications = 0;
+    h.controller.attach(() => { retiredPublications += 1; }); await h.controller.refresh();
+    assert.equal(retiredPublications, 0); assert.equal(first.frames.length, frameCount);
+    const next = h.connection.current(replacement), panel = h.mount(next);
+    assert.equal(panel.frames[0].status, null); assert.equal(panel.frames[0].error, null);
+    assert.equal(h.last('status').identity, 'replacement'); h.last('status').resolve(prepInitial()); await flush();
+    assert.equal(next.start(true), true); await flush(); assert.equal(h.last('start').identity, 'replacement');
+  } finally { h.connection.dispose(); }
+});
+
+test('stale detach cannot disconnect a newer panel and detachment cannot cancel already confirmed queued Start', async () => {
+  const h = prepConnectionHarness();
+  try {
+    const first = h.mount(); h.last('status').resolve(prepInitial()); await flush();
+    const second = h.mount(); first.detach(); h.last('status').resolve(prepInitial()); await flush();
+    assert.equal(second.frames.at(-1).refreshing, false);
+    assert.equal(h.controller.start(true), true); second.detach(); await flush();
+    assert.equal(h.by('start').length, 1); assert.equal(h.controller.start(true), false);
+    h.last('start').reject({ code: 'macos_maintenance_unavailable' }); await flush();
+    h.last('status').resolve(prepInitial()); await flush();
+    const third = h.mount(); assert.equal(third.frames[0].error.code, 'macos_maintenance_unavailable');
+  } finally { h.connection.dispose(); }
+});
+
+test('actual app connection teardown suppresses unissued Start and late replies without native cancellation or exit', async () => {
+  for (const issued of [false, true]) {
+    const h = prepConnectionHarness(); h.mount(); h.last('status').resolve(prepInitial()); await flush();
+    assert.equal(h.controller.start(true), true); if (issued) await flush();
+    const retained = h.controller.snapshot(); h.connection.dispose();
+    if (issued) h.last('start').reject({ code: 'cleanup_unknown' });
+    await flush();
+    assert.equal(h.by('start').length, issued ? 1 : 0); assert.equal(h.by('status').length, 1);
+    assert.equal(h.controller.snapshot(), retained); assert.equal(h.connection.current(h.api), null);
+    assert.equal(h.connection.connect(h.makeApi('after-teardown'), true), false);
+    assert.equal(h.controller.start(true), false);
+  }
 });

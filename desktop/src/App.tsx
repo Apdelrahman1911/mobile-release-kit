@@ -74,6 +74,7 @@ import { configurationOwnerReason, editRetainsDraft, editStartReason } from './c
 import { ConfigEditController } from './configEditController.ts';
 import { GitHubSetupController } from './githubSetupController.ts';
 import { EnvironmentController } from './environment.ts';
+import { InstallationPreparationConnection } from './installationController.ts';
 import { ReleaseVersionController } from './releaseVersion.ts';
 import { ExternalProjectObservationController } from './externalProjectObservationController.ts';
 import { CliReadAccessController } from './cliReadAccessController.ts';
@@ -241,6 +242,7 @@ function savedIdentityInput(session: ProjectSession | null, input?: IdentityInpu
 
 export function App() {
   const [api, setApi] = useState<DesktopApi | null>(null);
+  const [installationPreparation] = useState(() => new InstallationPreparationConnection());
   const [info, setInfo] = useState<AppInfo | null>(null);
   const [catalog, setCatalog] = useState<Catalog | null>(null);
   const [loading, setLoading] = useState(true);
@@ -1656,6 +1658,8 @@ export function App() {
   const localEditingLabel = nativeWorkflowAvailable || nativeMetadataAvailable || nativeVersionAvailable || nativeImagesAvailable ? 'Local file editing' : nativeSaveAvailable ? 'Configuration-only editing' : 'Read-only drafting';
 
   const bootstrap = useCallback(async () => {
+    const preparationError = installationPreparation.reconnectionError();
+    if (preparationError) { setBootError(preparationError); return; }
     const originalPlayCleanup = playCleanupBusy();
     if (originalPlayCleanup) { setBootError({ code: 'github_play_cleanup_busy', message: originalPlayCleanup, retryable: false }); return; }
     const originalActionsRetry = actionsRetryBusy();
@@ -1732,6 +1736,9 @@ export function App() {
     try {
       const connection = await desktopApi();
       if (generation !== bootGeneration.current) return;
+      if (!installationPreparation.connect(connection, connection.mode === 'native')) {
+        throw installationPreparation.reconnectionError() ?? { code: 'installation_document_unavailable' };
+      }
       setApi(connection);
       // This fixed native Status has its own qualification gate. Passive
       // appInfo/catalogue success never enables tool execution.
@@ -1818,7 +1825,7 @@ export function App() {
       passivePending.current -= 1; setPassivePending(passivePending.current);
       if (generation === bootGeneration.current) { bootstrapPending.current = false; setLoading(false); externalObserverRef.current?.syncContext(); identityRef.current?.ui.sync(); githubGhEntry.syncContext(); githubDevice.syncContext(); }
     }
-  }, [githubPlayCleanup, playCleanupBusy, githubActionsRetry, actionsRetryBusy, githubPullRequest, pullRequestBusy, githubActivity, activityBusy, repositoryCreate, repositoryCreateBusy, versionEnrollmentBusy, gitBusy, githubSetup, githubConnection, githubGhEntry, githubDevice, githubGhBusy, githubRemoteSetup, githubPublication, githubPreflight, githubRelease, githubHistory, environment, releaseVersion, releaseInputs, diagnostics, releaseEvidence, artifactInspection, artifactBusy, offlinePreflight, localStore, localStorePrepare, localStoreExecute, localStoreReconcile, localHistory, appleProvisioning, appleProvisioningBusy, androidBuild, toolAcquisition, toolPreparationBusy, projectRecovery, iosArchive, androidBusy, recoveryBusy, iosBusy, savedCommandBusy, metadataText, metadataImages, versionEdit, syncConnectionContext, retirePathPicker, identityBusy, retireIdentity, connectIdentity]);
+  }, [installationPreparation, githubPlayCleanup, playCleanupBusy, githubActionsRetry, actionsRetryBusy, githubPullRequest, pullRequestBusy, githubActivity, activityBusy, repositoryCreate, repositoryCreateBusy, versionEnrollmentBusy, gitBusy, githubSetup, githubConnection, githubGhEntry, githubDevice, githubGhBusy, githubRemoteSetup, githubPublication, githubPreflight, githubRelease, githubHistory, environment, releaseVersion, releaseInputs, diagnostics, releaseEvidence, artifactInspection, artifactBusy, offlinePreflight, localStore, localStorePrepare, localStoreExecute, localStoreReconcile, localHistory, appleProvisioning, appleProvisioningBusy, androidBuild, toolAcquisition, toolPreparationBusy, projectRecovery, iosArchive, androidBusy, recoveryBusy, iosBusy, savedCommandBusy, metadataText, metadataImages, versionEdit, syncConnectionContext, retirePathPicker, identityBusy, retireIdentity, connectIdentity]);
 
   // Before bootstrap: retire consent on the actual saved/key projection, and
   // keep the view responsive to peer-owner changes without renewing an intent.
@@ -1911,6 +1918,7 @@ export function App() {
   useEffect(() => () => { identityRef.current?.ui.dispose(); identityRef.current?.native.dispose(); }, []);
   useEffect(() => () => githubSetup.dispose(), [githubSetup]);
   useEffect(() => () => environment.dispose(), [environment]);
+  useEffect(() => () => installationPreparation.dispose(), [installationPreparation]);
   useEffect(() => () => releaseVersion.dispose(), [releaseVersion]);
   useEffect(() => () => releaseInputs.dispose(), [releaseInputs]);
   useEffect(() => () => diagnostics.dispose(), [diagnostics]);
@@ -2574,7 +2582,7 @@ export function App() {
                 {row.operationId && <> · original session <code>{row.operationId}</code>; query its separate operation history (which may be unavailable)</>}</p>)}
             </section>}
           </ProgressiveDisclosure></>}
-        {page === 'environment' && <Environment info={info} api={api} preview={preview} session={session} state={environmentState} controller={environment}
+        {page === 'environment' && <Environment info={info} api={api} preparationController={installationPreparation.current(api)} preview={preview} session={session} state={environmentState} controller={environment}
           diagnosticsState={diagnosticsState} diagnosticsController={diagnostics} toolDelegation={<AgentToolSetup controller={agentToolSetup}/>} toolPreparation={toolPreparationView} toolSetup={{ state: androidBuildState, controller: androidBuild, onHelp: setHelp, sectionRef: androidToolSetupSection }} onRetry={() => void bootstrap()} onSettings={() => navigate('settings')} onHelp={setHelp} loading={loading} />}
         {page === 'credentials' && <Credentials catalog={catalog} state={assetState} controller={assetSession} project={session} inputState={releaseInputState} inputController={releaseInputs} onSettings={() => navigate('settings')} onHelp={setHelp}
           onOfflineChecks={() => reviewCredentialChecks('offline')} onAndroidSigning={() => reviewCredentialChecks('android-signing')}

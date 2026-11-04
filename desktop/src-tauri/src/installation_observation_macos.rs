@@ -532,7 +532,7 @@ impl InstallationSlots {
             checkpoint(end, stop)?;
             let id = book.records.get(index).and_then(|r| r.identity).ok_or(AdmissionFailure::Identity)?;
             if id.uid != 0 || id.gid != 0 || id.mode & 0o7777 != mode || id.flags != 0 { return Err(AdmissionFailure::Ownership); }
-            native::no_xattrs(book.fd(index)?.as_fd()).map_err(native_error)?;
+            book.installed_attributes(index,end,stop)?;
             book.check_name(index, end, stop)
         })
     }
@@ -544,7 +544,7 @@ impl InstallationSlots {
         publish: &mut dyn FnMut(Problem, Instant)) -> InspectResult<()> {
         self.check(end, stop, publish)?;
         self.attempt(Problem::PayloadMismatch, end, stop, publish, |book| {
-            if book.close(index) { Ok(()) } else { Err(AdmissionFailure::Unknown) }
+            if book.close(index,&mut |book|book.point(end,stop).is_err()) { Ok(()) } else { Err(AdmissionFailure::Unknown) }
         })?;
         self.check(end, stop, publish)
     }

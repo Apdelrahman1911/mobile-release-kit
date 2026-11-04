@@ -18,7 +18,7 @@ mod mobile_release_desktop {
     }
 }
 use mobile_release_desktop::macos_existing_app_metadata::SnapshotData;
-#[derive(Clone, Copy)] struct Identity(u8);
+#[derive(Clone, Copy, PartialEq, Eq)] struct Identity(u8);
 impl Identity { fn same_object(self, other: Self) -> bool { self.0 == other.0 } }
 struct Original { identity: Option<Identity>, existing_app_metadata: Option<SnapshotData>, actual: Cell<SnapshotData> }
 struct Creation { identity: Option<Identity> }
@@ -49,7 +49,7 @@ impl Install {
 fn launcher_inventory_depth_data() -> usize {
     mobile_release_desktop::macos_applications_launcher::BUNDLE.bytes().filter(|b| *b == b'/').count()
 }
-fn root_check(book: &Install, root: usize, prefix: &str, depth: usize) -> Result<()> {
+fn root_check(book: &mut Install, root: usize, prefix: &str, depth: usize) -> Result<()> {
     /* MRK_TREE_ROOT_ATTRIBUTES_ORIGINAL */
     Ok(())
 }
@@ -64,10 +64,10 @@ fn main() {
     let mut existing = book(7);
     assert_eq!(existing.capture_existing_app_metadata(0, true, reason), Ok(()));
     // This fails with the old original root gate even after enrollment.
-    assert_eq!(root_check(&existing, 0, prefix, depth), Ok(()));
-    assert_eq!(root_check(&existing, 0, "app", 0), Ok(()));
+    assert_eq!(root_check(&mut existing, 0, prefix, depth), Ok(()));
+    assert_eq!(root_check(&mut existing, 0, "app", 0), Ok(()));
     for (p, d) in [(prefix, depth+1), ("runtime", 0), ("app/Contents", 1)] {
-        assert_eq!(root_check(&existing, 0, p, d), Err(reason));
+        assert_eq!(root_check(&mut existing, 0, p, d), Err(reason));
     }
     for allow in [false, true] {
         let mut fresh = book(7);
@@ -78,10 +78,10 @@ fn main() {
     let mut new_empty = book(0);
     assert_eq!(new_empty.capture_existing_app_metadata(0, false, reason), Ok(()));
     new_empty.originals[0].actual.set(SnapshotData(7));
-    assert_eq!(root_check(&new_empty, 0, prefix, depth), Err(reason));
+    assert_eq!(root_check(&mut new_empty, 0, prefix, depth), Err(reason));
     for changed in [0, 8] {
         existing.originals[0].actual.set(SnapshotData(changed));
-        assert_eq!(root_check(&existing, 0, prefix, depth), Err(reason));
+        assert_eq!(root_check(&mut existing, 0, prefix, depth), Err(reason));
         existing.originals.push(Original { identity: Some(Identity(3)), existing_app_metadata: None,
             actual: Cell::new(SnapshotData(changed)) });
         let n = existing.originals.len()-1;
@@ -98,5 +98,21 @@ fn main() {
     refused.reader_failed.set(false); refused.post_failed.set(true);
     assert_eq!(refused.capture_existing_app_metadata(0, true, reason), Err("original-correspondence"));
     assert_eq!(refused.originals[0].existing_app_metadata, None);
+    let payload_path = "app/Contents/Helpers/MobileReleaseKitPayload.app";
+    let mut payload = book(7);
+    // A nested payload never enrolls a first snapshot through the tree walker.
+    assert_eq!(root_check(&mut payload, 0, payload_path, 3), Err(reason));
+    assert_eq!(payload.capture_existing_app_metadata(0, true, reason), Ok(()));
+    payload.originals.push(Original { identity: Some(Identity(3)), existing_app_metadata: None,
+        actual: Cell::new(SnapshotData(7)) });
+    // Formal removal already captured this same original at its fixed code slot.
+    assert_eq!(root_check(&mut payload, 1, payload_path, 3), Ok(()));
+    assert_eq!(payload.originals[1].existing_app_metadata, Some(SnapshotData(7)));
+    for changed in [0, 8] {
+        payload.originals[1].actual.set(SnapshotData(changed));
+        assert!(root_check(&mut payload, 1, payload_path, 3).is_err());
+    }
+    payload.originals[1].actual.set(SnapshotData(7));
+    assert_eq!(root_check(&mut payload, 1, payload_path, 4), Err(reason));
     println!("MRK_EXISTING_LAUNCHER_METADATA_DATA=PASS");
 }

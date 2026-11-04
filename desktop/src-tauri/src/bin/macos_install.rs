@@ -10139,6 +10139,21 @@ mod installer {
             book.protected(root, true, Some(0o555))?;
             if prefix=="app" && depth==0 || prefix==mobile_release_desktop::macos_applications_launcher::BUNDLE
                 && depth==launcher_inventory_depth_data() { book.app_attributes(root,"maintenance-payload-attributes")?; }
+            else if prefix=="app/Contents/Helpers/MobileReleaseKitPayload.app" && depth==3 {
+                // Formal removal already retained this fixed bundle original.
+                // A tree reopen may conserve that snapshot, never enroll a new
+                // incoming/nested bundle or replace the first expectation.
+                let identity=book.identity(root)?;
+                let mut retained=false;
+                for prior in &book.originals {
+                    if prior.existing_app_metadata.is_some() && prior.identity.is_some_and(|id|id.same_object(identity)) {
+                        check(prior.identity==Some(identity),"maintenance-payload-original")?;
+                        retained=true;
+                    }
+                }
+                if retained {book.capture_existing_app_metadata(root,true,"maintenance-payload-attributes")?;}
+                book.app_attributes(root,"maintenance-payload-attributes")?;
+            }
             else { native::no_xattrs(book.fd(root)?.as_fd()).map_err(|_| "maintenance-payload-attributes")?; }
             check(stat::fstat(book.fd(root)?).map_err(|_| "maintenance-payload-stat")?.st_flags == 0,
                 "maintenance-payload-flags")?;
@@ -13761,7 +13776,14 @@ mod installer {
                     code[slot]=book.open(Some(code[parent]),name,directory)?;
                     let role=match slot {1=>AclRole::SystemLibrary,2=>AclRole::SystemSupport,_=>AclRole::Other};
                     book.protected_as(code[slot],directory,match slot {1|2=>None,3=>Some(0o755),_=>Some(0o555)},role)?;
-                    native::no_xattrs(book.fd(code[slot])?.as_fd()).map_err(|_| "removal-current-attributes")?;
+                    // Fixed existing entry/payload bundle originals only. The
+                    // snapshot remains provisional until the source, record and
+                    // both code signatures below authenticate these SAME FDs.
+                    if matches!(slot,4|7) {
+                        book.capture_existing_app_metadata(code[slot],true,"removal-current-attributes")?;
+                    } else {
+                        native::no_xattrs(book.fd(code[slot])?.as_fd()).map_err(|_| "removal-current-attributes")?;
+                    }
                     check(stat::fstat(book.fd(code[slot])?).map_err(|_| "removal-current-stat")?.st_flags==0,
                         "removal-current-flags")?;
                 }

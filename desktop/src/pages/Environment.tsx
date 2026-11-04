@@ -1,5 +1,6 @@
 import type { ReactNode } from 'react';
 import { InstallationDetails } from '../components/InstallationDetails.tsx';
+import type { InstallationPreparationController } from '../installationController.ts';
 import type { AppInfo, DesktopApi, HelpContent } from '../types.ts';
 import type { ProjectSession } from '../drafts.ts';
 import type { EnvironmentController, EnvironmentPlatform, EnvironmentOperation, EnvironmentState } from '../environment.ts';
@@ -37,7 +38,8 @@ const initialHelp: Record<'platform' | 'operation', HelpContent> = {
 };
 const activity = (operation: EnvironmentOperation) => operation === 'build' ? 'Build / archive prerequisites' : 'Artifact-validation prerequisites';
 
-export function Environment({ info, api, preview, session, state, controller, diagnosticsState, diagnosticsController, toolPreparation, toolSetup, toolDelegation, onRetry, onSettings, onHelp, loading }: {
+export function Environment({ info, api, preparationController, preview, session, state, controller, diagnosticsState, diagnosticsController, toolPreparation, toolSetup, toolDelegation, onRetry, onSettings, onHelp, loading }: {
+  preparationController: InstallationPreparationController | null;
   info: AppInfo | null; api: DesktopApi | null; preview: boolean; session: ProjectSession | null; state: EnvironmentState; controller: EnvironmentController;
   diagnosticsState: EnvironmentDiagnosticsState; diagnosticsController: EnvironmentDiagnosticsController;
   toolPreparation: PrepareBuildEnvironmentProps; toolSetup: AndroidToolSetupProps; toolDelegation?: ReactNode;
@@ -107,7 +109,7 @@ export function Environment({ info, api, preview, session, state, controller, di
       <ul className="plain-list">{result.limitations.map((item, index) => <li key={index}><Icon name="shield" size={16} /><span>{item}</span></li>)}</ul>
     </section>}
     </ProgressiveDisclosure>
-    <InstallationDetails info={info} api={api} preview={preview} loading={loading} onHelp={onHelp} />
+    <InstallationDetails info={info} api={api} preparationController={preparationController} preview={preview} loading={loading} onHelp={onHelp} />
     <ProgressiveDisclosure title="Advanced · app connection details" description="App and engine information for troubleshooting."
       needsAttention={!preview && info !== null && runtime?.state !== 'available'}>
     <div className="button-row"><button type="button" className="button secondary" disabled={loading} onClick={onRetry}><Icon name="refresh" size={17} className={loading ? 'spin' : ''} />{loading ? 'Loading…' : 'Reload connection'}</button></div>

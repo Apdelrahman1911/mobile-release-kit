@@ -122,7 +122,7 @@ class CandidatePartsWorkflowTests(unittest.TestCase):
         self.assertIn('None,false,inverse || observed.action==ActionData::SamePackageNoop',installer)
         self.assertIn('if prefix=="app" && depth==0',installer)
         self.assertIn('book.app_attributes(original,"maintenance-renamed-attributes")',installer)
-        self.assertIn('if !metadata_ok { self.unknown=true; }',installer)
+        self.assertRegex(installer,r'if !metadata_ok\s*\{\s*self\.unknown=true;\s*\}')
         self.assertNotIn('setxattr',source)
 
     def test_existing_launcher_metadata_original_control_flow(self):

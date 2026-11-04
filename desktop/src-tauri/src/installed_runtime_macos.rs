@@ -150,13 +150,13 @@ impl AndroidServiceIdentitySlots {
     pub(crate) fn capture_recheck_refusal(&mut self,failure:AdmissionFailure,at:Instant){
         self.capture_admission(true,failure,crate::android_registration_app_protocol::Reason::SigningUnavailable,at);
     }
-    fn mode(book:&Book,index:usize,mode:u16,end:Instant,stop:&watch::Receiver<bool>)->Result<()> {
+    fn mode(book:&mut Book,index:usize,mode:u16,end:Instant,stop:&watch::Receiver<bool>)->Result<()> {
         book.point(end,stop)?;
         let identity=book.records.get(index).and_then(|record|record.identity).ok_or(AdmissionFailure::Identity)?;
         if identity.uid!=0 || identity.gid!=0 || identity.flags!=0 || identity.mode&0o7777!=mode {
             return Err(AdmissionFailure::Ownership);
         }
-        native::no_xattrs(book.fd(index)?.as_fd()).map_err(native_error)?;
+        book.installed_attributes(index,end,stop)?;
         book.check_name(index,end,stop)
     }
     fn fixed_payload(&mut self,end:Instant,stop:&watch::Receiver<bool>)->Result<()> {
@@ -681,6 +681,9 @@ fn push_worker_name(selection:&VerifiedRuntime)->&'static str {
 }
 struct Record { state: State, fd: Option<OwnedFd>, parent: Option<usize>, name: String, identity: Option<Identity>, android_flags: Option<u32> }
 struct Book { upload_key_inspection:bool, initialization_agent_inspection:bool,workflow_edit_agent_inspection:bool, records: Vec<Record>, started: bool, inspected: bool, prepared: bool, unknown: bool, closed: bool,
+    // Three fixed installed bundle roots only; no per-payload allocation.
+    // Capturing opaque metadata never substitutes for record/signature admission.
+    bundle_metadata: [Option<(Identity,crate::macos_existing_app_metadata::SnapshotData)>;3],
     tool_ca_required: bool, tool_ca: Option<(usize,u64,String)>,
     fetch_helper_required:bool,fetch_helper:Option<usize>,
     push_helper_required:bool,push_helper:Option<usize>,
@@ -727,7 +730,7 @@ fn metadata(s: &FileStat, directory: bool) -> Result<Identity> {
 impl Book {
     fn new() -> Self { Self { upload_key_inspection:false, initialization_agent_inspection:false,workflow_edit_agent_inspection:false, records: Vec::new(), started: false, inspected: false, prepared: false, unknown: false, closed: false,
         history_nomination: None, history_provider: None, tool_ca_required:false, tool_ca:None,fetch_helper_required:false,fetch_helper:None,push_helper_required:false,push_helper:None,
-        store: None,
+        store: None, bundle_metadata: [None;3],
         #[cfg(not(feature = "macos-android-registration-helper"))]
         registration_gate: None,
         #[cfg(not(feature = "macos-android-registration-helper"))]
@@ -991,7 +994,7 @@ impl Book {
     fn check_name(&self, index: usize, end: Instant, stop: &watch::Receiver<bool>) -> Result<()> {
         self.check_name_with(index,&mut ||self.point(end,stop))
     }
-    fn check_name_with(&self, index: usize, point: &mut dyn FnMut()->Result<()>) -> Result<()> {
+    fn check_identity_with(&self, index: usize, point: &mut dyn FnMut()->Result<()>) -> Result<()> {
         point()?;
         let record = &self.records[index]; let identity = record.identity.ok_or(AdmissionFailure::Identity)?;
         let actual = stat::fstat(self.fd(index)?).map_err(native_error)?;
@@ -1002,7 +1005,69 @@ impl Book {
         point()?;
         if Identity::of(&actual) != identity || Identity::of(&named) != identity
             || record.android_flags.is_some_and(|flags|actual.st_flags!=flags || named.st_flags!=flags) { return Err(AdmissionFailure::Identity); }
+        Ok(())
+    }
+    fn check_name_with(&self, index: usize, point: &mut dyn FnMut()->Result<()>) -> Result<()> {
+        self.check_identity_with(index,point)?;
+        self.bundle_metadata_post_with(index,point)?;
+        let identity=self.records[index].identity.ok_or(AdmissionFailure::Identity)?;
         self.filesystem(index, identity, &mut || point().is_err())?; point()
+    }
+    fn installed_bundle_slot(&self,index:usize)->Option<usize> {
+        use crate::macos_install_paths as paths;
+        // Complete held ancestry, not an extension or inventory-controlled path.
+        // Retained generations, input roots, runtime bundles and ordinary children
+        // cannot enroll an attribute through this canonical-current policy.
+        let roots:[&[&str];3]=[
+            &["/","Library","Application Support","MobileReleaseKit",paths::APP_NAME],
+            &["/","Library","Application Support","MobileReleaseKit",paths::APP_NAME,"Contents","Helpers",paths::PAYLOAD_NAME],
+            &["/","Library","Application Support","MobileReleaseKit",paths::APP_NAME,"Contents","Helpers","MobileReleaseKitLauncher.app"],
+        ];
+        roots.iter().position(|names| {
+            let mut current=Some(index);
+            for name in names.iter().rev() {
+                let Some(record)=current.and_then(|i|self.records.get(i)) else{return false;};
+                if record.name!=*name{return false;}
+                current=record.parent;
+            }
+            current.is_none()
+        })
+    }
+    fn read_bundle_metadata_with(&self,index:usize,point:&mut dyn FnMut()->Result<()>)
+        ->Result<crate::macos_existing_app_metadata::SnapshotData> {
+        use crate::macos_existing_app_metadata::{MACL_BYTES_LIMIT,SnapshotData};
+        point()?;
+        let mut bytes=zeroize::Zeroizing::new([0u8;MACL_BYTES_LIMIT]);
+        let used=native::existing_app_macl(self.fd(index)?.as_fd(),&mut bytes).map_err(native_error)?;
+        point()?;
+        SnapshotData::from_observed_bytes_data(&bytes[..used]).ok_or(AdmissionFailure::Bounds)
+    }
+    fn bundle_metadata_post_with(&self,index:usize,point:&mut dyn FnMut()->Result<()>)->Result<()> {
+        if let Some(slot)=self.installed_bundle_slot(index) {
+            if let Some((identity,first))=self.bundle_metadata[slot] {
+                if self.records[index].identity!=Some(identity){return Err(AdmissionFailure::Identity);}
+                if self.read_bundle_metadata_with(index,point)?!=first{return Err(AdmissionFailure::Identity);}
+                // Recheck the SAME held FD and no-follow name after the added read.
+                self.check_identity_with(index,point)?;
+            }
+        }
+        Ok(())
+    }
+    fn installed_attributes(&mut self,index:usize,end:Instant,stop:&watch::Receiver<bool>)->Result<()> {
+        let Some(slot)=self.installed_bundle_slot(index) else {
+            return native::no_xattrs(self.fd(index)?.as_fd()).map_err(native_error);
+        };
+        self.check_name(index,end,stop)?;
+        let identity=self.records[index].identity.ok_or(AdmissionFailure::Identity)?;
+        if identity.mode!=0o040555 || identity.uid!=0 || identity.gid!=0 || identity.flags!=0 {
+            return Err(AdmissionFailure::Ownership);
+        }
+        let captured=self.read_bundle_metadata_with(index,&mut ||self.point(end,stop))?;
+        if let Some((original,first))=self.bundle_metadata[slot] {
+            if original!=identity || first!=captured{return Err(AdmissionFailure::Identity);}
+        }
+        self.bundle_metadata[slot]=Some((identity,captured));
+        self.check_name(index,end,stop)
     }
     fn chain(&mut self, path: &Path, end: Instant, stop: &watch::Receiver<bool>) -> Result<usize> {
         let bytes = path.as_os_str().as_bytes();
@@ -1032,7 +1097,14 @@ impl Book {
         self.check_name(index, end, stop)?;
         Ok((hash.finalize().iter().map(|b| format!("{b:02x}")).collect(), bytes))
     }
-    fn close(&mut self, index: usize) -> bool {
+    fn close(&mut self, index: usize, expired:&mut dyn FnMut(&Self)->bool) -> bool {
+        // A failed final metadata POST vetoes success but never skips the one
+        // permitted consuming close. The SAME owner clock is checked after the
+        // added metadata read; a late read cannot permit a close successor.
+        let metadata_ok=self.records[index].state!=State::Owned || self.records[index].fd.is_none()
+            || self.bundle_metadata_post_with(index,&mut ||
+                if expired(self){Err(AdmissionFailure::Deadline)}else{Ok(())}).is_ok();
+        if self.records[index].state==State::Owned && self.records[index].fd.is_some() && expired(self) {self.unknown=true;return false;}
         let record = &mut self.records[index];
         match record.state {
             State::Reserved => record.state = State::NoHandle,
@@ -1046,6 +1118,7 @@ impl Book {
             State::NoHandle | State::Closed => {}
             _ => self.unknown = true,
         }
+        if !metadata_ok {self.unknown=true;}
         !self.unknown
     }
     fn walk(&mut self, parent: usize, relative: &str, files: &BTreeMap<String, PayloadFile>, directories: &BTreeSet<String>,
@@ -1113,7 +1186,7 @@ impl Book {
                     || self.store.is_some() && store_runtime::retained(&path);
                 if !retain {
                     self.point(end, stop)?;
-                    if !self.close(index) { self.note_acl(AdmissionFailure::Unknown, Instant::now()); return Err(AdmissionFailure::Unknown); }
+                    if !self.close(index,&mut |book|book.point(end,stop).is_err()) { self.note_acl(AdmissionFailure::Unknown, Instant::now()); return Err(AdmissionFailure::Unknown); }
                     self.point(end, stop)?; // A late real consuming return never renews work.
                 }
             }
@@ -1201,6 +1274,8 @@ impl Book {
         let outer_contents = self.open(Some(entry), "Contents", true, end, stop)?;
         let helpers = self.open(Some(outer_contents), "Helpers", true, end, stop)?;
         let payload = self.open(Some(helpers), crate::macos_install_paths::PAYLOAD_NAME, true, end, stop)?;
+        self.installed_attributes(entry,end,stop)?;
+        self.installed_attributes(payload,end,stop)?;
         let contents = self.open(Some(payload), "Contents", true, end, stop)?;
         let app_parent = self.open(Some(contents), "MacOS", true, end, stop)?;
         let binary = self.open(Some(app_parent), "mobile-release-kit-desktop", false, end, stop)?;
@@ -1340,9 +1415,9 @@ impl Book {
         for index in (0..self.records.len()).rev() {
             if self.records[index].state == State::Owned {
                 if expired(self.first_failure()) { continue; }
-                if !self.close(index) { self.note_acl(AdmissionFailure::Unknown, Instant::now()); }
+                if !self.close(index,&mut |book|expired(book.first_failure())) { self.note_acl(AdmissionFailure::Unknown, Instant::now()); }
                 let _ = expired(self.first_failure()); // Record a late real return, never renew its owner.
-            } else { self.close(index); }
+            } else { self.close(index,&mut |_|false); }
         }
         self.closed = true; if self.settled() { CloseOutcome::Settled } else { CloseOutcome::Unknown }
     }

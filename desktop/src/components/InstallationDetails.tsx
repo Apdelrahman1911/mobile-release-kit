@@ -2,12 +2,13 @@ import { useEffect, useMemo, useRef, useState } from 'react';
 import type { ApiError, AppInfo, DesktopApi, HelpContent } from '../types.ts';
 import { installationError, installationLocationHelp, parseInstallationDescription, installationCheckActive, installationCheckHelp,
   INSTALLATION_CHECK_GUIDANCE, installationPreparationActive, installationPreparationHelp, INSTALLATION_PREPARATION_GUIDANCE } from '../installation.ts';
-import { InstallationCheckController, InstallationPreparationController, type InstallationCheckApi, type InstallationCheckView,
+import { InstallationCheckController, type InstallationPreparationController, type InstallationCheckApi, type InstallationCheckView,
   type InstallationPreparationApi, type InstallationPreparationView } from '../installationController.ts';
 import { Badge, ErrorNotice, HelpButton, SectionHeading } from './Common.tsx';
 
-export function InstallationDetails({ info, api, preview, loading, onHelp }: {
+export function InstallationDetails({ info, api, preparationController, preview, loading, onHelp }: {
   info: AppInfo | null; api: (Pick<DesktopApi, 'revealInstallation'> & InstallationCheckApi & InstallationPreparationApi) | null;
+  preparationController: InstallationPreparationController | null;
   preview: boolean; loading: boolean; onHelp: (help: HelpContent) => void;
 }) {
   const description = parseInstallationDescription(info?.installation);
@@ -49,7 +50,7 @@ export function InstallationDetails({ info, api, preview, loading, onHelp }: {
       <p className="save-note">Your projects, signing originals and credential data are separate from this location card. The location description alone does not check files. The separate read-only check below performs no maintenance and does not verify signing, notarization or release readiness.</p>
     </> : <p>{preview ? 'Browser preview cannot observe an installation or request Finder.' : 'Installation location information is not available in this runtime profile. This does not mean the application is missing.'}</p>}
     <InstallationCheckPanel api={api} enabled={!preview && !loading && !!api && description !== null} onHelp={onHelp} />
-    <InstallationPreparationPanel api={api} enabled={!preview && !loading && !!api && description !== null} onHelp={onHelp} />
+    <InstallationPreparationPanel controller={preparationController} enabled={!preview && !loading && !!api && description !== null} onHelp={onHelp} />
     {visible?.error && <ErrorNotice error={visible.error} title="Finder request not confirmed" />}
     {visible && !visible.error && <p role="status">Finder request sent. Finder visibility is unconfirmed; look for the selected app in Finder. No project or installation files were changed.</p>}
   </section>;
@@ -102,29 +103,24 @@ function InstallationCheckPanel({ api, enabled, onHelp }: {
   </div>;
 }
 
-function InstallationPreparationPanel({ api, enabled, onHelp }: {
-  api: InstallationPreparationApi | null; enabled: boolean; onHelp: (help: HelpContent) => void;
+function InstallationPreparationPanel({ controller, enabled, onHelp }: {
+  controller: InstallationPreparationController | null; enabled: boolean; onHelp: (help: HelpContent) => void;
 }) {
-  const identity = useMemo(() => ({}), [api, enabled]);
-  const current = useRef<{ identity: object; controller: InstallationPreparationController } | null>(null);
+  const identity = useMemo(() => ({}), [controller, enabled]);
   const [rendered, render] = useState<{ identity: object; view: InstallationPreparationView } | null>(null);
   const [confirmation, setConfirmation] = useState<{ identity: object; checked: boolean } | null>(null);
+  // Page changes detach only this listener. The App connection retains the
+  // original pending invoke, failure, and status until actual teardown.
   useEffect(() => {
-    const controller = new InstallationPreparationController(api, enabled);
-    current.current = { identity, controller };
-    controller.attach((view) => render({ identity, view }));
-    return () => {
-      if (current.current?.controller === controller) current.current = null;
-      controller.dispose();
-    };
-  }, [api, enabled, identity]);
-  const controller = current.current?.identity === identity ? current.current.controller : null;
+    if (!controller || !enabled) return;
+    return controller.attach((view) => render({ identity, view }));
+  }, [controller, enabled, identity]);
   const view: InstallationPreparationView = rendered?.identity === identity ? rendered.view
-    : { status: null, error: null, starting: false, refreshing: false };
+    : controller?.snapshot() ?? { status: null, error: null, starting: false, refreshing: false };
   const checked = confirmation?.identity === identity && confirmation.checked;
   const status = view.status;
   const active = installationPreparationActive(status);
-  const canConfirm = enabled && status?.canStart === true && !view.starting && !view.refreshing && !view.error;
+  const canConfirm = enabled && controller !== null && status?.canStart === true && !view.starting && !view.refreshing && !view.error;
   return <div className="session-progress" aria-busy={active || view.starting}>
     <h3>Prepare app to quit <HelpButton content={installationPreparationHelp} onHelp={onHelp} /></h3>
     <p>Save your edits and finish or cancel active work first. This stops the installed Android helper, closes new work and then uses the normal Quit flow. It does not delete projects, credentials or installed files, and makes no Store changes.</p>
@@ -135,7 +131,7 @@ function InstallationPreparationPanel({ api, enabled, onHelp }: {
       <button type="button" className="button secondary" disabled={!canConfirm || !checked}
         onClick={() => { if (controller?.start(checked)) setConfirmation({ identity, checked: false }); }}>
         {view.starting ? 'Starting preparation…' : 'Prepare and quit'}</button>
-      <button type="button" className="button secondary small" disabled={!enabled || view.refreshing || view.starting}
+      <button type="button" className="button secondary small" disabled={!enabled || !controller || view.refreshing || view.starting}
         onClick={() => void controller?.refresh()}>{view.refreshing ? 'Checking status…' : 'Refresh preparation status'}</button>
     </div>
     {!enabled && <p className="save-note">Preparation is available only in a supported normal installed macOS app, not browser preview.</p>}

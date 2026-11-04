@@ -175,9 +175,10 @@ impl Book {
         for index in (0..self.records.len()).rev() {
             if self.records[index].state==State::Owned {
                 if self.android_fd_cleanup_expired(end,cleanup,publish) {continue;}
-                if !self.close(index) {self.android_note(AdmissionFailure::Unknown);}
+                if !self.close(index,&mut |book|fd_cleanup_expired_at(end,cleanup,
+                    book.android_first_failure().map(|(_,at)|at),Instant::now())) {self.android_note(AdmissionFailure::Unknown);}
                 let _=self.android_fd_cleanup_expired(end,cleanup,publish);
-            } else if !self.close(index) {self.android_note(AdmissionFailure::Unknown);}
+            } else if !self.close(index,&mut |_|false) {self.android_note(AdmissionFailure::Unknown);}
             if let Some((failure,at))=self.android_first_failure(){publish(failure,at);}
         }
         self.closed=true;
