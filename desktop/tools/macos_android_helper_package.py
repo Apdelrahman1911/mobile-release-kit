@@ -1522,6 +1522,7 @@ def build_environment(environment, work, release, *, target=ARM_TARGET):
     selected = {key: environment[key] for key in ("DEVELOPER_DIR", "MACOSX_DEPLOYMENT_TARGET")}
     selected.update(PATH=cargo.rsplit("/", 1)[0] + ":/usr/bin:/bin:/usr/sbin:/sbin", HOME="/Users/runner",
                     CARGO_HOME="/Users/runner/.cargo", RUSTUP_HOME="/Users/runner/.rustup", RUSTC=rustc,
+                    DYLD_FALLBACK_LIBRARY_PATH=cargo.rsplit("/", 2)[0] + "/lib",
                     LANG="C", LC_ALL="C", TZ="UTC", RUSTUP_TOOLCHAIN=toolchain, RUSTUP_AUTO_INSTALL="0",
                     CARGO_INCREMENTAL="0", CARGO_TARGET_DIR=str(work / "android-helper-target"),
                     TMPDIR=str(work / "android-helper-target/tmp"),

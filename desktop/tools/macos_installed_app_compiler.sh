@@ -22,7 +22,7 @@ if repository_default != "1.98.0" or selected_toolchain != rust_release:
     raise ValueError("review the changed repository default or Mac clock toolchain before this gate")
 # Query only the same admitted direct tools; no shim or installation.
 rust_bin = "/Users/runner/.rustup/toolchains/" + os.environ["RUSTUP_TOOLCHAIN"] + "-" + build_target + "/bin"
-environment = dict(os.environ, PATH=rust_bin + ":/usr/bin:/bin:/usr/sbin:/sbin", HOME="/Users/runner", CARGO_HOME="/Users/runner/.cargo", RUSTUP_HOME="/Users/runner/.rustup", RUSTC=rust_bin + "/rustc", RUSTUP_AUTO_INSTALL="0")
+environment = dict(os.environ, PATH=rust_bin + ":/usr/bin:/bin:/usr/sbin:/sbin", HOME="/Users/runner", CARGO_HOME="/Users/runner/.cargo", RUSTUP_HOME="/Users/runner/.rustup", RUSTC=rust_bin + "/rustc", RUSTUP_AUTO_INSTALL="0", DYLD_FALLBACK_LIBRARY_PATH=rust_bin.rsplit("/", 1)[0] + "/lib")
 versions = {}
 for tool in ("rustc", "cargo"):
     command = [rust_bin + "/" + tool, "--version", "--verbose"]

@@ -29,7 +29,6 @@ fn manifest_json(bytes: &[u8]) -> Result<serde_json::Value, BridgeError> {
     if cfg!(target_os = "macos") { crate::protocol::strict_macos_runtime_manifest_json(bytes) }
     else { strict_json(bytes) }
 }
-const TREE_DEPTH: usize = 16;
 #[cfg(windows)]
 const PYTHON_RESOURCE: &str = "python/python.exe";
 #[cfg(not(windows))]
@@ -1353,37 +1352,12 @@ fn hex(bytes: &[u8]) -> String {
 }
 fn sha(value: &str) -> bool { value.len() == 64 && value.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)) }
 
-pub fn safe_payload_path(path: &str) -> bool { safe_payload_path_in(path, None) }
-
-/// Mac Store DATA paths retain upstream templates and notices. Only this fixed
-/// owned prefix admits internal spaces/percent; all other payload paths retain
-/// the cross-platform grammar and depth. This is not source authentication.
-pub fn safe_macos_runtime_path(path: &str) -> bool { safe_payload_path_in(path, Some("store/")) }
-pub fn safe_macos_install_path(path: &str) -> bool { safe_payload_path_in(path, Some("runtime/store/")) }
+include!("runtime_paths.rs");
 
 fn compiled_payload_path(path: &str) -> bool {
     if cfg!(target_os = "macos") { safe_macos_runtime_path(path) } else { safe_payload_path(path) }
 }
 
-fn safe_payload_path_in(path: &str, store_prefix: Option<&str>) -> bool {
-    if path.is_empty() || path.len() > 512 || !path.is_ascii() { return false; }
-    let prefix_depth = store_prefix.filter(|prefix| path.starts_with(prefix))
-        .map_or(0, |prefix| prefix.bytes().filter(|byte| *byte == b'/').count());
-    let mut depth = 0;
-    for part in path.split('/') {
-        depth += 1;
-        let store = prefix_depth > 0 && depth > prefix_depth;
-        if depth > TREE_DEPTH + prefix_depth || part.is_empty() || part == "." || part == ".."
-            || part.starts_with(' ') || part.ends_with(['.', ' '])
-            || !part.bytes().all(|b| b.is_ascii_alphanumeric() || b"._-+".contains(&b)
-                || store && b"% ".contains(&b)) { return false; }
-        let stem = part.split('.').next().unwrap_or("").to_ascii_uppercase();
-        if ["CON", "PRN", "AUX", "NUL"].contains(&stem.as_str())
-            || (stem.len() == 4 && (stem.starts_with("COM") || stem.starts_with("LPT"))
-                && matches!(stem.as_bytes().get(3), Some(b'1'..=b'9'))) { return false; }
-    }
-    true
-}
 
 fn ordinary(metadata: &Metadata) -> bool {
     if metadata.file_type().is_symlink() { return false; }
@@ -2954,27 +2928,7 @@ pub(crate) fn installed_macos_evidence_profile_data_check() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
-    #[test]
-    fn mac_store_paths_are_scoped_and_depth_bounded() {
-        let suffix = "bundle/ruby/3.3.0/gems/fastlane-2.235.0/fastlane/lib/fastlane/plugins/template/lib/fastlane/plugin/%plugin_name%/helper/%plugin_name%_helper.rb.erb";
-        assert_eq!(suffix.split('/').count(), 16);
-        for suffix in [suffix, "bundle/gems/terminal-notifier/Terminal Notifier/Credits.rtf"] {
-            assert!(safe_macos_runtime_path(&format!("store/{suffix}")));
-            assert!(safe_macos_install_path(&format!("runtime/store/{suffix}")));
-            assert!(!safe_payload_path(&format!("store/{suffix}")));
-            assert!(!safe_macos_runtime_path(&format!("python/{suffix}")));
-            assert!(!safe_macos_install_path(&format!("app/Contents/{suffix}")));
-        }
-        assert!(!safe_macos_runtime_path(&format!("store/extra/{suffix}")));
-        assert!(!safe_macos_install_path(&format!("runtime/store/extra/{suffix}")));
-        for bad in ["../x", "a//b", "a/./b", " space/x", "space /x", "dot./x", "a\\b", "a:b", "a\tb", "NUL.txt", "COM1", "é"] {
-            assert!(!safe_macos_runtime_path(&format!("store/{bad}")), "{bad}");
-            assert!(!safe_macos_install_path(&format!("runtime/store/{bad}")), "{bad}");
-        }
-        assert!(!safe_macos_runtime_path("store%/file"));
-        assert!(!safe_macos_install_path("runtime/storeish/a b"));
-        assert!(safe_payload_path("python/lib/libstdc++.so.6"));
-    }
+    include!("runtime_path_tests.rs");
 
     #[test]
     fn installed_allowlist_is_exactly_the_read_only_project_draft_guidance_and_saved_services() {

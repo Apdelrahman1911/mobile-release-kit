@@ -1058,8 +1058,19 @@ APP_BUILD_SELECTION_SOURCES = (
     "desktop/src-tauri/src/macos_install_paths.rs",
     "desktop/src-tauri/tauri.conf.json",
 )
+# Fixed application/libtest includes used by these Linux/Windows compiler lanes.
+# The macOS-only packaging declaration list is not selected by these profiles.
+# Binding test source bytes never authorizes executing the included tests.
+APP_LIBRARY_TEST_INCLUDE_SOURCES = (
+    "desktop/src-tauri/src/lib_application.rs",
+    "desktop/src-tauri/src/protocol_json.rs",
+    "desktop/src-tauri/src/protocol_json_tests.rs",
+    "desktop/src-tauri/src/runtime_paths.rs",
+    "desktop/src-tauri/src/runtime_path_tests.rs",
+)
 GTK_COMPILE_SOURCES = (
     *APP_BUILD_SELECTION_SOURCES,
+    *APP_LIBRARY_TEST_INCLUDE_SOURCES,
     ".github/workflows/desktop-environment-diagnostics-native.yml",
     "desktop/environment_bootstrap.py",
     "desktop/github_connection_bootstrap.py",
@@ -1857,6 +1868,7 @@ WINDOWS_INSTALLED_PASSIVE_APP_INERT = (
 )
 WINDOWS_INSTALLED_SOURCES = tuple(sorted((
     *APP_BUILD_SELECTION_SOURCES,
+    *APP_LIBRARY_TEST_INCLUDE_SOURCES,
     ".github/workflows/desktop-foundation.yml", "desktop/tools/ci_foundation.py",
     "desktop/src-tauri/Cargo.toml", "desktop/src-tauri/Cargo.lock", "desktop/src-tauri/build.rs",
     "desktop/src-tauri/src/lib.rs", "desktop/src-tauri/src/runtime.rs", "desktop/src-tauri/src/supervisor.rs",
@@ -1894,6 +1906,7 @@ WINDOWS_SDK_HEADERS = tuple(sorted((
 )))
 WINDOWS_SNAPSHOT_SOURCES = tuple(sorted((
     *APP_BUILD_SELECTION_SOURCES,
+    *APP_LIBRARY_TEST_INCLUDE_SOURCES,
     "src/mobile_release/api/_snapshot_windows_native.py", "src/mobile_release/api/_snapshot_windows.py",
     "src/mobile_release/api/_snapshot.py", "src/mobile_release/api/__init__.py",
     "tests/desktop/test_windows_snapshot.py", "tests/desktop/test_api.py", "docs/desktop.md",
@@ -2177,6 +2190,7 @@ WORKFLOW_EOF_CASES = ("precommit-eof", "postcommit-eof", "precommit-conflict-eof
 # The whole headless library is compiled, but only the two named workflow tests
 # may execute. No shell/GTK or Node/Vite outputs are prerequisites for this lane.
 WORKFLOW_NATIVE_SOURCES = tuple(sorted({
+    *APP_LIBRARY_TEST_INCLUDE_SOURCES,
     *WORKFLOW_TRANSACTION_EOF_SOURCES.values(), *WORKFLOW_CORE_SOURCES.values(),
     "desktop/src-tauri/src/candidate_evidence_protocol.rs", "desktop/tests/fixtures/candidate-evidence.json",
     "desktop/src-tauri/src/lifecycle_evidence_protocol.rs", "desktop/tests/fixtures/lifecycle-evidence.json",

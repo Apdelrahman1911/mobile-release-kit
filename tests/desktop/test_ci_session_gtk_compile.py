@@ -5,8 +5,10 @@ import ast
 from copy import deepcopy
 import importlib.util
 import json
+import os
 from pathlib import Path
 import re
+import stat
 import unittest
 from unittest.mock import patch
 
@@ -15,6 +17,49 @@ SPEC = importlib.util.spec_from_file_location("desktop_session_gtk_compile_contr
 assert SPEC is not None and SPEC.loader is not None
 helper = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(helper)
+
+
+def application_declarations(library: bytes, application: bytes) -> str:
+    """Expand only the two fixed root choices for the application source check."""
+    if not all(type(body) is bytes and 0 < len(body) <= 128 * 1024 for body in (library, application)):
+        raise ValueError("application declaration source bound")
+    library, application = library.decode("utf-8"), application.decode("utf-8")
+    profile = '''all(
+    target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),
+    any(feature = "macos-installed-installer", feature = "macos-installed-remover", feature = "macos-installed-app-absence-fixture", feature = "macos-package-producer", feature = "macos-remove-producer"),
+    not(any(feature = "desktop-shell", feature = "custom-protocol", feature = "development-runtime", feature = "installed-cli", feature = "ubuntu-runtime-publisher", feature = "windows-runtime-publisher", feature = "macos-xcode-setup", feature = "macos-android-registration-helper", feature = "macos-installed-resident-image", feature = "macos-installed-desktop-image", feature = "macos-installed-observation", feature = "windows-installed-observation"))
+)'''
+    packaging = '#[cfg(' + profile + ')]\ninclude!("lib_macos_packaging.rs");'
+    ordinary = '#[cfg(not(' + profile + '))]\ninclude!("lib_application.rs");'
+    if (library.count(packaging) != 1 or library.count(ordinary) != 1
+            or re.findall(r'include!\("([^"]+)"\);', library)
+            != ["lib_macos_packaging.rs", "lib_application.rs"]
+            or re.search(r'\binclude\s*!', application)
+            or re.search(r'\binclude\s*!', library.replace(packaging, "").replace(ordinary, ""))):
+        raise ValueError("application declaration source selection")
+    # No arbitrary include discovery or filesystem path supplied by source bytes.
+    return library.replace(packaging, "").replace(ordinary, application)
+
+
+def application_source(root: Path) -> tuple[bytes, bytes]:
+    bodies = []
+    for name in ("lib.rs", "lib_application.rs"):
+        path = root / "desktop/src-tauri/src" / name
+        fd = os.open(path, os.O_RDONLY | os.O_CLOEXEC | os.O_NOFOLLOW | os.O_NONBLOCK)
+        try:
+            before = os.fstat(fd)
+            if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1 or not 0 < before.st_size <= 128 * 1024:
+                raise ValueError("application declaration source file")
+            body = os.read(fd, 128 * 1024 + 1)
+            identity = lambda s: (s.st_dev, s.st_ino, s.st_mode, s.st_nlink, s.st_uid, s.st_gid,
+                                  s.st_size, s.st_mtime_ns, s.st_ctime_ns)
+            if (len(body) != before.st_size or identity(before) != identity(os.fstat(fd))
+                    or identity(before) != identity(path.lstat())):
+                raise ValueError("application declaration source changed")
+            bodies.append(body)
+        finally:
+            os.close(fd)
+    return tuple(bodies)
 
 
 def environment() -> dict[str, str]:
@@ -44,6 +89,48 @@ def receipt(phase: str) -> dict:
 
 
 class SessionGtkCompileContractTests(unittest.TestCase):
+    def test_application_includes_are_explicit_bounded_and_receipt_bound(self):
+        root = HELPER.parents[2]
+        library, application = application_source(root)
+        expanded = application_declarations(library, application)
+        self.assertIn("pub mod protocol;", expanded)
+        self.assertIn("pub mod runtime;", expanded)
+        self.assertNotIn('include!("lib_macos_packaging.rs")', expanded)
+        self.assertNotIn('include!("lib_application.rs")', expanded)
+        expected = {
+            "desktop/src-tauri/src/lib_application.rs",
+            "desktop/src-tauri/src/protocol_json.rs",
+            "desktop/src-tauri/src/protocol_json_tests.rs",
+            "desktop/src-tauri/src/runtime_paths.rs",
+            "desktop/src-tauri/src/runtime_path_tests.rs",
+        }
+        self.assertEqual(set(helper.APP_LIBRARY_TEST_INCLUDE_SOURCES), expected)
+        self.assertEqual(len(helper.APP_LIBRARY_TEST_INCLUDE_SOURCES), len(expected))
+        for roster in (helper.GTK_COMPILE_SOURCES, helper.WINDOWS_INSTALLED_SOURCES,
+                       helper.WINDOWS_SNAPSHOT_SOURCES, helper.WORKFLOW_NATIVE_SOURCES,
+                       helper.GITHUB_READONLY_SOURCES, helper.GITHUB_TLS_SOURCES):
+            self.assertTrue(expected <= set(roster))
+            self.assertEqual(len(roster), len(set(roster)))
+            self.assertNotIn("desktop/src-tauri/src/lib_macos_packaging.rs", roster)
+        # Exercise the actual reader for the new fixed inputs independently of
+        # older SG1 inputs that can already exceed its unchanged 1MiB cap.
+        with patch.object(helper, "GTK_COMPILE_SOURCES", tuple(sorted(expected))):
+            recorded = {row["path"]: row for row in helper.gtk_compile_binding(root)["sources"]}
+        for name in expected:
+            self.assertEqual(recorded[name]["sha256"], helper.hash_file(root / name))
+            self.assertEqual(recorded[name]["size"], (root / name).stat().st_size)
+        for left, right in (
+            (b"", application), (library, b""), (library, b"x" * (128 * 1024 + 1)),
+            (library.replace(b'include!("lib_application.rs");', b'include!("other.rs");'), application),
+            (library.replace(b'target_os = "macos"', b'target_os = "linux"'), application),
+            (library + b'\ninclude!("lib_application.rs");', application),
+            (library + b'\ninclude ! ("other.rs");', application),
+            (library, application + b'\ninclude!("../other.rs");'),
+            (library, b"\xff"),
+        ):
+            with self.subTest(source_mutation=(len(left), len(right))), self.assertRaises(ValueError):
+                application_declarations(left, right)
+
     def test_core_inventory_rejects_substitutions_and_malformed_rows(self):
         original = [{"path": path, "size": 1, "sha256": "4" * 64} for path in helper.GTK_CORE_PATHS]
         helper.validate_gtk_core_inventory(original)
@@ -114,7 +201,7 @@ class SessionGtkCompileContractTests(unittest.TestCase):
         self.assertNotIn("len(SOURCES) == 228", driver)
         self.assertNotIn("len(SOURCES) == 268", driver)
         self.assertEqual(driver.count("len(SOURCES) == 290"), 2)
-        self.assertEqual(len(helper.GTK_COMPILE_SOURCES), 78)
+        self.assertEqual(len(helper.GTK_COMPILE_SOURCES), 83)
         for relative in (
                 "desktop/offline_preflight_bootstrap.py",
                 "desktop/src-tauri/src/offline_preflight_owner.rs",
@@ -179,7 +266,7 @@ class SessionGtkCompileContractTests(unittest.TestCase):
                 "src/mobile_release/desktop_preflight.py",
         ):
             self.assertIn(relative, python_paths)
-        library = (root / "desktop/src-tauri/src/lib.rs").read_text(encoding="utf-8")
+        library = application_declarations(*application_source(root))
         integration = (root / "desktop/src-tauri/tests/session_gtk_qualification.rs").read_text(encoding="utf-8")
         modules = re.findall(r"^(?:pub )?mod ([a-z_]+);$", library, re.MULTILINE)
         registrations = re.findall(r'#\[path = "\.\./src/([a-z_]+)\.rs"\] mod ([a-z_]+);', integration)

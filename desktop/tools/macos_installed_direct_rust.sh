@@ -43,9 +43,16 @@ rust_tuples = {
 }
 rust_release, rust_commit = rust_tuples[build_target]
 bin_directory = rustup_home / ('toolchains/' + rust_release + '-' + build_target + '/bin')
+library_directory = bin_directory.parent / 'lib'
+objcopy_path = library_directory / 'rustlib' / build_target / 'bin/rust-objcopy'
 compiler_path = str(bin_directory) + ':/usr/bin:/bin:/usr/sbin:/sbin'
 def need(value, reason):
     if not value: raise ValueError(reason)
+def objcopy_version(body, release):
+    return (type(body) is bytes and len(body) <= 4096
+            and re.fullmatch(rb'llvm-objcopy, compatible with GNU objcopy\nLLVM \(http://llvm.org/\):\n'
+                             rb'  LLVM version [0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}-rust-'
+                             + re.escape(release.encode('ascii')) + rb'-stable\n  Optimized build\.\n', body) is not None)
 need(sys.platform == 'darwin' and sys.maxsize == 2**63-1 and os.uname().machine == machines[build_target]
      and os.getuid() != 0 and os.getuid() == os.geteuid() and os.getgid() == os.getegid(), 'direct-rust-host')
 need(os.environ.get('HOME') == str(home) and os.environ.get('GITHUB_WORKSPACE') == str(checkout)
@@ -141,6 +148,10 @@ try:
     current(selected)
     need(tomllib.loads(raw.decode('utf-8'))['toolchain']['channel'] == '1.98.0', 'direct-rust-repository-default')
     for tool in ('cargo', 'rustc'): original_file(bin_directory / tool, executable=True)
+    # The direct compiler invokes this tool while stripping build scripts.
+    # Admit its exact shipped library; no component install or host fallback.
+    original_file(library_directory / 'libLLVM.dylib')
+    original_file(objcopy_path, executable=True)
     stage = "configuration"
     no_configuration(); check_originals()
     stage = "owner-load"
@@ -151,6 +162,7 @@ try:
     owner = qualification.load_owner(checkout)
     environment = dict(PATH=compiler_path, HOME=str(home), CARGO_HOME=str(cargo_home), RUSTUP_HOME=str(rustup_home),
                        RUSTC=str(bin_directory / 'rustc'), RUSTUP_TOOLCHAIN=rust_release, RUSTUP_AUTO_INSTALL='0',
+                       DYLD_FALLBACK_LIBRARY_PATH=str(library_directory),
                        LANG='C', LC_ALL='C', TZ='UTC', DEVELOPER_DIR=os.environ['DEVELOPER_DIR'],
                        MACOSX_DEPLOYMENT_TARGET=os.environ['MACOSX_DEPLOYMENT_TARGET'])
     for tool in ('rustc', 'cargo'):
@@ -171,6 +183,19 @@ try:
         if tool == 'rustc':
             need([line for line in lines if line.partition(':')[0].strip() == 'commit-hash'] == ['commit-hash: ' + rust_commit], 'direct-rust-clock-commit')
         no_configuration(); check_originals()
+    stage = 'objcopy-version'
+    no_configuration(); check_originals()
+    argv = [str(objcopy_path), '--version']
+    pending_call = True
+    result = owner.run_owned(argv, environ=environment, cwd=checkout / 'desktop/src-tauri',
+                             timeout=15, capture=True, text=False, output_limit=4096)
+    need(type(result) is subprocess.CompletedProcess and type(result.args) is list and result.args == argv
+         and type(result.returncode) is int and type(result.stdout) is bytes and type(result.stderr) is bytes
+         and len(result.stdout) + len(result.stderr) <= 4096, 'direct-rust-original-return')
+    pending_call = False
+    need(result.returncode == 0 and not result.stderr and objcopy_version(result.stdout, rust_release),
+         'direct-rust-objcopy-version')
+    no_configuration(); check_originals()
 except BaseException as error:
     failure = error
 finally:
@@ -184,11 +209,11 @@ finally:
             except OSError: close_errors.append('direct-rust-close-unknown')
 if failure is not None or pending_call or close_errors or not all(row['closed'] for row in originals):
     # Only fixed source labels; never exception prose or private output.
-    allowed = ('direct-rust-ambient-configuration', 'direct-rust-ambient-selector', 'direct-rust-clock-commit', 'direct-rust-close-unknown', 'direct-rust-configuration-bound', 'direct-rust-configuration-directory', 'direct-rust-configuration-disappeared', 'direct-rust-directory-policy', 'direct-rust-file-policy', 'direct-rust-fixed-directory-bound', 'direct-rust-host', 'direct-rust-original-bound', 'direct-rust-original-changed', 'direct-rust-original-return', 'direct-rust-original-unbound', 'direct-rust-repository-default', 'direct-rust-repository-default-bound', 'direct-rust-repository-default-read', 'direct-rust-source-route', 'direct-rust-target', 'direct-rust-target-route', 'direct-rust-version-host', 'direct-rust-version-return')
+    allowed = ('direct-rust-ambient-configuration', 'direct-rust-ambient-selector', 'direct-rust-clock-commit', 'direct-rust-close-unknown', 'direct-rust-configuration-bound', 'direct-rust-configuration-directory', 'direct-rust-configuration-disappeared', 'direct-rust-directory-policy', 'direct-rust-file-policy', 'direct-rust-fixed-directory-bound', 'direct-rust-host', 'direct-rust-objcopy-version', 'direct-rust-original-bound', 'direct-rust-original-changed', 'direct-rust-original-return', 'direct-rust-original-unbound', 'direct-rust-repository-default', 'direct-rust-repository-default-bound', 'direct-rust-repository-default-read', 'direct-rust-source-route', 'direct-rust-target', 'direct-rust-target-route', 'direct-rust-version-host', 'direct-rust-version-return')
     args = BaseException.args.__get__(failure) if failure is not None else ()
     reason = (args[0] if type(failure) is ValueError and type(args) is tuple
               and len(args) == 1 and type(args[0]) is str and args[0] in allowed else
               "original-pending" if pending_call else "close-unknown" if close_errors else "unclassified")
     raise SystemExit('Pinned Rust admission refused: ' + reason + '; stage=' + stage)
-print('Fixed direct Rust' + rust_release + ' compiler and Cargo admitted from the versioned installation.')
+print('Fixed direct Rust' + rust_release + ' compiler, Cargo and objcopy admitted from the versioned installation.')
 PY_DIRECT_RUST

@@ -1,10 +1,13 @@
 """Bounded Bash/stub controls only; no Rust, network or Mac admission runs."""
 from pathlib import Path
+import ast
+import re
 import shlex
 import stat
 import subprocess
 import tempfile
 import unittest
+from types import SimpleNamespace
 
 
 SOURCE = Path(__file__).absolute().parents[2] / "desktop/tools/macos_installed_direct_rust.sh"
@@ -184,6 +187,98 @@ class InstalledRustBootstrapTests(unittest.TestCase):
         self.assertEqual(result.stdout.splitlines(), self.expected_call("packaged", "1.98.1", "cargo-absent")
                          + ["MKDIR", "-m", "700", str(self.cargo)])
         self.assertFalse(self.cargo.exists())
+
+
+class InstalledRustToolHealthTests(unittest.TestCase):
+    def setUp(self):
+        self.source = SOURCE.read_text(encoding="utf-8")
+        body = self.source.split(MARKER, 1)[1].split("\nPY_DIRECT_RUST", 1)[0]
+        self.parsed = ast.parse(body)
+        functions = [node for node in self.parsed.body if isinstance(node, ast.FunctionDef)
+                     and node.name in ("need", "objcopy_version")]
+        self.assertEqual([node.name for node in functions], ["need", "objcopy_version"])
+        self.namespace = {"re": re, "subprocess": subprocess}
+        exec(compile(ast.Module(body=functions, type_ignores=[]), "<fixed-tool-health-functions>", "exec"), self.namespace)
+        original = next(node for node in self.parsed.body if isinstance(node, ast.Try))
+        start = next(index for index, node in enumerate(original.body) if isinstance(node, ast.Assign)
+                     and isinstance(node.value, ast.Constant) and node.value.value == "objcopy-version")
+        # Only the actual health-query statements and inert owner doubles run.
+        self.health = compile(ast.Module(body=original.body[start:], type_ignores=[]), "<fixed-tool-health-query>", "exec")
+
+    def version(self, release="1.98.1"):
+        return ("llvm-objcopy, compatible with GNU objcopy\nLLVM (http://llvm.org/):\n"
+                "  LLVM version 22.1.8-rust-" + release + "-stable\n  Optimized build.\n").encode()
+
+    def test_objcopy_version_refuses_wrong_tool_release_or_unbounded_output(self):
+        check = self.namespace["objcopy_version"]
+        for _, release, _ in TARGETS:
+            self.assertTrue(check(self.version(release), release))
+            for body in (b"", self.version("9.9.9"), self.version(release).replace(b"llvm-objcopy", b"llvm-strip"),
+                         self.version(release) + b"unexpected\n", self.version(release).replace(b"stable", b"nightly"),
+                         b"x" * 4097, b"\xff", self.version(release).decode(), None):
+                with self.subTest(release=release, bodyType=type(body)):
+                    self.assertFalse(check(body, release))
+
+    def test_original_health_return_and_custody_failures_never_retry(self):
+        path = Path("/fixed/1.98.1-aarch64-apple-darwin/lib/rustlib/aarch64-apple-darwin/bin/rust-objcopy")
+        for case in ("ok", "abort", "stderr", "wrong-version", "wrong-argv", "bool-status", "oversized", "unknown", "changed"):
+            with self.subTest(case=case):
+                calls, checks = [], []
+                environment = {"DYLD_FALLBACK_LIBRARY_PATH": "/fixed/1.98.1-aarch64-apple-darwin/lib"}
+                def current():
+                    checks.append(True)
+                    if case == "changed" and len(checks) == 2:
+                        raise ValueError("direct-rust-original-changed")
+                def owned(argv, **options):
+                    calls.append((argv, options))
+                    self.assertEqual(argv, [str(path), "--version"])
+                    self.assertIs(options["environ"], environment)
+                    self.assertEqual({key: options[key] for key in ("timeout", "capture", "text", "output_limit")},
+                                     {"timeout": 15, "capture": True, "text": False, "output_limit": 4096})
+                    if case == "unknown":
+                        raise RuntimeError("inert original unreturned")
+                    return subprocess.CompletedProcess(["wrong"] if case == "wrong-argv" else argv,
+                        -6 if case == "abort" else False if case == "bool-status" else 0,
+                        b"x" * 4097 if case == "oversized" else self.version("9.9.9") if case == "wrong-version" else self.version(),
+                        b"inert dyld failure" if case == "stderr" else b"")
+                scope = dict(self.namespace, owner=SimpleNamespace(run_owned=owned), objcopy_path=path,
+                             environment=environment, checkout=Path("/fixed/checkout"), rust_release="1.98.1",
+                             pending_call=False, no_configuration=lambda: None, check_originals=current)
+                if case == "ok":
+                    exec(self.health, scope)
+                else:
+                    with self.assertRaises((ValueError, RuntimeError)):
+                        exec(self.health, scope)
+                self.assertEqual(len(calls), 1)
+                self.assertEqual(scope["pending_call"], case in ("wrong-argv", "bool-status", "oversized", "unknown"))
+                self.assertEqual(len(checks), 2 if case in ("ok", "changed") else 1)
+
+    def test_exact_tool_library_is_admitted_before_the_original_queries(self):
+        self.assertIn("library_directory = bin_directory.parent / 'lib'", self.source)
+        self.assertIn("objcopy_path = library_directory / 'rustlib' / build_target / 'bin/rust-objcopy'", self.source)
+        self.assertIn("DYLD_FALLBACK_LIBRARY_PATH=str(library_directory)", self.source)
+        for call in ("original_file(library_directory / 'libLLVM.dylib')", "original_file(objcopy_path, executable=True)"):
+            self.assertLess(self.source.index(call), self.source.index("result = owner.run_owned("))
+        for constraint in ("os.O_NOFOLLOW", "stat.S_ISREG(info.st_mode)", "not info.st_mode & 0o022", "current(row)"):
+            self.assertIn(constraint, self.source)
+        self.assertNotIn("llvm-tools", self.source)
+
+    def test_selected_shell_compilers_set_only_exact_library_after_system_env(self):
+        root = SOURCE.parents[2]
+        expected = 'DYLD_FALLBACK_LIBRARY_PATH="/Users/runner/.rustup/toolchains/${RUSTUP_TOOLCHAIN}-$MRK_MACOS_TARGET/lib" '
+        selected = {"desktop/tools/macos_installed_app_build.sh": 5}
+        for recipe in ("app_vault", "compile-the-fixed-ordinary-root-installer-before-cre",
+                       "check-actual-git-and-library-flags-before-the-expens", "check-the-corrected-macos-minimum-and-actual-native-"):
+            selected[".github/actions/macos-candidate-recipes/" + recipe + "/action.yml"] = 1
+        for path, count in selected.items():
+            source = (root / path).read_text(encoding="utf-8")
+            lines = [line for line in source.splitlines() if expected in line]
+            self.assertEqual(len(lines), count, path)
+            self.assertEqual(source.count("DYLD_"), count, path)
+            for line in lines:
+                self.assertRegex(line.split(expected, 1)[1], r'^"/Users/runner/\.rustup/toolchains/.*?/bin/(cargo|rustc)"(?: |$)')
+                if "/usr/bin/env -u" in line:
+                    self.assertLess(line.index("/usr/bin/env -u"), line.index(expected))
 
 
 if __name__ == "__main__":

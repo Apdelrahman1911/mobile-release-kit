@@ -11135,6 +11135,34 @@ sys.exit(status)
         with self.assertRaises(module.Refused):
             module.entrypoint(["tool", "notarize-payload", "--target", "i386-apple-darwin"])
 
+    def test_direct_compiler_library_is_exact_and_native_environment_has_no_loader_overrides(self):
+        module = ANDROID_HELPER
+        work = Path("/fixed/inert-work")
+        for target, release in (("aarch64-apple-darwin", "1.98.1"), ("x86_64-apple-darwin", "1.98.0")):
+            environment = {"HOME": "/Users/runner", "DEVELOPER_DIR": "/fixed/inert-xcode",
+                           "MACOSX_DEPLOYMENT_TARGET": "26.0", "GITHUB_SHA": "a" * 40,
+                           "RUSTUP_TOOLCHAIN": release, "DYLD_LIBRARY_PATH": "/ambient/lib",
+                           "DYLD_FALLBACK_LIBRARY_PATH": "/ambient/lib:/shared/lib",
+                           "DYLD_INSERT_LIBRARIES": "/ambient/injected.dylib",
+                           "GH_TOKEN": "inert-token", "RUSTC_WRAPPER": "/ambient/wrapper"}
+            with self.subTest(target=target):
+                selected = module.build_environment(environment, work, "0.1.4", target=target)
+                self.assertEqual(selected["DYLD_FALLBACK_LIBRARY_PATH"],
+                                 "/Users/runner/.rustup/toolchains/" + release + "-" + target + "/lib")
+                self.assertEqual({key for key in selected if key.startswith("DYLD_")}, {"DYLD_FALLBACK_LIBRARY_PATH"})
+                self.assertFalse({"GH_TOKEN", "RUSTC_WRAPPER"} & selected.keys())
+                self.assertEqual(selected["RUSTC"], module.direct_rust_tools(target)[1])
+                for wrong in ("stable", "nightly", "1.98.0" if release == "1.98.1" else "1.98.1"):
+                    with self.assertRaisesRegex(module.Refused, "^direct-rust-source-route$"):
+                        module.build_environment(dict(environment, RUSTUP_TOOLCHAIN=wrong), work, "0.1.4", target=target)
+                # The actual producer/native/signing environment constructor is
+                # independent of the compiler environment and ambient inputs.
+                operation = object.__new__(module.Operation)
+                operation.work, operation.target_name, operation.environment = work, "inert-target", environment
+                native = operation.native_environment()
+                self.assertFalse(any(key.startswith("DYLD_") for key in native))
+                self.assertEqual(native["PATH"], "/usr/bin:/bin:/usr/sbin:/sbin")
+
     def test_clean_environment_and_configured_profile_refuse_any_ad_hoc_fallback(self):
         module = ANDROID_HELPER
         with tempfile.TemporaryDirectory() as temporary:
