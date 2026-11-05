@@ -382,27 +382,8 @@ fn native_members_match_for(authority: &native_profile::NativeAuthority,
         })
 }
 
-#[derive(Clone, Copy, Serialize)]
-struct Reference {
-    /// Fixed compiled profile only. Not a saved-project compatibility claim.
-    profile: &'static str,
-    observed_jdk_vendor: &'static str,
-    observed_jdk_version: &'static str,
-    versions: VersionSpec,
-    roles: RoleSpec,
-    gradle_distribution_url: &'static str,
-    gradle_distribution_sha256: &'static str,
-    archives: &'static [OfficialArchive],
-    trees: &'static [SourceTree],
-    source_members: &'static [SourceMemberSpec],
-    source_bindings: &'static [SourceBinding],
-    support: &'static [SupportOriginalSpec],
-    support_members: &'static [SupportMemberSpec],
-    payload: &'static [PayloadSource],
-    classes: &'static [FileClass],
-    aliases: &'static [CanonicalAlias],
-    directories: &'static [&'static str],
-}
+// The application borrows dependency-owned catalogue statics directly.
+use mrk_android_catalogue_schema::CatalogueData as Reference;
 
 // Complete immutable observations for the fixed official toolchain.
 // Comparison DATA, never runtime registration or native qualification.
@@ -415,7 +396,7 @@ include!("android_supplier_macos_catalogue_projection.rs");
 #[path = "android_supplier_macos_catalogue_binary.rs"]
 mod catalogue_binary;
 #[cfg(test)]
-const CAT_PROJECTED: ZipMemberSpec<'static> = mrk_android_catalogue_arm64::CATALOGUE.support_members[0].member;
+fn cat_projected() -> ZipMemberSpec<'static> { mrk_android_catalogue_arm64::CATALOGUE.support_members[0].member }
 #[path = "android_supplier_macos_acquisition.rs"]
 pub(crate) mod acquisition;
 
@@ -751,7 +732,12 @@ fn fixed_working_bytes() -> Option<usize> {
     262144usize.checked_add(sdk_metadata::PARSER_WORK_BYTES)?.checked_add(policy::NATIVE_WORK_BYTES)?
         .checked_add(CACHE_WORK_BYTES)
 }
-impl Reference {
+trait ReferenceStorage {
+    fn authority(&self) -> Option<&'static native_profile::NativeAuthority>;
+    fn source_storage(&self) -> Option<SourceStorage>;
+    fn working_bytes(&self) -> Option<usize>;
+}
+impl ReferenceStorage for Reference {
     fn authority(&self) -> Option<&'static native_profile::NativeAuthority> {
         let profile = match self.profile {
             crate::android_build_protocol::MAC_TOOLCHAIN_PROFILE => Profile::MacArm64,
@@ -809,7 +795,25 @@ fn sdk_source_matches(archive: &OfficialArchive, member: &OfficialMember,
         && matches!(source.kind, SourceKindSpec::File { bytes, sha256, modes }
             if bytes == pin.bytes && sha256 == pin.sha256 && modes == [pin.original_mode])
 }
-impl Reference {
+trait ReferenceValidation {
+    fn sdk_original(&self, file: &CanonicalFile, kind: policy::Sdk35File) -> bool;
+    fn vendor_payload(&self, file: &CanonicalFile, group: SourceGroup, component: Component,
+        archive_pin: ArchivePin<'_>, member_prefix: &str, member_name: &str, original_mode: u32) -> bool;
+    fn target_original(&self, file: &CanonicalFile) -> bool;
+    fn gradle_foreign_original(&self, file: &CanonicalFile) -> bool;
+    fn jdk_original(&self, file: &CanonicalFile, original_mode: u32) -> bool;
+    fn compiled_metadata_origin(&self, kind: SdkMetadataKind, file: &CanonicalFile) -> bool;
+    fn compiled_metadata_pair(&self) -> bool;
+    fn source_directory_closure(&self) -> bool;
+    fn structural(&self) -> bool;
+    #[cfg(test)]
+    fn matches_inventory(&self, inventory: &Inventory) -> bool;
+    fn matches_checked_inventory(&self, inventory: &Inventory) -> bool;
+    fn embedded_native_closure(&self, file: &CanonicalFile, member: &NestedNative,
+        commands: &policy::MachCommands, inventory: &Inventory) -> bool;
+    fn native_closure(&self, inventory: &Inventory) -> bool;
+}
+impl ReferenceValidation for Reference {
     fn sdk_original(&self, file: &CanonicalFile, kind: policy::Sdk35File) -> bool {
         let pin = kind.pin();
         if !pin.matches(file.path, file.size, file.sha256, file.mode) { return false; }
@@ -1467,8 +1471,8 @@ fn compiled_catalogue_for(profile: Profile) -> Option<&'static CheckedCatalogue>
     // Selection precedes get_or_init: unsupported profiles never consult, wait
     // on or initialize the ARM cache, even when a document looks ARM-shaped.
     native_profile::authority(profile)?;
-    // REFERENCES is generated const DATA, so separate uses need not have equal
-    // addresses. Each ordinal is checked against itself; no pointer/profile/
+    // REFERENCES borrows named immutable dependency statics. Each ordinal
+    // is checked against itself; no pointer/profile/
     // digest key or deduplication can attach a proof to a different reference.
     // None is a cached immutable failure, not a retry or authorization token.
     match profile {

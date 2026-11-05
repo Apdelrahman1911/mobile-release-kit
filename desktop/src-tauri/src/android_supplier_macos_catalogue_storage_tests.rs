@@ -132,7 +132,7 @@ fn actual_safe_decoder_refuses_finite_malformed_envelopes_and_records() {
             1=>{catalogue_binary::official::<1>(tables,strings,0);},
             2=>{catalogue_binary::sources::<1>(tables,strings,0,&[&[0o755]]);},
             3=>{catalogue_binary::bindings::<1>(tables,strings,0);},
-            4=>{catalogue_binary::payload::<1>(tables,strings,0,CAT_PROJECTED);},
+            4=>{catalogue_binary::payload::<1>(tables,strings,0,cat_projected());},
             5=>{catalogue_binary::classes::<1>(tables,strings,0,&[],&[&[]]);},
             6=>{catalogue_binary::nested::<1>(tables,strings,0,&[]);},
             7=>{catalogue_binary::aliases::<1>(tables,strings,0);},
@@ -167,7 +167,7 @@ fn accepted_variant_records_reach_specific_guards() {
     for origin in [1u8, 2, 3] {
         let mut row = vec![0u8; 48]; row[20] = origin;
         if origin == 3 { row[22] = 1; }
-        let accepted = catalogue_binary::payload::<1>(tables(4, &row), strings, 0, CAT_PROJECTED);
+        let accepted = catalogue_binary::payload::<1>(tables(4, &row), strings, 0, cat_projected());
         match origin {
             1 => assert!(matches!(accepted[0].origin, PayloadOrigin::DirectOriginal(OriginalSource::Support(SupportAsset::BundletoolJar)))),
             2 => assert!(matches!(accepted[0].origin, PayloadOrigin::CompiledSdkMetadata(SdkMetadataKind::Platform35Revision2))),
@@ -175,7 +175,7 @@ fn accepted_variant_records_reach_specific_guards() {
             _ => unreachable!(),
         }
         row[if origin == 2 { 23 } else { 22 }] = 255;
-        refuses(|| { catalogue_binary::payload::<1>(tables(4, &row), strings, 0, CAT_PROJECTED); });
+        refuses(|| { catalogue_binary::payload::<1>(tables(4, &row), strings, 0, cat_projected()); });
     }
 
     for tag in [5u8, 6] {
@@ -331,6 +331,7 @@ fn application_projection_borrows_both_dependency_statics() {
         (&REFERENCES[0], &mrk_android_catalogue_arm64::CATALOGUE),
         (&intel_catalogue::REFERENCES[0], &mrk_android_catalogue_x86_64::CATALOGUE),
     ] {
+        assert!(std::ptr::eq(reference, data));
         assert!(std::ptr::eq(reference.archives, data.archives));
         assert!(std::ptr::eq(reference.trees, data.trees));
         assert!(std::ptr::eq(reference.source_members, data.source_members));

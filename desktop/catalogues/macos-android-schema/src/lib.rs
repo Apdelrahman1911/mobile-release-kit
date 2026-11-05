@@ -287,7 +287,8 @@ impl Sdk35Pin {
     }
 }
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Serialize)]
+#[serde(rename = "Reference")]
 pub struct CatalogueData {
     /// Fixed compiled profile only. Not a saved-project compatibility claim.
     pub profile: &'static str,
