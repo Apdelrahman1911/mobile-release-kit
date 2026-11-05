@@ -17,7 +17,7 @@ runs:
         from pathlib import Path
         
         SCRIPT_PATH = 'desktop/tools/macos_shipping_image_compile.sh'
-        SCRIPT_LIMIT = 64 * 1024  # Actual current Git inventory supplies size and digest.
+        SCRIPT_LIMIT = 96 * 1024  # Actual current Git inventory supplies size and digest.
         
         def shipping_source_bytes(checkout, work, source, run_id, run_attempt, *, clock=time.monotonic):
             """Fixed public SOURCE admission only; no build, native owner or output file."""
@@ -137,8 +137,14 @@ runs:
         work = Path(os.environ['MRK_MACOS_WORK'])
         source = os.environ['GITHUB_SHA']
         ref = 'refs/heads/verify/desktop-macos-image-compile'
+        compile_set = os.environ.get('MRK_MACOS_COMPILE_SET', 'image')
+        if compile_set not in ('image', 'remaining-arm64'):
+            raise ValueError('shipping-compile-selection')
+        event = 'workflow_dispatch' if compile_set == 'remaining-arm64' else 'push'
+        if compile_set == 'remaining-arm64' and os.environ.get('MRK_UNSIGNED_EXPECTED_SHA') != source:
+            raise ValueError('shipping-compile-reviewed-source')
         expected = dict(GITHUB_ACTIONS='true', RUNNER_ENVIRONMENT='github-hosted', RUNNER_OS='macOS', RUNNER_ARCH='ARM64',
-                        GITHUB_EVENT_NAME='push', GITHUB_REPOSITORY='Apdelrahman1911/mobile-release-kit', GITHUB_REF=ref,
+                        GITHUB_EVENT_NAME=event, GITHUB_REPOSITORY='Apdelrahman1911/mobile-release-kit', GITHUB_REF=ref,
                         GITHUB_WORKFLOW_REF='Apdelrahman1911/mobile-release-kit/.github/workflows/desktop-macos-installed.yml@' + ref,
                         GITHUB_WORKFLOW_SHA=source, GITHUB_WORKSPACE=str(checkout), MRK_MACOS_TARGET='aarch64-apple-darwin')
         if (sys.platform != 'darwin' or os.getuid() == 0 or os.getuid() != os.geteuid()

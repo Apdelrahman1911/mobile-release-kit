@@ -25,6 +25,10 @@ def compile_public_data(value, source, run_id, run_attempt):
 
     roles = ('node-version', 'npm-version', 'rustc-version', 'cargo-version',
              'npm-ci', 'frontend-build', 'shipping-image-build')
+    extended = value.get('scope') == 'fixed-arm-remaining-roles-and-libtest-compile-only' if type(value) is dict else False
+    if extended:
+        roles = roles[:6] + ('resident-image-build', 'shipping-image-build', 'vault-helper-build',
+                             'installed-cli-build', 'observer-build', 'application-libtest-build')
     fact_names = ('originalPending', 'sourcePost', 'toolsPost', 'frontendGenerated',
                   'facadeArtifactVerified', 'inputOriginalsKnown', 'toolOriginalsClosed',
                   'generatedOutputsRetired', 'shippingGraphCompiled', 'installedQualified',
@@ -44,7 +48,7 @@ def compile_public_data(value, source, run_id, run_attempt):
     check(type(value) is dict and type(source) is str and re.fullmatch(r'[0-9a-f]{40}', source)
           and source != '0' * 40 and all(type(item) is str and re.fullmatch(r'[1-9][0-9]{0,19}', item)
                                        for item in (run_id, run_attempt)))
-    fixed = dict(schemaVersion=1, scope='fixed-arm-shipping-image-compile-only', source=source,
+    fixed = dict(schemaVersion=1, scope='fixed-arm-remaining-roles-and-libtest-compile-only' if extended else 'fixed-arm-shipping-image-compile-only', source=source,
                  workflowSource=source, runId=run_id, runAttempt=run_attempt, target='aarch64-apple-darwin')
     check(type(value.get('schemaVersion')) is int and all(value.get(key) == item for key, item in fixed.items()))
     facts = {}
@@ -110,6 +114,25 @@ def compile_public_data(value, source, run_id, run_attempt):
                   'pythonControllerPost', 'pythonControllerRetired')))
     result = dict(kind='mrk-public-shipping-compile-evidence-v1', **fixed, facts=facts,
                   commands=commands, sourceInventory=inventory, facadeArtifact=facade, failure=failure)
+    if extended:
+        tree = value.get('sourceTree')
+        check(tree is None or type(tree) is str and re.fullmatch(r'[0-9a-f]{40}', tree))
+        compiled = value.get('compiledArtifacts', [])
+        check(type(compiled) is list and len(compiled) <= 6 and value.get('testsExecuted', False) is False)
+        projected = []
+        for index, row in enumerate(compiled):
+            check(type(row) is dict and set(row) == {'role', 'manifest', 'target', 'kind', 'test', 'optLevel', 'features', 'cargoStdoutSha256', 'bytes', 'sha256'}
+                  and row.get('role') == roles[index + 6]
+                  and type(row.get('manifest')) is str and row['manifest'].startswith('desktop/')
+                  and type(row.get('target')) is str and row.get('kind') in ('cdylib', 'bin', 'lib', 'test')
+                  and type(row.get('test')) is bool and row.get('optLevel') in ('0', '1', '3')
+                  and type(row.get('features')) is list and all(type(item) is str for item in row['features']))
+            projected.append({**row, 'bytes': integer(row.get('bytes'), 1, 512 * 1024 * 1024),
+                              'sha256': digest(row.get('sha256')), 'cargoStdoutSha256': digest(row.get('cargoStdoutSha256'))})
+        if facts['shippingGraphCompiled']:
+            check(tree is not None and len(projected) == 6 and value.get('libtestRetained') is True)
+        check(type(value.get('libtestRetained', False)) is bool)
+        result.update(sourceTree=tree, compiledArtifacts=projected, libtestRetained=value.get('libtestRetained', False), testsExecuted=False)
     check(len((json.dumps(result, sort_keys=True, separators=(',', ':'), allow_nan=False) + '\n').encode('ascii')) <= 16384)
     return result
 
@@ -119,6 +142,14 @@ RUST_RELEASE = '1.98.1'
 RUST_COMMIT = '48a229ceaefd4985c50990b14116b6d856af0985'
 ROLES = ('node-version', 'npm-version', 'rustc-version', 'cargo-version',
          'npm-ci', 'frontend-build', 'shipping-image-build')
+REMAINING_ROLES = ROLES[:6] + ('resident-image-build', 'shipping-image-build', 'vault-helper-build',
+                              'installed-cli-build', 'observer-build', 'application-libtest-build')
+REMAINING_SCOPE = 'fixed-arm-remaining-roles-and-libtest-compile-only'
+FIXTURES = (
+    ('MRK_OUTPUT_DATA_CORPUS', 'corpus.json', 679465, 'a2b4132dd4d7a5d9ba4c824d731e4587fcd6825f5f498931d2b8b782ae0631b2'),
+    ('MRK_OUTPUT_DATA_INVENTORY', 'inventory.json', 1402721, 'beb7a406091cef70e0e7799450bab1cd90a969436d7c1ae231b3c49b133a350a'),
+    ('MRK_OUTPUT_DATA_PATH_QUOTES', 'path-quotes.json', 1067553, '3bbd9b6c157b1d251429bd5d9fbd04025ab24b247786ece4328c1531694d1321'),
+)
 CAPTURE = 4 * 1024 * 1024
 SOURCE_LIMIT = 2 * 1024 * 1024
 ARTIFACT_REASONS = ('cargo-output-bound', 'cargo-line-bound', 'cargo-document', 'cargo-finished',
@@ -289,8 +320,8 @@ def returned_data(result, argv, cap):
             and len(result.stdout) + len(result.stderr) <= cap)
 
 
-def commands_data(node, npm, rust_bin, work):
-    return (
+def commands_data(node, npm, rust_bin, work, compile_set="image"):
+    original = (
         [str(node), '--version'], [str(node), str(npm), '--version'],
         [str(rust_bin / 'rustc'), '--version', '--verbose'],
         [str(rust_bin / 'cargo'), '--version', '--verbose'],
@@ -301,6 +332,77 @@ def commands_data(node, npm, rust_bin, work):
          '--manifest-path', '../helpers/macos-desktop-image/Cargo.toml', '--lib',
          '--target', TARGET, '--message-format=json-render-diagnostics'],
     )
+
+    need(compile_set in ('image', 'remaining-arm64'), 'compile-selection')
+    if compile_set == 'image': return original
+    cargo = str(rust_bin / 'cargo')
+    common = ['--locked', '--jobs', '1', '--target', TARGET, '--message-format=json-render-diagnostics']
+    resident = [cargo, 'build', *common, '--release', '--manifest-path', '../helpers/macos-android-register/Cargo.toml',
+                '--config', 'profile.release.package.mobile-release-kit-desktop.opt-level=1',
+                '--config', 'profile.release.package.mrk-android-catalogue-schema.opt-level=1', '--lib']
+    vault = [cargo, 'build', *common, '--release', '--manifest-path', '../helpers/macos-vault-helper/Cargo.toml',
+             '--bin', 'mrk-vault-keychain']
+    cli = [cargo, 'build', *common, '--offline', '--release', '--no-default-features',
+           '--features', 'installed-cli', '--bin', 'mrk']
+    observer = [cargo, 'test', *common, '--no-default-features',
+                '--features', 'desktop-shell,custom-protocol,macos-installed-observation',
+                '--test', 'installed-shell-observation', '--no-run']
+    libtest = [cargo, 'test', *common, '--offline', '--release', '--no-default-features',
+               '--config', 'profile.release.package.mobile-release-kit-desktop.opt-level=1', '--lib', '--no-run']
+    return original[:6] + (resident, original[6], vault, cli, observer, libtest)
+
+
+def remaining_artifact_data(raw, checkout, work, role):
+    """Bind each actual compiler artifact to its distinct manifest, role and profile."""
+    need(type(raw) is bytes and 0 < len(raw) <= CAPTURE and raw.endswith(b'\n'), 'cargo-output-bound')
+    lines = raw.splitlines()
+    need(0 < len(lines) <= 16384 and all(0 < len(line) <= 1024 * 1024 for line in lines), 'cargo-line-bound')
+    rows = [document(line) for line in lines]
+    need(all(type(row) is dict and row.get('reason') in ('compiler-artifact', 'compiler-message',
+             'build-script-executed', 'build-finished') for row in rows), 'cargo-document')
+    need([row for row in rows if row['reason'] == 'build-finished'] == [{'reason': 'build-finished', 'success': True}]
+         and rows[-1] == {'reason': 'build-finished', 'success': True}, 'cargo-finished')
+    table = {
+        'resident-image-build': ('desktop/helpers/macos-android-register', 'mrk_resident_image', 'cdylib', False, '3', [], 'src/lib.rs'),
+        'shipping-image-build': ('desktop/helpers/macos-desktop-image', 'mrk_desktop_image', 'cdylib', False, '3', [], 'src/lib.rs'),
+        'vault-helper-build': ('desktop/helpers/macos-vault-helper', 'mrk-vault-keychain', 'bin', False, '3', [], 'src/main.rs'),
+        'installed-cli-build': ('desktop/src-tauri', 'mrk', 'bin', False, '3', ['installed-cli'], 'src/installed_cli_main.rs'),
+        'observer-build': ('desktop/src-tauri', 'installed-shell-observation', 'test', True, '0',
+                           ['custom-protocol', 'desktop-shell', 'macos-installed-observation'], 'tests/installed_shell_observation.rs'),
+        'application-libtest-build': ('desktop/src-tauri', 'mobile_release_desktop', 'lib', True, '1', [], 'src/lib.rs'),
+    }
+    need(role in table, 'compile-artifact-role')
+    relative, name, kind, test, opt, features, entry = table[role]
+    manifest = checkout / relative / 'Cargo.toml'
+    selected = [row for row in rows if row['reason'] == 'compiler-artifact'
+                and row.get('manifest_path') == str(manifest) and row.get('target', {}).get('name') == name
+                and row.get('profile', {}).get('test') is test]
+    need(len(selected) == 1, 'cargo-facade-count')
+    row = selected[0]; target = row.get('target', {}); profile = row.get('profile', {})
+    need(target.get('kind') == [kind] and target.get('crate_types') == [kind if kind in ('lib', 'cdylib') else 'bin']
+         and target.get('src_path') == str(checkout / relative / entry)
+         and row.get('features') == features and profile.get('opt_level') == opt
+         and profile.get('debug_assertions') is (role == 'observer-build') and row.get('fresh') is False,
+         'cargo-real-facade')
+    files = row.get('filenames'); executable = row.get('executable')
+    need(type(files) is list and len(files) == 1 and type(files[0]) is str, 'cargo-target-shape')
+    output = Path(files[0]); directory = work / 'cargo-target' / TARGET / ('debug' if role == 'observer-build' else 'release')
+    if test:
+        need(executable == str(output) and output.parent == directory / 'deps'
+             and re.fullmatch(re.escape(name.replace('-', '_')) + r'-[0-9a-f]{16}', output.name), 'cargo-real-facade')
+    else:
+        leaf = 'lib' + name + '.dylib' if kind == 'cdylib' else name
+        need(output == directory / leaf and executable == (None if kind == 'cdylib' else str(output)), 'cargo-real-facade')
+    if role in ('resident-image-build', 'shipping-image-build'):
+        app = [r for r in rows if r['reason'] == 'compiler-artifact'
+               and r.get('manifest_path') == str(checkout / 'desktop/src-tauri/Cargo.toml')
+               and r.get('target', {}).get('name') == 'mobile_release_desktop']
+        app_features = (['macos-android-registration-helper', 'macos-installed-resident-image']
+                        if role == 'resident-image-build' else ['custom-protocol', 'desktop-shell', 'macos-installed-desktop-image'])
+        need(len(app) == 1 and app[0].get('features') == app_features and app[0].get('profile', {}).get('test') is False
+             and app[0].get('profile', {}).get('opt_level') == ('1' if role == 'resident-image-build' else '3'), 'cargo-shipping-feature')
+    return output, dict(role=role, manifest=relative + '/Cargo.toml', target=name, kind=kind, test=test,
+                         optLevel=opt, features=features, cargoStdoutSha256=hashlib.sha256(raw).hexdigest())
 
 
 def artifact_data(raw, checkout, work):
@@ -336,18 +438,19 @@ def artifact_data(raw, checkout, work):
     return output
 
 
-def cleanup_allowed_data(rows, pending, source_post, tools_post):
+def cleanup_allowed_data(rows, pending, source_post, tools_post, roles=ROLES):
     return (pending is False and source_post is True and tools_post is True
-            and type(rows) is list and len(rows) <= len(ROLES)
-            and all(type(row) is dict and row.get('role') == ROLES[index]
+            and type(rows) is list and len(rows) <= len(roles)
+            and all(type(row) is dict and row.get('role') == roles[index]
                     and row.get('returned') is True and row.get('capturesSettled') is True
                     and type(row.get('returncode')) is int for index, row in enumerate(rows)))
 
 
 def passed_data(receipt):
     rows = receipt.get('commands')
-    return (type(rows) is list and len(rows) == len(ROLES)
-            and cleanup_allowed_data(rows, receipt.get('originalPending'), receipt.get('sourcePost'), receipt.get('toolsPost'))
+    roles = REMAINING_ROLES if receipt.get('scope') == REMAINING_SCOPE else ROLES
+    return (type(rows) is list and len(rows) == len(roles)
+            and cleanup_allowed_data(rows, receipt.get('originalPending'), receipt.get('sourcePost'), receipt.get('toolsPost'), roles)
             and all(row['returncode'] == 0 for row in rows)
             and receipt.get('frontendGenerated') is True and receipt.get('facadeArtifactVerified') is True
             and receipt.get('inputOriginalsKnown') is True and receipt.get('toolOriginalsClosed') is True
@@ -355,15 +458,23 @@ def passed_data(receipt):
             and receipt.get('pythonControllerPrepared') is True and receipt.get('pythonControllerPost') is True
             and receipt.get('pythonControllerRetired') is True
             and all(receipt.get(name) is False for name in ('installedQualified', 'runtimeQualified', 'launched', 'signed'))
-            and receipt.get('failure') is None)
+            and receipt.get('failure') is None
+            and (roles == ROLES or len(receipt.get('compiledArtifacts', [])) == 6 and receipt.get('libtestRetained') is True))
 
 
 def main():
     start = time.monotonic()
-    work_end, hard_end = start + 1320, start + 1440  # Same24min, reserve120 inside it.
+    compile_set = os.environ.get('MRK_MACOS_COMPILE_SET', 'image')
+    need(compile_set in ('image', 'remaining-arm64'), 'compile-selection')
+    extended = compile_set == 'remaining-arm64'
+    roles = REMAINING_ROLES if extended else ROLES
+    # Existing image budget is unchanged; the new finite six-graph hosted batch has 118 minutes.
+    work_end, hard_end = (start + 6960, start + 7080) if extended else (start + 1320, start + 1440)
     checkout = Path('/Users/runner/work/mobile-release-kit/mobile-release-kit')
     work = Path(os.environ['MRK_MACOS_WORK'])
     source = os.environ['GITHUB_SHA']
+    need(os.environ.get('GITHUB_EVENT_NAME') == ('workflow_dispatch' if extended else 'push')
+         and (not extended or os.environ.get('MRK_UNSIGNED_EXPECTED_SHA') == source), 'compile-selection')
     need(sys.platform == 'darwin' and sys.maxsize == 2**63 - 1 and sys.flags.isolated and sys.flags.no_site
          and os.getuid() != 0 and os.getuid() == os.geteuid() and os.getgid() == os.getegid()
          and os.uname().machine == 'arm64', 'compile-host')
@@ -381,7 +492,7 @@ def main():
     input_originals_known = True
     controller = None
     owner = None
-    receipt = dict(schemaVersion=1, scope='fixed-arm-shipping-image-compile-only', source=source,
+    receipt = dict(schemaVersion=1, scope=REMAINING_SCOPE if extended else 'fixed-arm-shipping-image-compile-only', source=source,
                    workflowSource=source, runId=os.environ['GITHUB_RUN_ID'], runAttempt=os.environ['GITHUB_RUN_ATTEMPT'],
                    target=TARGET, commands=[], originalPending=False, sourcePost=False, toolsPost=False,
                    frontendGenerated=False, facadeArtifactVerified=False, facadeArtifactObserved=None, inputOriginalsKnown=True, toolOriginalsClosed=False,
@@ -389,6 +500,8 @@ def main():
                    runtimeQualified=False, launched=False, signed=False, failure=None,
                    pythonController=None, pythonControllerObserved=None, pythonControllerRuntime=None,
                    pythonControllerPrepared=False, pythonControllerPost=False, pythonControllerRetired=False)
+    if extended:
+        receipt.update(compiledArtifacts=[], libtestRetained=False, testsExecuted=False)
     failure_status = 1
     stage = 'admission'
 
@@ -564,17 +677,39 @@ def main():
         except FileNotFoundError: return
         raise ValueError('compile-frontend-already-present')
 
-    def output_hash(path):
+    def output_hash(path, maximum=256 * 1024 * 1024, links=(1,)):
         nonlocal input_originals_known
         fd = os.open(path, flags)
+        alias_fd = directory_fd = None
+        alias_name = None
         try:
             info = os.fstat(fd)
             receipt['facadeArtifactObserved'] = dict(mode=info.st_mode, uid=info.st_uid, gid=info.st_gid,
                 nlink=info.st_nlink, size=info.st_size, regular=stat.S_ISREG(info.st_mode),
                 ownerAllowed=info.st_uid == os.getuid(), singleLink=info.st_nlink == 1,
-                sizeAllowed=0 < info.st_size <= 256 * 1024 * 1024)
-            need(stat.S_ISREG(info.st_mode) and info.st_uid == os.getuid() and info.st_nlink == 1
-                 and 0 < info.st_size <= 256 * 1024 * 1024, 'compile-artifact-file')
+                sizeAllowed=0 < info.st_size <= maximum)
+            need(stat.S_ISREG(info.st_mode) and info.st_uid == os.getuid() and info.st_nlink in links
+                 and 0 < info.st_size <= maximum, 'compile-artifact-file')
+            if info.st_nlink == 2:
+                # Account for both original links in this exact new Cargo target.
+                # The public artifact plus one held deps alias exhaust nlink=2.
+                need(path.parent == work / 'cargo-target' / TARGET / 'release', 'compile-artifact-file')
+                deps = path.parent / 'deps'
+                directory_fd = os.open(deps, flags | os.O_DIRECTORY)
+                directory_before = os.fstat(directory_fd)
+                need(identity(directory_before) == identity(deps.lstat()) and directory_before.st_uid == os.getuid(), 'compile-artifact-file')
+                aliases = []
+                with os.scandir(directory_fd) as entries:
+                    for index, entry in enumerate(entries):
+                        cut(True); need(index < 8192, 'compile-artifact-file')
+                        expected = (entry.name == path.name if path.suffix == '.dylib' else
+                                    re.fullmatch(re.escape(path.name.replace('-', '_')) + r'-[0-9a-f]{16}', entry.name) is not None)
+                        if expected and identity(os.stat(entry.name, dir_fd=directory_fd, follow_symlinks=False)) == identity(info):
+                            aliases.append(entry.name)
+                need(len(aliases) == 1, 'compile-artifact-file')
+                alias_name = aliases[0]
+                alias_fd = os.open(alias_name, flags, dir_fd=directory_fd)
+                need(identity(os.fstat(alias_fd)) == identity(info), 'compile-artifact-file')
             digest, offset = hashlib.sha256(), 0
             while offset < info.st_size:
                 cut(True)
@@ -582,12 +717,20 @@ def main():
                 need(bool(block), 'compile-artifact-short')
                 digest.update(block); offset += len(block)
             need(not os.read(fd, 1) and identity(info) == identity(os.fstat(fd)) == identity(path.lstat()), 'compile-artifact-post')
+            if alias_fd is not None:
+                need(identity(info) == identity(os.fstat(alias_fd))
+                     == identity(os.stat(alias_name, dir_fd=directory_fd, follow_symlinks=False))
+                     and identity(directory_before) == identity(os.fstat(directory_fd)) == identity(deps.lstat()), 'compile-artifact-post')
             return dict(bytes=offset, sha256=digest.hexdigest(), identity=identity(info))
         finally:
-            try: os.close(fd)
-            except OSError:
-                input_originals_known = False
-                raise
+            close_error = None
+            for original in (alias_fd, directory_fd, fd):
+                if original is None: continue
+                try: os.close(original)
+                except OSError as error:
+                    input_originals_known = False
+                    if close_error is None: close_error = error
+            if close_error is not None: raise close_error
 
     try:
         binding_raw, binding_original = read(work / 'compile-binding.json', 16384)
@@ -613,6 +756,8 @@ def main():
         receipt['sourceInventorySha256'] = hashlib.sha256(inventory_raw).hexdigest()
         receipt['sourceInventoryBytes'] = len(inventory_raw)
         source_post(inventory)
+        if extended:
+            receipt['sourceTree'] = inventory['tree']
         release = document(read(checkout / 'desktop/macos-installed-inputs/build-release.json', 4096)[0])
         cargo = tomllib.loads(read(checkout / 'desktop/src-tauri/Cargo.toml', 65536)[0].decode())
         tauri = document(read(checkout / 'desktop/src-tauri/tauri.conf.json', 65536)[0])
@@ -659,13 +804,24 @@ def main():
         npm_env = dict(base, HOME=str(work / 'compile-home'), npm_config_userconfig=str(work / 'compile-user.npmrc'),
                        npm_config_globalconfig=str(work / 'compile-global.npmrc'), npm_config_registry='https://registry.npmjs.org/',
                        npm_config_cache=str(work / 'npm-cache'), npm_config_update_notifier='false')
-        argv_rows = commands_data(node, npm, rust_bin, work)
-        for index, (role, argv) in enumerate(zip(ROLES, argv_rows, strict=True)):
+        fixture_environment = {}
+        if extended:
+            for key, name, size, sha in FIXTURES:
+                path = checkout / '.github/fixtures/macos-output-data' / name
+                raw, info = read(path, size, expected=sha)
+                need(len(raw) == size, 'compile-fixture-size')
+                fixture_environment[key] = str(path)
+        libtest_environment = dict(base, **fixture_environment)
+        # This authentic no-feature test recipe has no shipping image release projection.
+        libtest_environment.pop('MRK_IMAGE_RELEASE_ID', None)
+        argv_rows = commands_data(node, npm, rust_bin, work, compile_set)
+        for index, (role, argv) in enumerate(zip(roles, argv_rows, strict=True)):
             stage = role
             cut(); root_post(); need(tools_post(), 'compile-tools-pre'); controller_post()
             if index in (1, 4, 5): configs_post()
             environment = npm_env if index in (1, 4, 5) else base
-            cwd = checkout / ('desktop/src-tauri' if index in (2, 3, 6) else 'desktop')
+            if extended and role == 'application-libtest-build': environment = libtest_environment
+            cwd = checkout / ('desktop/src-tauri' if index in (2, 3) or index >= 6 else 'desktop')
             cap = 4096 if index < 4 else CAPTURE
             if index == 4:
                 absent_frontend('node_modules'); absent_frontend('dist')
@@ -673,7 +829,11 @@ def main():
                 absent_frontend('dist')
                 for path, original in roots:
                     need(identity(path.lstat())[:5] == original, 'compile-generated-root-changed')
-            timeout = min(15 if index < 4 else (300 if index == 4 else 180 if index == 5 else 900), work_end - time.monotonic())
+            role_seconds = {'resident-image-build': 1200, 'shipping-image-build': 1200, 'vault-helper-build': 600,
+                            'installed-cli-build': 900, 'observer-build': 1200, 'application-libtest-build': 1200}
+            seconds = (role_seconds[role] if extended and index >= 6
+                       else 15 if index < 4 else 300 if index == 4 else 180 if index == 5 else 900)
+            timeout = min(seconds, work_end - time.monotonic())
             need(timeout > 0, 'compile-no-work-left')
             pending = True; receipt['originalPending'] = True
             result = owner.run_owned(argv, environ=environment, cwd=cwd, timeout=timeout,
@@ -709,10 +869,50 @@ def main():
                 body, info = read(checkout / 'desktop/dist/index.html', 1024 * 1024)
                 need(body and info.st_uid == os.getuid(), 'compile-genuine-frontend')
                 receipt['frontendGenerated'] = True
-            elif index == 6:
-                output = artifact_data(result.stdout, checkout, work)
-                receipt['facadeArtifact'] = output_hash(output)
-                receipt['facadeArtifactVerified'] = True
+            elif index >= 6:
+                if extended:
+                    output, bound = remaining_artifact_data(result.stdout, checkout, work, role)
+                    maximum = 512 * 1024 * 1024 if role == 'application-libtest-build' else 256 * 1024 * 1024
+                    fact = output_hash(output, maximum, (1,) if bound['test'] else (1, 2))
+                    bound.update(bytes=fact['bytes'], sha256=fact['sha256'])
+                    receipt['compiledArtifacts'].append(bound)
+                    if role == 'application-libtest-build':
+                        # Stream the exact original once to a single-link retained file; never rebuild for local testing.
+                        retained = work / 'application-libtest'
+                        fd = os.open(output, flags)
+                        target_fd = None
+                        try:
+                            need(identity(os.fstat(fd)) == tuple(fact['identity']), 'compile-artifact-post')
+                            target_fd = os.open(retained, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o700)
+                            copied = 0
+                            while copied < fact['bytes']:
+                                cut()
+                                block = os.read(fd, min(1024 * 1024, fact['bytes'] - copied))
+                                need(bool(block), 'compile-artifact-short')
+                                view = memoryview(block)
+                                while view:
+                                    count = os.write(target_fd, view); need(count > 0, 'compile-artifact-short'); view = view[count:]
+                                copied += len(block)
+                            need(not os.read(fd, 1) and identity(os.fstat(fd)) == identity(output.lstat()) == tuple(fact['identity']), 'compile-artifact-post')
+                            os.fsync(target_fd)
+                        finally:
+                            close_error = None
+                            for original in (target_fd, fd):
+                                if original is None: continue
+                                try: os.close(original)
+                                except OSError as error:
+                                    input_originals_known = False
+                                    if close_error is None: close_error = error
+                            if close_error is not None: raise close_error
+                        retained_fact = output_hash(retained, maximum)
+                        need(retained_fact['sha256'] == fact['sha256'] and retained_fact['bytes'] == fact['bytes'], 'compile-artifact-post')
+                        receipt['libtestRetained'] = True
+                else:
+                    output = artifact_data(result.stdout, checkout, work)
+                    fact = output_hash(output)
+                if role == 'shipping-image-build':
+                    receipt['facadeArtifact'] = fact
+                    receipt['facadeArtifactVerified'] = True
         receipt['release'] = release
     except BaseException as error:
         receipt['failure'] = dict(stage=stage, kind=type(error).__name__)
@@ -751,7 +951,7 @@ def main():
                 try: os.close(fd)
                 except OSError: close_ok = False
             receipt['toolOriginalsClosed'] = close_ok
-        if (cleanup_allowed_data(receipt['commands'], pending, receipt['sourcePost'], receipt['toolsPost'])
+        if (cleanup_allowed_data(receipt['commands'], pending, receipt['sourcePost'], receipt['toolsPost'], roles)
                 and close_ok and input_originals_known
                 and receipt['pythonControllerPrepared'] and receipt['pythonControllerPost']):
             try:
@@ -791,6 +991,17 @@ def main():
         receipt['inputOriginalsKnown'] = input_originals_known
         receipt['shippingGraphCompiled'] = passed_data(receipt)
         try:
+            if extended and receipt['shippingGraphCompiled']:
+                provenance = dict(schemaVersion=1, kind='unsigned-app-libtest-for-local-exact-data',
+                    source=source, sourceTree=inventory['tree'], workflowSource=source,
+                    runId=os.environ['GITHUB_RUN_ID'], runAttempt=os.environ['GITHUB_RUN_ATTEMPT'], target=TARGET,
+                    rustRelease=RUST_RELEASE, rustCommit=RUST_COMMIT, release=release, artifact=receipt['compiledArtifacts'][-1],
+                    compilerCommand=receipt['commands'][-1], compilerEnvironment=libtest_environment, sourceInventorySha256=receipt['sourceInventorySha256'],
+                    fixtures=[dict(environment=key, path='.github/fixtures/macos-output-data/' + name, bytes=size, sha256=sha)
+                              for key, name, size, sha in FIXTURES],
+                    sourcePost=receipt['sourcePost'], toolsPost=receipt['toolsPost'], originalPending=False,
+                    testsExecuted=False, signed=False, installed=False)
+                publish('application-libtest-provenance.json', (json.dumps(provenance, sort_keys=True, separators=(',', ':')) + '\n').encode(), 32768)
             publish('compile-receipt.json', (json.dumps(compile_public_data(receipt, source, os.environ['GITHUB_RUN_ID'], os.environ['GITHUB_RUN_ATTEMPT']), sort_keys=True, separators=(',', ':'), allow_nan=False) + '\n').encode('ascii'), 65536)
             cut(True); root_post()
         except BaseException:

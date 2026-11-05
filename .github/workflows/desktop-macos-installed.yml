@@ -21,6 +21,11 @@ on:
           - git-cli-timing
           - git-cli-process-data
           - command-startup-data
+          - unsigned-arm64-compile
+      expected_sha:
+        description: Exact reviewed source for the unsigned ARM64 compile-only route
+        type: string
+        required: false
       prepared_source:
         description: Full source commit of the saved package
         required: false
@@ -3547,12 +3552,15 @@ jobs:
           compression-level: 0
 
   shipping-image-compile:
-    if: github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-macos-image-compile'
+    # The reviewed successor marker suppresses the old automatic image-only build; dispatch remains explicit.
+    if: github.ref == 'refs/heads/verify/desktop-macos-image-compile' && ((github.event_name == 'push' && !contains(github.event.head_commit.message, '[macos-unsigned-arm64]')) || (github.event_name == 'workflow_dispatch' && inputs.operation == 'unsigned-arm64-compile' && inputs.target == 'aarch64-apple-darwin'))
     runs-on: macos-26
-    timeout-minutes: 35
+    timeout-minutes: ${{ github.event_name == 'workflow_dispatch' && 140 || 35 }}
     permissions:
       contents: read
     env:
+      MRK_MACOS_COMPILE_SET: ${{ github.event_name == 'workflow_dispatch' && 'remaining-arm64' || 'image' }}
+      MRK_UNSIGNED_EXPECTED_SHA: ${{ inputs.expected_sha }}
       MRK_MACOS_TARGET: aarch64-apple-darwin
       RUSTUP_TOOLCHAIN: 1.98.1
       RUSTUP_AUTO_INSTALL: '0'
@@ -3590,7 +3598,7 @@ jobs:
         run: *mrk_installed_direct_rust
       - name: "Build genuine frontend and the fixed shipping facade without launching it"
         id: "shipping_compile"
-        timeout-minutes: 24
+        timeout-minutes: ${{ github.event_name == 'workflow_dispatch' && 118 || 24 }}
         uses: "./.github/actions/macos-candidate-recipes/shipping_compile"
       - name: Preserve only bounded public compile evidence; upload is not qualification
         if: always() && steps.compile_work.outputs.root != ''
@@ -3601,6 +3609,22 @@ jobs:
           if-no-files-found: warn
           retention-days: 7
           path: |
+            ${{ steps.compile_work.outputs.root }}/compile-receipt.json
+
+      - name: Retain the exact unsigned application test executable for separately admitted local DATA checks
+        if: success() && github.event_name == 'workflow_dispatch'
+        timeout-minutes: 4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: macos-unsigned-app-libtest-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 1
+          path: |
+            ${{ steps.compile_work.outputs.root }}/application-libtest
+            ${{ steps.compile_work.outputs.root }}/application-libtest-provenance.json
+            ${{ steps.compile_work.outputs.root }}/application-libtest-build.stdout
+            ${{ steps.compile_work.outputs.root }}/source-inventory.json
             ${{ steps.compile_work.outputs.root }}/compile-receipt.json
 
   # Independent current-source parts; rerun failed jobs keeps completed originals.

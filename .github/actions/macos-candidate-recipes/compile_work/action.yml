@@ -29,21 +29,25 @@ runs:
             """Closed prior compile observations, never receipt-publication authority."""
             def check(ok):
                 need(ok, 'compile-public-data')
-        
+
             def digest(item):
                 check(type(item) is str and re.fullmatch(r'[0-9a-f]{64}', item) is not None)
                 return item
-        
+
             def integer(item, low, high):
                 check(type(item) is int and low <= item <= high)
                 return item
-        
+
             def nullable_bool(item):
                 check(item is None or type(item) is bool)
                 return item
-        
+
             roles = ('node-version', 'npm-version', 'rustc-version', 'cargo-version',
                      'npm-ci', 'frontend-build', 'shipping-image-build')
+            extended = value.get('scope') == 'fixed-arm-remaining-roles-and-libtest-compile-only' if type(value) is dict else False
+            if extended:
+                roles = roles[:6] + ('resident-image-build', 'shipping-image-build', 'vault-helper-build',
+                                     'installed-cli-build', 'observer-build', 'application-libtest-build')
             fact_names = ('originalPending', 'sourcePost', 'toolsPost', 'frontendGenerated',
                           'facadeArtifactVerified', 'inputOriginalsKnown', 'toolOriginalsClosed',
                           'generatedOutputsRetired', 'shippingGraphCompiled', 'installedQualified',
@@ -63,7 +67,7 @@ runs:
             check(type(value) is dict and type(source) is str and re.fullmatch(r'[0-9a-f]{40}', source)
                   and source != '0' * 40 and all(type(item) is str and re.fullmatch(r'[1-9][0-9]{0,19}', item)
                                                for item in (run_id, run_attempt)))
-            fixed = dict(schemaVersion=1, scope='fixed-arm-shipping-image-compile-only', source=source,
+            fixed = dict(schemaVersion=1, scope='fixed-arm-remaining-roles-and-libtest-compile-only' if extended else 'fixed-arm-shipping-image-compile-only', source=source,
                          workflowSource=source, runId=run_id, runAttempt=run_attempt, target='aarch64-apple-darwin')
             check(type(value.get('schemaVersion')) is int and all(value.get(key) == item for key, item in fixed.items()))
             facts = {}
@@ -129,20 +133,38 @@ runs:
                           'pythonControllerPost', 'pythonControllerRetired')))
             result = dict(kind='mrk-public-shipping-compile-evidence-v1', **fixed, facts=facts,
                           commands=commands, sourceInventory=inventory, facadeArtifact=facade, failure=failure)
+            if extended:
+                tree = value.get('sourceTree')
+                check(tree is None or type(tree) is str and re.fullmatch(r'[0-9a-f]{40}', tree))
+                compiled = value.get('compiledArtifacts', [])
+                check(type(compiled) is list and len(compiled) <= 6 and value.get('testsExecuted', False) is False)
+                projected = []
+                for index, row in enumerate(compiled):
+                    check(type(row) is dict and set(row) == {'role', 'manifest', 'target', 'kind', 'test', 'optLevel', 'features', 'cargoStdoutSha256', 'bytes', 'sha256'}
+                          and row.get('role') == roles[index + 6]
+                          and type(row.get('manifest')) is str and row['manifest'].startswith('desktop/')
+                          and type(row.get('target')) is str and row.get('kind') in ('cdylib', 'bin', 'lib', 'test')
+                          and type(row.get('test')) is bool and row.get('optLevel') in ('0', '1', '3')
+                          and type(row.get('features')) is list and all(type(item) is str for item in row['features']))
+                    projected.append({**row, 'bytes': integer(row.get('bytes'), 1, 512 * 1024 * 1024),
+                                      'sha256': digest(row.get('sha256')), 'cargoStdoutSha256': digest(row.get('cargoStdoutSha256'))})
+                if facts['shippingGraphCompiled']:
+                    check(tree is not None and len(projected) == 6 and value.get('libtestRetained') is True)
+                check(type(value.get('libtestRetained', False)) is bool)
+                result.update(sourceTree=tree, compiledArtifacts=projected, libtestRetained=value.get('libtestRetained', False), testsExecuted=False)
             check(len((json.dumps(result, sort_keys=True, separators=(',', ':'), allow_nan=False) + '\n').encode('ascii')) <= 16384)
             return result
-        
-        
+
+
         prep_start = time.monotonic()
         prep_work_end, prep_hard_end = prep_start + 45, prep_start + 60
-        
-        
+
+
         def identity(info):
             return (info.st_dev, info.st_ino, info.st_mode, info.st_uid, info.st_gid,
                     info.st_nlink, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
-        
-        
-        # Fixed, disposable hosted-controller preparation, not a packaged Python runtime.
+
+
         CONTROLLER_BASE = '/Library/Frameworks/Python.framework/Versions/3.14/bin/python3.14'
         CONTROLLER_DIRS = ('', 'bin', 'include', 'lib', 'lib/python3.14', 'lib/python3.14/site-packages')
         CONTROLLER_EXES = ('bin/python3.14', 'bin/python3', 'bin/python', 'bin/𝜋thon')
@@ -228,8 +250,14 @@ runs:
              and platform.mac_ver()[0].startswith('26.') and os.getuid() != 0
              and os.getuid() == os.geteuid() and os.getgid() == os.getegid(), 'shipping-compile-host')
         need(re.fullmatch(r'[0-9a-f]{40}', source) and source != '0' * 40, 'shipping-compile-source')
+        compile_set = os.environ.get('MRK_MACOS_COMPILE_SET', 'image')
+        if compile_set not in ('image', 'remaining-arm64'):
+            raise ValueError('shipping-compile-selection')
+        event = 'workflow_dispatch' if compile_set == 'remaining-arm64' else 'push'
+        if compile_set == 'remaining-arm64' and os.environ.get('MRK_UNSIGNED_EXPECTED_SHA') != source:
+            raise ValueError('shipping-compile-reviewed-source')
         expected = dict(GITHUB_ACTIONS='true', RUNNER_ENVIRONMENT='github-hosted', RUNNER_OS='macOS', RUNNER_ARCH='ARM64',
-                        GITHUB_EVENT_NAME='push', GITHUB_REPOSITORY='Apdelrahman1911/mobile-release-kit', GITHUB_REF=ref,
+                        GITHUB_EVENT_NAME=event, GITHUB_REPOSITORY='Apdelrahman1911/mobile-release-kit', GITHUB_REF=ref,
                         GITHUB_WORKFLOW_REF='Apdelrahman1911/mobile-release-kit/.github/workflows/desktop-macos-installed.yml@' + ref,
                         GITHUB_WORKFLOW_SHA=source, GITHUB_WORKSPACE=str(checkout), RUNNER_TEMP='/Users/runner/work/_temp',
                         MRK_MACOS_TARGET='aarch64-apple-darwin', RUSTUP_TOOLCHAIN='1.98.1', HOME='/Users/runner',
@@ -466,7 +494,7 @@ runs:
                 try: consuming_close(fd)
                 except BaseException: pass  # Same original attempted once; first failure retained.
             # No partial environment is adopted or removed after a failed preparation.
-            failure = dict(schemaVersion=1, scope='fixed-arm-shipping-image-compile-only', source=source,
+            failure = dict(schemaVersion=1, scope='fixed-arm-remaining-roles-and-libtest-compile-only' if compile_set == 'remaining-arm64' else 'fixed-arm-shipping-image-compile-only', source=source,
                            workflowSource=source, runId=os.environ['GITHUB_RUN_ID'], runAttempt=os.environ['GITHUB_RUN_ATTEMPT'],
                            target='aarch64-apple-darwin', commands=[], failure=first_failure,
                            pythonControllerObserved=observed, pythonControllerPrepared=False,
