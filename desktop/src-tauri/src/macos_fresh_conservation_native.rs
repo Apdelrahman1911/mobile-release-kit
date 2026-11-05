@@ -199,7 +199,7 @@ impl<'a> Census<'a> {
             "fresh-census-publication-receipt")
     }
 }
-fn inner<'a>(book:&mut Install,source:&'a worker::FreshRecoveryInput<'a>,launcher:Option<&'a applications::FreshRecovery>,stage:usize,journal_size:usize)
+fn inner<'a>(book:&mut Install,source:&'a worker::FreshRecoveryInput<'a>,launcher:Option<&applications::FreshRecovery>,stage:usize,journal_size:usize)
     ->Result<EnrolledAttemptObserved<'a>> {
     source.post(book)?;let selected=source.new_selection(book)?;let root=source.root_original();
     let (intent_original,intent_raw)=metadata_original(book,root,&data(transaction::intent_name_data(source.invocation()))?,transaction::INTENT_LIMIT)?;
@@ -271,7 +271,7 @@ fn inner<'a>(book:&mut Install,source:&'a worker::FreshRecoveryInput<'a>,launche
         && first.request==after.request && after.retry.is_none(),"fresh-census-whole-post")?;
     source.post(book)?;Ok(EnrolledAttemptObserved{source,audit:after,origin,journal,head,entries})
 }
-pub(super) fn observe<'a>(book:&mut Install,source:&'a worker::FreshRecoveryInput<'a>,launcher:Option<&'a applications::FreshRecovery>)
+pub(in crate::installer) fn observe<'a>(book:&mut Install,source:&'a worker::FreshRecoveryInput<'a>,launcher:Option<&applications::FreshRecovery>)
     ->Result<EnrolledAttemptObserved<'a>> {
     source.post(book)?;let root=source.root_original();let stage_name=format!(".install-{}",source.invocation());
     let (files,directories,index_peak)=source.incoming_index_peak(book)?;
@@ -597,7 +597,7 @@ fn shape(value:&serde_json::Value,keys:&[&str])->Result<()> {
 }
 fn receipt_read(book:&mut Install,parent:usize,name:&str,kind:&str,keys:&[&str])->Result<(serde_json::Value,[u8;32],usize)> {
     let (original,raw)=metadata_original(book,parent,name,RECEIPT_LIMIT)?;
-    let value=strict_json(&raw).map_err(|_|"fresh-conservation-receipt-json")?;
+    let value=mobile_release_desktop::protocol::strict_json(&raw).map_err(|_|"fresh-conservation-receipt-json")?;
     shape(&value,keys)?;
     check(value["schemaVersion"].as_u64()==Some(1) && value["kind"].as_str()==Some(kind)
         && bytes(&value)?==raw && book.fresh_output_identity(original)?.same_object_data(&birth_data(&value["writer"])?),
