@@ -137,7 +137,7 @@ impl InitializationKey {
 /// No raw getter, Clone, Debug, serde or renderer key surface. The document must
 /// charge this actual retained lease before refunding the original transport.
 pub(crate) struct VaultKey { cipher: XChaCha20Poly1305, identity: Identity, header_nonce: [u8; 24] }
-#[cfg(all(test, debug_assertions))]
+#[cfg(test)]
 pub(crate) fn lifecycle_data_key(identity: Identity) -> VaultKey {
     // Inert codec/lifecycle DATA only. This is no provider/document/native
     // admission, never compiled into an installed production application.
@@ -309,7 +309,7 @@ impl SealedRecord {
 pub(crate) struct AuthenticatedDescriptor { pub(crate) record: Id, pub(crate) revision: Revision, pub(crate) descriptor: Descriptor }
 pub(crate) struct StoredBytes { bytes: Zeroizing<Vec<u8>>, file: Range<usize> }
 impl StoredBytes {
-    #[cfg(all(test, debug_assertions))]
+    #[cfg(test)]
     pub(crate) fn lifecycle_data(bytes: Vec<u8>) -> Self {
         // Synthetic custody/accounting input only, not authentication or native
         // provider evidence. Production plaintext still comes only from open_record.

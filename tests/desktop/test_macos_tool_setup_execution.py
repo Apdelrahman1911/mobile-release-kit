@@ -27,6 +27,7 @@ INPUTS = load("_tool_execution_inputs", "macos_tool_setup_inputs.py")
 A = load("_tool_execution_preparation", "macos_android_dependency_preparation.py")
 N = load("_tool_execution_clock", "macos_normal_ui_runner.py")
 P = load("_tool_execution_relative", "macos_android_supplier_preparation.py")
+TABLES = load("_tool_execution_catalogue_tables", "macos_android_catalogue_tables.py")
 OBS = load("_tool_execution_observer", "macos_aqua_qualification.py")
 T = OBS.TOOLS
 
@@ -51,6 +52,7 @@ class PassiveOnly(unittest.TestCase):
         self.stack.enter_context(patch("urllib.request.OpenerDirector.open", side_effect=AssertionError("no HTTP")))
         self.stack.enter_context(patch.object(A, "N", N))
         self.stack.enter_context(patch.object(A, "P", P))
+        self.stack.enter_context(patch.object(A, "T", TABLES))
 
 
 class ServiceReports(PassiveOnly):

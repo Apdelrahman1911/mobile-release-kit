@@ -809,12 +809,32 @@ fn fresh_placement_data(phase:&PublicationPhaseData,workspace:Option<launcher::O
     let published=phase_location_data(phase,workspace.or(stage),live)?;
     Ok(if published {FreshPlacement::Applications}else if workspace.is_some(){FreshPlacement::Workspace}else{FreshPlacement::Stage})
 }
+// Closed borrowed sources share the SAME launcher owner, phase and transport.
+// The Fresh arm still requires actual current Parent source/producer/R/M.
+enum FreshRecoverySource<'a> {
+    Archived(&'a worker::ReinstallOldControlsObserved<'a>),
+    Fresh(&'a worker::FreshRecoveryInput<'a>),
+}
+impl FreshRecoverySource<'_> {
+    fn post(&self,book:&Install)->Result<()>{match self{Self::Archived(v)=>v.post(book),Self::Fresh(v)=>v.post(book)}}
+    fn incoming(&self,book:&Install)->Result<(usize,&Inventory,&[u8])>{match self{Self::Archived(v)=>v.incoming(book),Self::Fresh(v)=>v.incoming(book)}}
+    fn incoming_index_peak(&self,book:&Install)->Result<(usize,usize,usize)>{match self{Self::Archived(v)=>v.incoming_index_peak(book),Self::Fresh(v)=>v.incoming_index_peak(book)}}
+    fn root_original(&self)->usize{match self{Self::Archived(v)=>v.root_original(),Self::Fresh(v)=>v.root_original()}}
+    fn new_selection(&self,book:&Install)->Result<&mobile_release_desktop::macos_install_maintenance::ReleaseSetData>{match self{Self::Archived(v)=>v.new_selection(book),Self::Fresh(v)=>v.new_selection(book)}}
+}
 pub(super) struct FreshRecovery {
     phase:PublicationPhase,operation:Operation,material:Material,workspace:Option<usize>,
     bundle:usize,location:FreshPlacement,returned:Returned,first:Option<&'static str>,settled:bool,
 }
 impl FreshRecovery {
     pub(super) fn observe(book:&mut Install,view:&worker::ReinstallOldControlsObserved<'_>,
+        invocation:&str,expected:Option<[u8;32]>)->Result<Option<Self>> {
+        Self::observe_source(book,FreshRecoverySource::Archived(view),invocation,expected)
+    }
+    pub(super) fn observe_fresh(book:&mut Install,view:&worker::FreshRecoveryInput<'_>)->Result<Option<Self>> {
+        Self::observe_source(book,FreshRecoverySource::Fresh(view),view.invocation(),None)
+    }
+    fn observe_source(book:&mut Install,view:FreshRecoverySource<'_>,
         invocation:&str,expected:Option<[u8;32]>)->Result<Option<Self>> {
         view.post(book)?;
         let (_,inventory,_)=view.incoming(book)?;
@@ -892,6 +912,12 @@ impl FreshRecovery {
                 Err(Errno::ENOENT)=>(),Err(_)=>return Err("launcher-recovery-placement"),Ok(_)=>{
                     let original=book.open(Some(parent),name,true)?;
                     require_enrolled(book,original,Some(phase.data.staged))?;
+                    // The sealed native phase identifies this exact old copy;
+                    // conserve its canonical metadata before any traversal/move.
+                    book.capture_existing_app_metadata(original,true,"launcher-recovery-original-metadata")?;
+                    if matches!(&view,FreshRecoverySource::Fresh(_)) {
+                        maintenance::fresh_conservation::retain_launcher_metadata(book,original)?;
+                    }
                     maintenance::audit_launcher_tree(book,original,&material.index())?;
                     held[at]=Some(original);
                 },
@@ -904,7 +930,48 @@ impl FreshRecovery {
         phase.post(book)?;view.post(book)?;
         Ok(Some(Self{phase,operation,material,workspace,bundle,location,returned:Returned::NotAttempted,first:None,settled:false}))
     }
+    pub(super) fn fresh_census_post(&self,book:&Install,view:&worker::FreshRecoveryInput<'_>)->Result<()> {
+        view.post(book)?;
+        check(self.first.is_none() && !self.settled && self.returned==Returned::NotAttempted
+            && self.phase.data.invocation==view.invocation()
+            && book.originals[self.phase.stage].parent==Some(view.root_original()),"launcher-fresh-census-owner")?;
+        self.phase.post(book)?;self.operation.parent_post(book)?;
+        require_enrolled(book,self.bundle,Some(self.phase.data.staged))?;
+        let actual=original_identity(book,self.bundle)?;
+        let placement=fresh_placement_data(&self.phase.data,
+            (self.location==FreshPlacement::Workspace).then_some(actual),
+            (self.location==FreshPlacement::Stage).then_some(actual),
+            (self.location==FreshPlacement::Applications).then_some(actual))?;
+        check(placement==self.location,"launcher-fresh-census-placement")?;view.post(book)
+    }
+    pub(super) fn fresh_census_stage_counts(&self,book:&mut Install,view:&worker::FreshRecoveryInput<'_>)->Result<(u64,u64)> {
+        self.fresh_census_post(book,view)?;
+        let index=self.material.index();maintenance::audit_launcher_tree(book,self.bundle,&index)?;
+        let copied=self.location!=FreshPlacement::Applications;
+        let files=if copied{index.files.len() as u64}else{0};
+        let directories=u64::from(self.workspace.is_some())+if copied{index.directories.len() as u64}else{0};
+        self.fresh_census_post(book,view)?;Ok((files,directories))
+    }
+    pub(super) fn fresh_census_phase(&self,book:&Install,view:&worker::FreshRecoveryInput<'_>,raw:&[u8],
+        intent:&transaction::IntentData,stage:launcher::OriginalIdentityData,workspace:Option<launcher::OriginalIdentityData>,
+        staged:Option<launcher::OriginalIdentityData>,recovered:Option<launcher::OriginalIdentityData>,sealed:bool)->Result<()> {
+        self.fresh_census_post(book,view)?;
+        check(sealed && raw==self.phase.raw && stage==self.phase.data.stage
+            && workspace==self.workspace.map(|n|container_identity(book,n)).transpose()?,"launcher-fresh-census-phase")?;
+        self.phase.data.check(intent,view.invocation())?;
+        let live=(self.location==FreshPlacement::Applications).then(||original_identity(book,self.bundle)).transpose()?;
+        check(fresh_placement_data(&self.phase.data,staged,recovered,live)?==self.location,
+            "launcher-fresh-census-placement")?;self.fresh_census_post(book,view)
+    }
     pub(super) fn preserve(&mut self,book:&mut Install,view:&worker::ReinstallOldControlsObserved<'_>)->Result<()> {
+        self.preserve_source(book,FreshRecoverySource::Archived(view))
+    }
+    pub(super) fn preserve_fresh(&mut self,book:&mut Install,view:&worker::FreshRecoveryInput<'_>,
+        census:maintenance::fresh_conservation::EnrolledAttemptObserved<'_>)->Result<()> {
+        census.before_launcher(book,view,self)?;
+        self.preserve_source(book,FreshRecoverySource::Fresh(view))
+    }
+    fn preserve_source(&mut self,book:&mut Install,view:FreshRecoverySource<'_>)->Result<()> {
         check(self.first.is_none() && !self.settled && self.returned==Returned::NotAttempted,"launcher-recovery-once")?;
         let result=(|| {
             // view.post proves the genuine current producer and SAME held R/M
@@ -2061,4 +2128,33 @@ mod tests {
         assert_eq!(prefix_hash(3, |at, out| read_bytes(b"abc", at, out, 3),
             |_, out| Ok(out.len()+1), || Ok(())), Err("launcher-prefix-read"));
     }
+}
+
+// Retained Fresh controls nominate only a stage/workspace original. No live
+// Applications lookup or publication is possible through this read-only seam.
+pub(super) fn retained_fresh_metadata(book:&mut Install,stage:usize,intent:&transaction::IntentData)->Result<()> {
+    let name=phase_name(intent.invocation_data())?;
+    match book.named(Some(stage),&name){Err(Errno::ENOENT)=>return Ok(()),Err(_)=>return Err("launcher-retained-phase"),Ok(_)=>()};
+    maintenance::removal_archive_scope(book,|book|{
+        let (_,raw)=maintenance::metadata_original(book,stage,&name,PHASE_LIMIT)?;
+        let phase=PublicationPhaseData::parse_raw(&raw)?;phase.check(intent,intent.invocation_data())?;
+        check(phase.previous.is_none() && phase.stage==container_identity(book,stage)?,"launcher-retained-stage")?;
+        let workspace=match book.named(Some(stage),WORK_NAME){Ok(_)=>{
+            let n=book.open(Some(stage),WORK_NAME,true)?;check(container_identity(book,n)?==phase.workspace,"launcher-retained-workspace")?;Some(n)
+        },Err(Errno::ENOENT)=>None,Err(_)=>return Err("launcher-retained-workspace")};
+        let mut originals=[None,None];
+        for (at,parent) in [workspace,Some(stage)].into_iter().enumerate(){if let Some(parent)=parent{
+            match book.named(Some(parent),SOURCE_NAME){Ok(_)=>{
+                let n=book.open(Some(parent),SOURCE_NAME,true)?;require_enrolled(book,n,Some(phase.staged))?;
+                book.capture_existing_app_metadata(n,true,"launcher-retained-metadata")?;
+                maintenance::fresh_conservation::retain_launcher_metadata(book,n)?;
+                // Both callers immediately perform their full tree audit.
+                // Metadata enrollment must not enter ordinary deletion-plan hooks.
+                originals[at]=Some(n);
+            },Err(Errno::ENOENT)=>(),Err(_)=>return Err("launcher-retained-copy")}
+        }}
+        fresh_placement_data(&phase,originals[0].map(|n|original_identity(book,n)).transpose()?,
+            originals[1].map(|n|original_identity(book,n)).transpose()?,None)?;
+        book.check_name(stage,true)
+    })
 }

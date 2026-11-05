@@ -6627,12 +6627,76 @@ def maintenance_restore_post(root_fd, originals):
                  "maintenance-restore-original-changed")
 
 
+def maintenance_fresh_conservation_data(value):
+    if "freshConservation" not in value:
+        return None
+    row = maintenance_map(value["freshConservation"], ("invocation", "receiptSha256"), "maintenance-fresh-conservation-shape")
+    need(maintenance_hex(row["invocation"], 32) and maintenance_hex(row["receiptSha256"], 64)
+         and row["invocation"] not in (value["invocation"], value["requestId"]), "maintenance-fresh-conservation-binding")
+    return row
+
+
+
+def maintenance_fresh_conservation_protected(root_fd, current):
+    """Nonroot named metadata only. Private content remains explicitly unavailable."""
+    reference = current.get("freshConservation")
+    if reference is None:
+        return None
+    maintenance_fresh_conservation_data(current)
+    name = ".fresh-conservation-v1"
+    info = os.stat(name, dir_fd=root_fd, follow_symlinks=False)
+    identity = maintenance_directory_identity(info, 0o700)
+    need(identity["device"] == os.fstat(root_fd).st_dev, "fresh-conservation-volume")
+    return {"reference": reference, "name": name, "signature": signature(info),
+            "protectedPhysicalCensus": "unavailable", "physicalCensusComplete": False}
+
+
+def maintenance_fresh_conservation_audit_data(body, expected):
+    """Finite native collector DATA only; caller owes the separately admitted owner envelope."""
+    value = maintenance_json(body, 16 * 1024)
+    keys = ("schemaVersion", "kind", "selectionSha256", "reference", "originSha256", "root", "namespace",
+            "bytes", "files", "directories", "controlBytes", "attempts")
+    maintenance_map(value, keys, "fresh-conservation-audit-shape")
+    maintenance_map(expected, ("selectionSha256", "reference", "originSha256", "root", "namespace"),
+                    "fresh-conservation-audit-expected")
+    need(type(value["schemaVersion"]) is int and value["schemaVersion"] == 1
+         and value["kind"] == "mrk-fresh-conservation-observed-v1"
+         and all(value[key] == expected[key] for key in expected), "fresh-conservation-audit-binding")
+    maintenance_map(value["reference"], ("invocation", "receiptSha256"), "fresh-conservation-audit-reference")
+    need(maintenance_hex(value["reference"]["invocation"], 32)
+         and all(maintenance_hex(row, 64) for row in (value["selectionSha256"], value["originSha256"],
+                                                     value["reference"]["receiptSha256"])), "fresh-conservation-audit-hash")
+    for role in ("root", "namespace"):
+        row = value[role]
+        need(type(row) is list and len(row) == 5, "fresh-conservation-audit-identity")
+        maintenance_fresh_output_identity_data(dict(zip(FRESH_BIRTH_IDENTITY_FIELDS, row)))
+    need(value["root"][4] == value["namespace"][4] and value["root"][1] != value["namespace"][1],
+         "fresh-conservation-audit-identities")
+    need(all(type(value[key]) is int and value[key] > 0 for key in ("bytes", "files", "directories", "controlBytes"))
+         and value["controlBytes"] <= value["bytes"] <= MAX_BYTES
+         and value["files"] <= MAX_FILES and value["directories"] <= MAX_FILES,
+         "fresh-conservation-audit-count")
+    rows = value["attempts"]
+    need(type(rows) is list and 1 <= len(rows) <= 64, "fresh-conservation-audit-attempts")
+    ids, previous = set(), ""
+    for row in rows:
+        maintenance_map(row, ("invocation", "requestId", "intentSha256"), "fresh-conservation-audit-attempt")
+        invocation, request = row["invocation"], row["requestId"]
+        need(maintenance_hex(invocation, 32) and maintenance_hex(request, 32)
+             and maintenance_hex(row["intentSha256"], 64) and invocation > previous
+             and invocation != request and not ids.intersection((invocation, request)), "fresh-conservation-audit-ids")
+        ids.update((invocation, request))
+        previous = invocation
+    need(value["reference"]["invocation"] in {row["invocation"] for row in rows}, "fresh-conservation-audit-tip")
+    return value
+
 def maintenance_state_data(body, producer):
     value = maintenance_json(body, 16 * 1024)
     maintenance_map(value, ("schemaVersion", "kind", "target", "invocation", "requestId", "capsuleInvocation", "intendedAction",
                            "phase", "current", "retained", "previousEvidence", "residue")
                     + (("recovery",) if "recovery" in value else ())
-                    + (("restoreRecovery",) if "restoreRecovery" in value else ()), "maintenance-state-shape")
+                    + (("restoreRecovery",) if "restoreRecovery" in value else ())
+                    + (("freshConservation",) if "freshConservation" in value else ()), "maintenance-state-shape")
     maintenance_record_header(value, "mrk-macos-maintenance-state-v2", producer)
     need(value["capsuleInvocation"] == value["invocation"] and type(value["intendedAction"]) is str
          and value["intendedAction"] in MAINTENANCE_ACTIONS and value["phase"] == "mutation-recorded" and value["residue"] is None
@@ -6670,6 +6734,8 @@ def maintenance_state_data(body, producer):
          and recovery["tornInvocation"] not in links, "maintenance-noop-recovery-state")
     restore = maintenance_restore_recovery_data(value, value["intendedAction"])
     need(restore is None or restore["tornInvocation"] not in links, "maintenance-restore-state-binding")
+    conservation = maintenance_fresh_conservation_data(value)
+    need(conservation is None or conservation["invocation"] not in links, "maintenance-fresh-conservation-history")
     return value
 
 
@@ -6709,10 +6775,12 @@ def maintenance_intent_data(body, producer, *, current):
     maintenance_map(value, ("schemaVersion", "kind", "target", "invocation", "requestId", "action", "previous", "next", "previousState")
                     + (("recovery",) if "recovery" in value else ())
                     + (("restoreRecovery",) if "restoreRecovery" in value else ())
-                    + (("freshBirth",) if "freshBirth" in value else ()), "maintenance-intent-shape")
+                    + (("freshBirth",) if "freshBirth" in value else ())
+                    + (("freshConservation",) if "freshConservation" in value else ()), "maintenance-intent-shape")
     maintenance_record_header(value, "mrk-macos-maintenance-intent-v2", producer)
     maintenance_pair_data(value["action"], value["previous"], value["next"], producer, current=current)
     maintenance_noop_recovery_data(value, value["action"])
+    maintenance_fresh_conservation_data(value)
     previous = value["previousState"]
     if previous is None:
         need(value["action"] == "fresh-install", "maintenance-intent-previous-state")
@@ -6758,6 +6826,8 @@ def maintenance_intent_canonical_bytes_data(body, producer, *, current):
         for role in FRESH_BIRTH_ROLES:
             birth[role] = {key: birth[role][key] for key in FRESH_BIRTH_IDENTITY_FIELDS}
         ordered["freshBirth"] = birth
+    if "freshConservation" in value:
+        ordered["freshConservation"] = {key: value["freshConservation"][key] for key in ("invocation", "receiptSha256")}
     raw = json.dumps(ordered, ensure_ascii=False, separators=(",", ":"), allow_nan=False).encode("utf-8") + b"\n"
     need(len(raw) <= 16 * 1024, "maintenance-record-byte-bound")
     return raw
@@ -6774,6 +6844,166 @@ def maintenance_fresh_birth_intent_data(body, producer):
     value = maintenance_canonical_intent_data(body, producer, current=True)
     need("freshBirth" in value, "maintenance-fresh-birth-required")
     return value
+
+
+FRESH_OUTPUT_ORIGIN_NAME = "fresh-output-origin-v1.json"
+FRESH_OUTPUT_JOURNAL_NAME = "fresh-output-enrollment-v1"
+FRESH_OUTPUT_ORIGIN_BYTES = 16 * 1024
+FRESH_OUTPUT_ENTRY_BYTES = 2048
+FRESH_OUTPUT_ENTRY_MIN = 256
+FRESH_OUTPUT_ENTRIES = 32768
+FRESH_OUTPUT_PHASES = ("staging-created.json", "prepared.json", "runtime-publication-confirmed.json",
+                       "both-publications-confirmed.json")
+FRESH_OUTPUT_ORIGIN_FIELDS = ("schemaVersion", "kind", "target", "invocation", "requestId", "intentSha256",
+                              "next", "freshBirth", "stage", "originFile", "enrollmentFile", "intentFile")
+FRESH_OUTPUT_ENTRY_FIELDS = ("sequence", "previousSha256", "role", "path", "parent", "identity",
+                             "expectedBytes", "expectedSha256")
+FRESH_OUTPUT_RELEASE_FIELDS = ("profile", "packageIdentifier", "bundleIdentifier", "packageVersion", "release",
+                               "sourceCommit", "protocolSha256", "runtimeManifestSha256", "inventorySha256",
+                               "signingPolicySha256", "packageSha256")
+
+
+def maintenance_fresh_output_identity_data(value):
+    maintenance_map(value, FRESH_BIRTH_IDENTITY_FIELDS, "fresh-output-identity-shape")
+    need(all(type(value[key]) is int for key in FRESH_BIRTH_IDENTITY_FIELDS[:-1])
+         and 0 <= value["device"] < (1 << 63) and 0 < value["inode"] < (1 << 64)
+         and 0 < value["birthSeconds"] < (1 << 63) and 0 <= value["birthNanoseconds"] < 1_000_000_000
+         and maintenance_hex(value["volumeUuid"], 32), "fresh-output-identity")
+    return value
+
+
+def _fresh_output_key_data(value):
+    # Persistent comparison only; a native held/name check still includes device.
+    return tuple(value[key] for key in ("volumeUuid", "inode", "birthSeconds", "birthNanoseconds"))
+
+
+def _fresh_output_encode_data(value):
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":"), allow_nan=False).encode("utf-8") + b"\n"
+
+
+def maintenance_fresh_output_origin_data(body, intent_body, producer):
+    """Closed canonical DATA; neither native ownership nor recovery permission."""
+    intent = maintenance_canonical_intent_data(intent_body, producer, current=False)
+    value = maintenance_json(body, FRESH_OUTPUT_ORIGIN_BYTES)
+    maintenance_map(value, FRESH_OUTPUT_ORIGIN_FIELDS, "fresh-output-origin-shape")
+    need(type(value["schemaVersion"]) is int and value["schemaVersion"] == 1
+         and value["kind"] == "mrk-macos-fresh-output-origin-v1" and value["target"] == producer["target"]
+         and intent["action"] == "fresh-install" and "freshBirth" in intent
+         and value["invocation"] == intent["invocation"] and value["requestId"] == intent["requestId"]
+         and value["intentSha256"] == digest(intent_body) and value["next"] == intent["next"],
+         "fresh-output-origin-binding")
+    maintenance_release_data(value["next"], producer["target"])
+    maintenance_fresh_birth_data(value["freshBirth"])
+    need(value["freshBirth"] == intent["freshBirth"], "fresh-output-origin-birth")
+    identities = [value["freshBirth"][role] for role in FRESH_BIRTH_ROLES]
+    identities.extend(maintenance_fresh_output_identity_data(value[role])
+                      for role in ("stage", "originFile", "enrollmentFile", "intentFile"))
+    need(len({_fresh_output_key_data(row) for row in identities}) == 8
+         and all(row["volumeUuid"] == value["stage"]["volumeUuid"] for row in identities), "fresh-output-origin-alias")
+    ordered = {key: value[key] for key in FRESH_OUTPUT_ORIGIN_FIELDS}
+    ordered["next"] = {key: value["next"][key] for key in FRESH_OUTPUT_RELEASE_FIELDS}
+    # OriginWire embeds birth as serde_json::Value (sorted object keys), while
+    # its four native identities have the typed IdentityWire declaration order.
+    ordered["freshBirth"] = json.loads(json.dumps(value["freshBirth"], sort_keys=True))
+    for role in ("stage", "originFile", "enrollmentFile", "intentFile"):
+        ordered[role] = {key: value[role][key] for key in FRESH_BIRTH_IDENTITY_FIELDS}
+    need(_fresh_output_encode_data(ordered) == body, "fresh-output-origin-canonical")
+    return value
+
+
+def _maintenance_fresh_output_entry_data(body, origin, rows, identities, previous):
+    need(type(body) is bytes and FRESH_OUTPUT_ENTRY_MIN <= len(body) <= FRESH_OUTPUT_ENTRY_BYTES,
+         "fresh-output-entry-bound")
+    value = maintenance_json(body, FRESH_OUTPUT_ENTRY_BYTES)
+    maintenance_map(value, FRESH_OUTPUT_ENTRY_FIELDS, "fresh-output-entry-shape")
+    need(len(rows) < FRESH_OUTPUT_ENTRIES and type(value["sequence"]) is int and value["sequence"] == len(rows)
+         and value["previousSha256"] == previous and maintenance_hex(previous, 64)
+         and type(value["path"]) is str and value["path"].isascii() and 0 < len(value["path"]) <= 1024
+         and value["path"] not in rows, "fresh-output-chain")
+    role, path = value["role"], value["path"]
+    need(type(role) is str and role in ("payload-file", "payload-directory", "release-directory", "metadata-file",
+                                      "stage-receipt", "root-control"), "fresh-output-role")
+    parent = maintenance_fresh_output_identity_data(value["parent"])
+    identity = maintenance_fresh_output_identity_data(value["identity"])
+    need(identity["volumeUuid"] == parent["volumeUuid"] == origin["stage"]["volumeUuid"]
+         and _fresh_output_key_data(identity) not in identities, "fresh-output-enrollment-alias")
+    directory = role in ("payload-directory", "release-directory")
+    need((value["expectedBytes"] is None and value["expectedSha256"] is None) if directory else
+         (type(value["expectedBytes"]) is int and 0 <= value["expectedBytes"] <= 512 * 1024 * 1024
+          and maintenance_hex(value["expectedSha256"], 64)), "fresh-output-expected-file")
+    if role in ("payload-file", "payload-directory"):
+        need(safe_path(path, mac_store_prefix="runtime/store")
+             and (path in ("app", "runtime") or path.startswith(("app/", "runtime/"))), "fresh-output-payload-path")
+        if "/" in path:
+            prior = rows.get(path.rsplit("/", 1)[0])
+            need(prior is not None and prior["role"] == "payload-directory", "fresh-output-parent-not-enrolled")
+            expected_parent = prior["identity"]
+        else:
+            need(directory, "fresh-output-payload-root")
+            expected_parent = origin["stage"]
+    elif role == "release-directory":
+        need(path == "release", "fresh-output-release-path")
+        expected_parent = origin["freshBirth"]["versionsRoot"]
+    elif role == "metadata-file":
+        need(path in ("release/install-inventory.json", "release/installation-v1.json") and "release" in rows,
+             "fresh-output-metadata-path")
+        expected_parent = rows["release"]["identity"]
+    elif role == "stage-receipt":
+        need(path in tuple("stage/" + name for name in FRESH_OUTPUT_PHASES)
+             or path == "stage/launcher-" + origin["invocation"] + ".json", "fresh-output-stage-path")
+        expected_parent = origin["stage"]
+    else:
+        release = origin["next"]["release"]
+        need(path in ("control/" + MAINTENANCE_STATE_NAME, "control/.producer-" + release + ".json",
+                      "control/.producer-" + release + ".sig",
+                      "control/.maintenance-" + origin["invocation"] + ".capsule.json"), "fresh-output-control-path")
+        expected_parent = origin["freshBirth"]["installRoot"]
+    need(_fresh_output_key_data(parent) == _fresh_output_key_data(expected_parent), "fresh-output-parent-binding")
+    ordered = {key: value[key] for key in FRESH_OUTPUT_ENTRY_FIELDS}
+    for name in ("parent", "identity"):
+        ordered[name] = {key: value[name][key] for key in FRESH_BIRTH_IDENTITY_FIELDS}
+    need(_fresh_output_encode_data(ordered) == body, "fresh-output-entry-canonical")
+    return value
+
+
+def maintenance_fresh_output_stream_data(origin_body, intent_body, producer, length, read):
+    """Bounded comparison DATA from a byte callback; performs no file/native IO.
+
+    Returning a full current chain proves no historical write, persistence,
+    consuming close, R/M exclusion, descendant census, or recovery authority.
+    """
+    need(type(length) is int and 0 <= length <= INVENTORY_BYTES and callable(read), "fresh-output-journal-bound")
+    origin = maintenance_fresh_output_origin_data(origin_body, intent_body, producer)
+    identities = {_fresh_output_key_data(origin["freshBirth"][role]) for role in FRESH_BIRTH_ROLES}
+    identities.update(_fresh_output_key_data(origin[role]) for role in ("stage", "originFile", "enrollmentFile", "intentFile"))
+    rows, entries, previous, at = {}, [], digest(origin_body), 0
+    journal_hash = hashlib.sha256()
+
+    def exact(offset, count):
+        result = bytearray()
+        while len(result) < count:
+            chunk = read(offset + len(result), count - len(result))
+            need(type(chunk) is bytes and 0 < len(chunk) <= count - len(result), "fresh-output-short-read")
+            result.extend(chunk)
+            journal_hash.update(chunk)
+        return bytes(result)
+
+    while at < length:
+        need(length - at >= 4, "fresh-output-torn-header")
+        count = int.from_bytes(exact(at, 4), "big")
+        at += 4
+        need(FRESH_OUTPUT_ENTRY_MIN <= count <= FRESH_OUTPUT_ENTRY_BYTES and count <= length - at,
+             "fresh-output-torn-entry")
+        body = exact(at, count)
+        at += count
+        row = _maintenance_fresh_output_entry_data(body, origin, rows, identities, previous)
+        previous = digest(body)
+        rows[row["path"]] = row
+        identities.add(_fresh_output_key_data(row["identity"]))
+        entries.append(row)
+    tail = read(length, 1)
+    need(at == length and type(tail) is bytes and tail == b"", "fresh-output-journal-eof")
+    return dict(origin=origin, entries=entries, headSha256=previous, journalSha256=journal_hash.hexdigest(), bytes=at)
 
 
 def maintenance_launcher_data(value, writer_bytes):
@@ -6844,6 +7074,7 @@ def maintenance_history_data(result, records, producer):
              and intent["action"] == state["intendedAction"] == capsule["intendedAction"]
              and intent.get("recovery") == state.get("recovery")
              and intent.get("restoreRecovery") == state.get("restoreRecovery")
+             and intent.get("freshConservation") == state.get("freshConservation")
              and intent["previous"] == capsule["previous"] and intent["next"] == capsule["next"] == state["current"]["release"]
              and capsule["intentSha256"] == digest(bodies[0]) and capsule["stateSha256"] == digest(bodies[1]),
              "maintenance-linked-records")
@@ -6865,6 +7096,8 @@ def maintenance_history_data(result, records, producer):
             continue
         need(link["invocation"] in parsed and link["sha256"] == hashes[link["invocation"]]["stateSha256"], "maintenance-previous-state-link")
         previous_state = parsed[link["invocation"]][1]
+        need(current_intent.get("freshConservation") == previous_state.get("freshConservation"),
+             "maintenance-fresh-conservation-continuity")
         need(current_intent["previous"] == previous_state["current"]["release"], "maintenance-previous-release")
         evidence = [*previous_state["previousEvidence"], hashes[link["invocation"]]]
         need(current_state["previousEvidence"] == sorted(evidence, key=lambda row: row["invocation"]), "maintenance-history-derivation")
@@ -7594,6 +7827,9 @@ def observation_command(args, *, expected_previous=None, expected_restore_previo
             restore_names, restore_originals = maintenance_restore_namespace(root_fd, root_identity, current, parsed, records, producer, budget)
             need(not names.intersection(restore_names) and len(names) + len(restore_names) <= 512, "maintenance-restore-root-roster")
             names.update(restore_names)
+            conservation = maintenance_fresh_conservation_protected(root_fd, current)
+            if conservation is not None:
+                names.add(conservation["name"])
             need(set(os.listdir(root_fd)) == names, "maintenance-root-roster")
             stage_originals = []
             for stage in sorted(stages):
@@ -7625,6 +7861,8 @@ def observation_command(args, *, expected_previous=None, expected_restore_previo
                 maintenance_directory_identity(final, 0o700)
                 need(signature(final) == original, "maintenance-root-roster-changed")
             maintenance_restore_post(root_fd, restore_originals)
+            need(maintenance_fresh_conservation_protected(root_fd, current) == conservation,
+                 "fresh-conservation-protected-name-changed")
             need(set(os.listdir(root_fd)) == names, "maintenance-root-roster-changed")
     # No result is returned until every acquired original above has closed.
     if update:
@@ -7637,6 +7875,8 @@ def observation_command(args, *, expected_previous=None, expected_restore_previo
             "originalInstallerResult": result, "installerResultExport": exported, "installationMetadata": generation_results,
             "maintenanceGate": gate, "registrationReservation": reservation, "producerSignatureAuthority": "native-parent-and-application-checks-separate",
             "historicalOuterExit": "unverified", "applicationLaunched": False, "guiSaveQualified": False,
+            "freshConservation": None if conservation is None else {
+                key: conservation[key] for key in ("reference", "protectedPhysicalCensus", "physicalCensusComplete")},
             "aquaGate": "required-separate-actual-session", "qualification": "engineering-install-observed-not-runtime-or-GUI-acceptance",
             **({} if expected_previous is None else {"samePackagePredecessorMatched": True}),
             **({} if expected_restore_previous is None else {"restorePredecessorMatched": True})}

@@ -23,7 +23,7 @@ pub(super) fn admitted(document:&DocumentBinding,state: &DocumentState, control:
     { let _ = (document,state); Err(Reason::Capacity) }
 }
 
-#[cfg(all(test, debug_assertions, any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"),
+#[cfg(all(test, any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"),
     all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))))]
 pub(super) fn tally_data(state: &DocumentState) -> Result<usize, Reason> { known::tally_data(state) }
 
@@ -710,7 +710,7 @@ mod known {
         installed_fits(census.bytes, control)
     }
 
-    #[cfg(all(test, debug_assertions))]
+    #[cfg(test)]
     pub(super) fn tally_data(state: &DocumentState) -> Count<usize> {
         let mut census = Census::new(); census.document(state)?; Ok(census.bytes)
     }

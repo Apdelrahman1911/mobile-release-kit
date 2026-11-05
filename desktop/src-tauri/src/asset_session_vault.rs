@@ -1361,11 +1361,11 @@ impl DocumentBinding {
     }
 }
 
-#[cfg(all(test, debug_assertions))]
+#[cfg(test)]
 #[path = "credential_assignment_native_tests.rs"]
 mod assignment_native_regressions;
 
-#[cfg(all(test, debug_assertions))]
+#[cfg(test)]
 mod tests {
     // Deterministic in-memory DATA models only. No bridge/document constructor,
     // SDK/provider, native file, process, worker, join or store call is run.

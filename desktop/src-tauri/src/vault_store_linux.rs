@@ -119,7 +119,7 @@ impl RootWitness {
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 pub(crate) struct ReadWitness { root: DirectoryKey, file: FileKey, record: Id, revision: format::Revision }
-#[cfg(all(test, debug_assertions))]
+#[cfg(test)]
 impl ReadWitness {
     /// Inert projection/census DATA only: no file, descriptor or storage owner
     /// is acquired. Zero modes deliberately do not describe admissible files.

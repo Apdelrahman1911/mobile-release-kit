@@ -1623,7 +1623,7 @@ def externalize_literal_source(source, sink, *, asset_sink, profile):
     return assets.finish(output.finish())
 
 
-def render(projection, sink, *, asset_sink, profile="arm64"):
+def _render_literal(projection, sink, *, asset_sink, profile="arm64"):
     archives = _projection_profile(profile)
     need(projection.profile == profile, "projection-render-profile")
     assets = AssetEmitter(asset_sink, profile)
@@ -1772,6 +1772,45 @@ def render(projection, sink, *, asset_sink, profile="arm64"):
     put("    support: CAT_SUPPORT, support_members: CAT_SUPPORT_MEMBERS, payload: CAT_PAYLOAD, classes: CAT_CLASSES,\n")
     put("    aliases: CAT_ALIASES, directories: CAT_DIRECTORIES,\n}];\n")
     return assets.finish(output.finish())
+
+
+def _pack_rendered(render_call, sink, asset_sink, profile):
+    # The external owner must bind this fixed passive sibling alongside this
+    # generator. No path/import name or decoding policy comes from input DATA.
+    import macos_android_catalogue_tables as tables
+    source = bytearray()
+    retained_assets = {}
+    def source_sink(raw):
+        need(type(raw) is bytes and 0 < len(raw) <= 65536 and len(source) + len(raw) <= OUTPUT_LIMIT,
+             "packed-source-buffer")
+        source.extend(raw)
+    def header_sink(path, offset, raw):
+        need(type(raw) is bytes and 0 < len(raw) <= 65536, "packed-header-chunk")
+        value = retained_assets.setdefault(path, bytearray())
+        need(offset == len(value) and len(value) + len(raw) <= 2 * 1024 * 1024, "packed-header-bound")
+        value.extend(raw)
+    original = render_call(source_sink, header_sink)
+    original_output = original.get("output", original)
+    need(original_output["bytes"] == len(source)
+         and sum(map(len, retained_assets.values())) + len(source) <= OUTPUT_LIMIT, "packed-original-bound")
+    try:
+        packed = tables.convert(bytes(source), profile, sink, asset_sink=asset_sink)
+    except tables.Refused as error:
+        raise Refused("packed-catalogue-data") from error
+    for path, raw in retained_assets.items():
+        for at in range(0, len(raw), 65536): asset_sink(path, at, bytes(raw[at:at + 65536]))
+    output = {"bytes": packed["source"]["bytes"], "sha256": packed["source"]["sha256"],
+              "assets": original_output["assets"] + packed["assets"], "headers": original_output["headers"],
+              "typedTables": packed}
+    need(output["bytes"] + sum(a["bytes"] for a in output["assets"]) <= OUTPUT_LIMIT, "packed-total-bound")
+    return original, output
+
+
+def render(projection, sink, *, asset_sink, profile="arm64"):
+    """Same validated tuples, emitted through bounded compile-time storage."""
+    _, output = _pack_rendered(lambda source, assets: _render_literal(projection, source,
+        asset_sink=assets, profile=profile), sink, asset_sink, profile)
+    return output
 
 
 def generate(documents: Mapping[str, bytes], sink: Callable[[bytes], None], *, asset_sink):
@@ -2864,7 +2903,7 @@ def _signed_regions(source, rows, archives, profile, assets):
     return tuple(changes)
 
 
-def derive_signed_support(original_source, signed_inputs, sink, *, asset_sink, profile):
+def _derive_signed_support_literal(original_source, signed_inputs, sink, *, asset_sink, profile):
     """Reproducible proposed SOURCE, not native or shipping authorization.
 
     The external owner binds this module and its fixed passive sibling import,
@@ -2903,3 +2942,11 @@ def derive_signed_support(original_source, signed_inputs, sink, *, asset_sink, p
                          "afterSha256": hashlib.sha256(replacement).hexdigest(), "afterBytes": len(replacement)}
                         for start, end, replacement in changes],
             "nativeExecuted": False, "supplierAuthority": False, "shippingEnrollment": False}
+
+
+def derive_signed_support(original_source, signed_inputs, sink, *, asset_sink, profile):
+    # Preserve the exact historical preimage and fixed signed-member regions.
+    # Only the already-derived SOURCE is passed through the storage codec.
+    original, output = _pack_rendered(lambda source, assets: _derive_signed_support_literal(
+        original_source, signed_inputs, source, asset_sink=assets, profile=profile), sink, asset_sink, profile)
+    return {**original, "output": output, "literalOutput": original["output"]}

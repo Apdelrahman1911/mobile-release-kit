@@ -65,11 +65,12 @@ SOURCE_FILES = (
     'desktop/tools/macos_normal_ui_runner.py',
     'desktop/tools/macos_tool_setup_inputs.py',
     'desktop/tools/macos_identity_current_runtime.py',
+    'desktop/tools/macos_android_catalogue_tables.py',
 )
 ARCHIVES = [{'role': 'jdk', 'bytes': 185851019, 'sha256': '196d13ba5f10414bef7f6a05a9b3f00edacb18ebacef2b99485db9e2ee18f0e8', 'url': 'https://github.com/adoptium/temurin17-binaries/releases/download/jdk-17.0.20.1%2B1/OpenJDK17U-jdk_aarch64_mac_hotspot_17.0.20.1_1.tar.gz', 'archivePrefix': 'jdk-17.0.20.1+1'}, {'role': 'sdk-platform', 'bytes': 64273788, 'sha256': '0988cacad01b38a18a47bac14a0695f246bc76c1b06c0eeb8eb0dc825ab0c8e0', 'url': 'https://dl.google.com/android/repository/platform-35_r02.zip', 'archivePrefix': 'android-35'}, {'role': 'sdk-build-tools', 'bytes': 76857898, 'sha256': '530cdbd1ec315e1477624d7ed2f0f2962108d69f36eddba5894cef9ea2cedb48', 'url': 'https://dl.google.com/android/repository/build-tools_r35_macosx.zip', 'archivePrefix': 'android-15'}, {'role': 'gradle', 'bytes': 138068841, 'sha256': '6f74b601422d6d6fc4e1f9a1ab6522f642c2fdcbc15ae33ebd30ba3d7198e854', 'url': 'https://github.com/gradle/gradle-distributions/releases/download/v8.14.5/gradle-8.14.5-bin.zip', 'archivePrefix': 'gradle-8.14.5'}, {'role': 'aapt2', 'bytes': 4339472, 'sha256': '5d0aec6851fffbc9f6c8a8b50390c0bc976aa0ddf57a8a3a39061ed54b609ad1', 'url': 'https://dl.google.com/dl/android/maven2/com/android/tools/build/aapt2/8.9.2-12782657/aapt2-8.9.2-12782657-osx.jar', 'archivePrefix': '8.9.2-12782657-osx'}]
 RESOURCES = {'desktop/tools/android_dependency_preparation_data/project-v1.json': [5761, '17aaefbea83fb4b389e10d1ac01f9926562712b95253f7af5f2c6fab546b1dd4'], 'desktop/tools/android_dependency_preparation_data/verification-v1.xml': [90045, '5d00856c785363da964e00da72ad38571cfd088da915ebe86cf20640bb1c7545']}
 SDK_METADATA = [{'bytes': 17832, 'origin': 'committed-generated-sdk-package-metadata-not-vendor-archive-member-not-acceptance', 'path': 'desktop/macos-installed-inputs/android-sdk/platform-35-package.xml', 'sha256': '385364dad6ba50838ec90abc8e4593976e0e0c54c87cf703857ba0a1aad63fe2', 'target': 'sdk/platforms/android-35/package.xml'}, {'bytes': 17719, 'origin': 'committed-generated-sdk-package-metadata-not-vendor-archive-member-not-acceptance', 'path': 'desktop/macos-installed-inputs/android-sdk/build-tools-35-package.xml', 'sha256': '6f7a9969f1bb25e39ae22fa5690b878e6806217453acf3b534712fb3a76ad1d4', 'target': 'sdk/build-tools/35.0.0/package.xml'}]
-N = P = C = None
+N = P = C = T = None
 
 class Refused(Exception):
     pass
@@ -889,8 +890,11 @@ UI_REF = 'refs/heads/verify/desktop-macos-installed'
 UI_REFS = (UI_REF, 'refs/heads/verify/desktop-macos-candidate')
 UI_TARGET = 'aarch64-apple-darwin'
 UI_CATALOGUE = 'desktop/src-tauri/src/android_supplier_macos_catalogue.rs'
-UI_CATALOGUE_PIN = [19000727, 'ab472c20fa9bd1e30dfc95ef7399987cded50e99a91d15824df703d4355d9f8f']
+UI_CATALOGUE_PIN = [720044, '429d95bd08eafc48c9595068ee9f372c20fefb87e76710ebdeb96be2e9062a0c']
 UI_CATALOGUE_ASSETS = {UI_TARGET: (186, 574528), 'x86_64-apple-darwin': (190, 582616)}
+# Filled by the separately admitted SOURCE materializer with exact two-pack
+# byte/hash/path tuples. Empty means only the already pinned historical source.
+UI_TYPED_CATALOGUES = {'aarch64-apple-darwin': [{'bytes': 2464464, 'kind': 'records', 'path': 'android_supplier_macos_catalogue_assets/arm64_records_16a691ed63f9b8f455e05a9cd00800306ce57083baf6522f2ac171801a313982.bin', 'sha256': '16a691ed63f9b8f455e05a9cd00800306ce57083baf6522f2ac171801a313982'}, {'bytes': 5520680, 'kind': 'strings', 'path': 'android_supplier_macos_catalogue_assets/arm64_strings_7b298479dc1b213264c097b5958ee30c36fc03674036b920ec5bb6247c8d045f.bin', 'sha256': '7b298479dc1b213264c097b5958ee30c36fc03674036b920ec5bb6247c8d045f'}], 'x86_64-apple-darwin': [{'bytes': 2464160, 'kind': 'records', 'path': 'android_supplier_macos_catalogue_assets/x86_64_records_a67db67eb49769c97f28fa5f4234d146647a4c1b1c910532dc1c701a8c958e3b.bin', 'sha256': 'a67db67eb49769c97f28fa5f4234d146647a4c1b1c910532dc1c701a8c958e3b'}, {'bytes': 5520210, 'kind': 'strings', 'path': 'android_supplier_macos_catalogue_assets/x86_64_strings_2c20a82ec44dba34f764cf28811d8a6b7baacf6fcd85cf4bdc1ea866e1179124.bin', 'sha256': '2c20a82ec44dba34f764cf28811d8a6b7baacf6fcd85cf4bdc1ea866e1179124'}]}
 UI_ALIAS = 'mrk-disposable-android-ui'  # Public disposable identifier, not a password.
 UI_INPUT_ENV = 'TEST_RUNNER_MRK_NORMAL_UI_ANDROID_INPUT_FIXTURE'
 UI_PASSWORD_ENV = ('MRK_ANDROID_UI_STORE_PASSWORD', 'MRK_ANDROID_UI_KEY_PASSWORD')
@@ -909,7 +913,7 @@ def ui_selection(target):
         'url': 'https://github.com/adoptium/temurin17-binaries/releases/download/jdk-17.0.20.1%2B1/OpenJDK17U-jdk_x64_mac_hotspot_17.0.20.1_1.tar.gz',
         'archivePrefix': 'jdk-17.0.20.1+1'}
     return ('x86_64', 'X64', 'desktop/src-tauri/src/android_supplier_macos_intel_catalogue.rs',
-            [18999101, '914e813291dd6ba70bae1fb849899df22460ba2002d723543ad27aa8d82f47bc'],
+            [720326, 'b44569f94af28e8ce2c7a900bcefb223d23ddee919ac519abf43ccb01e438526'],
             [jdk, *ARCHIVES[1:4]], {'Jdk': 548, 'Sdk': 14197, 'Gradle': 322}, 750044172)
 
 
@@ -965,10 +969,11 @@ def ui_context():
 
 
 def ui_catalogue_read_bytes(target):
-    """Exact SOURCE and one packed asset, with an EOF read for each."""
+    """Exact SOURCE and all pinned packs, with an EOF read for each."""
     pin = ui_selection(target)[3]
     _, size = UI_CATALOGUE_ASSETS[target]
-    return pin[0] + size + 2
+    typed = UI_TYPED_CATALOGUES.get(target, ())
+    return pin[0] + size + sum(row['bytes'] for row in typed) + 2 + len(typed)
 
 
 def ui_catalogue_assets(text, target):
@@ -980,7 +985,8 @@ def ui_catalogue_assets(text, target):
     assets = list(pattern.finditer(text))
     headers = list(re.finditer(r'^const CAT_H([0-9]{1,3})_(PREFIX|COMMANDS): &\[u8\] = '
         r'CAT_HEADER_BYTES\.split_at\(([0-9]{1,7})\)\.1\.split_at\(([0-9]{1,5})\)\.0;$', text, re.MULTILINE))
-    need(len(assets) == 1 == text.count('include_bytes!(')
+    typed = UI_TYPED_CATALOGUES.get(target, ())
+    need(len(assets) == 1 and text.count('include_bytes!(') == 1 + len(typed)
          and len(headers) == count == text.count('const CAT_H') - 1, 'ui-catalogue-asset-roster')
     offset = 0
     for index, row in enumerate(headers):
@@ -990,7 +996,60 @@ def ui_catalogue_assets(text, target):
         offset += int(size)
         need(offset <= total, 'ui-catalogue-asset-bound')
     need(offset == total, 'ui-catalogue-asset-bytes')
-    return [assets[0].groups()]
+    result = [assets[0].groups()]
+    need(not typed or len(typed) == 2 and [row['kind'] for row in typed] == ['records', 'strings'],
+         'ui-catalogue-typed-roster')
+    for row in typed:
+        need(row['path'] == f'android_supplier_macos_catalogue_assets/{profile}_{row["kind"]}_{row["sha256"]}.bin'
+             and type(row['bytes']) is int and 0 < row['bytes'] <= 32 << 20
+             and re.fullmatch('[a-f0-9]{64}', row['sha256']) is not None, 'ui-catalogue-typed-pin')
+        declaration = f'const CAT_{"RECORD" if row["kind"] == "records" else "STRING"}_BYTES: &[u8] = include_bytes!("{row["path"]}");'
+        need(text.count(declaration) == 1, 'ui-catalogue-typed-source')
+        result.append((row['path'], row['sha256']))
+    return result
+
+
+def ui_catalogue_source_rows(text, target, assets):
+    typed = UI_TYPED_CATALOGUES.get(target)
+    if typed:
+        need(T is not None, 'ui-catalogue-reader-not-bound')
+        profile = ui_selection(target)[0]
+        modes = re.findall(r'^const CAT_MODES: &\[&\[u32\]\] = (&\[[^\n]+\]);$', text, re.MULTILINE)
+        need(len(modes) == 1, 'ui-catalogue-modes')
+        try:
+            mode_rows = T.expression(modes[0])['array']
+            need(all(type(row) is dict and set(row) == {'array'} for row in mode_rows), 'ui-catalogue-modes')
+            mode_rows = [row['array'] for row in mode_rows]
+            strings = T.string_pool(assets[typed[1]['path']], profile)
+            sections = T.record_sections(assets[typed[0]['path']], profile)
+            selected = [row for row in sections if row[0] == 2 and row[1] == 0]
+            need(len(selected) == 1 and selected[0][2] <= ENTRIES, 'ui-catalogue-source-section')
+            for row in T.decoded_rows(2, selected[0][3], strings, mode_rows, (), {}):
+                value = T.fields(row, 'SourceMemberSpec', 'group relative kind')
+                group = T.named(value['group'], 'SourceGroup::', T.GROUPS)
+                need(group < 3, 'ui-catalogue-group')
+                kind = value['kind']; directory = kind['name'] == 'SourceKindSpec::Directory'
+                fields = T.fields(kind, 'SourceKindSpec::Directory' if directory else 'SourceKindSpec::File',
+                                  'modes' if directory else 'bytes sha256 modes')
+                mode = fields['modes']['array']; need(len(mode) == 1, 'ui-catalogue-mode')
+                yield T.GROUPS[group], value['relative'], directory, 0 if directory else fields['bytes'], None if directory else fields['sha256'], mode[0]
+        except (T.Refused, KeyError, TypeError) as error:
+            raise Refused('ui-catalogue-typed-data') from error
+        return
+    # Historical SOURCE has a separate exact pinned route; mixed formats refuse.
+    start = 'const CAT_SOURCES: &[SourceMemberSpec] = &[\n'
+    stop = '];\nconst CAT_BINDINGS:'
+    need(text.count(start) == 1 and text.count(stop) == 1, 'ui-catalogue-section')
+    section = text.split(start, 1)[1].split(stop, 1)[0]
+    need(len(section.encode()) <= 4 << 20, 'ui-catalogue-section-bound')
+    pattern = re.compile(r'    SourceMemberSpec \{ group: SourceGroup::(Jdk|Sdk|Gradle), '
+        r'relative: ("(?:[^"\\]|\\.)*"), kind: SourceKindSpec::'
+        r'(?:Directory \{ modes: &\[0o([0-7]+)\] \}|'
+        r'File \{ bytes: ([0-9]+), sha256: "([a-f0-9]{64})", modes: &\[0o([0-7]+)\] \}) \},')
+    for line in section.splitlines():
+        match = pattern.fullmatch(line); need(match is not None, 'ui-catalogue-row')
+        group, quoted, directory_mode, size, sha, file_mode = match.groups()
+        yield group, json.loads(quoted), bool(directory_mode), int(size or '0'), sha, int(directory_mode or file_mode, 8)
 
 
 def ui_source_roster(clock, *, target=UI_TARGET):
@@ -1001,38 +1060,29 @@ def ui_source_roster(clock, *, target=UI_TARGET):
     need([len(raw), digest(raw)] == pin, 'ui-catalogue-source-pin')
     text = raw.decode('utf-8', 'strict')
     assets = ui_catalogue_assets(text, target)
-    total_assets = 0
+    total_assets = 0; packed = {}
+    typed = UI_TYPED_CATALOGUES.get(target, ())
+    expected_total = UI_CATALOGUE_ASSETS[target][1] + sum(row['bytes'] for row in typed)
+    need(len(raw) + expected_total <= 32 << 20, 'ui-catalogue-total-bound')
     for path, sha in assets:
         clock.check()
-        asset, _ = read(SOURCE / 'desktop/src-tauri/src' / path, UI_CATALOGUE_ASSETS[target][1], clock=clock)
+        limit = next((row['bytes'] for row in typed if row['path'] == path), UI_CATALOGUE_ASSETS[target][1])
+        asset, _ = read(SOURCE / 'desktop/src-tauri/src' / path, limit, clock=clock)
         total_assets += len(asset)
-        need(0 < len(asset) and digest(asset) == sha
-             and total_assets <= UI_CATALOGUE_ASSETS[target][1], 'ui-catalogue-asset-pin')
-    need(total_assets == UI_CATALOGUE_ASSETS[target][1], 'ui-catalogue-asset-bytes')
-    start = 'const CAT_SOURCES: &[SourceMemberSpec] = &[\n'
-    stop = '];\nconst CAT_BINDINGS:'
-    need(text.count(start) == 1 and text.count(stop) == 1, 'ui-catalogue-section')
-    section = text.split(start, 1)[1].split(stop, 1)[0]
-    need(len(section.encode()) <= 4 << 20, 'ui-catalogue-section-bound')
-    pattern = re.compile(r'    SourceMemberSpec \{ group: SourceGroup::(Jdk|Sdk|Gradle), '
-        r'relative: ("(?:[^"\\]|\\.)*"), kind: SourceKindSpec::'
-        r'(?:Directory \{ modes: &\[0o([0-7]+)\] \}|'
-        r'File \{ bytes: ([0-9]+), sha256: "([a-f0-9]{64})", modes: &\[0o([0-7]+)\] \}) \},')
+        need(len(asset) == limit and digest(asset) == sha and total_assets <= expected_total, 'ui-catalogue-asset-pin')
+        if any(row['path'] == path for row in typed): packed[path] = asset
+    need(total_assets == expected_total, 'ui-catalogue-asset-bytes')
     expected = {}; counts = {'Jdk': 0, 'Sdk': 0, 'Gradle': 0}; total = 0
-    for line in section.splitlines():
-        clock.check(); match = pattern.fullmatch(line)
-        need(match is not None and len(expected) < ENTRIES, 'ui-catalogue-row')
-        group, quoted, directory_mode, size, sha, file_mode = match.groups()
-        relative = json.loads(quoted); P.relative(relative)
+    for group, relative, directory, size, sha, mode in ui_catalogue_source_rows(text, target, packed):
+        clock.check(); need(len(expected) < ENTRIES, 'ui-catalogue-row'); P.relative(relative)
         need(0 < len(relative.encode()) <= 512, 'ui-catalogue-relative')
         prefix = {'Jdk': UI_ROOTS['jdk'], 'Sdk': UI_ROOTS['sdk'], 'Gradle': UI_ROOTS['gradle']}[group]
         target = prefix + '/' + relative
-        mode = int(directory_mode or file_mode, 8)
-        need(target not in expected and (mode == 0o755 if directory_mode else mode in (0o444, 0o644, 0o755)),
+        need(target not in expected and (mode == 0o755 if directory else mode in (0o444, 0o644, 0o755)),
              'ui-catalogue-mode-or-duplicate')
         count = int(size or '0'); total += count
         need(count <= 512 << 20 and total <= TOOL_BYTES, 'ui-catalogue-file-bound')
-        expected[target] = ('directory' if directory_mode else 'file', mode, count, sha)
+        expected[target] = ('directory' if directory else 'file', mode, count, sha)
         counts[group] += 1
     need(counts == wanted_counts
          and total == wanted_total, 'ui-catalogue-complete')
@@ -2537,7 +2587,7 @@ def cleanup(work, *, private=None):
 
 
 def main():
-    global N, P, C
+    global N, P, C, T
     private = None
     stage = 'work-admission'
     result = 78
@@ -2562,6 +2612,8 @@ def main():
         recheck_chain(private['fds'], private['originals'])
         stage = 'normal-helper-load'
         N = load('_mrk_android_preparation_normal', 'desktop/tools/macos_normal_ui_runner.py')
+        if ui:
+            T = load('_mrk_android_catalogue_tables', 'desktop/tools/macos_android_catalogue_tables.py')
         stage = 'transport-helper-load'
         P = load('_mrk_android_preparation_transport', 'desktop/tools/macos_android_supplier_preparation.py')
         if sys.argv[1] in ('acquire', 'acquire-ui-inputs', 'acquire-consumer-ui-inputs', 'acquire-tool-setup-inputs'):

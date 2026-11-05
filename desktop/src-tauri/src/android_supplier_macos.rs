@@ -526,6 +526,9 @@ struct Reference {
 // Complete immutable observations for the fixed official toolchain.
 // Comparison DATA, never runtime registration or native qualification.
 // Structural, inventory, native, support and whole-owner gates still apply.
+#[cfg(test)]
+#[path = "android_supplier_macos_catalogue_storage_tests.rs"]
+mod catalogue_storage_tests;
 include!("android_supplier_macos_catalogue.rs");
 #[path = "android_supplier_macos_intel_catalogue.rs"]
 mod intel_catalogue;

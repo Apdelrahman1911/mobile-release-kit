@@ -613,7 +613,7 @@ impl Observation {
             .find(|r|r.intent.invocation_data()==instance&&r.intent.action_data()!=ActionData::SamePackageNoop)
             .ok_or("noop-recovery-generation-stage")?;
         let mut bytes=0;
-        stage_roster_selected(book,self.root,&holder.intent,&mut bytes,None,Some(history),Some(&recovery))?;
+        stage_roster_selected(book,self.root,&holder.intent,selected,&mut bytes,None,Some(history),Some(&recovery))?;
         let mut wanted=self.root_names.clone();
         for attempt in &self.attempts {wanted.remove(&data(transaction::intent_name_data(attempt.intent.invocation_data()))?);}
         wanted.insert(data(transaction::intent_name_data(intent.invocation_data()))?);

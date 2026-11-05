@@ -18,6 +18,16 @@ import unittest
 from unittest import mock
 
 _SOURCE = Path(__file__).resolve().parents[2] / "desktop/tools/macos_android_supplier_catalogue.py"
+_TABLE_SOURCE = _SOURCE.with_name("macos_android_catalogue_tables.py")
+_TABLE_NAME = "macos_android_catalogue_tables"
+if _TABLE_NAME in sys.modules:
+    if Path(sys.modules[_TABLE_NAME].__file__).resolve() != _TABLE_SOURCE:
+        raise RuntimeError("unexpected catalogue table module collision")
+else:
+    _TABLE_SPEC = importlib.util.spec_from_file_location(_TABLE_NAME, _TABLE_SOURCE)
+    _TABLE_MODULE = importlib.util.module_from_spec(_TABLE_SPEC)
+    sys.modules[_TABLE_NAME] = _TABLE_MODULE
+    _TABLE_SPEC.loader.exec_module(_TABLE_MODULE)
 _NAME = "mrk_macos_supplier_catalogue_data_tests"
 _SPEC = importlib.util.spec_from_file_location(_NAME, _SOURCE)
 M = importlib.util.module_from_spec(_SPEC)
@@ -1122,8 +1132,8 @@ class CatalogueProjectionDataTests(unittest.TestCase):
             aapt=member("aapt2", label="aapt2", mode=0o100755, size=64), vendor="inert-test", version="0")
         projection.outers["jdk"].members = [member(src.prefix)]
         first, second = [], []
-        receipt = M.render(projection, first.append, asset_sink=lambda *_: None)
-        self.assertEqual(receipt, M.render(projection, second.append, asset_sink=lambda *_: None))
+        receipt = M._render_literal(projection, first.append, asset_sink=lambda *_: None)
+        self.assertEqual(receipt, M._render_literal(projection, second.append, asset_sink=lambda *_: None))
         self.assertEqual(first, second)
         raw = b"".join(first)
         self.assertEqual(receipt, {"bytes": len(raw), "sha256": hashlib.sha256(raw).hexdigest(), "assets": [], "headers": []})
@@ -1140,22 +1150,22 @@ class CatalogueProjectionDataTests(unittest.TestCase):
             b'OfficialArchive { component: Component::Gradle, official_source: '
             b'"https://github.com/gradle/gradle-distributions/releases/download/v8.14.5/gradle-8.14.5-bin.zip"', raw)
         with mock.patch.object(M, "OUTPUT_LIMIT", 8), self.assertRaises(M.Refused):
-            M.render(projection, lambda _: None, asset_sink=lambda *_: None)
+            M._render_literal(projection, lambda _: None, asset_sink=lambda *_: None)
         class SinkFailure(Exception):
             pass
         def reject(_):
             raise SinkFailure()
         with self.assertRaises(SinkFailure):
-            M.render(projection, reject, asset_sink=lambda *_: None)
+            M._render_literal(projection, reject, asset_sink=lambda *_: None)
 
         explicit = []
-        self.assertEqual(receipt, M.render(projection, explicit.append, profile="arm64", asset_sink=lambda *_: None))
+        self.assertEqual(receipt, M._render_literal(projection, explicit.append, profile="arm64", asset_sink=lambda *_: None))
         self.assertEqual(first, explicit)  # Default ARM byte stream is unchanged.
         intel = copy.deepcopy(projection)
         intel.profile = "x86_64"
         emitted, repeated = [], []
-        result = M.render(intel, emitted.append, profile="x86_64", asset_sink=lambda *_: None)
-        self.assertEqual(result, M.render(intel, repeated.append, profile="x86_64", asset_sink=lambda *_: None))
+        result = M._render_literal(intel, emitted.append, profile="x86_64", asset_sink=lambda *_: None)
+        self.assertEqual(result, M._render_literal(intel, repeated.append, profile="x86_64", asset_sink=lambda *_: None))
         self.assertEqual(emitted, repeated)
         actual = b"".join(emitted)
         expected = raw.replace(b"185851019", b"180578248").replace(
@@ -1172,18 +1182,18 @@ class CatalogueProjectionDataTests(unittest.TestCase):
         for selected, profile in ((projection, "x86_64"), (intel, "arm64"), (intel, "amd64")):
             discarded = []
             with self.subTest(profile=profile), self.assertRaises(M.Refused):
-                M.render(selected, discarded.append, profile=profile, asset_sink=lambda *_: None)
+                M._render_literal(selected, discarded.append, profile=profile, asset_sink=lambda *_: None)
             self.assertEqual(discarded, [])
         with mock.patch.object(M, "OUTPUT_LIMIT", 8), self.assertRaises(M.Refused):
-            M.render(intel, lambda _: None, profile="x86_64", asset_sink=lambda *_: None)
+            M._render_literal(intel, lambda _: None, profile="x86_64", asset_sink=lambda *_: None)
         with self.assertRaises(SinkFailure):
-            M.render(intel, reject, profile="x86_64", asset_sink=lambda *_: None)
+            M._render_literal(intel, reject, profile="x86_64", asset_sink=lambda *_: None)
         for selected in (projection, intel):
             native = copy.deepcopy(selected)
             native.payload = [M.Payload(path, 1, HASH, 0o444, ("Picked", "Jdk", "Contents/data"),
                                        ("MachO", (b"\0prefix", b"\xffcommands", None)))]
             generated, assets = [], {}
-            result = M.render(native, generated.append, profile=native.profile,
+            result = M._render_literal(native, generated.append, profile=native.profile,
                 asset_sink=collect_assets(assets))
             self.assertEqual(list(assets.values()), [b"\0prefix\xffcommands"])
             self.assertEqual(len(result["assets"]), 1)
@@ -1192,7 +1202,7 @@ class CatalogueProjectionDataTests(unittest.TestCase):
             self.assertIn(b"FileClass::MachO(NativeHeader { prefix: CAT_H0_PREFIX, commands: CAT_H0_COMMANDS })",
                           b"".join(generated))
             with self.assertRaises(SinkFailure):
-                M.render(native, lambda _: None, profile=native.profile, asset_sink=lambda *_: reject(None))
+                M._render_literal(native, lambda _: None, profile=native.profile, asset_sink=lambda *_: reject(None))
 
 
     def test_binary_storage_is_exact_bounded_profile_separated_and_failure_closed(self):
@@ -1257,54 +1267,71 @@ class CatalogueProjectionDataTests(unittest.TestCase):
             M.AssetEmitter(lambda *_: None, "arm64").put("CAT_H0_PREFIX", b"x")
         with self.assertRaises(M.Refused): assets.seal()  # Missing matching COMMANDS.
 
-    def test_committed_asset_rosters_reconstruct_both_frozen_sources(self):
+    def test_committed_typed_assets_bind_all_rows_headers_and_source_regions(self):
+        import re
+        tables = sys.modules[_TABLE_NAME]
         root = _SOURCE.parents[2]
         manifest = json.loads((root / "docs/desktop-macos-android-catalogue-storage.json").read_bytes())
+        self.assertEqual(manifest["schemaVersion"], 2)
         actual_paths = set()
         for catalogue in manifest["catalogues"]:
             source = root / catalogue["path"]
             raw = source.read_bytes()
             output = catalogue["output"]
+            typed = output["typedTables"]
             self.assertEqual((len(raw), hashlib.sha256(raw).hexdigest()), (output["bytes"], output["sha256"]))
-            self.assertEqual(len(output["assets"]), 1)
-            row = output["assets"][0]
-            path = source.parent / row["path"]
-            self.assertFalse(path.is_symlink())
-            packed = path.read_bytes()
-            self.assertEqual((len(packed), hashlib.sha256(packed).hexdigest()), (row["bytes"], row["sha256"]))
-            self.assertEqual(row["path"], f'android_supplier_macos_catalogue_assets/{catalogue["profile"]}_{row["sha256"]}.bin')
-            include = f'const CAT_HEADER_BYTES: &[u8] = include_bytes!("{row["path"]}");\n'.encode()
-            self.assertEqual(raw.count(include), 1)
-            cursor = raw.index(include)
-            reconstructed = hashlib.sha256()
-            reconstructed.update(raw[:cursor])
-            reconstructed_bytes = cursor
-            cursor += len(include)
+            self.assertEqual([row["kind"] for row in output["assets"]], ["headers", "records", "strings"])
+            assets = {}
+            for row in output["assets"]:
+                path = source.parent / row["path"]
+                self.assertFalse(path.is_symlink())
+                packed = path.read_bytes()
+                self.assertEqual((len(packed), hashlib.sha256(packed).hexdigest()), (row["bytes"], row["sha256"]))
+                kind = row["kind"]
+                label = "HEADER" if kind == "headers" else "RECORD" if kind == "records" else "STRING"
+                name_part = "" if kind == "headers" else kind + "_"
+                self.assertEqual(row["path"], f'android_supplier_macos_catalogue_assets/{catalogue["profile"]}_{name_part}{row["sha256"]}.bin')
+                declaration = f'const CAT_{label}_BYTES: &[u8] = include_bytes!("{row["path"]}");\n'.encode()
+                self.assertEqual(raw.count(declaration), 1)
+                assets[kind] = packed
+                actual_paths.add(path)
+            self.assertLessEqual(len(raw) + sum(map(len, assets.values())), 32 << 20)
+            self.assertEqual(raw.count(b"include_bytes!"), 3)
+            headers = {}
             offset = 0
             for index, header in enumerate(output["headers"]):
                 name = f"CAT_H{index // 2}_" + ("PREFIX", "COMMANDS")[index % 2]
                 size = header["bytes"]
                 self.assertEqual((header["name"], header["offset"]), (name, offset))
                 self.assertTrue(0 < size <= 16416)
-                asset = packed[offset:offset + size]
-                self.assertEqual((len(asset), hashlib.sha256(asset).hexdigest()), (size, header["sha256"]))
+                part = assets["headers"][offset:offset + size]
+                self.assertEqual((len(part), hashlib.sha256(part).hexdigest()), (size, header["sha256"]))
                 declaration = f'const {name}: &[u8] = CAT_HEADER_BYTES.split_at({offset}).1.split_at({size}).0;\n'.encode()
-                self.assertTrue(raw.startswith(declaration, cursor))
-                cursor += len(declaration)
-                literal = M._signed_array(name, asset)
-                reconstructed.update(literal)
-                reconstructed_bytes += len(literal)
+                self.assertEqual(raw.count(declaration), 1)
+                headers[name] = (offset, size)
                 offset += size
-            self.assertEqual(offset, len(packed))
-            self.assertEqual(raw.find(b"include_bytes!", cursor), -1)
-            reconstructed.update(memoryview(raw)[cursor:])
-            reconstructed_bytes += len(raw) - cursor
-            self.assertEqual((reconstructed_bytes, reconstructed.hexdigest()),
-                             (catalogue["before"]["bytes"], catalogue["before"]["sha256"]))
-            actual_paths.add(path)
+            self.assertEqual(offset, len(assets["headers"]))
+            strings = tables.string_pool(assets["strings"], catalogue["profile"])
+            self.assertEqual(len(strings), typed["strings"])
+            expected = {(row["kind"], row["index"]): row for row in typed["sections"]}
+            sections = tables.record_sections(assets["records"], catalogue["profile"])
+            self.assertEqual(set(expected), {(kind, index) for kind, index, _, _ in sections})
+            for kind, ordinal, count, data in sections:
+                wanted = expected[(kind, ordinal)]
+                self.assertEqual(count, wanted["count"])
+                h = hashlib.sha256(b"[")
+                actual_count = 0
+                for value in tables.decoded_rows(kind, data, strings, typed["modes"], typed["nativeTables"], headers):
+                    if actual_count: h.update(b",")
+                    h.update(tables.canonical(value))
+                    actual_count += 1
+                h.update(b"]")
+                self.assertEqual((actual_count, h.hexdigest()), (count, wanted["tupleSha256"]))
+            cleaned = tables.unchanged_source_regions(raw, typed).decode('ascii')
+            self.assertEqual(hashlib.sha256(cleaned.encode()).hexdigest(), catalogue["unchangedSourceRegionsSha256"])
         asset_root = root / "desktop/src-tauri/src/android_supplier_macos_catalogue_assets"
         self.assertEqual(actual_paths, {p for p in asset_root.rglob("*") if p.is_file()})
-        self.assertEqual(len(actual_paths), 2)
+        self.assertEqual(len(actual_paths), 6)
 
     def test_signed_support_native_windows_keep_all_slices_and_zip_identity(self):
         import binascii

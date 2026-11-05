@@ -136,6 +136,7 @@ pub mod macos_store_runtime;
 pub mod macos_applications_launcher;
 pub mod macos_install_maintenance;
 pub mod macos_install_transaction;
+pub mod macos_fresh_recovery;
 // Removal comparison DATA never relaxes installed State-v2 or grants live effects.
 pub mod macos_remove_record;
 // Closed removal wire DATA, not peer identity or a filesystem capability.

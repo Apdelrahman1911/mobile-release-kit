@@ -43,10 +43,12 @@ class MacAndroidPreparationSourceTests(unittest.TestCase):
             selected = helper.ui_selection(target)
             source = (ROOT / selected[2]).read_bytes()
             count, total = helper.UI_CATALOGUE_ASSETS[target]
-            prefix = source[:source.index(b"const CAT_N")].decode()
+            prefix = source.decode()
             rows = helper.ui_catalogue_assets(prefix, target)
-            self.assertEqual(len(rows), 1)
-            self.assertEqual(helper.ui_catalogue_read_bytes(target), len(source) + total + 2)
+            self.assertEqual(len(rows), 3)
+            typed = helper.UI_TYPED_CATALOGUES[target]
+            self.assertEqual([r['kind'] for r in typed], ['records', 'strings'])
+            self.assertEqual(helper.ui_catalogue_read_bytes(target), len(source) + total + sum(r['bytes'] for r in typed) + 4)
             for bad in (prefix.replace(rows[0][0], '../foreign.bin'),
                         prefix.replace('split_at(0)', 'split_at(1)', 1),
                         prefix.replace('const CAT_H0_PREFIX:', 'const CAT_H1_PREFIX:', 1),
@@ -67,17 +69,17 @@ class MacAndroidPreparationSourceTests(unittest.TestCase):
 
     def test_ui_two_target_source_selection_and_closed_acquisition_receipt(self):
         # Whole emitted catalogues are separately source-authenticated; this
-        # bounded DATA group never projects those ~20MiB leaves or acquires tools.
+        # bounded DATA group verifies named source/pack pins and never acquires tools.
         import copy
         from unittest.mock import patch
         helper=fixture_module('desktop/tools/macos_android_dependency_preparation.py','_mrk_two_target_ui_preparation')
         normal=fixture_module('desktop/tools/macos_normal_ui_runner.py','_mrk_two_target_ui_normal')
         original_archives=copy.deepcopy(helper.ARCHIVES)
         self.assertEqual(helper.RUN_SCOPE,'prepare-b')
-        fixed=(('aarch64-apple-darwin','arm64','ARM64',19000727,
-                'ab472c20fa9bd1e30dfc95ef7399987cded50e99a91d15824df703d4355d9f8f',550,773497465,465051546),
-               ('x86_64-apple-darwin','x86_64','X64',18999101,
-                '914e813291dd6ba70bae1fb849899df22460ba2002d723543ad27aa8d82f47bc',548,750044172,459778775))
+        fixed=(('aarch64-apple-darwin','arm64','ARM64',720044,
+                '429d95bd08eafc48c9595068ee9f372c20fefb87e76710ebdeb96be2e9062a0c',550,773497465,465051546),
+               ('x86_64-apple-darwin','x86_64','X64',720326,
+                'b44569f94af28e8ce2c7a900bcefb223d23ddee919ac519abf43ccb01e438526',548,750044172,459778775))
         env={'GITHUB_SHA':'a'*40,'GITHUB_RUN_ID':'42','GITHUB_RUN_ATTEMPT':'1','GITHUB_REF':helper.UI_REF}
         for target,machine,arch,size,sha,jdk_count,tool_bytes,archive_bytes in fixed:
             with self.subTest(target=target):
@@ -199,11 +201,13 @@ class MacAndroidPreparationSourceTests(unittest.TestCase):
         tree = ast.parse(source)
         constants = {n.targets[0].id: ast.literal_eval(n.value) for n in tree.body
                      if isinstance(n, ast.Assign) and len(n.targets) == 1 and isinstance(n.targets[0], ast.Name)
-                     and n.targets[0].id in ('ARCHIVES', 'RESOURCES', 'SDK_CURRENT_USE', 'RUN_SCOPE', 'SDK_METADATA')}
+                     and n.targets[0].id in ('ARCHIVES', 'RESOURCES', 'SDK_CURRENT_USE', 'RUN_SCOPE', 'SDK_METADATA', 'TOOL_SCOPE', 'TOOL_COMMANDS')}
         self.assertEqual(constants['SDK_CURRENT_USE']['image'], {'ImageOS': 'macos26', 'ImageVersion': '20260907.0351.1'})
         self.assertEqual(constants['SDK_CURRENT_USE']['productVersion'], '26.6.2')
         self.assertEqual(len(constants['SDK_CURRENT_USE']['files']), 5)
         self.assertEqual(constants['RUN_SCOPE'], 'prepare-b')
+        self.assertEqual(constants['TOOL_SCOPE'], 'prepare-tool-setup-inputs')
+        self.assertEqual(constants['TOOL_COMMANDS'], ('prepare-tool-setup-inputs', 'acquire-tool-setup-inputs'))
         # Exercise only the actual closed __main__ dispatcher with an inert
         # receiver. No context/native main, password or acquisition is entered.
         entry = tree.body[-1]
@@ -211,24 +215,45 @@ class MacAndroidPreparationSourceTests(unittest.TestCase):
         self.assertEqual(ast.unparse(entry.test), "__name__ == '__main__'")
         self.assertEqual(len(entry.body), 2)
         self.assertEqual(ast.unparse(entry.body[0].test),
+                         "len(sys.argv) == 2 and sys.argv[1] in TOOL_COMMANDS")
+        self.assertEqual(ast.unparse(entry.body[0].body[0]), 'RUN_SCOPE = TOOL_SCOPE')
+        ui_branch = entry.body[0].orelse[0]
+        self.assertEqual(ast.unparse(ui_branch.test),
                          "len(sys.argv) == 2 and sys.argv[1] in ('prepare-ui-inputs', 'acquire-ui-inputs')")
-        self.assertEqual(ast.unparse(entry.body[0].body[0]), 'RUN_SCOPE = UI_SCOPE')
+        self.assertEqual(ast.unparse(ui_branch.body[0]), 'RUN_SCOPE = UI_SCOPE')
+        consumer_branch = ui_branch.orelse[0]
+        self.assertEqual(ast.unparse(consumer_branch.test),
+                         "len(sys.argv) == 2 and sys.argv[1] in UI_CONSUMER_COMMANDS")
+        self.assertEqual([ast.unparse(n) for n in consumer_branch.body],
+                         ['RUN_SCOPE = UI_CONSUMER_SCOPE', 'SOURCE = UI_CONSUMER_SOURCE'])
         self.assertEqual(ast.unparse(entry.body[1]), 'raise SystemExit(main())')
         dispatcher = compile(ast.Module(body=[entry], type_ignores=[]), '<fixed-ui-cli>', 'exec')
-        for argv, expected in ((['owner', 'prepare-ui-inputs'], 'prepare-ui-inputs'),
-                               (['owner', 'acquire-ui-inputs'], 'prepare-ui-inputs'),
-                               (['owner', 'prepare-consumer-ui-inputs'], 'prepare-consumer-ui-inputs'),
-                               (['owner', 'acquire-consumer-ui-inputs'], 'prepare-consumer-ui-inputs'),
-                               (['owner', 'prepare-consumer-ui-inputs','extra'], 'prepare-b'),
-                               (['owner', 'prepare-b'], 'prepare-b'),
-                               (['owner', 'acquire'], 'prepare-b'),
-                               (['owner', 'cleanup'], 'prepare-b'),
-                               (['owner', 'prepare-ui-inputs', 'extra'], 'prepare-b'),
-                               (['owner', '--prepare-ui-inputs'], 'prepare-b'),
-                               (['owner'], 'prepare-b')):
+        for argv, expected, candidate_mode in (
+            (['owner', 'prepare-ui-inputs'], 'prepare-ui-inputs', None),
+            (['owner', 'acquire-ui-inputs'], 'prepare-ui-inputs', None),
+            (['owner', 'prepare-consumer-ui-inputs'], 'prepare-consumer-ui-inputs', None),
+            (['owner', 'acquire-consumer-ui-inputs'], 'prepare-consumer-ui-inputs', None),
+            (['owner', 'prepare-consumer-ui-inputs', 'extra'], 'prepare-b', None),
+            (['owner', 'prepare-b'], 'prepare-b', None),
+            (['owner', 'acquire'], 'prepare-b', None),
+            (['owner', 'cleanup'], 'prepare-b', None),
+            (['owner', 'prepare-ui-inputs', 'extra'], 'prepare-b', None),
+            (['owner', '--prepare-ui-inputs'], 'prepare-b', None),
+            (['owner'], 'prepare-b', None),
+            (['owner', 'prepare-tool-setup-inputs'], 'prepare-tool-setup-inputs', None),
+            (['owner', 'prepare-tool-setup-inputs'], 'prepare-tool-setup-inputs', 'install-retained-observer'),
+            (['owner', 'acquire-tool-setup-inputs'], 'prepare-tool-setup-inputs', None),
+            (['owner', 'acquire-tool-setup-inputs'], 'prepare-tool-setup-inputs', 'install-retained-observer'),
+            (['owner', 'prepare-tool-setup-inputs', 'extra'], 'prepare-b', 'install-retained-observer'),
+            (['owner', 'acquire-tool-setup-inputs', 'extra'], 'prepare-b', 'install-retained-observer'),
+            (['owner', '--prepare-tool-setup-inputs'], 'prepare-b', 'install-retained-observer'),
+        ):
             observed = []
             namespace = {'__name__': '__main__', 'sys': types.SimpleNamespace(argv=argv),
                          'RUN_SCOPE': 'prepare-b', 'UI_SCOPE': 'prepare-ui-inputs',
+                         'TOOL_SCOPE': constants['TOOL_SCOPE'],
+                         'TOOL_COMMANDS': constants['TOOL_COMMANDS'],
+                         'os': types.SimpleNamespace(environ={} if candidate_mode is None else {'MRK_CANDIDATE_MODE': candidate_mode}),
                          'UI_CONSUMER_SCOPE': 'prepare-consumer-ui-inputs',
                          'UI_CONSUMER_COMMANDS': ('prepare-consumer-ui-inputs','acquire-consumer-ui-inputs'),
                          'SOURCE': Path('/candidate'), 'UI_CONSUMER_SOURCE': Path('/candidate/.candidate-consumer-helper')}
@@ -240,7 +265,8 @@ class MacAndroidPreparationSourceTests(unittest.TestCase):
                 exec(dispatcher, namespace)
             self.assertEqual(stopped.exception.code, 78)
             self.assertEqual(observed, [(expected, tuple(argv))])
-            self.assertEqual(namespace['SOURCE'], namespace['UI_CONSUMER_SOURCE'] if expected == 'prepare-consumer-ui-inputs' else Path('/candidate'))
+            selected_helper = expected == 'prepare-consumer-ui-inputs' or (expected == 'prepare-tool-setup-inputs' and candidate_mode == 'install-retained-observer')
+            self.assertEqual(namespace['SOURCE'], namespace['UI_CONSUMER_SOURCE'] if selected_helper else Path('/candidate'))
             observed.clear()
             namespace.update(__name__='inert_import', RUN_SCOPE='prepare-b')
             exec(dispatcher, namespace)
@@ -369,14 +395,15 @@ class MacAndroidPreparationSourceTests(unittest.TestCase):
         target.role = helper.ARCHIVES[0]
         self.assertEqual(target.target(target.role['archivePrefix'] + '/Contents/Home/bin/keytool'),
                          'jdk/temurin-17.jdk/Contents/Home/bin/keytool')
-        original_ui = helper.P, helper.SOURCE
+        original_ui = helper.P, helper.SOURCE, helper.T
         paths = fixture_module('desktop/tools/macos_android_supplier_preparation.py', '_mrk_ui_catalogue_paths_data')
+        tables = fixture_module('desktop/tools/macos_android_catalogue_tables.py', '_mrk_ui_catalogue_tables_data')
         class SourceClock:
             def check(self): return 1
         try:
-            helper.P = paths; helper.SOURCE = ROOT
+            helper.P = paths; helper.SOURCE = ROOT; helper.T = tables
             expected_ui = helper.ui_source_roster(SourceClock())
-        finally: helper.P, helper.SOURCE = original_ui
+        finally: helper.P, helper.SOURCE, helper.T = original_ui
         self.assertEqual(len(expected_ui), 15077)
         self.assertEqual(sum(row[0] != 'directory' for row in expected_ui.values()), 12109)
         self.assertEqual(sum(row[0] == 'directory' for row in expected_ui.values()), 2968)

@@ -272,6 +272,20 @@ impl FreshBirthData {
     }
 }
 
+/// Closed correlation with the final native blank-versions receipt. This
+/// DATA cannot construct an exclusion, conservation owner, or Fresh readiness.
+#[derive(Clone,Debug,Deserialize,Serialize,PartialEq,Eq)]
+#[serde(rename_all="camelCase",deny_unknown_fields)]
+pub struct FreshConservationReferenceData { invocation:String,receipt_sha256:String }
+impl FreshConservationReferenceData {
+    pub fn new_data(invocation:&str,receipt_sha256:&str)->Result<Self> {
+        let value=Self{invocation:invocation.into(),receipt_sha256:receipt_sha256.into()};
+        require(value.valid(),TransactionDataError::Binding)?;Ok(value)
+    }
+    fn valid(&self)->bool {hex(&self.invocation,32)&&hex(&self.receipt_sha256,64)}
+    pub fn invocation_data(&self)->&str{&self.invocation}
+    pub fn receipt_sha256_data(&self)->&str{&self.receipt_sha256}
+}
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct IntentWire {
@@ -283,6 +297,8 @@ struct IntentWire {
     restore_recovery: Option<RestoreReferenceData>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     fresh_birth: Option<FreshBirthWire>,
+    #[serde(default,skip_serializing_if="Option::is_none")]
+    fresh_conservation:Option<FreshConservationReferenceData>,
 }
 /// Validated comparison input only; no Deserialize bypass or mutation methods.
 #[derive(Debug)]
@@ -303,6 +319,7 @@ impl IntentData {
         if value.get("recovery").is_some() { record_field(&value,"recovery",false)?; }
         if value.get("restoreRecovery").is_some() { record_field(&value,"restoreRecovery",false)?; }
         if let Some(birth) = value.get("freshBirth") {FreshBirthData::shape(birth)?;}
+        if value.get("freshConservation").is_some(){record_field(&value,"freshConservation",false)?;}
         let wire: IntentWire = decode(value)?;
         header(wire.schema_version, &wire.kind, INTENT_KIND, &wire.target, &wire.invocation, &wire.request_id, expected)?;
         pair(expected, wire.action, wire.previous.as_ref(), &wire.next, current)?;
@@ -317,6 +334,8 @@ impl IntentData {
             && wire.action==ActionData::RestoreFixedApp && r.receipt_invocation==wire.invocation
             && wire.previous_state.as_ref().is_some_and(|old|old.invocation!=r.torn_invocation)),
             TransactionDataError::Binding)?;
+        require(wire.fresh_conservation.as_ref().is_none_or(|r|r.valid() && r.invocation!=wire.invocation
+            && r.invocation!=wire.request_id),TransactionDataError::Binding)?;
         if let Some(birth) = &wire.fresh_birth {
             birth.validate()?;
             require(wire.action == ActionData::FreshInstall && wire.previous.is_none() && wire.previous_state.is_none()
@@ -331,6 +350,7 @@ impl IntentData {
     pub fn recovery_data(&self) -> Option<&RecoveryReferenceData> { self.wire.recovery.as_ref() }
     pub fn restore_recovery_data(&self) -> Option<&RestoreReferenceData> {self.wire.restore_recovery.as_ref()}
     pub fn fresh_birth_data(&self) -> Option<FreshBirthData> {self.wire.fresh_birth.clone().map(FreshBirthData)}
+    pub fn fresh_conservation_data(&self)->Option<&FreshConservationReferenceData>{self.wire.fresh_conservation.as_ref()}
     /// Exact encoder order and newline, retaining optional historical fields.
     /// It neither changes the stored original digest nor nominates new work.
     pub fn canonical_bytes_data(&self) -> Result<Vec<u8>> {encode(&self.wire,INTENT_LIMIT)}
@@ -392,6 +412,13 @@ impl IntentData {
         let bytes = intent.canonical_bytes_data()?;
         Self::parse_fresh_birth_data(&bytes,expected)?; Ok(bytes)
     }
+    pub fn encode_with_fresh_conservation_data(invocation:&str,request_id:&str,birth:&FreshBirthData,
+        reference:&FreshConservationReferenceData,expected:&ReleaseSetData)->Result<Vec<u8>> {
+        let raw=Self::encode_with_fresh_birth_data(invocation,request_id,birth,expected)?;
+        let mut value=Self::parse_fresh_birth_data(&raw,expected)?;
+        value.wire.fresh_conservation=Some(reference.clone());
+        let raw=encode(&value.wire,INTENT_LIMIT)?;Self::parse_fresh_birth_data(&raw,expected)?;Ok(raw)
+    }
     pub fn encode_with_restore_recovery_data(invocation:&str,request_id:&str,
         previous:(&StateData,&CapsuleData),reference:&RestoreReferenceData,expected:&ReleaseSetData) -> Result<Vec<u8>> {
         Self::encode_with_references_data(invocation,request_id,ActionData::RestoreFixedApp,
@@ -407,7 +434,8 @@ impl IntentData {
             previous: previous.map(|(state, _)| state.wire.current.release.clone()),
             next: expected.current_data().clone(), previous_state: previous.map(|(state, _)| StateLink {
                 invocation: state.wire.invocation.clone(), sha256: state.body_sha256.clone() }),
-            recovery:recovery.cloned(),restore_recovery:restore.cloned(),fresh_birth:None };
+            recovery:recovery.cloned(),restore_recovery:restore.cloned(),fresh_birth:None,
+            fresh_conservation:previous.and_then(|(state,_)|state.wire.fresh_conservation.clone()) };
         let bytes = encode(&wire, INTENT_LIMIT)?;
         let parsed = Self::parse_data(&bytes, expected)?;
         require(previous_matches(&parsed, previous), TransactionDataError::Binding)?;
@@ -542,6 +570,8 @@ struct StateWire {
     recovery: Option<RecoveryReferenceData>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     restore_recovery: Option<RestoreReferenceData>,
+    #[serde(default,skip_serializing_if="Option::is_none")]
+    fresh_conservation:Option<FreshConservationReferenceData>,
 }
 #[derive(Debug)]
 pub struct StateData { wire: StateWire, body_sha256: String }
@@ -554,6 +584,7 @@ impl StateData {
         record_field(&value, "residue", true)?;
         if value.get("recovery").is_some() { record_field(&value,"recovery",false)?; }
         if value.get("restoreRecovery").is_some() { record_field(&value,"restoreRecovery",false)?; }
+        if value.get("freshConservation").is_some(){record_field(&value,"freshConservation",false)?;}
         if !field(&value, "residue")?.is_null() { record_field(field(&value, "residue")?, "release", false)?; }
         let wire: StateWire = decode(value)?;
         header(wire.schema_version, &wire.kind, STATE_KIND, &wire.target, &wire.invocation, &wire.request_id, expected)?;
@@ -611,6 +642,9 @@ impl StateData {
             && wire.intended_action==ActionData::RestoreFixedApp && wire.phase==StatePhase::MutationRecorded
             && r.receipt_invocation==wire.invocation
             && !wire.previous_evidence.iter().any(|old|old.invocation==r.torn_invocation)),TransactionDataError::Binding)?;
+        require(wire.fresh_conservation.as_ref().is_none_or(|r|r.valid() && r.invocation!=wire.invocation
+            && r.invocation!=wire.request_id && !wire.previous_evidence.iter().any(|old|old.invocation==r.invocation)),
+            TransactionDataError::Binding)?;
         Ok(Self { wire, body_sha256: digest(bytes) })
     }
     pub fn invocation_data(&self) -> &str { &self.wire.invocation }
@@ -619,6 +653,7 @@ impl StateData {
     pub fn action_data(&self) -> ActionData { self.wire.intended_action }
     pub fn recovery_data(&self) -> Option<&RecoveryReferenceData> { self.wire.recovery.as_ref() }
     pub fn restore_recovery_data(&self) -> Option<&RestoreReferenceData> {self.wire.restore_recovery.as_ref()}
+    pub fn fresh_conservation_data(&self)->Option<&FreshConservationReferenceData>{self.wire.fresh_conservation.as_ref()}
     pub fn current_data(&self) -> GenerationData { GenerationData(self.wire.current.clone()) }
     pub fn retained_data(&self) -> impl Iterator<Item = GenerationData> + '_ {
         self.wire.retained.iter().cloned().map(GenerationData)
@@ -659,7 +694,8 @@ impl StateData {
         let wire = StateWire { schema_version: 2, kind: STATE_KIND.into(), target: intent.wire.target.clone(),
             invocation: intent.wire.invocation.clone(), request_id: intent.wire.request_id.clone(), capsule_invocation: intent.wire.invocation.clone(),
             intended_action: intent.wire.action, phase: StatePhase::MutationRecorded, current: current.0.clone(),
-            retained, previous_evidence: Self::next_evidence(previous)?, residue: None, recovery:intent.wire.recovery.clone(),restore_recovery:intent.wire.restore_recovery.clone() };
+            retained, previous_evidence: Self::next_evidence(previous)?, residue: None, recovery:intent.wire.recovery.clone(),restore_recovery:intent.wire.restore_recovery.clone(),
+            fresh_conservation:intent.wire.fresh_conservation.clone() };
         let bytes = encode(&wire, STATE_LIMIT)?; Self::parse_data(&bytes, expected)?; Ok(bytes)
     }
     /// Only the known one-inverse path may supply these observations. A failed
@@ -673,7 +709,8 @@ impl StateData {
             intended_action: intent.wire.action, phase: StatePhase::InverseRecorded,
             current: previous.0.wire.current.clone(), retained: previous.0.wire.retained.clone(),
             previous_evidence: Self::next_evidence(Some(previous))?, residue: Some(Residue {
-                invocation: intent.wire.invocation.clone(), release: intent.wire.next.clone(), staging_present, runtime_present }), recovery:None,restore_recovery:None };
+                invocation: intent.wire.invocation.clone(), release: intent.wire.next.clone(), staging_present, runtime_present }), recovery:None,restore_recovery:None,
+            fresh_conservation:intent.wire.fresh_conservation.clone() };
         let bytes = encode(&wire, STATE_LIMIT)?; Self::parse_data(&bytes, expected)?; Ok(bytes)
     }
 }
@@ -966,7 +1003,8 @@ fn evidence_matches(state: &StateWire, previous: Option<(&StateData, &CapsuleDat
 pub fn correspondence_data(intent: &IntentData, previous: Option<(&StateData, &CapsuleData)>, state: Option<&StateData>,
     capsule: Option<&CapsuleData>) -> CorrespondenceData {
     if intent.wire.previous_state.is_some() && previous.is_none() { return CorrespondenceData::Pending; }
-    if !previous_matches(intent, previous) || intent.recovery_data().is_some_and(|r|
+    if previous.is_some_and(|(old,_)|old.wire.fresh_conservation!=intent.wire.fresh_conservation)
+        || !previous_matches(intent, previous) || intent.recovery_data().is_some_and(|r|
         previous.is_none_or(|(old,_)|r.stage_invocation != old.current_data().instance_data())) {
         return CorrespondenceData::Mismatch;
     }
@@ -981,7 +1019,8 @@ pub fn correspondence_data(intent: &IntentData, previous: Option<(&StateData, &C
         if c.state_sha256.as_deref() != Some(state.body_sha256.as_str()) || state.wire.invocation != i.invocation
             || state.wire.request_id != i.request_id || state.wire.target != i.target || state.wire.intended_action != i.action
             || c.actual_current.as_ref() != Some(&state.wire.current.release)
-            || state.wire.recovery != i.recovery || state.wire.restore_recovery != i.restore_recovery { return CorrespondenceData::Mismatch; }
+            || state.wire.recovery != i.recovery || state.wire.restore_recovery != i.restore_recovery
+            || state.wire.fresh_conservation != i.fresh_conservation { return CorrespondenceData::Mismatch; }
     } else if c.state_sha256.is_some() { return CorrespondenceData::Pending; }
     if matches!(c.outcome, WorkerOutcome::Refused | WorkerOutcome::Partial) {
         return if c.writer.exit_code.is_some_and(|code| code != 0) { CorrespondenceData::FailureRecorded }
