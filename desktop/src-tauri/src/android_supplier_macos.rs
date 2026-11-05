@@ -1,6 +1,7 @@
 //! Private, compiled macOS Android supplier recipe and canonical proposal.
 //! Caller DATA never supplies a reference. This module performs no IO and
 //! cannot settle source custody, consent, original deadlines or native work.
+use mrk_android_catalogue_schema::{Component, PublishedChecksum, ArchiveKind, ArchiveDisposition, OfficialMember, OfficialArchive, SourceProvenance, SourceDisposition, SourceBinding, CanonicalAlias, NativeHeader, NativeResourceKind, NestedNative, FileClass, VersionSpec, RoleSpec};
 use std::{cmp::Ordering, mem::size_of, sync::OnceLock};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -25,102 +26,8 @@ pub(crate) enum SupplierFailure { Unavailable }
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum Failure { Unavailable, UnsupportedLayout, Reference, SourceMismatch, Bounds, Metadata }
 
-#[derive(Clone, Copy, PartialEq, Eq, Serialize)]
-enum Component { Jdk, SdkPlatform, SdkBuildTools, Gradle, Aapt2, Bundletool }
 const COMPONENTS: [Component; 6] = [Component::Jdk, Component::SdkPlatform,
     Component::SdkBuildTools, Component::Gradle, Component::Aapt2, Component::Bundletool];
-#[derive(Clone, Copy, Serialize)]
-enum PublishedChecksum { Sha256(&'static str), Sha1(&'static str) }
-#[derive(Clone, Copy, Serialize)]
-enum ArchiveKind {
-    Directory { mode: u32 },
-    File { mode: u32, bytes: u64, sha256: &'static str },
-    Alias { mode: u32, target: &'static str },
-}
-#[derive(Clone, Copy, Serialize)]
-enum ArchiveDisposition {
-    Picked { source_index: u32 },
-    /// Complete vendor-member provenance for fixed support. The separately
-    /// pinned signed relation accounts for its three changed native members;
-    /// installed support is never relabeled as byte-identical vendor input.
-    SealedSupport(SupportAsset),
-    /// Only an explicit directory wrapping the selected distribution/bundle.
-    WrapperDirectory,
-}
-#[derive(Clone, Copy, Serialize)]
-struct OfficialMember {
-    name: &'static str,
-    kind: ArchiveKind,
-    disposition: ArchiveDisposition,
-}
-#[derive(Clone, Copy, Serialize)]
-struct OfficialArchive {
-    component: Component,
-    official_source: &'static str,
-    vendor_release: &'static str,
-    archive: ArchivePin<'static>,
-    published: PublishedChecksum,
-    /// Actual archive-directory count/expansion, not a local selected-file count.
-    member_count: u32,
-    expanded_bytes: u64,
-    members: &'static [OfficialMember],
-}
-#[derive(Clone, Copy, Serialize)]
-enum SourceProvenance {
-    Vendor { archive: u8, member: u32 },
-    /// A necessary filesystem parent absent from the actual archive headers.
-    /// The complete bidirectional prefix closure below binds this exact archive
-    /// and prefix; neither a fictional member nor an archival mode is supplied.
-    ArchiveParent { archive: u8, prefix: &'static str },
-}
-#[derive(Clone, Copy, Serialize)]
-enum SourceDisposition {
-    Payload(u32),
-    Alias(u32),
-    /// Empty source directories are explicitly observed; canonical installed
-    /// directory closure is derived only from regular files/aliases.
-    Directory,
-}
-#[derive(Clone, Copy, Serialize)]
-struct SourceBinding {
-    provenance: SourceProvenance,
-    disposition: SourceDisposition,
-}
-#[derive(Serialize)]
-struct CanonicalAlias {
-    path: &'static str, target: &'static str, canonical: &'static str,
-    source_index: u32,
-}
-#[derive(Clone, Copy, Serialize)]
-struct NativeHeader {
-    /// Actual archived-byte header snapshots reviewed with its complete hash.
-    prefix: &'static [u8],
-    commands: &'static [u8],
-}
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
-enum NativeResourceKind {
-    Arm64,
-    JdkInstalledCounterpart,
-    JdkJpackageTemplate,
-    OtherPlatformElf,
-    OtherPlatformPe,
-    GradleIntelPlatform,
-    // Plain Gradle still copies this Intel resource; it is not an ARM64 JNI.
-    GradlePlainJansiIntel,
-    // Genuine bundletool ARM64 bypasses its Intel/Rosetta-only JNA route.
-    BundletoolDarwinI386X64,
-    CurrentX64,
-    OtherPlatformArm64,
-    OtherPlatformI386,
-}
-#[derive(Clone, Copy, Serialize)]
-struct NestedNative {
-    member: &'static str, bytes: u64, sha256: &'static str, mode: u32,
-    kind: NativeResourceKind,
-    // None is admitted ONLY by a complete exact compiled resource tuple below.
-    // It is not a caller-selected inactive flag or a general DATA downgrade.
-    header: Option<NativeHeader>,
-}
 struct NativeResourcePin {
     member: &'static str, bytes: u64, sha256: &'static str, mode: u32,
     kind: NativeResourceKind,
@@ -128,20 +35,6 @@ struct NativeResourcePin {
 struct NativeArchivePin {
     path: &'static str, bytes: u64, sha256: &'static str,
     members: &'static [NativeResourcePin],
-}
-#[derive(Serialize)]
-enum FileClass {
-    Data,
-    /// An explicit reviewed textual license/notice whose vendor archive mode
-    /// happens to be executable. This is not a general script downgrade.
-    LicenseText,
-    GradleShell,
-    GradleForeignLauncher,
-    AndroidTargetElf,
-    SdkBash(policy::Sdk35File),
-    SdkLegacyIntel(policy::Sdk35File, NativeHeader),
-    MachO(NativeHeader),
-    JvmArchive { native_members: &'static [NestedNative] },
 }
 
 // Inert original Gradle8.14.5 and fixed signed bundletool1.18.3 DATA pins. Every known
@@ -490,18 +383,6 @@ fn native_members_match_for(authority: &native_profile::NativeAuthority,
 }
 
 #[derive(Clone, Copy, Serialize)]
-struct VersionSpec {
-    jdk_vendor: &'static str, jdk_version: &'static str,
-    gradle_version: &'static str, agp_version: &'static str,
-    sdk_platform: &'static str, sdk_platform_revision: &'static str,
-    sdk_build_tools_version: &'static str,
-}
-#[derive(Clone, Copy, Serialize)]
-struct RoleSpec {
-    java: &'static str, javac: &'static str, gradle: &'static str,
-    bundletool: &'static str, sdk: &'static str,
-}
-#[derive(Clone, Copy, Serialize)]
 struct Reference {
     /// Fixed compiled profile only. Not a saved-project compatibility claim.
     profile: &'static str,
@@ -529,9 +410,12 @@ struct Reference {
 #[cfg(test)]
 #[path = "android_supplier_macos_catalogue_storage_tests.rs"]
 mod catalogue_storage_tests;
-include!("android_supplier_macos_catalogue.rs");
-#[path = "android_supplier_macos_intel_catalogue.rs"]
-mod intel_catalogue;
+include!("android_supplier_macos_catalogue_projection.rs");
+#[cfg(test)]
+#[path = "android_supplier_macos_catalogue_binary.rs"]
+mod catalogue_binary;
+#[cfg(test)]
+const CAT_PROJECTED: ZipMemberSpec<'static> = mrk_android_catalogue_arm64::CATALOGUE.support_members[0].member;
 #[path = "android_supplier_macos_acquisition.rs"]
 pub(crate) mod acquisition;
 

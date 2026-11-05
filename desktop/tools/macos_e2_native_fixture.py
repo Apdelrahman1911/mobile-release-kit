@@ -3836,6 +3836,8 @@ def source_names(rows):
         "desktop/tools/macos_e2_native_fixture.py", "desktop/tools/macos_aqua_qualification.py",
         "desktop/tools/stage_macos_installed.py", CONTEXT_SOURCE, LAYOUT_SOURCE,
         "desktop/tools/macos_android_sdk_metadata.py",
+        *("desktop/catalogues/macos-android-" + architecture + "/" + name
+          for architecture in ("schema", "arm64", "x86_64") for name in ("Cargo.toml", "src/lib.rs")),
         "src/mobile_release/api/data/metadata-images-v1.json",
         "src/mobile_release/api/data/metadata-image-help-v1.json",
         *("src/mobile_release/" + name for name in (

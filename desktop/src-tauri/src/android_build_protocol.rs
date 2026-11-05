@@ -5,6 +5,7 @@
 //! No owner, launch, file access, tool admission, permit or qualification here.
 //! A parsed core terminal and a settled frame decoder NEVER establish native
 //! finality: the original runtime/process/pipe/close/join owners must still settle.
+pub(crate) use mrk_android_catalogue_schema::{MAC_TOOLCHAIN_PROFILE, MAC_X64_TOOLCHAIN_PROFILE};
 use std::{fmt, path::Path};
 use serde::{de::{self, DeserializeSeed, MapAccess, SeqAccess, Visitor}, Deserialize, Serialize};
 use serde_json::{json, Map, Value};
@@ -19,8 +20,6 @@ pub(crate) const CANDIDATE_CONSENT: &str = "local-android-candidate-inputs-v1";
 pub(crate) const EVENT: &str = "android-build-state-changed";
 pub(crate) const SCOPE: &str = "local-post-build-artifact-observation";
 pub(crate) const TOOLCHAIN_PROFILE: &str = "android-local-linux-gnu-x86_64-v1";
-pub(crate) const MAC_TOOLCHAIN_PROFILE: &str = "android-registered-macos-arm64-v1";
-pub(crate) const MAC_X64_TOOLCHAIN_PROFILE: &str = "android-registered-macos-x86_64-v1";
 pub(crate) const MAC_TOOLCHAIN_PREFIX: &str = "/Library/Application Support/MobileReleaseKit/android";
 pub(crate) const IPC_LIMIT: usize = 8 * 1024;
 pub(crate) const REQUEST_LIMIT: usize = 32 * 1024;

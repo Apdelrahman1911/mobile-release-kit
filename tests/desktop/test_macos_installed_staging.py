@@ -2962,6 +2962,17 @@ class MacAndroidHelperPackagingData(unittest.TestCase):
                 "spans": [{"file_name": source + "/" + path, "line_start": 21,
                            "column_start": 7, "is_primary": True}]}}
         self.assertEqual(parse(stdout=json.dumps(message).encode() + b"\n")["rows"], [row])
+        for architecture in ("schema", "arm64", "x86_64"):
+            directory = "desktop/catalogues/macos-android-" + architecture
+            package = "mrk-android-catalogue-" + architecture
+            selected = copy.deepcopy(message)
+            selected["manifest_path"] = source + "/" + directory + "/Cargo.toml"
+            selected["package_id"] = "path+file://" + source + "/" + directory + "#" + package + "@0.1.0"
+            selected["message"]["spans"][0]["file_name"] = "src/lib.rs"
+            self.assertEqual(parse(stdout=json.dumps(selected).encode() + b"\n")["rows"],
+                             [dict(row, source=directory + "/src/lib.rs")])
+            selected["package_id"] = selected["package_id"].replace("@0.1.0", "@0.1.1")
+            self.assertEqual(parse(stdout=json.dumps(selected).encode() + b"\n")["rows"], [dict(row, source=None)])
         cargo = parse(stderr=b"error: failed to download private; could not resolve host\n")
         self.assertFalse(cargo["rows"])
         self.assertEqual(cargo["classifications"], ["download-failed", "network-failed"])
@@ -7044,14 +7055,18 @@ sys.exit(status)
             self.assertIs(module.time.monotonic_ns, original_clock)
             self.assertIs(module.WORK_PARENT, original_parent)
 
-    def cargo_rows(self, checkout, target, *, build_target="aarch64-apple-darwin"):
-        return normal_cargo_fixture(target, role="resident", checkout=checkout, build_target=build_target)[2] + [
+    def cargo_rows(self, checkout, target, *, build_target="aarch64-apple-darwin", release_body=None):
+        rows = normal_cargo_fixture(target, role="resident", checkout=checkout, build_target=build_target)[2] + [
             {"reason": "build-finished", "success": True}]
+        return rows if release_body is None else source_version_cargo_fixture(rows, release_body, target=build_target)
 
     def encoded(self, rows):
         return b"\n".join(json.dumps(row).encode("ascii") for row in rows) + b"\n"
 
     def fixture(self, root, failure=None, owner_error=None, *, build_target="aarch64-apple-darwin"):
+        # macOS may expose the temporary directory through /var's symlink;
+        # declare the real fixture root for the strict no-follow source reader.
+        root = root.resolve(strict=True)
         module = ANDROID_HELPER
         release_path = ("desktop/macos-installed-inputs/build-release.json" if build_target == "aarch64-apple-darwin"
                         else "desktop/macos-installed-inputs/build-release-intel.json")
@@ -7130,7 +7145,8 @@ sys.exit(status)
                     (checkout / release_path).write_bytes(
                         TOOL.canonical({"schemaVersion": 1, "packageVersion": TOOL.PACKAGE_VERSION,
                                         "release": "macos26-arm64-changed"}))
-                output = self.encoded(self.cargo_rows(checkout, target, build_target=build_target))
+                output = self.encoded(self.cargo_rows(checkout, target, build_target=build_target,
+                    release_body=(source / release_path).read_bytes()))
                 diagnostic = (b"error: synthetic helper build failed\n" if failure == "nonzero"
                               else b"warning: synthetic helper build diagnostic\n")
                 return CompletedProcess(argv, 101 if failure == "nonzero" else 0,
@@ -7228,9 +7244,25 @@ sys.exit(status)
             with mock.patch.object(TOOL, "DESKTOP", checkout / "desktop"):
                 self.assertEqual(TOOL.image_cargo_artifact(self.encoded(paired), binary, target, body,
                                                          "resident", target=selected, package_version="0.1.2")["target"], selected)
-                for index, wrong in ((0, "1"), (0, "2"), (1, "0"), (1, "2"), (1, "3"), (2, "1"), (2, "2")):
+                for index, wrong in ((0, "1"), (0, "2"), (1, "0"), (1, "2"), (1, "3"), (2, "1"), (2, "2"),
+                                     (3, "0"), (3, "2"), (3, "3"), (4, "1"), (5, "1")):
                     changed = copy.deepcopy(paired); changed[index]["profile"]["opt_level"] = wrong
                     with self.subTest(target=selected, profileRow=index), self.assertRaises(module.Refused):
+                        module.artifact(self.encoded(changed), checkout, target, build_target=selected, package_version="0.1.2")
+                    with self.assertRaises(TOOL.Refused):
+                        TOOL.image_cargo_artifact(self.encoded(changed), binary, target, body, "resident", target=selected, package_version="0.1.2")
+                # Every catalogue dependency has its own fixed source/version
+                # and empty-feature identity; neither architecture may disappear.
+                for index in (3, 4, 5):
+                    for field, value in (("features", ["default"]), ("manifest_path", "/foreign/Cargo.toml"),
+                                         ("package_id", paired[index]["package_id"].replace("@0.1.0", "@0.1.1"))):
+                        changed = copy.deepcopy(paired); changed[index][field] = value
+                        with self.subTest(target=selected, catalogue=index, field=field), self.assertRaises(module.Refused):
+                            module.artifact(self.encoded(changed), checkout, target, build_target=selected, package_version="0.1.2")
+                        with self.assertRaises(TOOL.Refused):
+                            TOOL.image_cargo_artifact(self.encoded(changed), binary, target, body, "resident", target=selected, package_version="0.1.2")
+                    changed = copy.deepcopy(paired); del changed[index]
+                    with self.assertRaises(module.Refused):
                         module.artifact(self.encoded(changed), checkout, target, build_target=selected, package_version="0.1.2")
                     with self.assertRaises(TOOL.Refused):
                         TOOL.image_cargo_artifact(self.encoded(changed), binary, target, body, "resident", target=selected, package_version="0.1.2")
@@ -7240,11 +7272,12 @@ sys.exit(status)
                 desktop_messages = desktop_rows + [{"reason": "build-finished", "success": True}]
                 self.assertEqual(TOOL.image_cargo_artifact(self.encoded(desktop_messages), desktop_binary,
                     target, desktop_body, "desktop", target=selected, package_version="0.1.2")["imageRole"], "desktop")
-                for wrong in ("1", "2"):
-                    desktop_messages[1]["profile"]["opt_level"] = wrong
-                    with self.assertRaises(TOOL.Refused):
-                        TOOL.image_cargo_artifact(self.encoded(desktop_messages), desktop_binary,
-                            target, desktop_body, "desktop", target=selected, package_version="0.1.2")
+                for index in (1, 3, 4, 5):
+                    for wrong in ("1", "2"):
+                        changed = copy.deepcopy(desktop_messages); changed[index]["profile"]["opt_level"] = wrong
+                        with self.assertRaises(TOOL.Refused):
+                            TOOL.image_cargo_artifact(self.encoded(changed), desktop_binary,
+                                target, desktop_body, "desktop", target=selected, package_version="0.1.2")
         class TargetSubclass(str):
             pass
         for invalid in (None, True, [], {}, "x86_64h-apple-darwin", "x86_64-apple-darwin ", TargetSubclass("x86_64-apple-darwin")):
@@ -7293,6 +7326,20 @@ sys.exit(status)
         for package in registry_packages:
             with self.subTest(registry_package=package["name"], version=package["version"]):
                 self.assertIn(tuple(package.get(field) for field in pin_fields), app_pins)
+
+        # All three real application roots lock the same complete catalogue
+        # dependencies without changing registry suppliers or role features.
+        desktop_lock = tomllib.loads((source / "desktop/helpers/macos-desktop-image/Cargo.lock").read_text(encoding="utf-8"))
+        for architecture in ("schema", "arm64", "x86_64"):
+            package_name = "mrk-android-catalogue-" + architecture
+            self.assertEqual(app_manifest["dependencies"][package_name], {
+                "path": "../catalogues/macos-android-" + architecture, "version": "=0.1.0", "default-features": False})
+            expected = {"name": package_name, "version": "0.1.0",
+                        "dependencies": ["serde" if architecture == "schema" else "mrk-android-catalogue-schema"]}
+            for lock in (app_lock, helper_lock, desktop_lock):
+                self.assertEqual([row for row in lock["package"] if row["name"] == package_name], [expected])
+                app = next(row for row in lock["package"] if row["name"] == app_package["name"])
+                self.assertIn(package_name, app["dependencies"])
 
         # The explicit producer is not the resident/ordinary graph and is
         # never substituted for any packaged executable.
@@ -7573,7 +7620,7 @@ sys.exit(status)
                     testcase.assertEqual(options["timeout"], 480)
                     testcase.assertEqual(options["environment"]["MRK_BUNDLED_RUNTIME_MANIFEST_SHA256"], "c" * 64)
                     testcase.assertEqual(options["environment"]["MRK_MACOS_INSTALL_SOURCE_COMMIT"], "a" * 40)
-                    graph = copy.deepcopy(remove_rows)
+                    graph = source_version_cargo_fixture(remove_rows, release_body, target=target)
                     # The real strict graph parser still executes below.
                     old = "/inert/work/android-helper-target"
                     graph = json.loads(json.dumps(graph).replace(old, str(self.work / self.target_name)).replace(TOOL.INTEL_TARGET, target))
@@ -8067,11 +8114,13 @@ sys.exit(status)
                         + ("MRK_MACOS_NOTARY_API_KEY_BASE64", "GITHUB_TOKEN", "HTTP_PROXY", "HTTPS_PROXY")))
                     self.assertEqual((work / "android-helper-resident-fetch.stderr").read_bytes(), b"synthetic fetch DATA\n")
                 self.assertEqual("--offline" in build_argv, bool(build_index))
-                self.assertEqual(build_argv.count("--config"), 1)
-                self.assertEqual(build_argv[build_argv.index("--config") + 1],
-                                 "profile.release.package.mobile-release-kit-desktop.opt-level=1")
+                self.assertEqual([build_argv[index + 1] for index, arg in enumerate(build_argv) if arg == "--config"], [
+                    "profile.release.package.mobile-release-kit-desktop.opt-level=1",
+                    "profile.release.package.mrk-android-catalogue-schema.opt-level=1"])
                 self.assertEqual(module.RESIDENT_CARGO_OVERRIDE,
                                  "profile.release.package.mobile-release-kit-desktop.opt-level=1")
+                self.assertEqual(module.RESIDENT_SCHEMA_CARGO_OVERRIDE,
+                                 "profile.release.package.mrk-android-catalogue-schema.opt-level=1")
                 self.assertEqual([arg for arg in build_argv if arg.startswith("--message-format=")],
                                  ["--message-format=json-render-diagnostics"])
                 self.assertEqual((build_options["timeout"], build_options["capture"],
@@ -8081,7 +8130,8 @@ sys.exit(status)
                 self.assertEqual((work / "android-helper-build.stderr").read_bytes(), diagnostic)
                 self.assertEqual(receipt["originalCalls"][build_index]["stderrSha256"], module.digest(diagnostic))
                 self.assertEqual((work / "android-helper-build.jsonl").read_bytes(),
-                                 self.encoded(self.cargo_rows(checkout, work / "android-helper-target", build_target=build_target)))
+                                 self.encoded(self.cargo_rows(checkout, work / "android-helper-target", build_target=build_target,
+                                     release_body=(checkout / operation.release_input).read_bytes())))
                 self.assertEqual(tuple(call["role"] for call in receipt["originalCalls"]), module.prepare_roles(build_target))
                 self.assertEqual(len(receipt["originalCalls"]), 8 + build_index)
                 self.assertEqual(receipt["originalCalls"][3 + build_index]["role"], "entry-build")
@@ -8111,10 +8161,35 @@ sys.exit(status)
                 daemons = contents / "Library/LaunchDaemons"; daemons.mkdir(parents=True)
                 (daemons / (module.IDENTIFIER + ".plist")).write_bytes(TOOL.android_service_plist())
                 (daemons / (module.IDENTIFIER + ".plist")).chmod(0o644)
+                metadata_paths = (module.TOOL_NOMINATION, module.PROFILE, module.PRODUCER_PROFILE,
+                                  "desktop/packaging/macos-empty-entitlements.plist", TOOL.HISTORY_PROVIDER_PROFILE)
+                metadata_originals = {(info.st_dev, info.st_ino) for info in
+                                      ((checkout / name).stat() for name in metadata_paths)}
+                def clean_fixture_xattrs(fd, buffer, size, options):
+                    # Fixed synthetic syscall DATA for these five positive
+                    # fixture inputs only; no native metadata custody is claimed.
+                    self.assertEqual((buffer, size, options), (None, 0, 0))
+                    info = os.fstat(fd)
+                    self.assertIn((info.st_dev, info.st_ino), metadata_originals)
+                    return 0
+                if sys.platform == "darwin":
+                    fd = os.open(checkout / metadata_paths[0], os.O_RDONLY | os.O_NOFOLLOW)
+                    try:
+                        with mock.patch.object(TOOL, "_DARWIN_XATTRS", return_value=len(b"com.apple.provenance\0")):
+                            with self.assertRaisesRegex(TOOL.Refused, "^file-extended-attributes$"):
+                                TOOL.no_xattrs(fd)
+                    finally:
+                        os.close(fd)
                 for phase in ("verify-before", "verify-after"):
                     actual = module.Operation(owner, checkout, work, phase, environment, TOOL, target=build_target)
-                    with mock.patch.object(TOOL, "DESKTOP", checkout / "desktop"):
-                        self.assertEqual(actual.execute(expected), expected)
+                    metadata_port = (mock.patch.object(TOOL, "_DARWIN_XATTRS", new=clean_fixture_xattrs)
+                                     if sys.platform == "darwin" else contextlib.nullcontext())
+                    with mock.patch.object(TOOL, "DESKTOP", checkout / "desktop"), metadata_port:
+                        try:
+                            self.assertEqual(actual.execute(expected), expected)
+                        except module.Refused:
+                            failure = json.loads((work / ("android-helper-" + phase + ".json")).read_bytes()).get("failure", {})
+                            self.fail("inert staged verification failed: " + json.dumps(failure, sort_keys=True))
                     self.assertFalse((work / ("android-helper-" + phase)).exists())
                     verified = json.loads((work / ("android-helper-" + phase + ".json")).read_bytes())
                     self.assertTrue(verified["passed"])
@@ -18500,6 +18575,18 @@ def synthetic_android_support(fixture, *, app_seal=None):
         yield relation
 
 
+def source_version_cargo_fixture(rows, release_body, *, target):
+    # Operation fixtures use their declared SOURCE selection. Pure version-
+    # rejection fixtures retain their explicit identities and negative mutations.
+    version = TOOL.build_release_data(release_body, target=target)["packageVersion"]
+    rows = copy.deepcopy(rows)
+    for row in rows:
+        package_id = row.get("package_id", "")
+        if package_id.rsplit("#", 1)[-1].split("@", 1)[0] == "mobile-release-kit-desktop":
+            row["package_id"] = package_id.rsplit("@", 1)[0] + "@" + version
+    return rows
+
+
 def normal_cargo_fixture(target=None, *, role="desktop", checkout=None, build_target="aarch64-apple-darwin", package_version="0.1.2"):
     # Keep the existing ordinary fixture seam, but bind the real image graph.
     target = target or Path("/synthetic-mrk-preview/cargo-target")
@@ -18521,13 +18608,16 @@ def normal_cargo_fixture(target=None, *, role="desktop", checkout=None, build_ta
     for directory, package, name, features in (
         (desktop / "src-tauri", "mobile-release-kit-desktop", "mobile_release_desktop", app_features),
         (desktop / "native/macos-installed-native", "mrk-macos-installed-native", "mrk_macos_installed_native", native_features),
+        (desktop / "catalogues/macos-android-schema", "mrk-android-catalogue-schema", "mrk_android_catalogue_schema", []),
+        (desktop / "catalogues/macos-android-arm64", "mrk-android-catalogue-arm64", "mrk_android_catalogue_arm64", []),
+        (desktop / "catalogues/macos-android-x86_64", "mrk-android-catalogue-x86_64", "mrk_android_catalogue_x86_64", []),
     ):
         rows.append({"reason": "compiler-artifact", "package_id": "path+" + directory.as_uri() + "#" + package + ("@" + package_version if package == "mobile-release-kit-desktop" else "@0.1.0"),
             "manifest_path": str(directory / "Cargo.toml"), "features": features,
             "target": {"name": name, "kind": ["lib"], "crate_types": ["lib"],
                        "src_path": str(directory / "src/lib.rs"), "edition": "2021"},
             "profile": dict(profile, opt_level="1" if role == "resident"
-                            and package == "mobile-release-kit-desktop" else "3"),
+                            and package in ("mobile-release-kit-desktop", "mrk-android-catalogue-schema") else "3"),
             "filenames": [str(binary.parent / "deps" / ("lib" + name + "-0123456789abcdef.rlib"))],
             "executable": None, "fresh": False})
     return target, binary, rows, image_macho_fixture(role, target=build_target)
@@ -18544,7 +18634,7 @@ def observer_cargo_fixture(target=None, *, build_target="aarch64-apple-darwin"):
                    "src_path": str(root / "tests/installed_shell_observation.rs"), "edition": "2021"},
         "profile": {"opt_level": "0", "debug_assertions": True, "test": True},
         "filenames": [str(binary)], "executable": str(binary), "fresh": False}
-    for row, selected in zip(rows[1:], (features, ["default", "installed-observation"])):
+    for row, selected in zip(rows[1:], (features, ["default", "installed-observation"], [], [], [])):
         row["features"] = list(selected)
         row["profile"] = {"opt_level": "0", "debug_assertions": True, "test": False}
         name = row["target"]["name"]
@@ -19112,8 +19202,34 @@ class MacNormalPreviewData(unittest.TestCase):
                 with self.subTest(library=position, field=field), self.assertRaises(TOOL.Refused):
                     TOOL.image_cargo_artifact(cargo_lines(*rows, {"reason": "build-finished", "success": True}),
                                              binary, target, body, "desktop", package_version="0.1.2")
+        # Desktop and installed CLI both bind all three real catalogue
+        # dependencies, including the architecture not native to this target.
+        for selected_target in TOOL.MAC_TARGETS:
+            for role in ("desktop", "cli"):
+                target, binary, rows, body = (normal_cargo_fixture(build_target=selected_target) if role == "desktop"
+                                              else installed_cli_cargo_fixture(build_target=selected_target))
+                def validate(selected_rows):
+                    messages = cargo_lines(*selected_rows, {"reason": "build-finished", "success": True})
+                    if role == "desktop":
+                        return TOOL.image_cargo_artifact(messages, binary, target, body, role,
+                                                        target=selected_target, package_version="0.1.2")
+                    return TOOL.installed_cli_cargo_artifact(messages, binary, target, body,
+                                                            target=selected_target, package_version="0.1.2")
+                validate(rows)
+                for position in (3, 4, 5):
+                    for section, field, value in ((None, "features", ["default"]),
+                            (None, "manifest_path", "/foreign/Cargo.toml"), (None, "package_id", "registry+foreign"),
+                            ("target", "src_path", "/foreign/lib.rs"), ("profile", "opt_level", "1")):
+                        changed = copy.deepcopy(rows)
+                        (changed[position] if section is None else changed[position][section])[field] = value
+                        with self.subTest(target=selected_target, role=role, catalogue=position, field=field), self.assertRaises(TOOL.Refused):
+                            validate(changed)
+                    changed = copy.deepcopy(rows); del changed[position]
+                    with self.assertRaises(TOOL.Refused):
+                        validate(changed)
         # A second image role, even with another filename/name, is not a
         # legitimate dependency of the isolated desktop image root.
+        target, binary, original, body = normal_cargo_fixture()
         other = normal_cargo_fixture(target, role="resident")[2][0]
         with self.assertRaises(TOOL.Refused):
             TOOL.image_cargo_artifact(cargo_lines(*original, other, {"reason": "build-finished", "success": True}),

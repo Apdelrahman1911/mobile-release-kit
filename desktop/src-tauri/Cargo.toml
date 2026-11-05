@@ -128,6 +128,9 @@ macos-installed-observation = ["mrk-macos-installed-native/installed-observation
 windows-installed-observation = ["mrk-windows-installed-native/windows-installed-observation"]
 
 [dependencies]
+mrk-android-catalogue-schema = { path = "../catalogues/macos-android-schema", version = "=0.1.0", default-features = false }
+mrk-android-catalogue-arm64 = { path = "../catalogues/macos-android-arm64", version = "=0.1.0", default-features = false }
+mrk-android-catalogue-x86_64 = { path = "../catalogues/macos-android-x86_64", version = "=0.1.0", default-features = false }
 serde = { version = "=1.0.228", features = ["derive"] }
 serde_json = "=1.0.145"
 plist = { version = "=1.10.1", default-features = false, features = ["enable_unstable_features_that_may_break_with_minor_version_bumps"] }

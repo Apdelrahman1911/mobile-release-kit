@@ -324,3 +324,22 @@ fn noncopy_chunk_assembly_preserves_fields_and_final_references() {
     catalogue_binary::test_noncopy_chunks(&CHUNK_CLASS_ARM, &CHUNK_ALIAS_ARM, &CHUNK_STRINGS_ARM, 1);
     catalogue_binary::test_noncopy_chunks(&CHUNK_CLASS_INTEL, &CHUNK_ALIAS_INTEL, &CHUNK_STRINGS_INTEL, 2);
 }
+
+#[test]
+fn application_projection_borrows_both_dependency_statics() {
+    for (reference, data) in [
+        (&REFERENCES[0], &mrk_android_catalogue_arm64::CATALOGUE),
+        (&intel_catalogue::REFERENCES[0], &mrk_android_catalogue_x86_64::CATALOGUE),
+    ] {
+        assert!(std::ptr::eq(reference.archives, data.archives));
+        assert!(std::ptr::eq(reference.trees, data.trees));
+        assert!(std::ptr::eq(reference.source_members, data.source_members));
+        assert!(std::ptr::eq(reference.source_bindings, data.source_bindings));
+        assert!(std::ptr::eq(reference.support, data.support));
+        assert!(std::ptr::eq(reference.support_members, data.support_members));
+        assert!(std::ptr::eq(reference.payload, data.payload));
+        assert!(std::ptr::eq(reference.classes, data.classes));
+        assert!(std::ptr::eq(reference.aliases, data.aliases));
+        assert!(std::ptr::eq(reference.directories, data.directories));
+    }
+}

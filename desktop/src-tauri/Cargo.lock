@@ -2142,6 +2142,9 @@ dependencies = [
  "gtk",
  "hmac",
  "miniz_oxide 0.9.1",
+ "mrk-android-catalogue-arm64",
+ "mrk-android-catalogue-schema",
+ "mrk-android-catalogue-x86_64",
  "mrk-linux-mount-observation",
  "mrk-macos-installed-native",
  "mrk-windows-installed-native",
@@ -2164,6 +2167,27 @@ dependencies = [
  "webkit2gtk",
  "zbus",
  "zeroize",
+]
+
+[[package]]
+name = "mrk-android-catalogue-arm64"
+version = "0.1.0"
+dependencies = [
+ "mrk-android-catalogue-schema",
+]
+
+[[package]]
+name = "mrk-android-catalogue-schema"
+version = "0.1.0"
+dependencies = [
+ "serde",
+]
+
+[[package]]
+name = "mrk-android-catalogue-x86_64"
+version = "0.1.0"
+dependencies = [
+ "mrk-android-catalogue-schema",
 ]
 
 [[package]]

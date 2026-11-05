@@ -193,7 +193,7 @@ jobs:
           manifest = str(root / package.WORKSPACE / "Cargo.toml")
           commands = (("fetch", 120, [cargo, "fetch", "--manifest-path", manifest, "--locked", "--target", target]),
               ("build", 1200, [cargo, "build", "--manifest-path", manifest, "--locked", "--offline", "--release",
-               "--config", package.RESIDENT_CARGO_OVERRIDE, "--jobs", "1", "--target", target,
+               "--config", package.RESIDENT_CARGO_OVERRIDE, "--config", package.RESIDENT_SCHEMA_CARGO_OVERRIDE, "--jobs", "1", "--target", target,
                "--lib", "--message-format=json-render-diagnostics"]))
           # Same owner, SDK, compiler paths, graph, profile and capture bound as
           # prepare(). Only this diagnostic's build allowance differs (1200s).

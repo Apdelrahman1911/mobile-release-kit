@@ -1,5 +1,6 @@
 //! Closed paired macOS Android registration DATA; native role graphs remain ARM64-only.
 //! No object parsed here grants native custody, registration or execution.
+pub(crate) use mrk_android_catalogue_schema::{SDK35_ARCHIVE_BYTES, SDK35_ARCHIVE_SHA, Sdk35File, Sdk35Pin, SDK35_PINS};
 use std::collections::{BTreeMap, BTreeSet};
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
@@ -81,41 +82,6 @@ pub(crate) struct FileSpec { pub(crate) path: String, pub(crate) size: u64, pub(
 // These are original members of one genuine SDK distribution, not shebang or
 // filename exemptions. The supplier also joins the exact archive/member/mode.
 // Foreign originals stay authenticated; they are not ARM64 launch roots.
-pub(crate) const SDK35_ARCHIVE_BYTES: u64 = 76_857_898;
-pub(crate) const SDK35_ARCHIVE_SHA: &str = "530cdbd1ec315e1477624d7ed2f0f2962108d69f36eddba5894cef9ea2cedb48";
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize)]
-pub(crate) enum Sdk35File { D8, Apksigner, LldShell, LldIntel, CxxIntel, CxxAbiIntel }
-pub(crate) struct Sdk35Pin {
-    pub(crate) kind: Sdk35File, pub(crate) path: &'static str, pub(crate) member: &'static str,
-    pub(crate) bytes: u64, pub(crate) sha256: &'static str, pub(crate) original_mode: u32,
-}
-pub(crate) const SDK35_PINS: [Sdk35Pin; 6] = [
-    Sdk35Pin { kind: Sdk35File::D8, path: "sdk/build-tools/35.0.0/d8", member: "android-15/d8",
-        bytes: 2678, sha256: "b773a721be3d4988dea9660815a9e441b76100e5b0f5c72b5893cfadadc76c6f", original_mode: 0o755 },
-    Sdk35Pin { kind: Sdk35File::Apksigner, path: "sdk/build-tools/35.0.0/apksigner", member: "android-15/apksigner",
-        bytes: 2959, sha256: "b47549e373b895ce6ca620d0c7887e674d9615ffa837a86ac601dcfd04adb0f0", original_mode: 0o755 },
-    Sdk35Pin { kind: Sdk35File::LldShell, path: "sdk/build-tools/35.0.0/lld", member: "android-15/lld",
-        bytes: 647, sha256: "a4d5291a75bfa2350de74a00a3aa5099f190fd6bc86c581bb38215720884fc15", original_mode: 0o755 },
-    Sdk35Pin { kind: Sdk35File::LldIntel, path: "sdk/build-tools/35.0.0/lld-bin/lld", member: "android-15/lld-bin/lld",
-        bytes: 33452016, sha256: "7497b5765b30cbaf67b07de4ef631eeaab6f6a21392f2852b3ac252a44a0a250", original_mode: 0o755 },
-    Sdk35Pin { kind: Sdk35File::CxxIntel, path: "sdk/build-tools/35.0.0/lib64/libc++.1.dylib", member: "android-15/lib64/libc++.1.dylib",
-        bytes: 680976, sha256: "46494d6cd3737f83ddf4fcda11d69c810cd324fa0114e8110757514f8aa767c8", original_mode: 0o644 },
-    Sdk35Pin { kind: Sdk35File::CxxAbiIntel, path: "sdk/build-tools/35.0.0/lib64/libc++abi.1.dylib", member: "android-15/lib64/libc++abi.1.dylib",
-        bytes: 179936, sha256: "89194f2f5b98042d0e16c4948d9dad4905821749a90dd9326bb7ce509028ba66", original_mode: 0o644 },
-];
-impl Sdk35File {
-    pub(crate) fn pin(self) -> &'static Sdk35Pin {
-        &SDK35_PINS[match self { Self::D8 => 0, Self::Apksigner => 1, Self::LldShell => 2,
-            Self::LldIntel => 3, Self::CxxIntel => 4, Self::CxxAbiIntel => 5 }]
-    }
-    pub(crate) fn script(self) -> bool { matches!(self, Self::D8 | Self::Apksigner | Self::LldShell) }
-    pub(crate) fn legacy(self) -> bool { !matches!(self, Self::D8 | Self::Apksigner) }
-}
-impl Sdk35Pin {
-    pub(crate) fn matches(&self, path: &str, bytes: u64, sha256: &str, mode: u32) -> bool {
-        path == self.path && bytes == self.bytes && sha256 == self.sha256 && mode == (self.original_mode & !0o222)
-    }
-}
 pub(crate) fn sdk35_reserved(path: &str) -> Option<Sdk35File> {
     SDK35_PINS.iter().find(|pin| pin.path == path).map(|pin| pin.kind)
 }

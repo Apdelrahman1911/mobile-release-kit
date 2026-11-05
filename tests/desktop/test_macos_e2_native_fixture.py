@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import copy
+import hashlib
 import importlib.util
 import json
 from pathlib import Path
@@ -738,6 +739,8 @@ class CargoTests(unittest.TestCase):
             "desktop/tools/macos_e2_native_fixture.py", "desktop/tools/macos_aqua_qualification.py",
             "desktop/tools/stage_macos_installed.py", fixture.CONTEXT_SOURCE, fixture.LAYOUT_SOURCE,
             "desktop/tools/macos_android_sdk_metadata.py",
+            *("desktop/catalogues/macos-android-" + architecture + "/" + name
+              for architecture in ("schema", "arm64", "x86_64") for name in ("Cargo.toml", "src/lib.rs")),
             "src/mobile_release/api/data/metadata-images-v1.json",
             "src/mobile_release/api/data/metadata-image-help-v1.json",
             *("src/mobile_release/" + name for name in (
@@ -749,15 +752,34 @@ class CargoTests(unittest.TestCase):
                         for name in ("leaf", "issuer", "root")}
         unrelated = {"desktop/packaging/macos-install-producer-certificates/extra.der",
                      "desktop/packaging/macos-install-producer-certificates/leaf.key",
-                     "desktop/packaging/other-signing.profile"}
+                     "desktop/packaging/other-signing.profile", "desktop/catalogues/macos-android-other/src/lib.rs"}
         self.assertEqual(fixture.source_names(required), sorted(required))
         self.assertEqual(fixture.source_names(required | certificates | unrelated), sorted(required | certificates))
         for missing in ("desktop/packaging/macos-install-producer-signing.profile",
                         "desktop/tools/macos_maintenance_fixture_prepare.sh",
-                        "desktop/tools/macos_maintenance_fixture_publish.sh"):
+                        "desktop/tools/macos_maintenance_fixture_publish.sh",
+                        *("desktop/catalogues/macos-android-" + architecture + "/" + name
+                          for architecture in ("schema", "arm64", "x86_64") for name in ("Cargo.toml", "src/lib.rs"))):
             with self.subTest(missing_required_source=missing):
                 with self.assertRaisesRegex(fixture.Refused, "^required-source-roster$"):
                     fixture.source_names(required - {missing})
+        # Each new crate source is admitted and rechecked by the same original
+        # byte reader; selecting its path does not bypass digest/blob binding.
+        for architecture in ("schema", "arm64", "x86_64"):
+            for leaf in ("Cargo.toml", "src/lib.rs"):
+                name = "desktop/catalogues/macos-android-" + architecture + "/" + leaf
+                body = (PATH.parents[2] / name).read_bytes()
+                observed = [body]
+                book = SimpleNamespace(
+                    file=lambda *_args: ({"identity": (0, 0, 0o100644)}, observed[0]),
+                    read=lambda _entry: observed[0])
+                inputs = fixture.SourceInputs(book, Path("/inert/work"), {})
+                inputs.rows = {name: {"gitMode": "100644", "size": len(body), "sha256": fixture.digest(body),
+                    "blob": hashlib.sha1(b"blob " + str(len(body)).encode("ascii") + b"\0" + body).hexdigest()}}
+                self.assertEqual(inputs.read(name), body)
+                observed[0] = bytes([body[0] ^ 1]) + body[1:]
+                with self.subTest(changed_catalogue_source=name), self.assertRaisesRegex(fixture.Refused, "^source-bytes$"):
+                    inputs.read(name)
 
         class UnknownOriginal(Exception):
             dispatched, contained, cleanup_complete = True, False, False

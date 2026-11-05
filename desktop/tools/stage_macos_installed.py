@@ -2431,6 +2431,16 @@ def cargo_library(records, directory, package, name, features, *, package_versio
     cargo_features(row, features)
 
 
+def cargo_catalogue_libraries(records, *, resident=False):
+    # Both complete architectures are actual dependencies of every application
+    # graph. Only the runtime schema retains the Resident application's opt1.
+    for architecture in ("schema", "arm64", "x86_64"):
+        cargo_library(records, DESKTOP / "catalogues" / ("macos-android-" + architecture),
+                      "mrk-android-catalogue-" + architecture, "mrk_android_catalogue_" + architecture,
+                      [], test=False, package_version="0.1.0",
+                      opt_level="1" if resident and architecture == "schema" else "3")
+
+
 def image_cargo_artifact(messages, binary, target_dir, body, role, *, target=ARM_TARGET, package_version):
     target = mac_target(target)
     need(role in ("desktop", "resident"), "image-cargo-role")
@@ -2465,6 +2475,7 @@ def image_cargo_artifact(messages, binary, target_dir, body, role, *, target=ARM
                   opt_level="1" if role == "resident" else "3", package_version=package_version)
     cargo_library(records, DESKTOP / "native/macos-installed-native", "mrk-macos-installed-native",
                   "mrk_macos_installed_native", native_features, test=False, package_version="0.1.0")
+    cargo_catalogue_libraries(records, resident=role == "resident")
     need(not any(item["target"].get("kind") in (["bin"], ["test"], ["example"], ["bench"])
                  or item is not row and item["target"].get("kind") == ["cdylib"]
                  for item in records), "image-cargo-no-executable-role")
@@ -2612,6 +2623,7 @@ def installed_cli_cargo_artifact(messages, binary, target_dir, body, *, target=A
                   test=False, package_version=package_version)
     cargo_library(records, DESKTOP / "native/macos-installed-native", "mrk-macos-installed-native",
                   "mrk_macos_installed_native", ["default"], test=False, package_version="0.1.0")
+    cargo_catalogue_libraries(records)
     need(not any(item is not row and item["target"].get("kind") in
                  (["bin"], ["test"], ["example"], ["bench"], ["cdylib"]) for item in records), "installed-cli-cargo-no-mixed-role")
     macho(body, system_only=True, target=target)
