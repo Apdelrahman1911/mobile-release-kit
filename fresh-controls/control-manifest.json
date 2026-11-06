@@ -1,0 +1,105 @@
+{
+  "binaryBytes": 7108688,
+  "compilersReplayed": false,
+  "controlManifestSha256": "77450907bba866fb257a73ea1fa6fa5b22f31de94c87536e59d6b36679e315e3",
+  "controlSourceSha256": "cdf4c6e620b1822efacaaea03c506a6fa04c2e01ad436f618740b214018aba22",
+  "controls": {
+    "census": {
+      "bytes": 934400,
+      "compilerManifestSha256": "263f81e0aa945ce216f7563d4b4cdf1879a4584dc63eee68ded5958aee55748a",
+      "compilerOriginalClosureKnown": true,
+      "compilerOriginalReturn": 0,
+      "compilerReceipts": {
+        "finality.json": {
+          "bytes": 4096,
+          "sha256": "15ab29c8c86efa7af9e60016bfaa0ca8c8a79d47b534458fa5824b6fa95c88b0"
+        },
+        "launch.json": {
+          "bytes": 4096,
+          "sha256": "0bbbe33dafa51469b11be4cab51a170c438741c0ebc5433b09a98543cfe1c452"
+        },
+        "original-return.json": {
+          "bytes": 4096,
+          "sha256": "c392c644d3d856c34b7ebfb0e18c76fb61a092a67c38f2c6055a37698a696f55"
+        }
+      },
+      "compilerResultSha256": "86a3fc73c0e16ad13ccbf912132ac4673788d2033532a45c1a369de1b3a58558",
+      "gitMode": "100644",
+      "originalMode": 493,
+      "path": "fresh-controls/census/mrk-macos-install",
+      "programExecuted": false,
+      "sha256": "c7e7692a19c8567b11abc4a7eefcb718a384e0449904196375a4d36379b6dc9e"
+    },
+    "torn": {
+      "bytes": 3086976,
+      "compilerManifestSha256": "feec843a53576e8a237a1a409787dad8a39f5fb4c573d06cae86256d50d289d3",
+      "compilerOriginalClosureKnown": true,
+      "compilerOriginalReturn": 0,
+      "compilerReceipts": {
+        "finality.json": {
+          "bytes": 4096,
+          "sha256": "15ab29c8c86efa7af9e60016bfaa0ca8c8a79d47b534458fa5824b6fa95c88b0"
+        },
+        "launch.json": {
+          "bytes": 4096,
+          "sha256": "208a3e17c732c455d637ba111915b8d12ebb78928f3cd6f6acda24c1e5fab970"
+        },
+        "original-return.json": {
+          "bytes": 4096,
+          "sha256": "b6d21dc886b888900d5418856e071e15874594bdb04f38b61750aea99f65600b"
+        }
+      },
+      "compilerResultSha256": "f7302924a13a0ff5aadca304c7961dcc15c8018113f551b78e377c1f5b49efe2",
+      "gitMode": "100644",
+      "originalMode": 493,
+      "path": "fresh-controls/torn/mrk-macos-install",
+      "programExecuted": false,
+      "sha256": "25e226a802a62e478f54070f344619af0ff0a8502776cb301df9abefafc56e15"
+    },
+    "write": {
+      "bytes": 3087312,
+      "compilerManifestSha256": "ecfac6359a9f764f8a0e571ac5d1b13055c2c83397a77c05285d3c6f5be942e3",
+      "compilerOriginalClosureKnown": true,
+      "compilerOriginalReturn": 0,
+      "compilerReceipts": {
+        "finality.json": {
+          "bytes": 4096,
+          "sha256": "15ab29c8c86efa7af9e60016bfaa0ca8c8a79d47b534458fa5824b6fa95c88b0"
+        },
+        "launch.json": {
+          "bytes": 4096,
+          "sha256": "da9b5d15ca671cc1038ae245ccf623382bca85757c3ade6aeca7b7ab0f4e35a5"
+        },
+        "original-return.json": {
+          "bytes": 4096,
+          "sha256": "810d2b10ae29466dbc19d7765880ec15d99c67140156f7825fc9b2e54cb0dc1f"
+        }
+      },
+      "compilerResultSha256": "dc3673e4bc3ce6268b549baab96b8bbde5ea42bb5feb942d4ff2c3a8c745da52",
+      "gitMode": "100644",
+      "originalMode": 493,
+      "path": "fresh-controls/write/mrk-macos-install",
+      "programExecuted": false,
+      "sha256": "7ac9311dbc2af4b4c2e5e444da45f2c479430739a85c9ca9c84fb89942c7e9f4"
+    }
+  },
+  "exactFiles": [
+    "control-manifest.json",
+    "census/mrk-macos-install",
+    "torn/mrk-macos-install",
+    "write/mrk-macos-install"
+  ],
+  "independentCompilerReadbackSha256": "6bbbd33c0fa9ba365e1894ae9be7f360727e79d70fcdafd358a4f19d9b203862",
+  "kind": "mrk-fixed-nonshipping-fresh-control-transport-v1",
+  "localCompilerLimitBytes": 3221225472,
+  "nativeSignatureQualified": false,
+  "productFreezeSha256": "ebcdb3557f47f1e95dd025d4e3c1a3eef2b38c4bec39fdce772f5f89fe870a79",
+  "productSource": "5c53b796a40bf788ca553ae2445e82a3e5edb87a",
+  "productTree": "f45d4488fa25c223c99280ead38c2d4080b60298",
+  "publicationAuthorized": false,
+  "runtimeQualified": false,
+  "schemaVersion": 1,
+  "shippingApplicationRebuilt": false,
+  "sourceIdentityMeaning": "productSource identifies reviewed ordinary product; controlSourceSha256 identifies the separate nonshipping Rust overlay. The Git transport commit and future runner source are independent identities.",
+  "threeCompilerResultSha256": "580951c842b8578b5cd1081d31278d31c3507e175d2acb06a7b096f7de5fda3a"
+}
