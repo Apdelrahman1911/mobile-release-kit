@@ -1,0 +1,152 @@
+name: macOS exact-product libtest-only control
+run-name: macOS libtest-only control / ${{ github.sha }}
+
+on:
+  push:
+    branches: [codex/macos-libtest-control]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: macos-libtest-only-control-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  libtest-only-control:
+    if: github.repository == 'Apdelrahman1911/mobile-release-kit' && github.event_name == 'push' && github.ref == 'refs/heads/codex/macos-libtest-control' && contains(github.event.head_commit.message, '[macos-libtest-only-control]')
+    runs-on: macos-26
+    timeout-minutes: 100
+    env:
+      MRK_MACOS_TARGET: aarch64-apple-darwin
+      RUSTUP_TOOLCHAIN: 1.98.1
+      RUSTUP_AUTO_INSTALL: '0'
+      CARGO_HOME: /Users/runner/.cargo
+      RUSTUP_HOME: /Users/runner/.rustup
+      CARGO_INCREMENTAL: '0'
+      DEVELOPER_DIR: /Library/Developer/CommandLineTools
+      MACOSX_DEPLOYMENT_TARGET: '26.0'
+    steps:
+      - name: Check out the exact control source
+        timeout-minutes: 3
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Select the existing hosted control Python
+        timeout-minutes: 3
+        id: python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
+        with:
+          python-version: '3.14.7'
+      - name: Select the same fixed frontend compiler
+        timeout-minutes: 3
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v5
+        with:
+          node-version: '24.20.0'
+          package-manager-cache: false
+      - name: Preserve the three reviewed control files before product checkout
+        id: control
+        timeout-minutes: 1
+        shell: bash
+        env:
+          MRK_PYTHON: ${{ steps.python.outputs.python-path }}
+        run: |
+          set -euo pipefail
+          umask 077
+          ulimit -c 0
+          control_work=$(/usr/bin/mktemp -d "$RUNNER_TEMP/mrk-macos-libtest-control.XXXXXXXX")
+          /bin/cp desktop/tools/macos_libtest_control.py desktop/tools/macos_libtest_control.sh desktop/tools/macos_libtest_artifact.py "$control_work/"
+          "$MRK_PYTHON" -I -S -B "$control_work/macos_libtest_control.py" bootstrap "$control_work"
+          printf 'work=%s\n' "$control_work" >> "$GITHUB_OUTPUT"
+          printf 'MRK_MACOS_WORK=%s\nCARGO_TARGET_DIR=%s/cargo-target\nMRK_PYTHON=%s\n' "$control_work" "$control_work" "$MRK_PYTHON" >> "$GITHUB_ENV"
+      - name: Check out the unchanged product source separately from control authority
+        timeout-minutes: 3
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: 239d2df45c41f880063ed0bec583edc8a49c148b
+          persist-credentials: false
+          clean: true
+      - name: Bind the exact product tree and create fresh libtest inputs
+        timeout-minutes: 2
+        shell: bash
+        run: |
+          "$MRK_PYTHON" -I -S -B "$MRK_MACOS_WORK/macos_libtest_control.py" prepare "$MRK_MACOS_WORK"
+      - name: Reuse the existing pinned Rust and ambient-configuration admission
+        timeout-minutes: 8
+        shell: bash
+        run: |
+          builtin source ./desktop/tools/macos_installed_direct_rust.sh
+      - name: Bind the selected direct tools and exact clean command environment
+        timeout-minutes: 1
+        shell: bash
+        run: |
+          "$MRK_PYTHON" -I -S -B "$MRK_MACOS_WORK/macos_libtest_control.py" bind-tools "$MRK_MACOS_WORK"
+      - name: Prepare the same frontend dependency graph
+        timeout-minutes: 5
+        shell: bash
+        run: |
+          /bin/bash "$MRK_MACOS_WORK/macos_libtest_control.sh" npm-ci "$MRK_MACOS_WORK" "$MRK_PYTHON"
+      - name: Generate the same genuine frontend
+        timeout-minutes: 3
+        shell: bash
+        run: |
+          /bin/bash "$MRK_MACOS_WORK/macos_libtest_control.sh" frontend-build "$MRK_MACOS_WORK" "$MRK_PYTHON"
+      - name: Fetch the real locked application dependencies
+        timeout-minutes: 10
+        shell: bash
+        run: |
+          /bin/bash "$MRK_MACOS_WORK/macos_libtest_control.sh" locked-dependency-fetch "$MRK_MACOS_WORK" "$MRK_PYTHON"
+      - name: Compile only the genuine application libtest without running it
+        timeout-minutes: 40
+        shell: bash
+        run: |
+          /bin/bash "$MRK_MACOS_WORK/macos_libtest_control.sh" application-libtest-build "$MRK_MACOS_WORK" "$MRK_PYTHON"
+      - name: Verify original captures and retain the exact libtest-only bundle
+        id: qualify
+        timeout-minutes: 4
+        shell: bash
+        run: |
+          "$MRK_PYTHON" -I -S -B "$MRK_MACOS_WORK/macos_libtest_control.py" qualify "$MRK_MACOS_WORK"
+      - name: Retain the five-member unsigned libtest bundle for separate LOCAL40 admission
+        if: success() && steps.qualify.outcome == 'success'
+        timeout-minutes: 4
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: macos-libtest-only-239d2df45c41f880063ed0bec583edc8a49c148b-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ steps.control.outputs.work }}/bundle/application-libtest
+            ${{ steps.control.outputs.work }}/bundle/application-libtest-provenance.json
+            ${{ steps.control.outputs.work }}/bundle/application-libtest-build.stdout
+            ${{ steps.control.outputs.work }}/bundle/source-inventory.json
+            ${{ steps.control.outputs.work }}/bundle/compile-receipt.json
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 1
+          overwrite: false
+      - name: Collect bounded command observations even after failure or timeout
+        if: always() && steps.control.outputs.work != ''
+        timeout-minutes: 2
+        shell: bash
+        run: |
+          "$MRK_PYTHON" -I -S -B "$MRK_MACOS_WORK/macos_libtest_control.py" collect "$MRK_MACOS_WORK"
+      - name: Retain original stdout and stderr without diagnostic filtering
+        if: always() && steps.control.outputs.work != ''
+        timeout-minutes: 3
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: macos-libtest-only-diagnostics-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ steps.control.outputs.work }}/evidence/control.json
+            ${{ steps.control.outputs.work }}/npm-ci.stdout
+            ${{ steps.control.outputs.work }}/npm-ci.stderr
+            ${{ steps.control.outputs.work }}/frontend-build.stdout
+            ${{ steps.control.outputs.work }}/frontend-build.stderr
+            ${{ steps.control.outputs.work }}/locked-dependency-fetch.stdout
+            ${{ steps.control.outputs.work }}/locked-dependency-fetch.stderr
+            ${{ steps.control.outputs.work }}/application-libtest-build.stdout
+            ${{ steps.control.outputs.work }}/application-libtest-build.stderr
+          if-no-files-found: error
+          retention-days: 7
+          compression-level: 1
+          overwrite: false
