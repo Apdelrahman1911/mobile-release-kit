@@ -1501,7 +1501,7 @@ def direct_rust_tools(target=ARM_TARGET):
 
 def prepare_roles(target):
     build_profile(target)
-    return (("resident-fetch",) if target == INTEL_TARGET else ()) + PREPARE_ROLES
+    return ("resident-fetch",) + PREPARE_ROLES
 
 
 def rust_toolchain(target=ARM_TARGET):
@@ -7065,17 +7065,16 @@ class Operation:
         return body
 
     def prepare(self):
-        if self.target == INTEL_TARGET:
-            self.stage = "resident-dependency-fetch"
-            # Separate acquisition from the unchanged compiler deadline. The
-            # same original call must return0 with settled captures first.
-            self.call("resident-fetch", [direct_rust_tools(self.target)[0], "fetch", "--manifest-path",
-                      str(self.checkout / WORKSPACE / "Cargo.toml"), "--locked", "--target", self.target],
-                      build_environment(self.environment, self.work, self.image_release, target=self.target),
-                      cwd=self.checkout / WORKSPACE, timeout=120, limit=4 * 1024 * 1024)
+        self.stage = "resident-dependency-fetch"
+        # Both hosts acquire locked dependencies before their unchanged
+        # compiler deadline. A failed original fetch cannot reach compilation.
+        self.call("resident-fetch", [direct_rust_tools(self.target)[0], "fetch", "--manifest-path",
+                  str(self.checkout / WORKSPACE / "Cargo.toml"), "--locked", "--target", self.target],
+                  build_environment(self.environment, self.work, self.image_release, target=self.target),
+                  cwd=self.checkout / WORKSPACE, timeout=120, limit=4 * 1024 * 1024)
         self.stage = "separate-resident-image-compiler"
         result = self.call("build", [direct_rust_tools(self.target)[0], "build", "--manifest-path", str(self.checkout / WORKSPACE / "Cargo.toml"),
-                           "--locked", *(("--offline",) if self.target == INTEL_TARGET else ()), "--release", "--config", RESIDENT_CARGO_OVERRIDE,
+                           "--locked", "--offline", "--release", "--config", RESIDENT_CARGO_OVERRIDE,
                            "--config", RESIDENT_SCHEMA_CARGO_OVERRIDE, "--jobs", "1", "--target", self.target,
                            "--lib", "--message-format=json-render-diagnostics"],
                            build_environment(self.environment, self.work, self.image_release, target=self.target),

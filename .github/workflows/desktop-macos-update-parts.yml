@@ -523,7 +523,7 @@ jobs:
       run: "/bin/bash desktop/tools/macos_installed_direct_rust.sh"
     - name: Build and sign the fixed resident image and C facades
       id: android_helper
-      timeout-minutes: 26
+      timeout-minutes: 28
       env:
         RUNNER_ENVIRONMENT: "${{ runner.environment }}"
         MRK_MACOS_DEVELOPER_ID_P12_BASE64: "${{ secrets.MRK_MACOS_DEVELOPER_ID_P12_BASE64

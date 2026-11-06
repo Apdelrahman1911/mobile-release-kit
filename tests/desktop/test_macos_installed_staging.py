@@ -7115,7 +7115,7 @@ sys.exit(status)
             if argv[0] == module.direct_rust_tools(build_target)[0]:
                 self.assertEqual(argv[argv.index("--target") + 1], build_target)
                 if argv[1] == "fetch":
-                    self.assertEqual(build_target, module.INTEL_TARGET)
+                    self.assertIn(build_target, (module.ARM_TARGET, module.INTEL_TARGET))
                     self.assertEqual(argv, [module.direct_rust_tools(build_target)[0], "fetch", "--manifest-path",
                         str(checkout / module.WORKSPACE / "Cargo.toml"), "--locked", "--target", build_target])
                     self.assertEqual((options["timeout"], options["capture"], options["text"], options["output_limit"]),
@@ -7125,7 +7125,7 @@ sys.exit(status)
                     return CompletedProcess(argv, 101 if failure == "fetch-nonzero" else 0,
                         "malformed DATA" if failure == "fetch-malformed" else b"", b"synthetic fetch DATA\n")
                 self.assertEqual(argv[1], "build")
-                self.assertEqual("--offline" in argv, build_target == module.INTEL_TARGET)
+                self.assertIn("--offline", argv)
                 target = work / "android-helper-target"
                 binary = target / build_target / "release" / module.RESIDENT_IMAGE
                 binary.parent.mkdir(parents=True)
@@ -7814,16 +7814,17 @@ sys.exit(status)
             else: changed["remove-producer.sig"] = (signed + b"x", 0o444)
             with self.assertRaises(TOOL.Refused): TOOL.removal_distribution_layout_data(list(changed), expected, changed)
 
-    def test_intel_fetch_failure_never_reaches_compiler_or_signer(self):
+    def test_resident_fetch_failure_never_reaches_compiler_or_signer(self):
         module = ANDROID_HELPER
-        self.assertEqual(module.prepare_roles(module.ARM_TARGET), module.PREPARE_ROLES)
+        self.assertEqual(module.prepare_roles(module.ARM_TARGET), ("resident-fetch",) + module.PREPARE_ROLES)
         self.assertEqual(module.prepare_roles(module.INTEL_TARGET), ("resident-fetch",) + module.PREPARE_ROLES)
         with self.assertRaises(module.Refused): module.prepare_roles("foreign-target")
-        for failure in ("fetch-nonzero", "fetch-owner", "fetch-malformed"):
-            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as temporary:
+        for target, failure in ((target, failure) for target in TOOL.MAC_TARGETS
+                               for failure in ("fetch-nonzero", "fetch-owner", "fetch-malformed")):
+            with self.subTest(target=target, failure=failure), tempfile.TemporaryDirectory() as temporary:
                 checkout, work, environment, owner, observations = self.fixture(Path(temporary),
-                    failure=failure, build_target=module.INTEL_TARGET)
-                operation = module.Operation(owner, checkout, work, "prepare", environment, TOOL, target=module.INTEL_TARGET)
+                    failure=failure, build_target=target)
+                operation = module.Operation(owner, checkout, work, "prepare", environment, TOOL, target=target)
                 with self.assertRaises(module.Refused): operation.execute()
                 self.assertEqual(len(observations), 1)
                 self.assertEqual(observations[0][0][1], "fetch")
@@ -7837,7 +7838,69 @@ sys.exit(status)
                 self.assertTrue(operation.receipt["originalClosesKnown"])
                 self.assertTrue(all(entry["closed"] and entry["fd"] is None for entry in operation.entries))
                 self.assertFalse((work / module.RESIDENT_IMAGE).exists())
-                self.assertFalse((work / "android-helper-target" / module.INTEL_TARGET).exists())
+                self.assertFalse((work / "android-helper-target" / target).exists())
+
+    def test_resident_fetch_success_does_not_relabel_unknown_compiler(self):
+        module = ANDROID_HELPER
+        class ProcessErrorData(RuntimeError):
+            dispatched, contained, cleanup_complete = True, False, False
+        for target in TOOL.MAC_TARGETS:
+            with self.subTest(target=target), tempfile.TemporaryDirectory() as temporary:
+                error = ProcessErrorData("owned command exceeded its original deadline")
+                checkout, work, environment, owner, observations = self.fixture(Path(temporary),
+                    "owner", error, build_target=target)
+                owner.ProcessError = ProcessErrorData
+                operation = module.Operation(owner, checkout, work, "prepare", environment, TOOL, target=target)
+                with self.assertRaises(module.Refused): operation.execute()
+                self.assertEqual(tuple(call["role"] for call in operation.calls), ("resident-fetch", "build"))
+                fetched, compiled = operation.calls
+                self.assertTrue(fetched["returned"] and fetched["capturesSettled"])
+                self.assertEqual(fetched["returncode"], 0)
+                self.assertFalse(compiled["returned"] or compiled["capturesSettled"])
+                self.assertNotIn("returncode", compiled)
+                self.assertEqual(compiled["originalFailure"]["classification"], "deadline")
+                self.assertEqual(compiled["originalFailure"]["timeoutSeconds"],
+                                 720 if target == module.INTEL_TARGET else 1200)
+                self.assertEqual([options["timeout"] for _, options in observations],
+                                 [120, 720 if target == module.INTEL_TARGET else 1200])
+                self.assertFalse(operation.receipt["passed"] or operation.receipt["targetRetired"])
+                self.assertFalse(operation.credential_calls or operation.credential_contexts)
+                self.assertTrue(operation.receipt["originalClosesKnown"])
+                self.assertTrue((work / "android-helper-target").is_dir())
+                self.assertFalse((work / "android-helper-build.jsonl").exists())
+                self.assertIsNone(operation.compiler_failure)
+
+    def test_resident_fetch_and_offline_compiler_keep_exact_graph_and_limits(self):
+        module = ANDROID_HELPER
+        for target in TOOL.MAC_TARGETS:
+            with self.subTest(target=target), tempfile.TemporaryDirectory() as temporary:
+                checkout, work, environment, owner, observations = self.fixture(Path(temporary),
+                    "nonzero", build_target=target)
+                operation = module.Operation(owner, checkout, work, "prepare", environment, TOOL, target=target)
+                with self.assertRaises(module.Refused): operation.execute()
+                self.assertEqual(len(observations), 2)
+                (fetch, fetch_options), (build, build_options) = observations
+                cargo = module.direct_rust_tools(target)[0]
+                manifest = str(checkout / module.WORKSPACE / "Cargo.toml")
+                self.assertEqual(fetch, (cargo, "fetch", "--manifest-path", manifest, "--locked", "--target", target))
+                self.assertEqual(build, (cargo, "build", "--manifest-path", manifest, "--locked", "--offline",
+                    "--release", "--config", "profile.release.package.mobile-release-kit-desktop.opt-level=1",
+                    "--config", "profile.release.package.mrk-android-catalogue-schema.opt-level=1",
+                    "--jobs", "1", "--target", target, "--lib", "--message-format=json-render-diagnostics"))
+                self.assertEqual(fetch_options["environ"], build_options["environ"])
+                self.assertEqual(fetch_options["cwd"], build_options["cwd"])
+                self.assertEqual(fetch_options["cwd"], checkout / module.WORKSPACE)
+                self.assertEqual([options["timeout"] for _, options in observations],
+                                 [120, 720 if target == module.INTEL_TARGET else 1200])
+                for _, options in observations:
+                    self.assertEqual((options["capture"], options["text"], options["output_limit"]),
+                                     (True, False, 4 * 1024 * 1024))
+                fetched, compiled = operation.calls
+                self.assertEqual((fetched["returncode"], compiled["returncode"]), (0, 101))
+                self.assertTrue(all(call["returned"] and call["capturesSettled"] for call in operation.calls))
+                self.assertEqual((work / "android-helper-resident-fetch.status").read_bytes(), b"0\n")
+                self.assertEqual((work / "android-helper-build.status").read_bytes(), b"101\n")
+                self.assertFalse(operation.receipt["passed"] or operation.credential_calls or operation.credential_contexts)
 
     def test_xcode_setup_finalization_roles_are_exact_four_prefix_then_existing_ten(self):
         module = ANDROID_HELPER
@@ -8104,16 +8167,15 @@ sys.exit(status)
                 self.assertTrue(receipt["passed"] and receipt["originalClosesKnown"] and receipt["targetRetired"])
                 self.assertEqual(receipt["target"], build_target)
                 self.assertEqual(receipt["residentImageCargoArtifact"]["target"], build_target)
-                build_index = int(build_target == module.INTEL_TARGET)
+                build_index = 1
                 build_argv, build_options = observations[build_index]
-                if build_index:
-                    fetch_argv, fetch_options = observations[0]
-                    self.assertEqual(fetch_argv[1], "fetch")
-                    self.assertEqual(fetch_options["environ"], build_options["environ"])
-                    self.assertFalse(set(fetch_options["environ"]) & set(module.CREDENTIAL_VARIABLES + module.INSTALLER_CREDENTIAL_VARIABLES
-                        + ("MRK_MACOS_NOTARY_API_KEY_BASE64", "GITHUB_TOKEN", "HTTP_PROXY", "HTTPS_PROXY")))
-                    self.assertEqual((work / "android-helper-resident-fetch.stderr").read_bytes(), b"synthetic fetch DATA\n")
-                self.assertEqual("--offline" in build_argv, bool(build_index))
+                fetch_argv, fetch_options = observations[0]
+                self.assertEqual(fetch_argv[1], "fetch")
+                self.assertEqual(fetch_options["environ"], build_options["environ"])
+                self.assertFalse(set(fetch_options["environ"]) & set(module.CREDENTIAL_VARIABLES + module.INSTALLER_CREDENTIAL_VARIABLES
+                    + ("MRK_MACOS_NOTARY_API_KEY_BASE64", "GITHUB_TOKEN", "HTTP_PROXY", "HTTPS_PROXY")))
+                self.assertEqual((work / "android-helper-resident-fetch.stderr").read_bytes(), b"synthetic fetch DATA\n")
+                self.assertIn("--offline", build_argv)
                 self.assertEqual([build_argv[index + 1] for index, arg in enumerate(build_argv) if arg == "--config"], [
                     "profile.release.package.mobile-release-kit-desktop.opt-level=1",
                     "profile.release.package.mrk-android-catalogue-schema.opt-level=1"])
@@ -9393,14 +9455,14 @@ sys.exit(status)
                                         "desktop-facade-owner", "resident-facade-owner")
                 self.assertEqual((work / "android-helper-target").exists(), uncertain)
                 if failure in ("alias", "owner", "malformed", "nonzero"):
-                    self.assertEqual(len(observations), 1)
+                    self.assertEqual(len(observations), 2)
                 if failure.startswith("entry-"):
-                    self.assertEqual(len(observations), 4)
+                    self.assertEqual(len(observations), 5)
                     self.assertFalse((work / module.ENTRY).exists())
                     self.assertEqual(receipt["originalCalls"][-1]["returned"], failure != "entry-owner")
                     self.assertEqual(receipt["failure"]["stage"], "fixed-installed-entry-compiler")
                 if failure == "nonzero":
-                    call = receipt["originalCalls"][0]
+                    call = receipt["originalCalls"][1]
                     self.assertEqual((call["returned"], call["returncode"]), (True, 101))
                     self.assertEqual(receipt["failure"], {"stage": "separate-resident-image-compiler",
                                      "type": "Refused", "reason": "original-nonzero-build"})
@@ -9413,11 +9475,11 @@ sys.exit(status)
                     self.assertEqual((work / "android-helper-build.status").read_bytes(), b"101\n")
                 if failure.startswith(("desktop-facade-", "resident-facade-")):
                     role = "desktop" if failure.startswith("desktop-") else "resident"
-                    self.assertEqual(len(observations), 5 if role == "desktop" else 6)
+                    self.assertEqual(len(observations), 6 if role == "desktop" else 7)
                     self.assertEqual(receipt["originalCalls"][-1]["returned"], not failure.endswith("-owner"))
                     self.assertEqual(receipt["failure"]["stage"], role + "-facade-compiler")
                 if failure == "image-binding-changed":
-                    self.assertEqual(len(observations), 8)
+                    self.assertEqual(len(observations), 9)
                     self.assertEqual(receipt["failure"]["reason"], "file-original-changed")
                 if failure in ("close", "image-close"):
                     self.assertEqual(len(injected), 1)
@@ -9463,12 +9525,12 @@ sys.exit(status)
                 with self.assertRaises(module.Refused):
                     operation.execute()
                 receipt = json.loads((work / "android-helper-prepare.json").read_bytes())
-                call = receipt["originalCalls"][0]
+                call = receipt["originalCalls"][1]
                 diagnostic = call["originalFailure"]
                 self.assertEqual(diagnostic["classification"], expected)
                 self.assertEqual(diagnostic["ownerErrorType"], "ProcessError" if type(error) is ProcessErrorData else "other")
                 self.assertEqual((diagnostic["timeoutSeconds"], diagnostic["outputLimitBytes"], diagnostic["captureMode"]),
-                                 (480, 4 * 1024 * 1024, "bytes"))
+                                 (1200, 4 * 1024 * 1024, "bytes"))
                 encoded = json.dumps(diagnostic, sort_keys=True, separators=(",", ":")).encode("ascii")
                 self.assertLessEqual(len(encoded), 2048)
                 self.assertNotIn(b"PRIVATE", encoded)
@@ -9479,7 +9541,7 @@ sys.exit(status)
                 self.assertFalse((work / "android-helper-build.jsonl").exists())
                 self.assertFalse((work / "android-helper-build.stderr").exists())
                 self.assertFalse((work / "android-helper-build.status").exists())
-                self.assertEqual(len(observations), 1)
+                self.assertEqual(len(observations), 2)
                 if type(error) is ProcessErrorData:
                     self.assertEqual((call["dispatched"], call["contained"], call["cleanup_complete"]), (True, False, False))
 
@@ -10651,7 +10713,7 @@ sys.exit(status)
                        "GITHUB_RUN_ID":"123","GITHUB_RUN_ATTEMPT":"1"}
         selected = {purpose: None for purpose in module.TOOL_FIXED}
         for phase in module.APP_SIGNATURE_PHASES:
-            roles = (module.PREPARE_ROLES if phase == "prepare" else
+            roles = (module.prepare_roles(module.ARM_TARGET) if phase == "prepare" else
                      (phase,phase+"-verify") if phase in module.SIGNING_PHASES else (phase,phase+"-resident-image"))
             purposes = (("resident-image","helper") if phase == "prepare" else
                         (phase,) if phase in module.SIGNING_PHASES else ())
@@ -10710,13 +10772,13 @@ sys.exit(status)
                 operation = module.Operation(owner, checkout, work, "prepare", environment, TOOL, target=target)
                 with self.assertRaisesRegex(module.Refused, "^helper-package-incomplete$") as raised:
                     operation.execute()
-                expected_roles = ("resident-fetch", "build") if target == module.INTEL_TARGET else ("build",)
-                expected_actions = ("fetch", "build") if target == module.INTEL_TARGET else ("build",)
+                expected_roles = ("resident-fetch", "build")
+                expected_actions = ("fetch", "build")
                 self.assertEqual(len(observations), len(expected_roles))
                 self.assertEqual(tuple(argv[1] for argv, options in observations), expected_actions)
                 self.assertEqual(tuple(call["role"] for call in operation.calls), expected_roles)
                 self.assertEqual(tuple(call["returncode"] for call in operation.calls),
-                                 (0, status) if target == module.INTEL_TARGET else (status,))
+                                 (0, status))
                 self.assertTrue(all(call["returned"] and call["capturesSettled"] for call in operation.calls))
                 # The existing receipt schema/reason remains unchanged. The new
                 # private scalar preserves only the admitted stager code lost there.
@@ -10912,7 +10974,7 @@ sys.exit(status)
                       mock.patch.dict(module.os.environ, environment, clear=True),
                       contextlib.redirect_stdout(stdout), contextlib.redirect_stderr(stderr)):
                     self.assertEqual(module.main(), 1 if failed else 0)
-                self.assertEqual(len(observations), 2 if failed else len(module.PREPARE_ROLES))
+                self.assertEqual(len(observations), 2 if failed else len(module.prepare_roles(target)))
                 if failed:
                     self.assertEqual(tuple(argv[1] for argv, options in observations), ("fetch", "build"))
                 if failed:
@@ -11044,7 +11106,7 @@ sys.exit(status)
                 captured_stderr = c_output
                 def command(argv, **options):
                     returned = original_command(argv, **options)
-                    if kind in ("captured", "parser-error"):
+                    if kind in ("captured", "parser-error") and argv[1] == "build":
                         self.assertEqual(returned.returncode, 101)
                         return CompletedProcess(returned.args, returned.returncode, captured_stdout, captured_stderr)
                     return returned
@@ -11079,15 +11141,15 @@ sys.exit(status)
                     self.assertIsNone(operation.compiler_failure)
                 if kind in ("captured", "parser-error"):
                     self.assertEqual(operation.receipt["failure"]["reason"], "original-nonzero-build")
-                    self.assertEqual(len(observations), 1)
+                    self.assertEqual(len(observations), 2)
                     self.assertTrue(operation.receipt["targetRetired"] and operation.receipt["originalClosesKnown"])
                     self.assertFalse(operation.receipt["passed"] or operation.credential_calls or operation.credential_contexts)
                 elif kind == "unknown":
-                    self.assertFalse(operation.calls[0]["returned"] or operation.calls[0]["capturesSettled"])
+                    self.assertFalse(operation.calls[1]["returned"] or operation.calls[1]["capturesSettled"])
                     self.assertFalse(operation.receipt["passed"])
                 else:
                     self.assertTrue(operation.receipt["passed"])
-                    self.assertEqual(len(observations), len(module.PREPARE_ROLES))
+                    self.assertEqual(len(observations), len(module.prepare_roles(module.ARM_TARGET)))
 
         # The public whole-line cap stays4096. The reducer copies rows; trimming
         # its output cannot change the saved original diagnostic fact. A larger
