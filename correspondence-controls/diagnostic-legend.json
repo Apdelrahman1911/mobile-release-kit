@@ -1,0 +1,1704 @@
+{
+  "schemaVersion": 1,
+  "meaning": "First observed correspondence failure DATA; does not identify final primary reason or confer worker outcome authority.",
+  "origins": [
+    "parent",
+    "writer-ready-frame",
+    "writer-result-frame"
+  ],
+  "wireFields": [
+    "site",
+    "pass",
+    "role",
+    "original",
+    "parent",
+    "category",
+    "exact",
+    "heldNamed",
+    "heldExpected"
+  ],
+  "pass": {
+    "1": "initial already sampled pair",
+    "2": "already sampled pair following existing_app_metadata_post"
+  },
+  "roles": [
+    "Reader",
+    "PayloadWriter",
+    "LauncherWriter",
+    "MetadataWriter",
+    "ReceiptWriter",
+    "GateWriter",
+    "GateParticipant",
+    "ReservationWriter",
+    "ReservationParticipant",
+    "FreshEnrollmentWriter"
+  ],
+  "categories": [
+    "other",
+    "filesystem root",
+    "Library",
+    "Application Support",
+    "MobileReleaseKit",
+    "versions",
+    "input",
+    "mrk-macos-install",
+    "Contents",
+    "MacOS",
+    "request.json",
+    "install-inventory.json",
+    "maintenance gate",
+    "registration gate",
+    "fixed app name",
+    ".install- prefix"
+  ],
+  "maskBits": [
+    "device",
+    "inode",
+    "file type",
+    "mode permissions",
+    "UID",
+    "GID",
+    "links",
+    "size",
+    "mtime seconds",
+    "mtime nanoseconds",
+    "ctime seconds",
+    "ctime nanoseconds"
+  ],
+  "sameObjectBits": [
+    0,
+    1,
+    2,
+    4,
+    5
+  ],
+  "noParent": 4294967295,
+  "originalLimit": 196608,
+  "siteMapping": [
+    {
+      "site": 687,
+      "fileCode": 0,
+      "line": 687,
+      "source": "let id = Identity::of(&before); self.originals[n].identity = Some(id); self.check_name(n, true)?;"
+    },
+    {
+      "site": 707,
+      "fileCode": 0,
+      "line": 707,
+      "source": "self.originals[n].existing_app_metadata=Some(first);self.check_name(n,true)?;"
+    },
+    {
+      "site": 721,
+      "fileCode": 0,
+      "line": 721,
+      "source": "self.check_name(writer,true)?;self.protected(writer,false,None)?;"
+    },
+    {
+      "site": 732,
+      "fileCode": 0,
+      "line": 732,
+      "source": "self.check_name(writer,true)?;self.protected(writer,false,Some(0o600))?;"
+    },
+    {
+      "site": 749,
+      "fileCode": 0,
+      "line": 749,
+      "source": "self.protected(n, false, Some(0o600))?; self.check_name(n, true)?; Ok(n)"
+    },
+    {
+      "site": 831,
+      "fileCode": 0,
+      "line": 831,
+      "source": "self.check_name(n,true)?;"
+    },
+    {
+      "site": 839,
+      "fileCode": 0,
+      "line": 839,
+      "source": "self.check_name(n,true)"
+    },
+    {
+      "site": 911,
+      "fileCode": 0,
+      "line": 911,
+      "source": "self.check_name(n, true)?; self.clock()?;"
+    },
+    {
+      "site": 922,
+      "fileCode": 0,
+      "line": 922,
+      "source": "self.protected(n, true, Some(mode))?; self.check_name(n, true)?;"
+    },
+    {
+      "site": 930,
+      "fileCode": 0,
+      "line": 930,
+      "source": "|| self.check_name(n,true).is_ok();"
+    },
+    {
+      "site": 974,
+      "fileCode": 0,
+      "line": 974,
+      "source": "check(count == size, \"size-changed\")?; self.check_name(n, true)?;"
+    },
+    {
+      "site": 1007,
+      "fileCode": 0,
+      "line": 1007,
+      "source": "self.check_name(n, false)?;"
+    },
+    {
+      "site": 1054,
+      "fileCode": 0,
+      "line": 1054,
+      "source": "self.check_name(root,false)?; self.check_name(reader,false)?;"
+    },
+    {
+      "site": 1061,
+      "fileCode": 0,
+      "line": 1061,
+      "source": "self.check_name(root,false)?; self.check_name(reader,false)?;"
+    },
+    {
+      "site": 1118,
+      "fileCode": 0,
+      "line": 1118,
+      "source": "check(count == item.size && actual == item.sha256, \"copy-hash\")?; self.check_name(source, true)?;"
+    },
+    {
+      "site": 1155,
+      "fileCode": 0,
+      "line": 1155,
+      "source": "self.check_name(source, true)?; self.forward_close(source, \"source-directory-close\")?;"
+    },
+    {
+      "site": 1159,
+      "fileCode": 0,
+      "line": 1159,
+      "source": "self.check_name(target, false)?;"
+    },
+    {
+      "site": 1165,
+      "fileCode": 0,
+      "line": 1165,
+      "source": "self.check_name(target, true)"
+    },
+    {
+      "site": 1168,
+      "fileCode": 0,
+      "line": 1168,
+      "source": "self.clock()?; self.check_name(root, true)?; self.check_name(stage, false)?; self.check_name(destination, false)?;"
+    },
+    {
+      "site": 1183,
+      "fileCode": 0,
+      "line": 1183,
+      "source": "self.check_name(root, true)?; self.protected(root, true, Some(0o555))?; self.absent(stage, source)?;"
+    },
+    {
+      "site": 1225,
+      "fileCode": 0,
+      "line": 1225,
+      "source": "self.check_name(parent, false)?; self.protected(parent, true, Some(0o755))?;"
+    },
+    {
+      "site": 1230,
+      "fileCode": 0,
+      "line": 1230,
+      "source": "self.check_name(reader, true)"
+    },
+    {
+      "site": 1277,
+      "fileCode": 0,
+      "line": 1277,
+      "source": "self.check_name(n,!directory)?;"
+    },
+    {
+      "site": 1290,
+      "fileCode": 0,
+      "line": 1290,
+      "source": "self.check_name(n,!directory)?; Ok(value)"
+    },
+    {
+      "site": 1293,
+      "fileCode": 0,
+      "line": 1293,
+      "source": "self.check_name(n,false)?;"
+    },
+    {
+      "site": 1303,
+      "fileCode": 0,
+      "line": 1303,
+      "source": "self.check_name(n,false)?;"
+    },
+    {
+      "site": 1403,
+      "fileCode": 0,
+      "line": 1403,
+      "source": "self.check_name(owner.writer,true)?;self.check_name(owner.reader,true)?;"
+    },
+    {
+      "site": 1448,
+      "fileCode": 0,
+      "line": 1448,
+      "source": "self.check_name(owner.writer,true)?;self.check_name(owner.reader,true)?;"
+    },
+    {
+      "site": 1503,
+      "fileCode": 0,
+      "line": 1503,
+      "source": "self.check_name(reader,true)?;maintenance::held_bytes(self,origin_reader,&raw)?;"
+    },
+    {
+      "site": 1541,
+      "fileCode": 0,
+      "line": 1541,
+      "source": "self.originals[owner.reader].identity=Some(Identity::of(&actual));self.check_name(owner.reader,true)?;"
+    },
+    {
+      "site": 1650,
+      "fileCode": 0,
+      "line": 1650,
+      "source": "self.check_name(parent, false)?;"
+    },
+    {
+      "site": 1660,
+      "fileCode": 0,
+      "line": 1660,
+      "source": "self.check_name(reader, true)"
+    },
+    {
+      "site": 1780,
+      "fileCode": 0,
+      "line": 1780,
+      "source": "self.protected(destination,true,Some(0o755))?;self.check_name(destination,true)?;"
+    },
+    {
+      "site": 1815,
+      "fileCode": 0,
+      "line": 1815,
+      "source": "self.check_name(prepared.input, true)?;"
+    },
+    {
+      "site": 1821,
+      "fileCode": 0,
+      "line": 1821,
+      "source": "self.clock()?; self.check_name(n, false)?; self.protected(n, true, Some(0o755))?;"
+    },
+    {
+      "site": 1833,
+      "fileCode": 0,
+      "line": 1833,
+      "source": "self.check_name(n,false)?;"
+    },
+    {
+      "site": 1853,
+      "fileCode": 0,
+      "line": 1853,
+      "source": "self.check_name(writer, true)?; self.protected(writer, false, Some(0o600))?;"
+    },
+    {
+      "site": 1896,
+      "fileCode": 0,
+      "line": 1896,
+      "source": "self.check_name(release, false)?; self.clock()?;"
+    },
+    {
+      "site": 2048,
+      "fileCode": 0,
+      "line": 2048,
+      "source": "check(book.identity(n)?==expected,\"complete-prefix-current-replaced\")?;book.check_name(n,true)?;"
+    },
+    {
+      "site": 2358,
+      "fileCode": 0,
+      "line": 2358,
+      "source": "book.check_name(n.ok_or(\"complete-prefix-source-original\")?,true)?;"
+    },
+    {
+      "site": 2471,
+      "fileCode": 0,
+      "line": 2471,
+      "source": "book.check_name(child,true)?;let before=removal_archive_stat(book,retry,true,0o700)?;"
+    },
+    {
+      "site": 3895,
+      "fileCode": 0,
+      "line": 3895,
+      "source": "if let Err(why)=book.check_name(index,true) {if failure.is_none(){failure=Some(why);}}"
+    },
+    {
+      "site": 3903,
+      "fileCode": 0,
+      "line": 3903,
+      "source": "book.clock()?;book.check_name(index,true)?;book.protected(index,directory,Some(mode))?;book.clock()?;"
+    },
+    {
+      "site": 4034,
+      "fileCode": 0,
+      "line": 4034,
+      "source": "book.clock()?;book.check_name(root,true)?;"
+    },
+    {
+      "site": 4041,
+      "fileCode": 0,
+      "line": 4041,
+      "source": "book.check_name(root,true)?;book.clock()?;Ok(shape==PartialFreshFileState::Complete)"
+    },
+    {
+      "site": 5696,
+      "fileCode": 0,
+      "line": 5696,
+      "source": "failure=rehome_retry_first_failure_data(failure,book.check_name(index,true).err());"
+    },
+    {
+      "site": 6275,
+      "fileCode": 0,
+      "line": 6275,
+      "source": "book.clock()?;book.check_name(n,true)?;"
+    },
+    {
+      "site": 6279,
+      "fileCode": 0,
+      "line": 6279,
+      "source": "book.protected(n,false,Some(identity.mode&0o7777))?;book.check_name(n,true)"
+    },
+    {
+      "site": 6287,
+      "fileCode": 0,
+      "line": 6287,
+      "source": "book.clock()?;book.check_name(source_parent,true)?;book.check_name(output_parent,true)?;"
+    },
+    {
+      "site": 6307,
+      "fileCode": 0,
+      "line": 6307,
+      "source": "book.check_name(source_parent,true)?;book.check_name(output_parent,true)?;"
+    },
+    {
+      "site": 6337,
+      "fileCode": 0,
+      "line": 6337,
+      "source": "book.clock()?;book.check_name(output_parent,true)?;"
+    },
+    {
+      "site": 6345,
+      "fileCode": 0,
+      "line": 6345,
+      "source": "partial_fresh_raw_post(book,output,id,actual.st_flags)?;book.check_name(output_parent,true)?;"
+    },
+    {
+      "site": 6356,
+      "fileCode": 0,
+      "line": 6356,
+      "source": "book.clock()?;book.check_name(parent,true)?;"
+    },
+    {
+      "site": 6377,
+      "fileCode": 0,
+      "line": 6377,
+      "source": "partial_fresh_raw_post(book,reader,id,stat.st_flags)?;book.check_name(parent,true)?;"
+    },
+    {
+      "site": 6510,
+      "fileCode": 0,
+      "line": 6510,
+      "source": "book.check_name(n,true)?;book.protected(n,true,Some(0o555))?;"
+    },
+    {
+      "site": 6514,
+      "fileCode": 0,
+      "line": 6514,
+      "source": "book.check_name(n,true)?;"
+    },
+    {
+      "site": 6632,
+      "fileCode": 0,
+      "line": 6632,
+      "source": "book.check_name(output_parent,true)?;"
+    },
+    {
+      "site": 6635,
+      "fileCode": 0,
+      "line": 6635,
+      "source": "book.check_name(parent,true)?;"
+    },
+    {
+      "site": 6696,
+      "fileCode": 0,
+      "line": 6696,
+      "source": "if let Some(parent)=source_parent{book.check_name(parent,true)?;}"
+    },
+    {
+      "site": 6697,
+      "fileCode": 0,
+      "line": 6697,
+      "source": "book.check_name(output_parent,true)?;"
+    },
+    {
+      "site": 6710,
+      "fileCode": 0,
+      "line": 6710,
+      "source": "book.clock()?;book.check_name(parent,true)?;let reader=book.open(Some(parent),leaf,false)?;"
+    },
+    {
+      "site": 6724,
+      "fileCode": 0,
+      "line": 6724,
+      "source": "partial_fresh_raw_post(book,reader,id,info.st_flags)?;book.check_name(parent,true)?;"
+    },
+    {
+      "site": 7806,
+      "fileCode": 0,
+      "line": 7806,
+      "source": "book.check_name(parent,true)?;return Ok(Some(parent));"
+    },
+    {
+      "site": 7811,
+      "fileCode": 0,
+      "line": 7811,
+      "source": "book.check_name(parent,true)?;return Ok(Some(parent));"
+    },
+    {
+      "site": 8036,
+      "fileCode": 0,
+      "line": 8036,
+      "source": "book.check_name(original,true)?;book.absent(retry,&name)?;"
+    },
+    {
+      "site": 8058,
+      "fileCode": 0,
+      "line": 8058,
+      "source": "book.check_name(original,true)?;book.persist(root,false)?;book.persist(retry,false)?;"
+    },
+    {
+      "site": 8175,
+      "fileCode": 0,
+      "line": 8175,
+      "source": "for n in [self.root,self.versions,self.release] {book.check_name(n,true)?;}"
+    },
+    {
+      "site": 9997,
+      "fileCode": 0,
+      "line": 9997,
+      "source": "book.check_name(parent,true)?;book.absent(parent,name)?;book.check_name(parent,true)?;"
+    },
+    {
+      "site": 10247,
+      "fileCode": 0,
+      "line": 10247,
+      "source": "book.check_name(original,true)?;"
+    },
+    {
+      "site": 10572,
+      "fileCode": 0,
+      "line": 10572,
+      "source": "book.check_name(n,true)?;book.forward_close(n,\"removal-snapshot-census-close\")?;"
+    },
+    {
+      "site": 10608,
+      "fileCode": 0,
+      "line": 10608,
+      "source": "book.check_name(directory, false)?;"
+    },
+    {
+      "site": 10614,
+      "fileCode": 0,
+      "line": 10614,
+      "source": "book.check_name(reader, true)?;"
+    },
+    {
+      "site": 10616,
+      "fileCode": 0,
+      "line": 10616,
+      "source": "book.check_name(directory, false)?; Ok(values)"
+    },
+    {
+      "site": 10686,
+      "fileCode": 0,
+      "line": 10686,
+      "source": "book.check_name(reader, true)?;"
+    },
+    {
+      "site": 10698,
+      "fileCode": 0,
+      "line": 10698,
+      "source": "check(at == expected.len(), \"maintenance-record-size\")?; book.check_name(reader, true)"
+    },
+    {
+      "site": 10755,
+      "fileCode": 0,
+      "line": 10755,
+      "source": "book.check_name(original, true)?; book.protected(original, true, Some(0o555))?;"
+    },
+    {
+      "site": 10762,
+      "fileCode": 0,
+      "line": 10762,
+      "source": "book.check_name(original,true)?;book.protected(original,true,Some(0o555))?;"
+    },
+    {
+      "site": 10766,
+      "fileCode": 0,
+      "line": 10766,
+      "source": "book.check_name(original,true)?;"
+    },
+    {
+      "site": 10843,
+      "fileCode": 0,
+      "line": 10843,
+      "source": "book.check_name(root,true)?;"
+    },
+    {
+      "site": 11141,
+      "fileCode": 0,
+      "line": 11141,
+      "source": "book.check_name(original,true)?;book.protected(original,directory,Some(if directory{0o755}else{0o444}))?;"
+    },
+    {
+      "site": 11218,
+      "fileCode": 0,
+      "line": 11218,
+      "source": "book.check_name(versions,true)?;"
+    },
+    {
+      "site": 11746,
+      "fileCode": 0,
+      "line": 11746,
+      "source": "book.check_name(stage, true)?; book.forward_close(stage, \"maintenance-stage-close\")"
+    },
+    {
+      "site": 11947,
+      "fileCode": 0,
+      "line": 11947,
+      "source": "book.check_name(self.inner.old_app.ok_or(\"removal-current-app\")?,true)?;"
+    },
+    {
+      "site": 11948,
+      "fileCode": 0,
+      "line": 11948,
+      "source": "book.check_name(self.inner.old_release.ok_or(\"removal-current-release\")?,true)"
+    },
+    {
+      "site": 12684,
+      "fileCode": 0,
+      "line": 12684,
+      "source": "book.check_name(original,true)"
+    },
+    {
+      "site": 12690,
+      "fileCode": 0,
+      "line": 12690,
+      "source": "book.clock()?; book.check_name(original,true)?;"
+    },
+    {
+      "site": 12693,
+      "fileCode": 0,
+      "line": 12693,
+      "source": "book.check_name(from,false)?; book.check_name(to,false)?;"
+    },
+    {
+      "site": 12707,
+      "fileCode": 0,
+      "line": 12707,
+      "source": "book.check_name(original,true)"
+    },
+    {
+      "site": 12731,
+      "fileCode": 0,
+      "line": 12731,
+      "source": "book.check_name(app,true)?;book.check_name(release,true)?;"
+    },
+    {
+      "site": 12768,
+      "fileCode": 0,
+      "line": 12768,
+      "source": "book.check_name(release,true)?;"
+    },
+    {
+      "site": 12809,
+      "fileCode": 0,
+      "line": 12809,
+      "source": "for n in [observed.prepared.destination,observed.prepared.versions] {book.check_name(n,false)?;}"
+    },
+    {
+      "site": 12810,
+      "fileCode": 0,
+      "line": 12810,
+      "source": "book.check_name(observed.old_release.ok_or(\"app-absence-current-runtime\")?,true)?;"
+    },
+    {
+      "site": 12811,
+      "fileCode": 0,
+      "line": 12811,
+      "source": "book.check_name(observed.old_app.ok_or(\"app-absence-current-app\")?,true)"
+    },
+    {
+      "site": 12910,
+      "fileCode": 0,
+      "line": 12910,
+      "source": "book.registration_ready()?;book.check_name(source,true)?;book.check_name(stage,false)?;"
+    },
+    {
+      "site": 12912,
+      "fileCode": 0,
+      "line": 12912,
+      "source": "book.check_name(writer,false)?;book.protected(writer,false,Some(0o600))?;"
+    },
+    {
+      "site": 12995,
+      "fileCode": 0,
+      "line": 12995,
+      "source": "book.check_name(old,true)?; held_bytes(book,history.state_original,&history.state_bytes)?;"
+    },
+    {
+      "site": 13000,
+      "fileCode": 0,
+      "line": 13000,
+      "source": "book.check_name(app,true)?; book.absent(stage,\"app\")?;"
+    },
+    {
+      "site": 13347,
+      "fileCode": 0,
+      "line": 13347,
+      "source": "book.check_name(original,true)?;"
+    },
+    {
+      "site": 13368,
+      "fileCode": 0,
+      "line": 13368,
+      "source": "check(offset == size,\"producer-source-size\")?; book.check_name(original,true)?;"
+    },
+    {
+      "site": 13374,
+      "fileCode": 0,
+      "line": 13374,
+      "source": "book.check_name(self.original,true)?;"
+    },
+    {
+      "site": 13925,
+      "fileCode": 0,
+      "line": 13925,
+      "source": "book.check_name(original,true)?;"
+    },
+    {
+      "site": 14003,
+      "fileCode": 0,
+      "line": 14003,
+      "source": "for index in [source.script,source.image,source.input] { self.check_name(index, true)?; }"
+    },
+    {
+      "site": 14438,
+      "fileCode": 0,
+      "line": 14438,
+      "source": "book.check_name(support, false)?;"
+    },
+    {
+      "site": 14445,
+      "fileCode": 0,
+      "line": 14445,
+      "source": "book.check_name(self.support,false)?; book.check_name(self.writer,true)?;"
+    },
+    {
+      "site": 14514,
+      "fileCode": 0,
+      "line": 14514,
+      "source": "book.check_name(*original,true)?;"
+    },
+    {
+      "site": 14560,
+      "fileCode": 0,
+      "line": 14560,
+      "source": "book.check_name(original,true)?;"
+    },
+    {
+      "site": 14658,
+      "fileCode": 0,
+      "line": 14658,
+      "source": "for n in self.code { book.check_name(n,true)?; }"
+    },
+    {
+      "site": 15027,
+      "fileCode": 0,
+      "line": 15027,
+      "source": "book.check_name(n,true)?;"
+    },
+    {
+      "site": 15050,
+      "fileCode": 0,
+      "line": 15050,
+      "source": "if other!=n && original.fd.is_some() { book.check_name(other,true)?; }"
+    },
+    {
+      "site": 15054,
+      "fileCode": 0,
+      "line": 15054,
+      "source": "book.check_name(n,true)"
+    },
+    {
+      "site": 15075,
+      "fileCode": 0,
+      "line": 15075,
+      "source": "book.check_name(parent,true)?;book.clock()?;"
+    },
+    {
+      "site": 15103,
+      "fileCode": 0,
+      "line": 15103,
+      "source": "book.check_name(parent,true)?;book.clock()?;Ok(found)"
+    },
+    {
+      "site": 15170,
+      "fileCode": 0,
+      "line": 15170,
+      "source": "book.absent(directory,\"s\")?;book.check_name(directory,true)?;"
+    },
+    {
+      "site": 15544,
+      "fileCode": 0,
+      "line": 15544,
+      "source": "if original.fd.is_some() && n!=self.directory { self.book.check_name(n,true)?; }"
+    },
+    {
+      "site": 15931,
+      "fileCode": 0,
+      "line": 15931,
+      "source": "book.check_name(n,true)?;"
+    },
+    {
+      "site": 15944,
+      "fileCode": 0,
+      "line": 15944,
+      "source": "book.check_name(n,true)?;"
+    },
+    {
+      "site": 16026,
+      "fileCode": 0,
+      "line": 16026,
+      "source": "book.check_name(n,true)?;"
+    },
+    {
+      "site": 16088,
+      "fileCode": 0,
+      "line": 16088,
+      "source": "book.check_name(directory,true)?;book.forward_close(directory,\"removal-snapshot-census-close\")?;"
+    },
+    {
+      "site": 16089,
+      "fileCode": 0,
+      "line": 16089,
+      "source": "book.absent(archive,\"app\")?;book.check_name(archive,true)"
+    },
+    {
+      "site": 16153,
+      "fileCode": 0,
+      "line": 16153,
+      "source": "book.check_name(root_reader,true)?;book.forward_close(root_reader,\"removal-snapshot-root-close\")?;"
+    },
+    {
+      "site": 16182,
+      "fileCode": 0,
+      "line": 16182,
+      "source": "if let Some(parent)=parent { book.check_name(parent,true)?;book.forward_close(parent,\"removal-snapshot-control-parent-close\")?; }"
+    },
+    {
+      "site": 16252,
+      "fileCode": 0,
+      "line": 16252,
+      "source": "book.check_name(*n,true)?;"
+    },
+    {
+      "site": 16271,
+      "fileCode": 0,
+      "line": 16271,
+      "source": "for n in &source.originals.bootstrap {book.check_name(*n,true)?;}"
+    },
+    {
+      "site": 16609,
+      "fileCode": 0,
+      "line": 16609,
+      "source": "book.check_name(reader,true)?;"
+    },
+    {
+      "site": 16711,
+      "fileCode": 0,
+      "line": 16711,
+      "source": "book.check_name(parent,true)?;book.clock()"
+    },
+    {
+      "site": 16759,
+      "fileCode": 0,
+      "line": 16759,
+      "source": "book.check_name(n,true)?;book.forward_close(n,\"removal-payload-code-close\")?;"
+    },
+    {
+      "site": 16767,
+      "fileCode": 0,
+      "line": 16767,
+      "source": "book.check_name(alias,true)?;book.forward_close(alias,\"removal-payload-app-alias-close\")?;"
+    },
+    {
+      "site": 16784,
+      "fileCode": 0,
+      "line": 16784,
+      "source": "book.check_name(parent,true)?;"
+    },
+    {
+      "site": 16786,
+      "fileCode": 0,
+      "line": 16786,
+      "source": "book.absent(parent,&self.plan.nodes[index].name)?;book.check_name(parent,true)?;"
+    },
+    {
+      "site": 16848,
+      "fileCode": 0,
+      "line": 16848,
+      "source": "book.check_name(original,true)?;book.protected(original,true,Some(0o555))?;book.absent(to,\"app\")?;"
+    },
+    {
+      "site": 16878,
+      "fileCode": 0,
+      "line": 16878,
+      "source": "native::no_xattrs(book.fd(n)?.as_fd()).map_err(|_|\"removal-payload-node-attributes\")?;book.check_name(n,true)?;Ok(n)"
+    },
+    {
+      "site": 16884,
+      "fileCode": 0,
+      "line": 16884,
+      "source": "self.external_post(book)?;book.check_name(parent,true)?;"
+    },
+    {
+      "site": 16899,
+      "fileCode": 0,
+      "line": 16899,
+      "source": "book.check_name(n,true)?;"
+    },
+    {
+      "site": 16907,
+      "fileCode": 0,
+      "line": 16907,
+      "source": "book.check_name(n,true)?;"
+    },
+    {
+      "site": 16916,
+      "fileCode": 0,
+      "line": 16916,
+      "source": "self.external_post(book)?;book.check_name(n,true)?;"
+    },
+    {
+      "site": 16964,
+      "fileCode": 0,
+      "line": 16964,
+      "source": "book.check_name(app,true)?;book.clock()?;"
+    },
+    {
+      "site": 17021,
+      "fileCode": 0,
+      "line": 17021,
+      "source": "book.absent(reader,\"runtime\")?;book.check_name(reader,true)?;"
+    },
+    {
+      "site": 17025,
+      "fileCode": 0,
+      "line": 17025,
+      "source": "book.check_name(roster_reader,true)?;book.forward_close(roster_reader,\"removal-payload-control-roster-close\")?;"
+    },
+    {
+      "site": 17026,
+      "fileCode": 0,
+      "line": 17026,
+      "source": "book.check_name(reader,true)?;book.forward_close(reader,\"removal-payload-control-close\")?;"
+    },
+    {
+      "site": 17058,
+      "fileCode": 0,
+      "line": 17058,
+      "source": "book.check_name(release,true)?;book.forward_close(release,\"removal-payload-release-close\")?;"
+    },
+    {
+      "site": 17106,
+      "fileCode": 0,
+      "line": 17106,
+      "source": "book.clock()?;book.check_name(n,true)?;book.protected(n,directory,mode)?;book.clock()?;"
+    },
+    {
+      "site": 17110,
+      "fileCode": 0,
+      "line": 17110,
+      "source": "book.check_name(n,true)"
+    },
+    {
+      "site": 17118,
+      "fileCode": 0,
+      "line": 17118,
+      "source": "book.check_name(n,true)?;let size=u64::try_from(book.identity(n)?.size).map_err(|_|\"removal-resume-size\")?;"
+    },
+    {
+      "site": 17125,
+      "fileCode": 0,
+      "line": 17125,
+      "source": "book.check_name(n,true)?;Ok(digest.finalize().into())"
+    },
+    {
+      "site": 17139,
+      "fileCode": 0,
+      "line": 17139,
+      "source": "book.check_name(n,true)?;Ok(raw)"
+    },
+    {
+      "site": 17211,
+      "fileCode": 0,
+      "line": 17211,
+      "source": "for n in [parts.archive,parts.snapshot,parts.tip_archive,parts.tip_original] {book.check_name(n,true)?;}"
+    },
+    {
+      "site": 17221,
+      "fileCode": 0,
+      "line": 17221,
+      "source": "for n in [parts.archive,parts.snapshot,parts.tip_archive,parts.tip_original] {book.check_name(n,true)?;}"
+    },
+    {
+      "site": 17515,
+      "fileCode": 0,
+      "line": 17515,
+      "source": "for n in self.bootstrap.iter().chain(&self.root_chain) {book.check_name(*n,true)?;}"
+    },
+    {
+      "site": 17525,
+      "fileCode": 0,
+      "line": 17525,
+      "source": "book.absent(self.root,paths::APP_NAME)?;book.check_name(self.root,true)"
+    },
+    {
+      "site": 17621,
+      "fileCode": 0,
+      "line": 17621,
+      "source": "for n in &self.bootstrap {book.check_name(*n,true)?;book.protected(*n,true,None)?;}"
+    },
+    {
+      "site": 17671,
+      "fileCode": 0,
+      "line": 17671,
+      "source": "parent=book.open(Some(parent),part,true)?;book.protected(parent,true,None)?;book.check_name(parent,true)?;"
+    },
+    {
+      "site": 17817,
+      "fileCode": 0,
+      "line": 17817,
+      "source": "book.check_name(*n,true)?;book.protected_as(*n,true,if at==3{Some(0o755)}else{None},"
+    },
+    {
+      "site": 18025,
+      "fileCode": 0,
+      "line": 18025,
+      "source": "parent=book.open(Some(parent),part,true)?;book.protected(parent,true,None)?;book.check_name(parent,true)?;"
+    },
+    {
+      "site": 18848,
+      "fileCode": 0,
+      "line": 18848,
+      "source": "drop(genesis);book.check_name(snapshot,true)?;book.check_name(archive,true)?;"
+    },
+    {
+      "site": 19099,
+      "fileCode": 0,
+      "line": 19099,
+      "source": "book.check_name(n,true)?;book.clock()"
+    },
+    {
+      "site": 19386,
+      "fileCode": 0,
+      "line": 19386,
+      "source": "book.check_name(original,true)?;book.absent(child,item.name_data())?;"
+    },
+    {
+      "site": 19412,
+      "fileCode": 0,
+      "line": 19412,
+      "source": "book.check_name(original,true)?;book.persist(root,false)?;book.persist(child,false)?;"
+    },
+    {
+      "site": 19475,
+      "fileCode": 0,
+      "line": 19475,
+      "source": "self.post(book)?;book.check_name(self.incoming.input,true)?;"
+    },
+    {
+      "site": 19544,
+      "fileCode": 0,
+      "line": 19544,
+      "source": "self.post(book)?;book.check_name(self.incoming.input,true)?;"
+    },
+    {
+      "site": 19689,
+      "fileCode": 0,
+      "line": 19689,
+      "source": "book.protected(self.root,true,Some(0o755))?;book.check_name(self.root,false)?;"
+    },
+    {
+      "site": 19856,
+      "fileCode": 0,
+      "line": 19856,
+      "source": "book.check_name(self.release,true)?;"
+    },
+    {
+      "site": 19917,
+      "fileCode": 0,
+      "line": 19917,
+      "source": "maintenance::selected_compile(self.selected)?;book.check_name(self.input,true)?;"
+    },
+    {
+      "site": 20026,
+      "fileCode": 0,
+      "line": 20026,
+      "source": "self.post_source(book)?;book.check_name(self.incoming.input,true)?;"
+    },
+    {
+      "site": 20119,
+      "fileCode": 0,
+      "line": 20119,
+      "source": "book.check_name(root,true)?;book.protected(root,true,Some(0o755))?;Ok(root)"
+    },
+    {
+      "site": 20122,
+      "fileCode": 0,
+      "line": 20122,
+      "source": "let root=self.post(book)?;book.check_name(reader,true)?;"
+    },
+    {
+      "site": 20127,
+      "fileCode": 0,
+      "line": 20127,
+      "source": "self.post(book)?;book.check_name(reader,true)?;"
+    },
+    {
+      "site": 20146,
+      "fileCode": 0,
+      "line": 20146,
+      "source": "book.source_post(source)?;book.check_name(self.root,true)?;"
+    },
+    {
+      "site": 20188,
+      "fileCode": 0,
+      "line": 20188,
+      "source": "self.book.protected(root,true,Some(0o755))?;self.book.check_name(root,true)?;root}"
+    },
+    {
+      "site": 21181,
+      "fileCode": 0,
+      "line": 21181,
+      "source": "self.book.check_name(directory,true)?;"
+    },
+    {
+      "site": 22046,
+      "fileCode": 0,
+      "line": 22046,
+      "source": "self.book.protected(root,true,Some(0o755))?;self.book.check_name(root,true)?;"
+    },
+    {
+      "site": 22074,
+      "fileCode": 0,
+      "line": 22074,
+      "source": "self.book.check_name(support,true)?;"
+    },
+    {
+      "site": 22145,
+      "fileCode": 0,
+      "line": 22145,
+      "source": "self.book.check_name(reader,true)?;"
+    },
+    {
+      "site": 22233,
+      "fileCode": 0,
+      "line": 22233,
+      "source": "book.check_name(reader,true)?;book.forward_close(reader,\"removal-observer-effects-close\")?;"
+    },
+    {
+      "site": 22287,
+      "fileCode": 0,
+      "line": 22287,
+      "source": "let root=source.root_original();self.book.check_name(root,true)?;"
+    },
+    {
+      "site": 23770,
+      "fileCode": 0,
+      "line": 23770,
+      "source": "self.check_name(parent, false)?;"
+    },
+    {
+      "site": 23990,
+      "fileCode": 0,
+      "line": 23990,
+      "source": "book.check_name(reader, true).expect(\"same held and named inventory\");"
+    },
+    {
+      "site": 100084,
+      "fileCode": 1,
+      "line": 84,
+      "source": "book.check_name(original,true)?;"
+    },
+    {
+      "site": 100095,
+      "fileCode": 1,
+      "line": 95,
+      "source": "book.check_name(original,true)?;"
+    },
+    {
+      "site": 100145,
+      "fileCode": 1,
+      "line": 145,
+      "source": "book.check_name(reader,true)?;"
+    },
+    {
+      "site": 100147,
+      "fileCode": 1,
+      "line": 147,
+      "source": "book.check_name(release,false)?;"
+    },
+    {
+      "site": 100208,
+      "fileCode": 1,
+      "line": 208,
+      "source": "book.check_name(bundle,true)?;"
+    },
+    {
+      "site": 100277,
+      "fileCode": 1,
+      "line": 277,
+      "source": "book.check_name(reader,true)?;book.forward_close(reader,\"launcher-parent-phase-close\")?;"
+    },
+    {
+      "site": 100279,
+      "fileCode": 1,
+      "line": 279,
+      "source": "book.check_name(stage,false)?;"
+    },
+    {
+      "site": 100354,
+      "fileCode": 1,
+      "line": 354,
+      "source": "book.check_name(self.operation.bundle.ok_or(\"launcher-original-missing\")?,true)?;"
+    },
+    {
+      "site": 100365,
+      "fileCode": 1,
+      "line": 365,
+      "source": "book.check_name(bundle,true)?;"
+    },
+    {
+      "site": 100369,
+      "fileCode": 1,
+      "line": 369,
+      "source": "for node in &self.retirement.nodes {book.check_name(node.original,true)?;}"
+    },
+    {
+      "site": 100514,
+      "fileCode": 1,
+      "line": 514,
+      "source": "book.check_name(bundle,true)?;"
+    },
+    {
+      "site": 100705,
+      "fileCode": 1,
+      "line": 705,
+      "source": "book.check_name(reader,true)?;book.forward_close(reader,\"launcher-phase-history-close\")?;"
+    },
+    {
+      "site": 100706,
+      "fileCode": 1,
+      "line": 706,
+      "source": "book.check_name(stage,false)?;Ok(raw.len() as u64)"
+    },
+    {
+      "site": 100713,
+      "fileCode": 1,
+      "line": 713,
+      "source": "book.check_name(original,false)?;"
+    },
+    {
+      "site": 100724,
+      "fileCode": 1,
+      "line": 724,
+      "source": "book.check_name(original,false)?;"
+    },
+    {
+      "site": 100777,
+      "fileCode": 1,
+      "line": 777,
+      "source": "book.check_name(self.stage,false)?;book.forward_close(self.stage,\"launcher-phase-stage-close\")"
+    },
+    {
+      "site": 100784,
+      "fileCode": 1,
+      "line": 784,
+      "source": "book.check_name(self.reader,true)?;"
+    },
+    {
+      "site": 100796,
+      "fileCode": 1,
+      "line": 796,
+      "source": "book.check_name(self.reader,true)?;book.clock()"
+    },
+    {
+      "site": 100879,
+      "fileCode": 1,
+      "line": 879,
+      "source": "book.check_name(stage,true)?;book.forward_close(stage,\"launcher-recovery-stage-close\")?;"
+    },
+    {
+      "site": 100895,
+      "fileCode": 1,
+      "line": 895,
+      "source": "book.check_name(intent_reader,true)?;book.forward_close(intent_reader,\"launcher-recovery-intent-close\")?;"
+    },
+    {
+      "site": 101007,
+      "fileCode": 1,
+      "line": 1007,
+      "source": "if let Some(workspace)=self.workspace {book.check_name(workspace,true)?;"
+    },
+    {
+      "site": 101107,
+      "fileCode": 1,
+      "line": 1107,
+      "source": "book.check_name(stage, true)?;"
+    },
+    {
+      "site": 101146,
+      "fileCode": 1,
+      "line": 1146,
+      "source": "book.check_name(self.original, true)?;"
+    },
+    {
+      "site": 101161,
+      "fileCode": 1,
+      "line": 1161,
+      "source": "book.check_name(self.stage, true)?;"
+    },
+    {
+      "site": 101174,
+      "fileCode": 1,
+      "line": 1174,
+      "source": "book.check_name(root, false)?;"
+    },
+    {
+      "site": 101177,
+      "fileCode": 1,
+      "line": 1177,
+      "source": "book.check_name(original, false)?;"
+    },
+    {
+      "site": 101213,
+      "fileCode": 1,
+      "line": 1213,
+      "source": "book.check_name(self.system_root, false)?;"
+    },
+    {
+      "site": 101215,
+      "fileCode": 1,
+      "line": 1215,
+      "source": "book.check_name(self.applications, false)?;"
+    },
+    {
+      "site": 101268,
+      "fileCode": 1,
+      "line": 1268,
+      "source": "book.check_name(bundle, true)"
+    },
+    {
+      "site": 101295,
+      "fileCode": 1,
+      "line": 1295,
+      "source": "book.check_name(original, true)?;"
+    },
+    {
+      "site": 101298,
+      "fileCode": 1,
+      "line": 1298,
+      "source": "book.check_name(prepared.input, true)?;"
+    },
+    {
+      "site": 101335,
+      "fileCode": 1,
+      "line": 1335,
+      "source": "book.check_name(staged, true)?;"
+    },
+    {
+      "site": 101354,
+      "fileCode": 1,
+      "line": 1354,
+      "source": "book.check_name(bundle, true)?;"
+    },
+    {
+      "site": 101425,
+      "fileCode": 1,
+      "line": 1425,
+      "source": "book.check_name(new,true)?;"
+    },
+    {
+      "site": 101442,
+      "fileCode": 1,
+      "line": 1442,
+      "source": "book.check_name(new,true)?;"
+    },
+    {
+      "site": 101469,
+      "fileCode": 1,
+      "line": 1469,
+      "source": "book.check_name(old, true)?;"
+    },
+    {
+      "site": 101480,
+      "fileCode": 1,
+      "line": 1480,
+      "source": "book.check_name(new, true)?;"
+    },
+    {
+      "site": 101498,
+      "fileCode": 1,
+      "line": 1498,
+      "source": "book.check_name(new, true)?;"
+    },
+    {
+      "site": 101510,
+      "fileCode": 1,
+      "line": 1510,
+      "source": "book.check_name(old, true)?;"
+    },
+    {
+      "site": 101530,
+      "fileCode": 1,
+      "line": 1530,
+      "source": "book.check_name(old, true)?;"
+    },
+    {
+      "site": 101649,
+      "fileCode": 1,
+      "line": 1649,
+      "source": "book.check_name(original, true)?;"
+    },
+    {
+      "site": 101652,
+      "fileCode": 1,
+      "line": 1652,
+      "source": "book.check_name(prepared.input, true)"
+    },
+    {
+      "site": 101759,
+      "fileCode": 1,
+      "line": 1759,
+      "source": "book.check_name(*directory, true)?;"
+    },
+    {
+      "site": 101761,
+      "fileCode": 1,
+      "line": 1761,
+      "source": "for node in &self.nodes { book.check_name(node.original, true)?; }"
+    },
+    {
+      "site": 101796,
+      "fileCode": 1,
+      "line": 1796,
+      "source": "book.check_name(original, true)?;"
+    },
+    {
+      "site": 101813,
+      "fileCode": 1,
+      "line": 1813,
+      "source": "book.check_name(original, true)?;"
+    },
+    {
+      "site": 101889,
+      "fileCode": 1,
+      "line": 1889,
+      "source": "book.check_name(original, true)?;"
+    },
+    {
+      "site": 101905,
+      "fileCode": 1,
+      "line": 1905,
+      "source": "book.check_name(original, true)?;"
+    },
+    {
+      "site": 101934,
+      "fileCode": 1,
+      "line": 1934,
+      "source": "book.check_name(target, true)?;"
+    },
+    {
+      "site": 101936,
+      "fileCode": 1,
+      "line": 1936,
+      "source": "book.check_name(original, true)?;"
+    },
+    {
+      "site": 101939,
+      "fileCode": 1,
+      "line": 1939,
+      "source": "book.check_name(source_root, true)?;"
+    },
+    {
+      "site": 102158,
+      "fileCode": 1,
+      "line": 2158,
+      "source": "book.check_name(stage,true)"
+    },
+    {
+      "site": 200030,
+      "fileCode": 2,
+      "line": 30,
+      "source": "book.check_name(n,!directory)?;"
+    },
+    {
+      "site": 200054,
+      "fileCode": 2,
+      "line": 54,
+      "source": "book.check_name(n,true)?;Ok(Some((n,bytes)))"
+    },
+    {
+      "site": 200274,
+      "fileCode": 2,
+      "line": 274,
+      "source": "book.check_name(n,true)?;"
+    },
+    {
+      "site": 200281,
+      "fileCode": 2,
+      "line": 281,
+      "source": "book.clock()?;book.check_name(n,true)"
+    },
+    {
+      "site": 200306,
+      "fileCode": 2,
+      "line": 306,
+      "source": "book.protected(n,false,Some(mode))?;book.check_name(from,false)?;book.check_name(to,false)?;"
+    },
+    {
+      "site": 200511,
+      "fileCode": 2,
+      "line": 511,
+      "source": "book.check_name(stage,false)?;Ok(census)"
+    },
+    {
+      "site": 300173,
+      "fileCode": 3,
+      "line": 173,
+      "source": "book.check_name(original,true)?;Ok(Some(identity))"
+    },
+    {
+      "site": 300189,
+      "fileCode": 3,
+      "line": 189,
+      "source": "book.check_name(reader,true)?;Ok((hash(&raw),raw.len(),mode))"
+    },
+    {
+      "site": 300569,
+      "fileCode": 3,
+      "line": 569,
+      "source": "book.absent(self.root,paths::APP_NAME)?;book.check_name(writer,true)?;"
+    },
+    {
+      "site": 300625,
+      "fileCode": 3,
+      "line": 625,
+      "source": "book.check_name(self.stage.original,true)?;book.protected(self.stage.original,true,Some(0o700))?;"
+    },
+    {
+      "site": 300735,
+      "fileCode": 3,
+      "line": 735,
+      "source": "let result=f(book,&index);held_bytes(book,reader,&raw)?;book.check_name(release,true)?;result"
+    },
+    {
+      "site": 301206,
+      "fileCode": 3,
+      "line": 1206,
+      "source": "book.check_name(original,true)"
+    },
+    {
+      "site": 301231,
+      "fileCode": 3,
+      "line": 1231,
+      "source": "book.clock()?;book.check_name(root,false)?;"
+    },
+    {
+      "site": 301236,
+      "fileCode": 3,
+      "line": 1236,
+      "source": "book.check_name(original,true)?;book.protected(original,directory,Some(mode))?;"
+    },
+    {
+      "site": 301255,
+      "fileCode": 3,
+      "line": 1255,
+      "source": "book.absent(root,source)?;book.persist(root,false)?;book.check_name(original,true)?;book.clock()"
+    },
+    {
+      "site": 400014,
+      "fileCode": 4,
+      "line": 14,
+      "source": "book.check_name(n,true)?;book.protected(n,true,Some(0o555))?;"
+    },
+    {
+      "site": 400058,
+      "fileCode": 4,
+      "line": 58,
+      "source": "book.check_name(original,true)?;book.forward_close(original,\"fresh-app-anchor-close\")?;source.post(book)"
+    },
+    {
+      "site": 400266,
+      "fileCode": 4,
+      "line": 266,
+      "source": "book.check_name(original,true)?;book.forward_close(original,\"fresh-census-anchor-close\")?;"
+    },
+    {
+      "site": 400569,
+      "fileCode": 4,
+      "line": 569,
+      "source": "book.check_name(root,false)?;book.protected(root,true,Some(0o755))?;"
+    },
+    {
+      "site": 400585,
+      "fileCode": 4,
+      "line": 585,
+      "source": "retained_root_identity(book,self.root)?;book.check_name(self.child,true)?;"
+    },
+    {
+      "site": 400964,
+      "fileCode": 4,
+      "line": 964,
+      "source": "book.check_name(original,true)"
+    },
+    {
+      "site": 401022,
+      "fileCode": 4,
+      "line": 1022,
+      "source": "book.check_name(self.root,false)?;book.protected(self.root,true,Some(0o755))?;"
+    },
+    {
+      "site": 401364,
+      "fileCode": 4,
+      "line": 1364,
+      "source": "book.check_name(actual,false)?;book.check_name(expected,false)?;"
+    },
+    {
+      "site": 500223,
+      "fileCode": 5,
+      "line": 223,
+      "source": "book.protected(root,true,Some(0o755))?;book.check_name(root,true)?;"
+    },
+    {
+      "site": 500232,
+      "fileCode": 5,
+      "line": 232,
+      "source": "book.check_name(original,true)?;Ok(original)"
+    },
+    {
+      "site": 500239,
+      "fileCode": 5,
+      "line": 239,
+      "source": "book.protected(self.root,true,Some(0o755))?;book.check_name(self.root,false)?;"
+    },
+    {
+      "site": 500241,
+      "fileCode": 5,
+      "line": 241,
+      "source": "book.check_name(original,true)?;book.protected(original,false,Some(0o444))?;"
+    },
+    {
+      "site": 500249,
+      "fileCode": 5,
+      "line": 249,
+      "source": "book.check_name(original,true)?;book.check_name(acquired,true)?;"
+    },
+    {
+      "site": 500398,
+      "fileCode": 5,
+      "line": 398,
+      "source": "book.check_name(support,false)?;"
+    },
+    {
+      "site": 500426,
+      "fileCode": 5,
+      "line": 426,
+      "source": "book.check_name(reader,true)?;book.forward_close(reader,\"app-absence-census-close\")?;"
+    },
+    {
+      "site": 500427,
+      "fileCode": 5,
+      "line": 427,
+      "source": "book.check_name(support,false)?;"
+    },
+    {
+      "site": 500435,
+      "fileCode": 5,
+      "line": 435,
+      "source": "book.check_name(n,false)?;book.protected_as(n,true,None,role)?;"
+    },
+    {
+      "site": 500443,
+      "fileCode": 5,
+      "line": 443,
+      "source": "book.protected(private,true,Some(0o700))?;book.check_name(private,false)?;"
+    },
+    {
+      "site": 500604,
+      "fileCode": 5,
+      "line": 604,
+      "source": "book.protected(root,true,Some(0o755))?;book.check_name(root,true)?;"
+    },
+    {
+      "site": 500687,
+      "fileCode": 5,
+      "line": 687,
+      "source": "maintenance::app_absence_state_post(book,&observed)?;book.check_name(retained,true)?;"
+    },
+    {
+      "site": 501261,
+      "fileCode": 5,
+      "line": 1261,
+      "source": "admission.post(book,true)?;book.check_name(retained,true)?;"
+    }
+  ],
+  "siteEncoding": "fileCode * 100000 + one-based source line; lines 1..99999 only",
+  "fileCodes": {
+    "0": "desktop/src-tauri/src/bin/macos_install.rs",
+    "1": "desktop/src-tauri/src/macos_applications_native.rs",
+    "2": "desktop/src-tauri/src/macos_noop_recovery_native.rs",
+    "3": "desktop/src-tauri/src/macos_restore_recovery_native.rs",
+    "4": "desktop/src-tauri/src/macos_fresh_conservation_native.rs",
+    "5": "desktop/src-tauri/src/macos_app_absence_fixture.rs"
+  },
+  "siteSourcePins": [
+    {
+      "path": "desktop/src-tauri/src/bin/macos_install.rs",
+      "bytes": 1909514,
+      "sha256": "02c7731145b8723000dfe640b6f1b4b4f5cd4bcb9454743691aa3c00525f8710"
+    },
+    {
+      "path": "desktop/src-tauri/src/macos_applications_native.rs",
+      "bytes": 133358,
+      "sha256": "ab23e03fe625fefbdcb78b31da47a5f38c1008c67024a41a575d5880890425f2"
+    },
+    {
+      "path": "desktop/src-tauri/src/macos_noop_recovery_native.rs",
+      "bytes": 71221,
+      "sha256": "40d53ba7c1c7f91c032803d00f932c23841d897b845eec01d98971029c6c1d35"
+    },
+    {
+      "path": "desktop/src-tauri/src/macos_restore_recovery_native.rs",
+      "bytes": 141241,
+      "sha256": "ece384fe5c9fc1dbf9eff84e88f725cedff29bab5218ba152be7e983094f1f82"
+    },
+    {
+      "path": "desktop/src-tauri/src/macos_fresh_conservation_native.rs",
+      "bytes": 108930,
+      "sha256": "ce41e2a1d11ab5e7f9033f0083c4f1fdede47b80e8b85b4702e1923463d7950e"
+    },
+    {
+      "path": "desktop/src-tauri/src/macos_app_absence_fixture.rs",
+      "bytes": 88110,
+      "sha256": "829d41d42855b971f1a8d211d722b4f7cd8b82f62d0559065dba4aff9cbf7050"
+    }
+  ]
+}

@@ -1,0 +1,87 @@
+{
+  "schemaVersion": 1,
+  "state": "corrected test-only successor source for peer; no v3 compiler run",
+  "baseCommit": "5c53b796a40bf788ca553ae2445e82a3e5edb87a",
+  "baseTree": "f45d4488fa25c223c99280ead38c2d4080b60298",
+  "sourceCheckout": "/Users/abdelrahman/Projects/mobile-release-kit-macos-20261024-evidence/approved-014-validation-v98t43ls/native-correspondence-diagnostic-j0va6s_q/v3/checkout",
+  "feature": "macos-installed-correspondence-diagnostic",
+  "binary": "mrk-macos-install",
+  "ordinaryPackageSha256": "61dbcceb17d7ffb9f4351261e518192f38fc2b719a0e508b783b6948f9a5cffd",
+  "payloadBindingSourceCommit": "5c53b796a40bf788ca553ae2445e82a3e5edb87a",
+  "diagnosticSourceIsOrdinaryProduct": false,
+  "files": [
+    {
+      "path": "desktop/src-tauri/Cargo.toml",
+      "bytes": 11912,
+      "sha256": "ccb2428cfd90a0d06c6425e5d126ab83864ff8a870228b7433674072aaaefa48"
+    },
+    {
+      "path": "desktop/src-tauri/src/bin/macos_install.rs",
+      "bytes": 1909514,
+      "sha256": "02c7731145b8723000dfe640b6f1b4b4f5cd4bcb9454743691aa3c00525f8710"
+    },
+    {
+      "path": "desktop/src-tauri/src/macos_install_correspondence_diagnostic.rs",
+      "bytes": 8958,
+      "sha256": "916c1630ac3d43db2c2bb951b33770d111904d85b4f623b90e546c1733ea5c89"
+    },
+    {
+      "path": "desktop/src-tauri/src/macos_noop_recovery_native.rs",
+      "bytes": 71221,
+      "sha256": "40d53ba7c1c7f91c032803d00f932c23841d897b845eec01d98971029c6c1d35"
+    }
+  ],
+  "artifacts": [
+    {
+      "path": "diagnostic-source.patch",
+      "bytes": 39599,
+      "sha256": "4d411e35d6ce91a423110a059cae213e4c5fe18e112412d2c53544bdf1774c94"
+    },
+    {
+      "path": "diagnostic-legend.json",
+      "bytes": 43459,
+      "sha256": "d07e023fc19e0361145f983d3e0098f4ceb86d3059dd25b9b11732d5782abc85"
+    }
+  ],
+  "bounds": {
+    "retainedPerInstallContextBytesMaximum": 40,
+    "wireIntegers": 9,
+    "wireExtraReserve": 128,
+    "wireEncodeHintHeadroomThreshold": 1920,
+    "unchangedControlLimit": 2048,
+    "unchangedResultLimit": 65536,
+    "contextLineBytesMaximum": 256,
+    "contextLinesMaximum": 2,
+    "unavailableLineExclusiveWithWriterContext": true
+  },
+  "newChecks": [
+    "six unchanged std-only DATA tests already PASS; do not replay",
+    "two new integration tests only with actual historical cfg(test) fixtures",
+    "one diagnostic-only installer release build"
+  ],
+  "validationNotRun": [
+    "v3 cargo focused test",
+    "diagnostic cargo release build",
+    "native control"
+  ],
+  "supersedesManifestSha256": "aec340727c60a2c9860dd0c86acba4a3087ce5a86639fc96fb2cbaac0c93ca4b",
+  "sourceRevision": 3,
+  "localAvailableToolchainProposed": "1.98.1",
+  "declaredSourceToolchain": "1.98.0",
+  "v2SourcePreserved": "/Users/abdelrahman/Projects/mobile-release-kit-macos-20261024-evidence/approved-014-validation-v98t43ls/native-correspondence-diagnostic-j0va6s_q/checkout",
+  "v2CompilerFailure": {
+    "path": "/Users/abdelrahman/Projects/mobile-release-kit-macos-20261024-evidence/approved-014-validation-v98t43ls/native-correspondence-diagnostic-j0va6s_q/compiler-once/two-integration-tests-original-return.json",
+    "bytes": 4606,
+    "sha256": "24717cee4a773e17d1589e2d81f95e3c4c6e195ce580e68b12f610d11ce45d29"
+  },
+  "dataProofReused": {
+    "path": "/Users/abdelrahman/Projects/mobile-release-kit-macos-20261024-evidence/approved-014-validation-v98t43ls/native-correspondence-diagnostic-j0va6s_q/six-data-once/result.json",
+    "bytes": 7184,
+    "sha256": "810290137e37744abd33b2a7e25920afa28c5bfd56e009d5adcbdd0229d3b9e6"
+  },
+  "testOnlyCorrection": {
+    "path": "desktop/src-tauri/src/macos_noop_recovery_native.rs",
+    "line": 939,
+    "change": "Add conservation:None to existing cfg(test) RemovalSnapshotCapture initializer, inline; no production behavior or line shifts."
+  }
+}

@@ -1,0 +1,118 @@
+{
+  "compiler": {
+    "cargoArtifactFresh": false,
+    "declaredSourceToolchain": "1.98.0",
+    "features": [
+      "macos-installed-correspondence-diagnostic",
+      "macos-installed-installer"
+    ],
+    "originals": [
+      {
+        "closureKnown": true,
+        "evidence": {
+          "bytes": 5094,
+          "sha256": "a525d54d2c9f32b34b9f41a890efd62c871a0cbe15def5c16577159402c8b0fd"
+        },
+        "label": "two-integration-tests",
+        "peakAggregateRssBytes": 973045760,
+        "return": 0,
+        "streams": {
+          "stderr": {
+            "observedBytes": 278679,
+            "observedSha256": "acf9f5c1ff9bf56bc81083c9f5ebcfb23870c9c2d3b62d8c299f9ba131c425fd",
+            "retainedBytes": 278679,
+            "retainedSha256": "acf9f5c1ff9bf56bc81083c9f5ebcfb23870c9c2d3b62d8c299f9ba131c425fd"
+          },
+          "stdout": {
+            "observedBytes": 131698,
+            "observedSha256": "8a97a853bc796ef70159c7211e6d14b566813d5d76dcd22719c993baccedaf93",
+            "retainedBytes": 131698,
+            "retainedSha256": "8a97a853bc796ef70159c7211e6d14b566813d5d76dcd22719c993baccedaf93"
+          }
+        }
+      },
+      {
+        "closureKnown": true,
+        "evidence": {
+          "bytes": 4579,
+          "sha256": "3b39727fb60bb068cb9c15340fb08f614e011775d77da779dff1638a52497ab4"
+        },
+        "label": "diagnostic-release-build",
+        "peakAggregateRssBytes": 1017544704,
+        "return": 0,
+        "streams": {
+          "stderr": {
+            "observedBytes": 272014,
+            "observedSha256": "e281db025797977f7c9d89ec300b2f516f832fc973a60293abd49e936e2ff32a",
+            "retainedBytes": 272014,
+            "retainedSha256": "e281db025797977f7c9d89ec300b2f516f832fc973a60293abd49e936e2ff32a"
+          },
+          "stdout": {
+            "observedBytes": 131302,
+            "observedSha256": "9675e886fef6cef9c2122d157ac99caa5cbe9c5cbdd75f4080a89963d12a78dd",
+            "retainedBytes": 131302,
+            "retainedSha256": "9675e886fef6cef9c2122d157ac99caa5cbe9c5cbdd75f4080a89963d12a78dd"
+          }
+        }
+      }
+    ],
+    "payloadBinding": {
+      "inventorySha256": "460d915d828c5639e28366970d5167cc3723edcde96a97ac1b56fe9df9270b9d",
+      "ordinaryPackageSha256": "61dbcceb17d7ffb9f4351261e518192f38fc2b719a0e508b783b6948f9a5cffd",
+      "ordinarySourceCommit": "5c53b796a40bf788ca553ae2445e82a3e5edb87a",
+      "preparedBindingSha256": "446ba22506e184eb138c6b7cf84e2d608fd6fe78cf3cf035028dd175b4c0fb0c",
+      "protocolSha256": "083e6afae3e329c4e0d81bad00dd0c9920f77491b38ce0d23aa602996f4c4bf5",
+      "runtimeManifestSha256": "3f79454e3ad2969c30ffd38c434cece202c200983368b0a020a9e0d83d482f36"
+    },
+    "plan": {
+      "bytes": 14374,
+      "sha256": "225cb6375cbec3ec53e171a53940e4c46a6a6fe18b71dc1b65991775f98e0722"
+    },
+    "releaseProfile": {
+      "debug_assertions": false,
+      "debuginfo": 0,
+      "opt_level": "3",
+      "overflow_checks": false,
+      "test": false
+    },
+    "result": {
+      "bytes": 13046,
+      "sha256": "320924c2b75933efda3f8dbf439761d66abae58c46abbec330b06081ffea1071"
+    },
+    "sourceRoster": {
+      "bytes": 693922,
+      "sha256": "c7147d8fa97ca56f25df0ccd16fd71fe2213a94d3b2cc891bfd6ff39179d0ebf"
+    },
+    "toolchain": "1.98.1",
+    "toolchainReason": "Unchanged native ARM64 clock guard admits1.98.1 only; std-only DATA proof used1.98.0."
+  },
+  "controlManifestSha256": "6a7e6e8aa09868e76443ed3e54563d6a6d99dc64839d2a263d23dc9fd4ac61e3",
+  "controlSourceSha256": "02c7731145b8723000dfe640b6f1b4b4f5cd4bcb9454743691aa3c00525f8710",
+  "controls": {
+    "diagnostic": {
+      "bytes": 3972608,
+      "compilerOriginalClosureKnown": true,
+      "compilerOriginalReturn": 0,
+      "path": "diagnostic/mrk-macos-install",
+      "sha256": "1096f79c3bf063fd2e0018471a07137ceec3848b0a1f4d0e96240d7dbaea3674"
+    }
+  },
+  "diagnosticLegend": {
+    "bytes": 43459,
+    "sha256": "d07e023fc19e0361145f983d3e0098f4ceb86d3059dd25b9b11732d5782abc85"
+  },
+  "diagnosticSourceCommit": "179f7de2e53795080070286b92aac880d6f5725c",
+  "diagnosticSourceIsOrdinaryProduct": false,
+  "diagnosticSourceManifest": {
+    "bytes": 3799,
+    "sha256": "6a7e6e8aa09868e76443ed3e54563d6a6d99dc64839d2a263d23dc9fd4ac61e3"
+  },
+  "diagnosticSourceTree": "ac00c4f7caee0ff74f7cdd1477f88428a164510f",
+  "nativeInstallerExecutedLocally": false,
+  "ordinaryPackageSha256": "61dbcceb17d7ffb9f4351261e518192f38fc2b719a0e508b783b6948f9a5cffd",
+  "productSource": "5c53b796a40bf788ca553ae2445e82a3e5edb87a",
+  "productTree": "f45d4488fa25c223c99280ead38c2d4080b60298",
+  "schemaVersion": 1,
+  "scope": "nonshipping-correspondence-diagnostic-control",
+  "shippingQualification": false
+}
