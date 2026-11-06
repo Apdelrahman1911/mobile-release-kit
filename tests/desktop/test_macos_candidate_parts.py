@@ -1,6 +1,7 @@
 """Intermediate provenance and retry planning DATA; no hosted/native calls."""
 import copy
 import json
+import os
 import unittest
 
 from desktop.tools import macos_candidate_parts as P
@@ -150,6 +151,177 @@ class CandidatePartsDataTests(unittest.TestCase):
         for body in (b'{"a":1,"a":2}\n', b'{"a":NaN}\n', b'{}', b'{}\n ',
                      b'x' * (P.MANIFEST_LIMIT + 1), b''):
             with self.assertRaises(ValueError): P.decode(body)
+
+
+"""Check actual packaging source bytes against their unchanged source readers.
+
+This is DATA-only: parse source, never import packaging or execute a native tool.
+The early candidate DATA job runs these checks before compilation or signing.
+"""
+import ast
+import hashlib
+from pathlib import Path
+import stat
+import unittest
+
+ROOT = Path(__file__).absolute().parents[2]
+TOOLS = ROOT / "desktop/tools"
+KIB = 1024
+MIB = 1024 * KIB
+
+
+def literal(node, names):
+    if isinstance(node, ast.Constant) and type(node.value) in (str, int):
+        return node.value
+    if isinstance(node, ast.Name):
+        return names[node.id]
+    if isinstance(node, (ast.Tuple, ast.List)):
+        return tuple(literal(item, names) for item in node.elts)
+    if isinstance(node, ast.BinOp):
+        left, right = literal(node.left, names), literal(node.right, names)
+        if isinstance(node.op, ast.Add):
+            return left + right
+        if isinstance(node.op, ast.Mult):
+            return left * right
+        if isinstance(node.op, ast.LShift):
+            return left << right
+    if (isinstance(node, ast.IfExp) and isinstance(node.test, ast.Compare)
+            and len(node.test.ops) == 1 and isinstance(node.test.ops[0], ast.Eq)):
+        same = literal(node.test.left, names) == literal(node.test.comparators[0], names)
+        return literal(node.body if same else node.orelse, names)
+    raise ValueError("unsupported source-reader expression")
+
+
+def assignments(tree, names=None):
+    result = dict(names or {})
+    for node in ast.walk(tree):
+        if isinstance(node, ast.Assign) and len(node.targets) == 1 and isinstance(node.targets[0], ast.Name):
+            try:
+                result[node.targets[0].id] = literal(node.value, result)
+            except (KeyError, ValueError, TypeError):
+                pass
+    return result
+
+
+def function(tree, name):
+    selected = [node for node in ast.walk(tree) if isinstance(node, ast.FunctionDef) and node.name == name]
+    if len(selected) != 1:
+        raise ValueError("one fixed source-reader function required: " + name)
+    return selected[0]
+
+
+def source_calls(tree):
+    return [node for node in ast.walk(tree) if isinstance(node, ast.Call)
+            and isinstance(node.func, ast.Attribute) and node.func.attr == "source_original"]
+
+
+def loop_readers(tree, name, names):
+    method = function(tree, name)
+    names = assignments(method, names)
+    rows = []
+    for loop in (node for node in ast.walk(method) if isinstance(node, ast.For)):
+        try:
+            items = literal(loop.iter, names)
+        except (KeyError, ValueError, TypeError):
+            continue
+        for item in items:
+            current = dict(names)
+            targets = (loop.target,) if isinstance(loop.target, ast.Name) else loop.target.elts
+            values = (item,) if isinstance(loop.target, ast.Name) else item
+            current.update((target.id, value) for target, value in zip(targets, values))
+            for call in source_calls(loop):
+                try:
+                    path, cap = literal(call.args[0], current), literal(call.args[2], current)
+                except (KeyError, ValueError, TypeError, IndexError):
+                    continue
+                if isinstance(path, str) and path.startswith("desktop/tools/") and path.endswith(".py"):
+                    rows.append((path, cap))
+    return rows
+
+
+class MacPackagingSourceLimits(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.helper_body = cls.read_source("desktop/tools/macos_android_helper_package.py", MIB)
+        cls.helper = ast.parse(cls.helper_body)
+        cls.names = assignments(cls.helper)
+
+    @staticmethod
+    def read_source(relative, cap):
+        path = ROOT / relative
+        before = path.lstat()
+        if not stat.S_ISREG(before.st_mode) or not 0 < before.st_size <= cap:
+            raise AssertionError(f"{relative}: {before.st_size} bytes exceeds source reader {cap}")
+        def identity(info):
+            return (info.st_dev, info.st_ino, info.st_mode, info.st_uid, info.st_gid,
+                    info.st_nlink, info.st_size, info.st_mtime_ns, info.st_ctime_ns,
+                    getattr(info, "st_flags", 0))
+        with path.open("rb") as original:
+            if identity(os.fstat(original.fileno())) != identity(before):
+                raise AssertionError("source changed before DATA read: " + relative)
+            body = original.read(cap + 1)
+            if identity(os.fstat(original.fileno())) != identity(before):
+                raise AssertionError("source changed during DATA read: " + relative)
+        if len(body) != before.st_size or identity(path.lstat()) != identity(before):
+            raise AssertionError("source changed after DATA read: " + relative)
+        return body
+
+    def test_all_three_packaging_stager_readers_and_helper_fit(self):
+        expected = [("desktop/tools/stage_macos_installed.py", 512 * KIB),
+                    ("desktop/tools/macos_android_helper_package.py", MIB)]
+        for name in ("notarize_payload", "finalize_image", "finalize_package"):
+            with self.subTest(reader=name):
+                rows = loop_readers(self.helper, name, self.names)
+                self.assertEqual(rows, expected, "source-reader contract changed; audit its real bounds")
+                for path, cap in rows:
+                    self.read_source(path, cap)
+
+    def test_python_and_removal_sibling_source_readers_fit(self):
+        expected = {
+            "python_prepare": [
+                ("macos_python_supplier_transport.py", MIB), ("macos_cpython_orchestrator.py", MIB),
+                ("macos_cpython_source_build.py", MIB), ("macos_cpython_source_probe.py", MIB),
+                ("stage_macos_installed.py", MIB), ("macos_android_helper_package.py", MIB)],
+            "removal_preload": [("macos_xcode_host_preparation.py", 512 * KIB),
+                                ("macos_normal_ui_runner.py", 512 * KIB)],
+        }
+        for name, wanted in expected.items():
+            with self.subTest(reader=name):
+                rows = loop_readers(self.helper, name, self.names)
+                self.assertEqual(rows, [("desktop/tools/" + path, cap) for path, cap in wanted])
+                for path, cap in rows:
+                    self.read_source(path, cap)
+
+    def test_direct_host_and_setup_source_readers_fit(self):
+        for name, role, path, cap in (
+            ("removal_baseline_admit", "removal-baseline-host-source", "macos_xcode_host_preparation.py", 512 * KIB),
+            ("normal_mount_host", "source-package-mount-host", "macos_xcode_host_preparation.py", 97065),
+            ("verify_xcode_setup_package", "setup-log-reader-source", "stage_macos_installed.py", MIB),
+        ):
+            with self.subTest(reader=name):
+                selected = [call for call in source_calls(function(self.helper, name))
+                            if len(call.args) >= 3 and isinstance(call.args[1], ast.Constant)
+                            and call.args[1].value == role]
+                self.assertEqual(len(selected), 1)
+                call = selected[0]
+                self.assertEqual((literal(call.args[0], self.names), literal(call.args[2], self.names)),
+                                 ("desktop/tools/" + path, cap))
+                body = self.read_source("desktop/tools/" + path, cap)
+                if name == "normal_mount_host":
+                    self.assertEqual(len(body), 97065)
+                    self.assertEqual(hashlib.sha256(body).hexdigest(),
+                                     "ae198b3615450a474d948b32145735bbfa16635fb7871d0ef7c31efdc3bd785e")
+
+    def test_shared_resume_module_roster_including_aqua_fits(self):
+        parsed = ast.parse(self.read_source("desktop/tools/macos_fixed_carrier_resume.py", MIB))
+        names = assignments(parsed)
+        self.assertEqual(names["SOURCE_MODULE_LIMIT"], MIB)
+        rows = names["SOURCE_FILES"]
+        self.assertIn("desktop/tools/macos_aqua_qualification.py", rows)
+        self.assertIn("desktop/tools/stage_macos_installed.py", rows)
+        for path in rows:
+            with self.subTest(source=path):
+                self.read_source(path, names["SOURCE_MODULE_LIMIT"])
 
 
 if __name__ == '__main__':
