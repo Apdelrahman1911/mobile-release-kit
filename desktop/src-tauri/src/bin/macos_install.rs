@@ -2,6 +2,26 @@
 //! into the final app/runtime destinations. One original parent admits the
 //! completed package; its exact self-worker owns the existing copy writer.
 //! No Python, app, daemon or general publisher runs as root.
+// The diagnostic control is an exclusive nonshipping installer build. It
+// preserves the same root entry and payload rules; only bounded failure DATA
+// is added. No ordinary app, remover or existing cut fixture may be unified.
+#[cfg(all(feature="macos-installed-correspondence-diagnostic", any(
+    feature="macos-installed-remover", feature="macos-installed-installer-fixture",
+    feature="macos-installed-removal-abrupt-fixture", feature="macos-installed-removal-observer",
+    feature="macos-installed-app-absence-fixture", feature="macos-installed-observation",
+    feature="macos-installed-restore-app-write-fixture", feature="macos-installed-restore-own-attempt-fixture",
+    feature="macos-installed-restore-stage-move-fixture", feature="desktop-shell", feature="custom-protocol",
+    feature="development-runtime", feature="macos-installed-desktop-image",
+    feature="macos-installed-resident-image", feature="macos-android-registration-helper",
+    feature="macos-package-producer", feature="macos-remove-producer", feature="macos-remove-observer-producer",
+    feature="installed-cli", feature="ubuntu-runtime-publisher", feature="windows-runtime-publisher",
+    feature="macos-xcode-setup", feature="windows-installed-observation"
+)))]
+compile_error!("correspondence diagnostic requires its exclusive nonshipping installer role");
+#[cfg(feature="macos-installed-correspondence-diagnostic")]
+#[path = "../macos_install_correspondence_diagnostic.rs"]
+mod correspondence_diagnostic;
+
 // A separately compiled test role must never enable a shipping or other
 // native observation/producer role through Cargo feature unification.
 #[cfg(all(feature="macos-installed-app-absence-fixture", any(
@@ -177,6 +197,8 @@ mod installer {
     }
     struct Install {
         originals: Vec<Original>, creations: Vec<Creation>, end: Instant, unknown: bool,
+        #[cfg(feature="macos-installed-correspondence-diagnostic")]
+        correspondence_first: std::cell::Cell<Option<crate::correspondence_diagnostic::Context>>,
         // Fixed bounded native-only mappings enrolled after complete generation
         // audit. Never read from worker DATA or persisted as new authority.
         legacy_volumes: [Option<mobile_release_desktop::macos_persistent_identity::LegacyVolumeBindingData>;
@@ -580,6 +602,8 @@ mod installer {
     impl Install {
         fn new() -> Self {
             Self { originals: Vec::new(), creations: Vec::new(), end: Instant::now()+Duration::from_secs(120), unknown:false,
+                #[cfg(feature="macos-installed-correspondence-diagnostic")]
+                correspondence_first: std::cell::Cell::new(None),
                 legacy_volumes:[None;mobile_release_desktop::macos_install_maintenance::PREDECESSOR_LIMIT+1],
                 worker_deadline:None,worker_stderr_is_gate:false,worker_go_eof:false,payload_written:0,payload_write_calls:0,launcher_writes:applications::WriteCounts::default(),launcher_effects:None,
                 removal_live_reserved:0,removal_control_reserved:0,removal_original_storage_reserved:0,removal_snapshot_capture:None,removal_snapshot_work_reserved:false,archived_install_reserved:false,removal_payload_plan:None,removal_observation_control:None,removal_observation_reserved:0,removal_archive_scan:None,
@@ -724,11 +748,45 @@ mod installer {
             self.originals[n].identity = Some(Identity::of(&stat::fstat(self.fd(n)?).map_err(|_| "created-stat")?));
             self.protected(n, false, Some(0o600))?; self.check_name(n, true)?; Ok(n)
         }
+        #[cfg(feature="macos-installed-correspondence-diagnostic")]
+        fn remember_correspondence(&self,n:usize,exact:bool,caller:&'static std::panic::Location<'static>,pass:u8,
+            expected:Identity,actual:Identity,named:Identity) {
+            use crate::correspondence_diagnostic::{Context,NO_PARENT,mismatch,retain_first,source_site};
+            if self.correspondence_first.get().is_some() { return; }
+            let Some(site)=source_site(caller.file(),caller.line())else{return;};
+            // Only already-held records and the SAME three sampled Identities.
+            // No fstat, names lookup, native call, clock, path output or retry.
+            let original=&self.originals[n];
+            let role=match original.role {Role::Reader=>0,Role::PayloadWriter=>1,Role::LauncherWriter=>2,
+                Role::MetadataWriter=>3,Role::ReceiptWriter=>4,Role::GateWriter=>5,Role::GateParticipant=>6,
+                Role::ReservationWriter=>7,Role::ReservationParticipant=>8,Role::FreshEnrollmentWriter=>9};
+            let category=match original.name.as_str() {
+                "/"=>1,"Library"=>2,"Application Support"=>3,"MobileReleaseKit"=>4,
+                "versions"=>5,"input"=>6,"mrk-macos-install"=>7,"Contents"=>8,"MacOS"=>9,
+                "request.json"=>10,"install-inventory.json"=>11,
+                name if name==paths::MAINTENANCE_GATE_NAME=>12,
+                name if name==paths::REGISTRATION_GATE_NAME=>13,
+                name if name==paths::APP_NAME=>14,
+                name if name.starts_with(".install-")=>15,_=>0,
+            };
+            let fields=|id:Identity| [id.dev as i128,id.ino as i128,(id.mode&0o170000) as i128,
+                (id.mode&!0o170000) as i128,id.uid as i128,id.gid as i128,id.links as i128,
+                id.size as i128,id.mtime as i128,id.mtime_ns as i128,id.ctime as i128,id.ctime_ns as i128];
+            let row=[site as u64,pass as u64,role,n as u64,
+                original.parent.map_or(NO_PARENT as u64,|v|v as u64),category,u64::from(exact),
+                mismatch(fields(actual),fields(named)) as u64,mismatch(fields(actual),fields(expected)) as u64];
+            retain_first(&self.correspondence_first,Context::from_wire(&row,installation_record::ORIGINAL_LIMIT));
+        }
+        #[cfg_attr(feature="macos-installed-correspondence-diagnostic",track_caller)]
         fn check_name(&self, n: usize, exact: bool) -> Result<()> {
             self.clock()?;
             let original = &self.originals[n]; let expected = self.identity(n)?;
             let actual = Identity::of(&stat::fstat(self.fd(n)?).map_err(|_| "original-stat")?);
             let named = Identity::of(&self.named(original.parent, &original.name).map_err(|_| "original-name")?);
+            #[cfg(feature="macos-installed-correspondence-diagnostic")]
+            if !(actual == named && if exact { actual == expected } else { expected.same_object(actual) }) {
+                self.remember_correspondence(n,exact,std::panic::Location::caller(),1,expected,actual,named);
+            }
             check(actual == named && if exact { actual == expected } else { expected.same_object(actual) }, "original-correspondence")?;
             if original.existing_app_metadata.is_some() {
                 self.existing_app_metadata_post(n,"maintenance-app-attributes")?;
@@ -736,6 +794,10 @@ mod installer {
                 // POST; a pre-read name match cannot cover a later replacement.
                 let actual=Identity::of(&stat::fstat(self.fd(n)?).map_err(|_|"original-stat")?);
                 let named=Identity::of(&self.named(original.parent,&original.name).map_err(|_|"original-name")?);
+                #[cfg(feature="macos-installed-correspondence-diagnostic")]
+                if !(actual==named && if exact {actual==expected}else{expected.same_object(actual)}) {
+                    self.remember_correspondence(n,exact,std::panic::Location::caller(),2,expected,actual,named);
+                }
                 check(actual==named && if exact {actual==expected}else{expected.same_object(actual)},"original-correspondence")?;
                 self.clock()?;
             }
@@ -13652,6 +13714,8 @@ mod installer {
                 // The legacy-only Instant field is an inert marker here and
                 // cannot select a worker clock or its private result transport.
                 Self { originals: Vec::new(), creations: Vec::new(), end: Instant::now(), unknown:false,
+                    #[cfg(feature="macos-installed-correspondence-diagnostic")]
+                    correspondence_first:std::cell::Cell::new(None),
                     legacy_volumes:[None;mobile_release_desktop::macos_install_maintenance::PREDECESSOR_LIMIT+1],
                     worker_deadline:Some(deadline),worker_stderr_is_gate:stderr_is_gate,worker_go_eof:false,
                     fresh_birth_control_reserved:false,fresh_outputs:None,fresh_census_metadata:Vec::new(),fresh_conservation_projection:None,
@@ -14249,6 +14313,8 @@ mod installer {
             exit: i32, state: String, originals: bool, payload: bool, verified: bool,
             runtime: String, app: String, timely: bool, unknown: bool, writes: u64, bytes: u64,
             reason: Option<String>, maintenance: Option<MaintenanceReply>,
+            #[cfg(feature="macos-installed-correspondence-diagnostic")]
+            correspondence: Option<crate::correspondence_diagnostic::Context>,
         }
         impl PreExit {
             fn from_original(book: &Install, result: &FinalResult) -> Self {
@@ -14258,6 +14324,8 @@ mod installer {
                     timely:result.deadline_met,unknown:book.unknown || book.worker_deadline.as_ref().is_some_and(Deadline::is_unknown),
                     writes:book.payload_write_calls,bytes:book.payload_written,
                     reason:result.reason.map(|label| closed_reason(label).to_owned()),
+                    #[cfg(feature="macos-installed-correspondence-diagnostic")]
+                    correspondence:book.correspondence_first.get(),
                     maintenance:book.maintenance.as_ref().map(|effects|MaintenanceReply::from_original(effects,book,result.deadline_met)) }
             }
             fn data(&self, invocation: &str, init_sha: &str) -> Value {
@@ -14268,7 +14336,34 @@ mod installer {
                     "payloadWriteCount":self.writes,"payloadWriteBytes":self.bytes,
                     "stdoutClosed":false,"inheritedGateClosed":false,"selfJoined":false});
                 if let Some(maintenance) = &self.maintenance { value["maintenance"] = maintenance.data(); }
+                #[cfg(feature="macos-installed-correspondence-diagnostic")]
+                if self.exit!=0 && self.reason.as_deref()==Some("original-correspondence") {
+                    // Preserve both original frame bounds, including a failure
+                    // arriving before READY. Conservatively omit hints above
+                    // CONTROL_LIMIT even when a later result could be larger.
+                    let fits=crate::correspondence_diagnostic::FrameHeadroom::new(CONTROL_LIMIT.min(RESULT_LIMIT))
+                        .is_some_and(|mut sink|serde_json::to_writer(&mut sink,&value).is_ok());
+                    if fits {if let Some(context)=self.correspondence {value["correspondenceDiagnostic"]=json!(context.wire());}}
+                }
                 value
+            }
+            #[cfg(feature="macos-installed-correspondence-diagnostic")]
+            fn diagnostic_fields(value:&Value)->Option<crate::correspondence_diagnostic::Context> {
+                let values=value.get("correspondenceDiagnostic")?.as_array()?;
+                if values.len()!=9{return None;}
+                let mut row=[0u64;9];for(slot,value)in row.iter_mut().zip(values){*slot=value.as_u64()?;}
+                crate::correspondence_diagnostic::Context::from_wire(&row,installation_record::ORIGINAL_LIMIT)
+            }
+            #[cfg(feature="macos-installed-correspondence-diagnostic")]
+            fn diagnostic_hint(value:&Value,invocation:&str,init_sha:&str)->Option<crate::correspondence_diagnostic::Context> {
+                // Copy only already-decoded, correlated, failure-only DATA.
+                // This does not parse/admit an outcome, skip READY or create
+                // JoinedWriter authority; all original checks run unchanged.
+                (value["schemaVersion"]==2 && value["kind"]=="pre-exit-writer-result"
+                    && value["invocation"]==invocation && value["initSha256"]==init_sha
+                    && value["reason"]=="original-correspondence"
+                    && value["exitCode"].as_i64().is_some_and(|exit|exit!=0))
+                    .then(||Self::diagnostic_fields(value)).flatten()
             }
             fn parse(value: &Value, invocation: &str, init_sha: &str) -> Result<Self> {
                 let mut keys = vec!["schemaVersion","kind","invocation","initSha256","exitCode","state","reason","originalsClosed",
@@ -14277,6 +14372,13 @@ mod installer {
                 let maintenance = if let Some(value) = value.get("maintenance") {
                     keys.push("maintenance"); Some(MaintenanceReply::parse(value)?)
                 } else { None };
+                #[cfg(feature="macos-installed-correspondence-diagnostic")]
+                let correspondence=if value.get("correspondenceDiagnostic").is_some() {
+                    keys.push("correspondenceDiagnostic");
+                    // An invalid optional diagnostic cannot rewrite the original
+                    // result/refusal. Its bounded fields are never authority.
+                    Self::diagnostic_fields(value)
+                }else{None};
                 object(value,&keys)?;
                 check(value["schemaVersion"] == 2 && value["kind"] == "pre-exit-writer-result"
                     && value["invocation"] == invocation && value["initSha256"] == init_sha
@@ -14290,7 +14392,9 @@ mod installer {
                     timely:boolean("withinOriginalDeadline")?,unknown:boolean("unknown")?,
                     writes:value["payloadWriteCount"].as_u64().ok_or("worker-result-shape")?,
                     bytes:value["payloadWriteBytes"].as_u64().ok_or("worker-result-shape")?,
-                    reason:if value["reason"].is_null() { None } else { Some(text("reason")?) },maintenance };
+                    reason:if value["reason"].is_null() { None } else { Some(text("reason")?) },maintenance,
+                    #[cfg(feature="macos-installed-correspondence-diagnostic")]
+                    correspondence };
                 check(result.reason.as_deref().is_none_or(|label| closed_reason(label) == label)
                     && (result.exit != 0 || result.reason.is_none()), "worker-result-reason")?;
                 for publication in [&result.runtime,&result.app] {
@@ -20248,6 +20352,8 @@ exec ./mrk-macos-remove --fixture-supervise "$1"
             fn drop(&mut self){let _=self.retain_pending();} // memory only, no allocate/clock/native/close
         }
         struct Parent {
+            #[cfg(feature="macos-installed-correspondence-diagnostic")]
+            writer_correspondence:Option<(crate::correspondence_diagnostic::Context,crate::correspondence_diagnostic::Origin)>,
             fresh_birth_ready:Option<FreshParentBirthReady>,
             fresh_recovery:Option<maintenance::fresh_conservation::ConservationAttemptOriginal>,
             fresh_launcher_recovery:Option<applications::FreshRecovery>,
@@ -20286,6 +20392,8 @@ exec ./mrk-macos-remove --fixture-supervise "$1"
                 // input/gate admission. Do not renew it after argument work.
                 deadline.check_work()?;
                 Ok(Self { book:Install::with_worker_deadline(deadline,false),entered:false,fresh_birth_ready:None,fresh_recovery:None,fresh_launcher_recovery:None,
+                    #[cfg(feature="macos-installed-correspondence-diagnostic")]
+                    writer_correspondence:None,
                     command:None,child:None,source:None,invocation:String::new(),init_sha:String::new(),maintenance:None,request_export:None,producer:None,
                     removal:None,removal_observed:None,
                     removal_request:None,
@@ -21269,6 +21377,11 @@ exec ./mrk-macos-remove --fixture-supervise "$1"
                 self.init_sha = hash(&bytes);
                 write_frame(self.book.fd(command_n)?.as_fd(), &init, INIT_LIMIT, self.book.shared_deadline()?, true)?;
                 let ready = read_frame(self.book.fd(output_n)?.as_fd(), CONTROL_LIMIT, self.book.shared_deadline()?)?.0;
+                #[cfg(feature="macos-installed-correspondence-diagnostic")]
+                if self.writer_correspondence.is_none() {
+                    self.writer_correspondence=PreExit::diagnostic_hint(&ready,&self.invocation,&self.init_sha)
+                        .map(|context|(context,crate::correspondence_diagnostic::Origin::WriterReadyFrame));
+                }
                 let worker_command = &ready["writerCommandEndpoint"];
                 let worker_result = &ready["writerResultEndpoint"];
                 pipe_shape(worker_command)?; pipe_shape(worker_result)?;
@@ -21408,6 +21521,11 @@ exec ./mrk-macos-remove --fixture-supervise "$1"
                     Ok(bytes) => bytes, Err(error) => { self.note(error); return Err(error); }
                 };
                 let value = packet(&bytes,RESULT_LIMIT)?;
+                #[cfg(feature="macos-installed-correspondence-diagnostic")]
+                if self.writer_correspondence.is_none() {
+                    self.writer_correspondence=PreExit::diagnostic_hint(&value,&self.invocation,&self.init_sha)
+                        .map(|context|(context,crate::correspondence_diagnostic::Origin::WriterResultFrame));
+                }
                 let outcome = PreExit::parse(&value,&self.invocation,&self.init_sha)?;
                 check(match (&self.maintenance,&outcome.maintenance) {
                     (None,None) => true,
@@ -22275,12 +22393,92 @@ exec ./mrk-macos-remove --fixture-supervise "$1"
                 originals,native,timely,unknown,native_settled) {
                 // One bounded best-effort write; no retry, panic, or success-path output.
                 let _ = std::io::Write::write(&mut std::io::stderr().lock(),line.as_bytes());
+                #[cfg(feature="macos-installed-correspondence-diagnostic")]
+                {
+                    // Same failure/finality gate. The preceding primary reason
+                    // keeps its original precedence. These are first OBSERVED
+                    // mismatches, never claims about that primary cause or a
+                    // successfully joined writer. Never write worker fd2.
+                    use crate::correspondence_diagnostic::Origin;
+                    let parent_context=if parent.errors.first()==Some(&"original-correspondence") {
+                        parent.book.correspondence_first.get().map(|context|(context,Origin::Parent))
+                    }else{None};
+                    for (context,origin) in [parent_context,parent.writer_correspondence].into_iter().flatten() {
+                        if let Some(line)=context.line(origin) {
+                            let _=std::io::Write::write(&mut std::io::stderr().lock(),line.as_bytes());
+                        }
+                    }
+                    if parent.child.is_some() && parent.writer_correspondence.is_none() {
+                        let _=std::io::Write::write(&mut std::io::stderr().lock(),
+                            b"MRK_MACOS_INSTALL_CORRESPONDENCE_DIAGNOSTIC_UNAVAILABLE=origin=writer;basis=no-valid-decoded-hint\n");
+                    }
+                }
             }
             exit
         }
         #[cfg(test)]
         mod tests {
             use super::*;
+            #[cfg(feature="macos-installed-correspondence-diagnostic")]
+            #[test]
+            fn correspondence_diagnostic_transport_is_optional_correlated_and_never_ready_authority() {
+                use crate::correspondence_diagnostic::Context;
+                let invocation="11111111111111111111111111111111";let sha="a".repeat(64);
+                let context=Context::from_wire(&[732,1,0,17,16,0,1,0,1024],installation_record::ORIGINAL_LIMIT).unwrap();
+                let result=PreExit {exit:1,state:"refused-staging-retained".into(),originals:true,payload:true,
+                    verified:false,runtime:"not-attempted".into(),app:"not-attempted".into(),timely:true,
+                    unknown:false,writes:0,bytes:0,reason:Some("original-correspondence".into()),maintenance:None,
+                    correspondence:Some(context)};
+                let value=result.data(invocation,&sha);
+                let parsed=PreExit::parse(&value,invocation,&sha).unwrap();
+                assert_eq!((parsed.exit,parsed.reason.as_deref(),parsed.correspondence),
+                    (1,Some("original-correspondence"),Some(context)));
+                assert_eq!(PreExit::diagnostic_hint(&value,invocation,&sha),Some(context));
+                // A pre-READY outcome can carry a hint but remains invalid as
+                // READY; copying DATA grants no protocol or joined authority.
+                assert!(pipe_shape(&value["writerCommandEndpoint"]).is_err());
+                assert!(value["kind"]!="ready");
+                let mut absent=value.clone();absent.as_object_mut().unwrap().remove("correspondenceDiagnostic");
+                assert!(PreExit::parse(&absent,invocation,&sha).is_ok());
+                for malformed in [Value::Null,json!([1]),json!([732,1,0,17,16,0,1,0,0]),
+                    json!([732,1,0,17,16,0,1,0,"raw-path"])] {
+                    let mut changed=value.clone();changed["correspondenceDiagnostic"]=malformed;
+                    let parsed=PreExit::parse(&changed,invocation,&sha).unwrap();
+                    assert_eq!((parsed.exit,parsed.reason.as_deref(),parsed.correspondence),(1,Some("original-correspondence"),None));
+                }
+                for field in ["schemaVersion","kind","invocation","initSha256","reason","exitCode"] {
+                    let mut changed=value.clone();changed[field]=Value::Null;
+                    assert!(PreExit::diagnostic_hint(&changed,invocation,&sha).is_none());
+                    let mut original=changed.clone();original.as_object_mut().unwrap().remove("correspondenceDiagnostic");
+                    assert_eq!(PreExit::parse(&changed,invocation,&sha).is_ok(),PreExit::parse(&original,invocation,&sha).is_ok());
+                }
+                assert_eq!(completed_reason_data(Some("worker-pipe-shape"),Some("original-correspondence")),Some("worker-pipe-shape"));
+                assert_eq!(completed_reason_data(Some("original-correspondence"),Some("original-correspondence")),Some("original-correspondence"));
+            }
+            #[cfg(feature="macos-installed-correspondence-diagnostic")]
+            #[test]
+            fn correspondence_diagnostic_wire_headroom_preserves_original_frame_bound() {
+                use crate::correspondence_diagnostic::{Context,NO_PARENT,FIELD_MASK,WIRE_EXTRA_LIMIT};
+                let invocation="11111111111111111111111111111111";let sha="a".repeat(64);
+                let context=Context::from_wire(&[599_999,2,9,196_607,NO_PARENT as u64,15,1,FIELD_MASK as u64,FIELD_MASK as u64],
+                    installation_record::ORIGINAL_LIMIT).unwrap();
+                let mut result=PreExit {exit:1,state:"refused-staging-retained".into(),originals:true,payload:true,
+                    verified:false,runtime:"not-attempted".into(),app:"not-attempted".into(),timely:true,
+                    unknown:false,writes:0,bytes:0,reason:Some("original-correspondence".into()),maintenance:None,
+                    correspondence:None};
+                let base=serde_json::to_vec(&result.data(invocation,&sha)).unwrap();
+                result.correspondence=Some(context);
+                let enlarged=serde_json::to_vec(&result.data(invocation,&sha)).unwrap();
+                assert!(enlarged.len()>base.len() && enlarged.len()-base.len()<=WIRE_EXTRA_LIMIT);
+                // Synthetic maximum frame DATA: no native operations or claim
+                // that this synthetic state string is an admitted outcome.
+                result.state.push_str(&"x".repeat(CONTROL_LIMIT-WIRE_EXTRA_LIMIT+1-base.len()));
+                let omitted=result.data(invocation,&sha);
+                assert!(omitted.get("correspondenceDiagnostic").is_none());
+                assert!(frame(&omitted,RESULT_LIMIT).is_ok());
+                result.correspondence=None;
+                assert_eq!(omitted,result.data(invocation,&sha));
+            }
             #[test]
             fn same_absolute_endpoint_reserves_settlement_and_rejects_backwards_or_overflow() {
                 let start = 20 * SECOND; let end = start + TOTAL;
@@ -23125,7 +23323,9 @@ exec ./mrk-macos-remove --fixture-supervise "$1"
                 assert!(packet(br#"{"kind":"go","kind":"go"}"#,CONTROL_LIMIT).is_err());
                 assert!(frame_size(&0u32.to_be_bytes(),CONTROL_LIMIT).is_err());
                 assert!(frame_size(&(CONTROL_LIMIT as u32+1).to_be_bytes(),CONTROL_LIMIT).is_err());
-                let result = PreExit { exit:0,state:"installed".into(),originals:true,payload:true,verified:true,
+                let result = PreExit {
+                    #[cfg(feature="macos-installed-correspondence-diagnostic")]
+                    correspondence:None, exit:0,state:"installed".into(),originals:true,payload:true,verified:true,
                     runtime:"confirmed".into(),app:"confirmed".into(),timely:true,unknown:false,writes:1,bytes:1,reason:None,maintenance:None };
                 let data = result.data(invocation,&sha);
                 assert!(PreExit::parse(&data,invocation,&sha).is_ok());
@@ -23146,7 +23346,9 @@ exec ./mrk-macos-remove --fixture-supervise "$1"
                     (ActionData::SamePackageNoop,"same-package","not-attempted","not-attempted",0),
                     (ActionData::RestoreFixedApp,"restored-app","not-attempted","confirmed",17),
                 ] {
-                    let returned = PreExit { exit:0,state:state.into(),originals:true,payload:true,verified:true,
+                    let returned = PreExit {
+                    #[cfg(feature="macos-installed-correspondence-diagnostic")]
+                    correspondence:None, exit:0,state:state.into(),originals:true,payload:true,verified:true,
                         runtime:runtime.into(),app:app.into(),timely:true,unknown:false,writes,bytes:writes,reason:None,
                         maintenance:Some(MaintenanceReply { action,progress:"recorded".into(),state_published:true,
                             // This bounded frame does not confer StateData or
@@ -23203,7 +23405,9 @@ exec ./mrk-macos-remove --fixture-supervise "$1"
                     let mut changed = value.clone(); changed["runtimePublication"] = json!(if runtime == "confirmed" { "not-attempted" } else { "confirmed" });
                     assert!(PreExit::parse(&changed,invocation,&sha).is_err());
                 }
-                let inverse = PreExit { exit:20,state:"inverse-recorded".into(),originals:true,payload:true,verified:true,
+                let inverse = PreExit {
+                    #[cfg(feature="macos-installed-correspondence-diagnostic")]
+                    correspondence:None, exit:20,state:"inverse-recorded".into(),originals:true,payload:true,verified:true,
                     runtime:"confirmed".into(),app:"confirmed".into(),timely:true,unknown:false,writes:17,bytes:17,
                     reason:Some("other-original-refusal".into()),maintenance:Some(MaintenanceReply { action:ActionData::Update,
                         progress:"inverse-recorded".into(),state_published:true,state_bytes:Some("{}".into()),inverse:true,launcher:None }) };

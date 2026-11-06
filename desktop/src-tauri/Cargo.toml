@@ -98,6 +98,8 @@ development-runtime = []
 ubuntu-runtime-publisher = []
 windows-runtime-publisher = ["mrk-windows-installed-native/runtime-publication"]
 macos-installed-installer = []
+# Exclusive nonshipping first-failure DATA context; no app or alternate Installer route.
+macos-installed-correspondence-diagnostic = ["macos-installed-installer"]
 macos-xcode-setup = ["mrk-macos-installed-native/xcode-setup"]
 # NONSHIPPING: fixed compile-time Restore cuts, no runtime failpoint selector.
 macos-installed-restore-app-write-fixture = ["macos-installed-installer", "mrk-macos-installed-native/installed-restore-cut-fixture"]
