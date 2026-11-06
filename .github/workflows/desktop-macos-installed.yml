@@ -3579,6 +3579,11 @@ jobs:
         uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7
         with:
           python-version: '3.14.7'
+      - name: Check compile failure evidence and timing with source DATA only
+        timeout-minutes: 1
+        shell: bash
+        run: |
+          /Library/Frameworks/Python.framework/Versions/3.14/bin/python3.14 -I -S -B tests/desktop/test_macos_shipping_compile_public_evidence.py
       - name: Select the fixed Node frontend compiler
         uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v5
         with:
@@ -3610,6 +3615,8 @@ jobs:
           retention-days: 7
           path: |
             ${{ steps.compile_work.outputs.root }}/compile-receipt.json
+            ${{ steps.compile_work.outputs.root }}/failed-command.stdout
+            ${{ steps.compile_work.outputs.root }}/failed-command.stderr
 
       - name: Retain the exact unsigned application test executable for separately admitted local DATA checks
         if: success() && github.event_name == 'workflow_dispatch'

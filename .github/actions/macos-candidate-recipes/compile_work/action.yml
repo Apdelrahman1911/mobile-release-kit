@@ -60,8 +60,10 @@ runs:
                           'controller-publication', 'controller-source-copy', 'controller-operation',
                           'cargo-output-bound', 'cargo-line-bound', 'cargo-document', 'cargo-finished',
                           'cargo-facade-count', 'cargo-target-shape', 'cargo-real-facade', 'cargo-app-count',
-                          'cargo-shipping-feature', 'compile-artifact-file', 'compile-artifact-short', 'compile-artifact-post')
-            owner_reasons = ('incomplete-output', 'output-bound', 'protocol-or-ownership',
+                          'cargo-shipping-feature', 'compile-artifact-file', 'compile-artifact-short', 'compile-artifact-post',
+                          'compile-deadline', 'compile-no-work-left', 'compile-original-nonzero', 'compile-original-return')
+            owner_reasons = ('incomplete-output', 'original-deadline', 'incomplete-frame', 'handler-restore',
+                             'output-bound', 'protocol-or-ownership',
                              'command-failed-or-incomplete', 'cleanup-unconfirmed', 'exec-rejected',
                              'stopped-before-exec', 'parent-ended', 'observer-ended', 'fence-collision', 'unknown')
             check(type(value) is dict and type(source) is str and re.fullmatch(r'[0-9a-f]{40}', source)
@@ -76,6 +78,18 @@ runs:
                 facts[name] = value.get(name)
             check(type(facts['shippingGraphCompiled']) is bool
                   and all(facts[name] is False for name in ('installedQualified', 'runtimeQualified', 'launched', 'signed')))
+            def timing(item, role):
+                check(type(item) is dict and set(item) == {'startedAfterMilliseconds', 'elapsedMilliseconds', 'timeoutSeconds'})
+                index = roles.index(role)
+                cap = ({'resident-image-build': 1200, 'shipping-image-build': 1200, 'vault-helper-build': 600,
+                        'installed-cli-build': 900, 'observer-build': 1200, 'application-libtest-build': 1200}[role]
+                       if extended and index >= 6 else 15 if index < 4 else 300 if index == 4 else 180 if index == 5 else 900)
+                started = integer(item['startedAfterMilliseconds'], 0, 7080000 if extended else 1440000)
+                elapsed = item['elapsedMilliseconds']
+                check(elapsed is None or type(elapsed) is int and 0 <= elapsed <= (7080000 if extended else 1440000) - started)
+                return dict(startedAfterMilliseconds=started, elapsedMilliseconds=elapsed,
+                            timeoutSeconds=integer(item['timeoutSeconds'], 1, cap))
+
             rows = value.get('commands')
             check(type(rows) is list and len(rows) <= len(roles))
             commands = []
@@ -89,6 +103,8 @@ runs:
                                      returncode=integer(row.get('returncode'), -(2**31), 2**31 - 1),
                                      stdoutBytes=out, stderrBytes=err,
                                      stdoutSha256=digest(row.get('stdoutSha256')), stderrSha256=digest(row.get('stderrSha256'))))
+                if 'timing' in row:
+                    commands[-1]['timing'] = timing(row['timing'], roles[index])
             inventory = None
             if 'sourceInventoryBytes' in value or 'sourceInventorySha256' in value:
                 inventory = dict(bytes=integer(value.get('sourceInventoryBytes'), 1, 2 * 1024 * 1024),
@@ -109,6 +125,17 @@ runs:
                 failure = dict(stage=stage if stage in stages else 'other',
                                condition=condition if condition in conditions else None if condition is None else 'unclassified',
                                ownerDiagnostic=None)
+                if 'attempt' in item:
+                    attempt = item['attempt']
+                    check(type(attempt) is dict and set(attempt) == {'role', 'resultReturned', 'timing'}
+                          and attempt['role'] == stage and stage in roles and type(attempt['resultReturned']) is bool)
+                    returned = attempt['resultReturned']
+                    check((bool(commands) and commands[-1]['role'] == stage and commands[-1]['returned']
+                           and commands[-1]['capturesSettled']) if returned else len(commands) < len(roles) and roles[len(commands)] == stage)
+                    observed_timing = timing(attempt['timing'], stage)
+                    if returned:
+                        check(commands[-1].get('timing') == observed_timing)
+                    failure['attempt'] = dict(role=stage, resultReturned=returned, timing=observed_timing)
                 if 'ownerDiagnostic' in item:
                     observed = item['ownerDiagnostic']
                     check(type(observed) is dict and type(observed.get('available')) is bool)
@@ -123,6 +150,14 @@ runs:
                         check(mask is None or type(mask) is int and 1 <= mask <= 63)
                         projected.append(dict(kind=row['kind'], reason=row['reason'], ownerFailureMask=mask,
                                               **{key: nullable_bool(row.get(key)) for key in ('dispatched', 'contained', 'cleanupComplete')}))
+                        if 'ownerFinality' in row:
+                            finality = row['ownerFinality']
+                            valid = (type(finality) is list and len(finality) == 5
+                                     and all(type(part) is int for part in finality[:4]) and finality[0] == 1
+                                     and finality[1] in (0, 1) and 0 <= finality[2] <= (1023 if finality[1] == 0 else 1048575)
+                                     and 0 <= finality[3] <= 15 and (finality[4] is None or type(finality[4]) is int
+                                     and finality[1] == 1 and (finality[4] in (0, 32) or 48 <= finality[4] <= 63)))
+                            projected[-1]['ownerFinality'] = list(finality) if valid else None
                     failure['ownerDiagnostic'] = dict(available=observed['available'], typedFacts=projected,
                                                       chainTruncated=nullable_bool(observed.get('chainTruncated')))
             if facts['shippingGraphCompiled']:

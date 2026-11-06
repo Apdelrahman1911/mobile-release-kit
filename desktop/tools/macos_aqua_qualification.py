@@ -4339,7 +4339,8 @@ def _git_read_command_failure(value):
     } and type(value["category"]) is str and value["category"] in (
         "process", "process-cleanup", "process-outcome-unknown")
         and type(value["reason"]) is str and value["reason"] in (
-            "incomplete-output", "original-deadline", "output-bound", "protocol-or-ownership",
+            "incomplete-output", "original-deadline", "incomplete-frame", "handler-restore",
+            "output-bound", "protocol-or-ownership",
             "command-failed-or-incomplete", "cleanup-unconfirmed", "exec-rejected",
             "stopped-before-exec", "parent-ended", "observer-ended", "fence-collision", "unknown")
         and type(value["command"]) is str and value["command"] in (
@@ -7380,6 +7381,8 @@ def _owner_exception_diagnostic(error, owner):
     reason = {
         "owned command produced incomplete output": "incomplete-output",
         "owned command exceeded its original deadline": "original-deadline",
+        "owned command ended with an incomplete frame": "incomplete-frame",
+        "owned command cancellation handlers could not be restored": "handler-restore",
         "owned command output exceeds its bound": "output-bound",
         "owned command protocol or original ownership is incomplete": "protocol-or-ownership",
         "owned command failed, timed out, or produced incomplete output": "command-failed-or-incomplete",

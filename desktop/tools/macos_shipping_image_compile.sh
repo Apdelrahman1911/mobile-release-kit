@@ -41,8 +41,10 @@ def compile_public_data(value, source, run_id, run_attempt):
                   'controller-publication', 'controller-source-copy', 'controller-operation',
                   'cargo-output-bound', 'cargo-line-bound', 'cargo-document', 'cargo-finished',
                   'cargo-facade-count', 'cargo-target-shape', 'cargo-real-facade', 'cargo-app-count',
-                  'cargo-shipping-feature', 'compile-artifact-file', 'compile-artifact-short', 'compile-artifact-post')
-    owner_reasons = ('incomplete-output', 'output-bound', 'protocol-or-ownership',
+                  'cargo-shipping-feature', 'compile-artifact-file', 'compile-artifact-short', 'compile-artifact-post',
+                  'compile-deadline', 'compile-no-work-left', 'compile-original-nonzero', 'compile-original-return')
+    owner_reasons = ('incomplete-output', 'original-deadline', 'incomplete-frame', 'handler-restore',
+                     'output-bound', 'protocol-or-ownership',
                      'command-failed-or-incomplete', 'cleanup-unconfirmed', 'exec-rejected',
                      'stopped-before-exec', 'parent-ended', 'observer-ended', 'fence-collision', 'unknown')
     check(type(value) is dict and type(source) is str and re.fullmatch(r'[0-9a-f]{40}', source)
@@ -57,6 +59,18 @@ def compile_public_data(value, source, run_id, run_attempt):
         facts[name] = value.get(name)
     check(type(facts['shippingGraphCompiled']) is bool
           and all(facts[name] is False for name in ('installedQualified', 'runtimeQualified', 'launched', 'signed')))
+    def timing(item, role):
+        check(type(item) is dict and set(item) == {'startedAfterMilliseconds', 'elapsedMilliseconds', 'timeoutSeconds'})
+        index = roles.index(role)
+        cap = ({'resident-image-build': 1200, 'shipping-image-build': 1200, 'vault-helper-build': 600,
+                'installed-cli-build': 900, 'observer-build': 1200, 'application-libtest-build': 1200}[role]
+               if extended and index >= 6 else 15 if index < 4 else 300 if index == 4 else 180 if index == 5 else 900)
+        started = integer(item['startedAfterMilliseconds'], 0, 7080000 if extended else 1440000)
+        elapsed = item['elapsedMilliseconds']
+        check(elapsed is None or type(elapsed) is int and 0 <= elapsed <= (7080000 if extended else 1440000) - started)
+        return dict(startedAfterMilliseconds=started, elapsedMilliseconds=elapsed,
+                    timeoutSeconds=integer(item['timeoutSeconds'], 1, cap))
+
     rows = value.get('commands')
     check(type(rows) is list and len(rows) <= len(roles))
     commands = []
@@ -70,6 +84,8 @@ def compile_public_data(value, source, run_id, run_attempt):
                              returncode=integer(row.get('returncode'), -(2**31), 2**31 - 1),
                              stdoutBytes=out, stderrBytes=err,
                              stdoutSha256=digest(row.get('stdoutSha256')), stderrSha256=digest(row.get('stderrSha256'))))
+        if 'timing' in row:
+            commands[-1]['timing'] = timing(row['timing'], roles[index])
     inventory = None
     if 'sourceInventoryBytes' in value or 'sourceInventorySha256' in value:
         inventory = dict(bytes=integer(value.get('sourceInventoryBytes'), 1, 2 * 1024 * 1024),
@@ -90,6 +106,17 @@ def compile_public_data(value, source, run_id, run_attempt):
         failure = dict(stage=stage if stage in stages else 'other',
                        condition=condition if condition in conditions else None if condition is None else 'unclassified',
                        ownerDiagnostic=None)
+        if 'attempt' in item:
+            attempt = item['attempt']
+            check(type(attempt) is dict and set(attempt) == {'role', 'resultReturned', 'timing'}
+                  and attempt['role'] == stage and stage in roles and type(attempt['resultReturned']) is bool)
+            returned = attempt['resultReturned']
+            check((bool(commands) and commands[-1]['role'] == stage and commands[-1]['returned']
+                   and commands[-1]['capturesSettled']) if returned else len(commands) < len(roles) and roles[len(commands)] == stage)
+            observed_timing = timing(attempt['timing'], stage)
+            if returned:
+                check(commands[-1].get('timing') == observed_timing)
+            failure['attempt'] = dict(role=stage, resultReturned=returned, timing=observed_timing)
         if 'ownerDiagnostic' in item:
             observed = item['ownerDiagnostic']
             check(type(observed) is dict and type(observed.get('available')) is bool)
@@ -104,6 +131,14 @@ def compile_public_data(value, source, run_id, run_attempt):
                 check(mask is None or type(mask) is int and 1 <= mask <= 63)
                 projected.append(dict(kind=row['kind'], reason=row['reason'], ownerFailureMask=mask,
                                       **{key: nullable_bool(row.get(key)) for key in ('dispatched', 'contained', 'cleanupComplete')}))
+                if 'ownerFinality' in row:
+                    finality = row['ownerFinality']
+                    valid = (type(finality) is list and len(finality) == 5
+                             and all(type(part) is int for part in finality[:4]) and finality[0] == 1
+                             and finality[1] in (0, 1) and 0 <= finality[2] <= (1023 if finality[1] == 0 else 1048575)
+                             and 0 <= finality[3] <= 15 and (finality[4] is None or type(finality[4]) is int
+                             and finality[1] == 1 and (finality[4] in (0, 32) or 48 <= finality[4] <= 63)))
+                    projected[-1]['ownerFinality'] = list(finality) if valid else None
             failure['ownerDiagnostic'] = dict(available=observed['available'], typedFacts=projected,
                                               chainTruncated=nullable_bool(observed.get('chainTruncated')))
     if facts['shippingGraphCompiled']:
@@ -154,7 +189,8 @@ CAPTURE = 4 * 1024 * 1024
 SOURCE_LIMIT = 2 * 1024 * 1024
 ARTIFACT_REASONS = ('cargo-output-bound', 'cargo-line-bound', 'cargo-document', 'cargo-finished',
                     'cargo-facade-count', 'cargo-target-shape', 'cargo-real-facade', 'cargo-app-count',
-                    'cargo-shipping-feature', 'compile-artifact-file', 'compile-artifact-short', 'compile-artifact-post')
+                    'cargo-shipping-feature', 'compile-artifact-file', 'compile-artifact-short', 'compile-artifact-post',
+                  'compile-deadline', 'compile-no-work-left', 'compile-original-nonzero', 'compile-original-return')
 
 
 def need(value, reason):
@@ -274,22 +310,10 @@ def tool_shape_data(info, current_uid, executable):
                 sizeAllowed=0 < info.st_size <= 256 * 1024 * 1024)
 
 
-def owner_error_data(error, owner):
+def owner_error_data(error, owner, project_owner):
     # Closed observation only; never substitutes for an original return.
     if owner is None:
         return dict(available=False, typedFacts=[], chainTruncated=False)
-    reasons = {
-        'owned command produced incomplete output': 'incomplete-output',
-        'owned command output exceeds its bound': 'output-bound',
-        'owned command protocol or original ownership is incomplete': 'protocol-or-ownership',
-        'owned command failed, timed out, or produced incomplete output': 'command-failed-or-incomplete',
-        'owned command cleanup could not be confirmed': 'cleanup-unconfirmed',
-        'owned command executable could not be started': 'exec-rejected',
-        'owned command was stopped before execution': 'stopped-before-exec',
-        'owned command original parent ended': 'parent-ended',
-        'owned command original observer ended': 'observer-ended',
-        'owned command fence name already exists': 'fence-collision',
-    }
     pending, seen, facts = [error], set(), []
     while pending and len(seen) < 16:
         current = pending.pop()
@@ -305,9 +329,10 @@ def owner_error_data(error, owner):
             mask = getattr(current, 'owner_failure_mask', None) if not interrupted else None
             # Simultaneous failed predicates, NOT chronological cause or authority.
             row['ownerFailureMask'] = mask if type(mask) is int and 1 <= mask <= 63 else None
-            args = current.args
-            row['reason'] = (reasons.get(args[0], 'unknown')
-                             if len(args) == 1 and type(args[0]) is str else 'unknown')
+            observed = None if interrupted else project_owner(current, owner)
+            row['reason'] = 'unknown' if observed is None else observed['reason']
+            if observed is not None:
+                row['ownerFinality'] = observed['ownerFinality']
             facts.append(row)
         pending.extend((current.__context__, current.__cause__))
     return dict(available=True, typedFacts=facts, chainTruncated=bool(pending))
@@ -318,6 +343,25 @@ def returned_data(result, argv, cap):
             and result.args == argv and type(result.returncode) is int
             and type(result.stdout) is bytes and type(result.stderr) is bytes
             and len(result.stdout) + len(result.stderr) <= cap)
+
+
+def command_timeout_data(role_seconds, work_end, now):
+    # The existing owner requires an integer; flooring never extends this endpoint.
+    need(type(role_seconds) is int and 1 <= role_seconds <= 1200
+         and type(work_end) in (int, float) and type(now) in (int, float)
+         and math.isfinite(work_end) and math.isfinite(now), 'compile-no-work-left')
+    remaining = math.floor(work_end - now)
+    need(remaining >= 1, 'compile-no-work-left')
+    return min(role_seconds, remaining)
+
+
+def command_elapsed_data(started_after, command_start, now, extended):
+    maximum = 7080000 if extended else 1440000
+    if (type(started_after) is not int or not 0 <= started_after <= maximum
+            or any(type(value) not in (int, float) or not math.isfinite(value) for value in (command_start, now))):
+        return None
+    elapsed = math.floor((now - command_start) * 1000)
+    return elapsed if 0 <= elapsed <= maximum - started_after else None
 
 
 def commands_data(node, npm, rust_bin, work, compile_set="image"):
@@ -468,8 +512,9 @@ def main():
     need(compile_set in ('image', 'remaining-arm64'), 'compile-selection')
     extended = compile_set == 'remaining-arm64'
     roles = REMAINING_ROLES if extended else ROLES
-    # Existing image budget is unchanged; the new finite six-graph hosted batch has 118 minutes.
-    work_end, hard_end = (start + 6960, start + 7080) if extended else (start + 1320, start + 1440)
+    # Preserve the 118/24-minute outer caps: reserve 10 seconds for source
+    # admission and 20 for handoff/exit outside this helper; cleanup keeps 120 seconds.
+    work_end, hard_end = (start + 6930, start + 7050) if extended else (start + 1290, start + 1410)
     checkout = Path('/Users/runner/work/mobile-release-kit/mobile-release-kit')
     work = Path(os.environ['MRK_MACOS_WORK'])
     source = os.environ['GITHUB_SHA']
@@ -491,7 +536,8 @@ def main():
     pending = False
     input_originals_known = True
     controller = None
-    owner = None
+    owner = qualification = None
+    active_attempt = None
     receipt = dict(schemaVersion=1, scope=REMAINING_SCOPE if extended else 'fixed-arm-shipping-image-compile-only', source=source,
                    workflowSource=source, runId=os.environ['GITHUB_RUN_ID'], runAttempt=os.environ['GITHUB_RUN_ATTEMPT'],
                    target=TARGET, commands=[], originalPending=False, sourcePost=False, toolsPost=False,
@@ -817,6 +863,7 @@ def main():
         argv_rows = commands_data(node, npm, rust_bin, work, compile_set)
         for index, (role, argv) in enumerate(zip(roles, argv_rows, strict=True)):
             stage = role
+            active_attempt = None
             cut(); root_post(); need(tools_post(), 'compile-tools-pre'); controller_post()
             if index in (1, 4, 5): configs_post()
             environment = npm_env if index in (1, 4, 5) else base
@@ -833,19 +880,35 @@ def main():
                             'installed-cli-build': 900, 'observer-build': 1200, 'application-libtest-build': 1200}
             seconds = (role_seconds[role] if extended and index >= 6
                        else 15 if index < 4 else 300 if index == 4 else 180 if index == 5 else 900)
-            timeout = min(seconds, work_end - time.monotonic())
-            need(timeout > 0, 'compile-no-work-left')
+            command_start = time.monotonic()
+            timeout = command_timeout_data(seconds, work_end, command_start)
+            active_attempt = dict(role=role, resultReturned=False, timing=dict(
+                startedAfterMilliseconds=math.floor((command_start - start) * 1000),
+                elapsedMilliseconds=None, timeoutSeconds=timeout))
             pending = True; receipt['originalPending'] = True
-            result = owner.run_owned(argv, environ=environment, cwd=cwd, timeout=timeout,
-                                     capture=True, text=False, output_limit=cap)
+            try:
+                result = owner.run_owned(argv, environ=environment, cwd=cwd, timeout=timeout,
+                                         capture=True, text=False, output_limit=cap)
+            finally:
+                try:
+                    active_attempt['timing']['elapsedMilliseconds'] = command_elapsed_data(
+                        active_attempt['timing']['startedAfterMilliseconds'], command_start, time.monotonic(), extended)
+                except BaseException:
+                    pass  # Timing observation cannot replace the original owner exception.
             need(returned_data(result, argv, cap), 'compile-original-return')
             pending = False; receipt['originalPending'] = False
             receipt['commands'].append(dict(role=role, argv=argv, returned=True, capturesSettled=True,
+                                            timing=dict(active_attempt['timing']),
                                             returncode=result.returncode, stdoutBytes=len(result.stdout), stderrBytes=len(result.stderr),
                                             stdoutSha256=hashlib.sha256(result.stdout).hexdigest(), stderrSha256=hashlib.sha256(result.stderr).hexdigest()))
+            active_attempt['resultReturned'] = True
             if result.returncode != 0: failure_status = result.returncode
             if index >= 4:
-                outputs[role + '.stdout'] = result.stdout; outputs[role + '.stderr'] = result.stderr
+                # Only a validated, settled nonzero compiler result uses the fixed diagnostic names.
+                # The same command row binds both streams' bytes/hashes; no duplicate or exception buffers.
+                capture_name = 'failed-command' if index >= 6 and result.returncode != 0 else role
+                outputs[capture_name + '.stdout'] = result.stdout
+                outputs[capture_name + '.stderr'] = result.stderr
             produced = True
             if index == 4: produced = produced_root('node_modules')
             elif index == 5: produced = produced_root('dist')
@@ -916,10 +979,12 @@ def main():
         receipt['release'] = release
     except BaseException as error:
         receipt['failure'] = dict(stage=stage, kind=type(error).__name__)
+        if active_attempt is not None and active_attempt['role'] == stage:
+            receipt['failure']['attempt'] = active_attempt
         if type(error) is ValueError and len(error.args) == 1 and type(error.args[0]) is str and error.args[0] in CONTROLLER_REASONS + ARTIFACT_REASONS:
             receipt['failure']['condition'] = error.args[0]
         try:
-            receipt['failure']['ownerDiagnostic'] = owner_error_data(error, owner)
+            receipt['failure']['ownerDiagnostic'] = owner_error_data(error, owner, qualification._owner_exception_diagnostic if qualification is not None else None)
         except BaseException:
             # Diagnostic failure cannot replace the original error or settle pending work.
             receipt['failure']['ownerDiagnostic'] = dict(available=False)
@@ -983,7 +1048,7 @@ def main():
         receipt['toolOriginals'] = [dict(path=str(row['path']), identity=row['identity'], sha256=row['sha256'],
                                         observedShape=row['observedShape']) for row in tools]
         receipt['inputOriginalsKnown'] = input_originals_known
-        # Local captured compiler originals only; never included in the artifact.
+        # Preserve local captures; only fixed settled-nonzero compiler aliases are uploaded.
         try:
             for name, raw in outputs.items(): publish(name, raw, CAPTURE)
         except BaseException as error:
