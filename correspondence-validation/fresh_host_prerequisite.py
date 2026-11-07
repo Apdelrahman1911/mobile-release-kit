@@ -1,8 +1,10 @@
-"""One fixed, nonroot prerequisite for this disposable GitHub Mac engineering job.
+"""One fixed Applications-ancestor prerequisite for this disposable diagnostic.
 
 This is NOT a consumer repair tool or a native-policy exception. Only an audited
 root:admin /Applications 0775 may become 0755, once, before any candidate worker.
 Concrete native Book/ACL/toolchain protection runs independently afterward.
+The selected producer uses Command Line Tools and macOS system frameworks.
+Unused Xcode bundles and iPhoneOS SDKs are neither admitted nor qualified here.
 A result file is provisional until this original helper has closed every owner
 and returned zero. Unknown command retirement blocks until job/VM disposal.
 
@@ -1183,25 +1185,10 @@ def _collect_xcode_chain(book, applications, selected, stop_on_error=False):
 
 
 def _collect_prerequisites(book):
-    """Batch all safely reachable roles; one bad ancestor does not hide siblings."""
+    """Collect this diagnostic's ancestors and tools, excluding unused Xcode."""
     root = book.open(None, "/", "directory", "native", "root")
     applications = book.open(root, "Applications", "directory", "applications", "applications")
     book.applications = applications
-    selected = "Xcode.app"
-    if applications.fd is not None:
-        try:
-            named = os.stat("Xcode.app", dir_fd=applications.fd, follow_symlinks=False)
-            if stat.S_ISLNK(named.st_mode):
-                alias = book.open(applications, "Xcode.app", "alias", "alias", "xcode-alias")
-                if (alias.pre is None or not _selection_alias_owner(alias.pre["full9"][3], book.context["uid"])
-                        or alias.pre["full9"][5] != 1
-                        or not 1 <= alias.pre["full9"][6] <= 1024 or alias.alias_target is None):
-                    raise Refused("invalid-alias-no-descendant-follow")
-                selected = _sibling(alias.alias_target)
-        except (OSError, Refused, UnicodeError) as error:
-            book.error("selection", "xcode-alias", type(error).__name__, getattr(error, "errno", 0))
-            selected = None
-    _collect_xcode_chain(book, applications, selected)
     system_bin = book.chain(root, ("usr", "bin"), "fixed-system-bin")
     for name in ("security", "codesign", "openssl"):
         book.open(system_bin, name, "file", "native", "signing-recovery:" + name)
@@ -1733,7 +1720,7 @@ class FixedCommandOwner:
 
 
 def _report(book, context, command, phase, eligible=False):
-    return {"schemaVersion": 1, "scope": "dedicated-disposable-macos-xcode-ancestor-preparation",
+    return {"schemaVersion": 1, "scope": "dedicated-disposable-macos-diagnostic-applications-ancestor-preparation",
             "context": context, "sourceBinding": book.source_binding,
             "phase": phase, "prepared": False,
             "provisionalPostAuditPassed": eligible,
@@ -1742,7 +1729,7 @@ def _report(book, context, command, phase, eligible=False):
             "absences": [observation for _, observation in book.absences],
             "workTransitions": book.work_transitions, "intent": book.intent_pin,
             "command": command, "errors": book.errors,
-            "nativeQualified": False, "consumerQualified": False,
+            "nativeQualified": False, "consumerQualified": False, "xcodeQualified": False,
             "stockConsumer0775StillRejected": True,
             "disposal": {"providerObligation": "normal-per-job-GitHub-hosted-VM-teardown",
                          "physicallyVerified": False, "restore0775Command": None},

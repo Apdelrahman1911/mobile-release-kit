@@ -153,5 +153,68 @@ class DiagnosticData(unittest.TestCase):
         self.assertFalse(binding["executionApproved"])
 
 
+class DiagnosticHostPrerequisitesData(unittest.TestCase):
+    """Exercise collection and real metadata policy with synthetic observations."""
+
+    def _host_and_book(self, bad_role=None):
+        host = load("_diagnostic_host_scope_data", HERE / "fresh_host_prerequisite.py")
+
+        class DataBook(host.Originals):
+            def __init__(self):
+                super().__init__(None, {"uid": 501}, SimpleNamespace(check=lambda: None))
+                self.unused_xcode = SimpleNamespace(st_mode=host.stat.S_IFDIR | 0o755,
+                    st_uid=501, st_gid=20, st_nlink=1, st_size=0)
+
+            def open(self, parent, name, kind, policy, role):
+                path = "/" if parent is None else parent.path.rstrip("/") + "/" + name
+                node = host.Node(path, role, parent, name, kind, policy)
+                mode = host.stat.S_IFDIR | 0o755 if kind == "directory" else host.stat.S_IFREG | 0o755
+                if policy == "sudo": mode |= host.stat.S_ISUID
+                current = SimpleNamespace(st_dev=1, st_ino=len(self.nodes) + 1,
+                    st_mode=mode, st_uid=501 if role == bad_role or "Xcode" in path else 0,
+                    st_gid=80 if policy == "applications" else 0, st_nlink=1,
+                    st_size=0, st_mtime_ns=1, st_ctime_ns=1)
+                # These numbers are inert availability sentinels, never OS descriptors.
+                node.fd = 100 + len(self.nodes)
+                node.pre = {"full9": host.full9(current)}
+                self.nodes[path] = node
+                self.metadata(node, current, "initial")
+                return node
+
+            def absence(self, parent, name, role):
+                self.absences.append((None, {"role": role, "absent": True}))
+
+        return host, DataBook()
+
+    def test_unused_runner_owned_xcode_does_not_block_diagnostic_ancestors(self):
+        from unittest.mock import patch
+        host, book = self._host_and_book()
+        with patch.object(host.os, "stat", return_value=book.unused_xcode) as query:
+            host._collect_prerequisites(book)
+        self.assertEqual(book.errors, [])
+        self.assertEqual(host._eligible_action(book), "noop")
+        query.assert_not_called()
+        self.assertEqual(len(book.absences), 3)
+        report = host._report(book, book.context, {"claimed": False}, "inert-data")
+        self.assertFalse(report["xcodeQualified"])
+        self.assertFalse(report["nativeQualified"])
+        self.assertEqual(report["scope"],
+                         "dedicated-disposable-macos-diagnostic-applications-ancestor-preparation")
+
+    def test_required_ancestor_and_tool_owners_still_block_eligibility(self):
+        from unittest.mock import patch
+        for role in ("root", "applications", "fixed-system-bin:0", "fixed-system-bin:1",
+                     "signing-recovery:security", "signing-recovery:codesign",
+                     "signing-recovery:openssl", "os-provisioner-sudo", "fixed-os-bin",
+                     "os-provisioner-chmod"):
+            with self.subTest(role=role):
+                host, book = self._host_and_book(bad_role=role)
+                with patch.object(host.os, "stat", return_value=book.unused_xcode):
+                    host._collect_prerequisites(book)
+                self.assertTrue(any(error["role"] == role and error["code"] == "root-owner-required"
+                                    for error in book.errors))
+                self.assertIsNone(host._eligible_action(book))
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
