@@ -1,20 +1,20 @@
 {
-  "id": 13680768858,
-  "node_id": "MDg6QXJ0aWZhY3QxMzY4MDc2ODg1OA==",
-  "name": "mobile-release-kit-macos26-aarch64-apple-darwin-prepared-38ece8614245d9bf17ac9c65457383f9972aa97d-42618284137-1",
-  "size_in_bytes": 253991923,
-  "url": "https://api.github.com/repos/Apdelrahman1911/mobile-release-kit/actions/artifacts/13680768858",
-  "archive_download_url": "https://api.github.com/repos/Apdelrahman1911/mobile-release-kit/actions/artifacts/13680768858/zip",
+  "id": 13706694958,
+  "node_id": "MDg6QXJ0aWZhY3QxMzcwNjY5NDk1OA==",
+  "name": "mobile-release-kit-macos26-aarch64-apple-darwin-prepared-bc173947cc55284eafb0986380e25fd38778f454-42678087424-1",
+  "size_in_bytes": 254092670,
+  "url": "https://api.github.com/repos/Apdelrahman1911/mobile-release-kit/actions/artifacts/13706694958",
+  "archive_download_url": "https://api.github.com/repos/Apdelrahman1911/mobile-release-kit/actions/artifacts/13706694958/zip",
   "expired": false,
-  "digest": "sha256:e7244ec9219ecdc470ed8e994cdb0bfdfcefd3a51b4f2c3a0aaf404c4ac4686b",
-  "created_at": "2026-11-09T14:20:29Z",
-  "updated_at": "2026-11-09T14:20:29Z",
-  "expires_at": "2026-11-23T14:20:26Z",
+  "digest": "sha256:964e3740908b71e42980682d8e6478fbb76a485a5db16feb7fec4c9d23472dea",
+  "created_at": "2026-11-09T20:31:40Z",
+  "updated_at": "2026-11-09T20:31:40Z",
+  "expires_at": "2026-11-23T20:31:36Z",
   "workflow_run": {
-    "id": 42618284137,
+    "id": 42678087424,
     "repository_id": 1341770786,
     "head_repository_id": 1341770786,
     "head_branch": "verify/desktop-macos-candidate",
-    "head_sha": "38ece8614245d9bf17ac9c65457383f9972aa97d"
+    "head_sha": "bc173947cc55284eafb0986380e25fd38778f454"
   }
 }

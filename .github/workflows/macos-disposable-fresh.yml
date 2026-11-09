@@ -1,4 +1,4 @@
-name: Disposable Fresh interrupted-write validation
+name: Disposable Fresh recovery and refusal validation
 
 on:
   push:
@@ -9,10 +9,9 @@ permissions:
   actions: read
 
 # Validation-only source bound to the admitted product/package/pair and
-# distinct source-bound control transport. The write job uses the immutable
+# distinct source-bound control transport. Both jobs use the same immutable
 # prepared/carrier tuples; no credentials or owner-machine actions.
-# Torn-journal refusal qualified in42655913320 and is deliberately omitted.
-# Final binding replaces only the named UNBOUND input pins and enables the job
+# Final binding replaces only the named UNBOUND input pins and enables the jobs
 # after Root's source review. The Python entry independently requires its full
 # execution binding, so removing a job condition alone cannot start a route.
 
@@ -29,7 +28,7 @@ jobs:
       MRK_MACOS_SAME_PACKAGE_SCOPE: disabled
       DEVELOPER_DIR: /Library/Developer/CommandLineTools
       MACOSX_DEPLOYMENT_TARGET: '26.0'
-    steps:
+    steps: &fresh_steps
       - name: Check out the actual immutable runner source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
@@ -136,13 +135,13 @@ jobs:
       - name: Check out the separately frozen product
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          ref: 38ece8614245d9bf17ac9c65457383f9972aa97d
+          ref: bc173947cc55284eafb0986380e25fd38778f454
           path: prepared-built-source
           persist-credentials: false
       - name: Check out the separate immutable control transport
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          ref: 7d0e46ebf5a810ca5de068a937b84b688dfcfc7b
+          ref: 5b6f9f3d17718a1e4286ad478478e4d3ecb1da40
           path: _fresh-control-transport
           persist-credentials: false
       - name: Reserve a fresh work directory and copy pinned service metadata
@@ -163,15 +162,15 @@ jobs:
       - name: Download the exact successful prepared cohort
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
         with:
-          artifact-ids: 13680768858
-          run-id: 42618284137
+          artifact-ids: 13706694958
+          run-id: 42678087424
           github-token: ${{ github.token }}
           path: ${{ steps.work.outputs.root }}/prepared-input
       - name: Download the exact ordinary six-member carrier
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
         with:
-          artifact-ids: 13684743227
-          run-id: 42639644199
+          artifact-ids: 13711473813
+          run-id: 42699551107
           github-token: ${{ github.token }}
           path: ${{ steps.work.outputs.root }}/ordinary-carrier
       - name: Run the fixed Fresh route using the existing original owner
@@ -204,3 +203,17 @@ jobs:
           include-hidden-files: true
           path: |
             ${{ steps.hostwork.outputs.root }}/*.json
+
+  torn-refusal:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/codex/macos-fresh-validation'
+    runs-on: macos-26
+    timeout-minutes: 75
+    env:
+      MRK_MACOS_RUNNER: macos-26
+      MRK_MACOS_TARGET: aarch64-apple-darwin
+      MRK_MACOS_PACKAGE_ROLE: ordinary-image
+      MRK_MACOS_STORE_RUNTIME: signed-component
+      MRK_MACOS_SAME_PACKAGE_SCOPE: disabled
+      DEVELOPER_DIR: /Library/Developer/CommandLineTools
+      MACOSX_DEPLOYMENT_TARGET: '26.0'
+    steps: *fresh_steps
