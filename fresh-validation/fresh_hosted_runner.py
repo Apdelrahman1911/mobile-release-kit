@@ -19,7 +19,7 @@ EXECUTION_BINDING = None
 TARGET = "aarch64-apple-darwin"
 PRODUCT = {'source': '38ece8614245d9bf17ac9c65457383f9972aa97d', 'tree': 'edac7af2910a8c2065bc301bf2eeced2c436ad54'}
 # This is the frozen ordinary product, independent of runner/transport sources.
-CONTROL_TRANSPORT = {'commit': '8ac91df234bb606d2ad3e3578a10a37eb5f44092', 'tree': '2e8148ff02888d78934e48982463592e907f1c60', 'manifestSha256': 'd0017fbba8bc8249a48935eefd3ab82b8698dbead5183733434729ed94653343', 'remoteAvailable': True}
+CONTROL_TRANSPORT = {'commit': '7d0e46ebf5a810ca5de068a937b84b688dfcfc7b', 'tree': 'd6bf84de70f4688806da463899080ee56a932ecf', 'manifestSha256': '69db4a0f7f83436f08f9c7857afb238c568a518259c1f7957d6003457e03e400', 'remoteAvailable': True}
 JOB_STEPS = {
     "write-recovery": ("write", "frontier", "ordinary-recovery", "completed"),
     "torn-refusal": ("torn", "frontier-refusal", "ordinary-refusal"),

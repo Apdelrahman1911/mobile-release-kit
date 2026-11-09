@@ -142,7 +142,7 @@ jobs:
       - name: Check out the separate immutable control transport
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          ref: 8ac91df234bb606d2ad3e3578a10a37eb5f44092
+          ref: 7d0e46ebf5a810ca5de068a937b84b688dfcfc7b
           path: _fresh-control-transport
           persist-credentials: false
       - name: Reserve a fresh work directory and copy pinned service metadata
