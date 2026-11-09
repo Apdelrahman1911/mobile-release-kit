@@ -118,6 +118,7 @@ impl Parent {
         let root = prepared.destination;
         self.reinstall_input = Some(prepared);
         acquire_existing_gates(&mut self.book,root)?;
+        maintenance::reserve_removal_snapshot_work(&mut self.book)?;
         check(maintenance::removal_effective_control_bytes(&self.book)?
             .checked_add(OUTPUT_RESERVE).is_some_and(|n| n <= installation_record::CONTROL_LIMIT as u64),
             "fresh-census-output-budget")?;
