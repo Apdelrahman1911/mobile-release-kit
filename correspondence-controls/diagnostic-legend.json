@@ -718,417 +718,429 @@
       "source": "for n in self.code { book.check_name(n,true)?; }"
     },
     {
-      "site": 15027,
+      "site": 15041,
       "fileCode": 0,
-      "line": 15027,
+      "line": 15041,
       "source": "book.check_name(n,true)?;"
     },
     {
-      "site": 15050,
+      "site": 15064,
       "fileCode": 0,
-      "line": 15050,
+      "line": 15064,
       "source": "if other!=n && original.fd.is_some() { book.check_name(other,true)?; }"
     },
     {
-      "site": 15054,
+      "site": 15068,
       "fileCode": 0,
-      "line": 15054,
+      "line": 15068,
       "source": "book.check_name(n,true)"
     },
     {
-      "site": 15075,
+      "site": 15089,
       "fileCode": 0,
-      "line": 15075,
+      "line": 15089,
       "source": "book.check_name(parent,true)?;book.clock()?;"
     },
     {
-      "site": 15103,
+      "site": 15117,
       "fileCode": 0,
-      "line": 15103,
+      "line": 15117,
       "source": "book.check_name(parent,true)?;book.clock()?;Ok(found)"
     },
     {
-      "site": 15170,
+      "site": 15184,
       "fileCode": 0,
-      "line": 15170,
+      "line": 15184,
       "source": "book.absent(directory,\"s\")?;book.check_name(directory,true)?;"
     },
     {
-      "site": 15544,
+      "site": 15558,
       "fileCode": 0,
-      "line": 15544,
+      "line": 15558,
       "source": "if original.fd.is_some() && n!=self.directory { self.book.check_name(n,true)?; }"
     },
     {
-      "site": 15931,
+      "site": 15945,
       "fileCode": 0,
-      "line": 15931,
+      "line": 15945,
       "source": "book.check_name(n,true)?;"
     },
     {
-      "site": 15944,
+      "site": 15958,
       "fileCode": 0,
-      "line": 15944,
+      "line": 15958,
       "source": "book.check_name(n,true)?;"
     },
     {
-      "site": 16026,
+      "site": 16040,
       "fileCode": 0,
-      "line": 16026,
+      "line": 16040,
       "source": "book.check_name(n,true)?;"
     },
     {
-      "site": 16088,
+      "site": 16102,
       "fileCode": 0,
-      "line": 16088,
+      "line": 16102,
       "source": "book.check_name(directory,true)?;book.forward_close(directory,\"removal-snapshot-census-close\")?;"
     },
     {
-      "site": 16089,
+      "site": 16103,
       "fileCode": 0,
-      "line": 16089,
+      "line": 16103,
       "source": "book.absent(archive,\"app\")?;book.check_name(archive,true)"
     },
     {
-      "site": 16153,
+      "site": 16167,
       "fileCode": 0,
-      "line": 16153,
+      "line": 16167,
       "source": "book.check_name(root_reader,true)?;book.forward_close(root_reader,\"removal-snapshot-root-close\")?;"
     },
     {
-      "site": 16182,
+      "site": 16196,
       "fileCode": 0,
-      "line": 16182,
+      "line": 16196,
       "source": "if let Some(parent)=parent { book.check_name(parent,true)?;book.forward_close(parent,\"removal-snapshot-control-parent-close\")?; }"
     },
     {
-      "site": 16252,
+      "site": 16266,
       "fileCode": 0,
-      "line": 16252,
+      "line": 16266,
       "source": "book.check_name(*n,true)?;"
     },
     {
-      "site": 16271,
+      "site": 16285,
       "fileCode": 0,
-      "line": 16271,
+      "line": 16285,
       "source": "for n in &source.originals.bootstrap {book.check_name(*n,true)?;}"
     },
     {
-      "site": 16609,
+      "site": 16623,
       "fileCode": 0,
-      "line": 16609,
+      "line": 16623,
       "source": "book.check_name(reader,true)?;"
     },
     {
-      "site": 16711,
+      "site": 16725,
       "fileCode": 0,
-      "line": 16711,
+      "line": 16725,
       "source": "book.check_name(parent,true)?;book.clock()"
     },
     {
-      "site": 16759,
+      "site": 16773,
       "fileCode": 0,
-      "line": 16759,
+      "line": 16773,
       "source": "book.check_name(n,true)?;book.forward_close(n,\"removal-payload-code-close\")?;"
     },
     {
-      "site": 16767,
+      "site": 16781,
       "fileCode": 0,
-      "line": 16767,
+      "line": 16781,
       "source": "book.check_name(alias,true)?;book.forward_close(alias,\"removal-payload-app-alias-close\")?;"
     },
     {
-      "site": 16784,
+      "site": 16798,
       "fileCode": 0,
-      "line": 16784,
+      "line": 16798,
       "source": "book.check_name(parent,true)?;"
     },
     {
-      "site": 16786,
+      "site": 16800,
       "fileCode": 0,
-      "line": 16786,
+      "line": 16800,
       "source": "book.absent(parent,&self.plan.nodes[index].name)?;book.check_name(parent,true)?;"
     },
     {
-      "site": 16848,
+      "site": 16862,
       "fileCode": 0,
-      "line": 16848,
+      "line": 16862,
       "source": "book.check_name(original,true)?;book.protected(original,true,Some(0o555))?;book.absent(to,\"app\")?;"
     },
     {
-      "site": 16878,
+      "site": 16892,
       "fileCode": 0,
-      "line": 16878,
+      "line": 16892,
       "source": "native::no_xattrs(book.fd(n)?.as_fd()).map_err(|_|\"removal-payload-node-attributes\")?;book.check_name(n,true)?;Ok(n)"
     },
     {
-      "site": 16884,
+      "site": 16898,
       "fileCode": 0,
-      "line": 16884,
+      "line": 16898,
       "source": "self.external_post(book)?;book.check_name(parent,true)?;"
     },
     {
-      "site": 16899,
+      "site": 16913,
       "fileCode": 0,
-      "line": 16899,
+      "line": 16913,
       "source": "book.check_name(n,true)?;"
     },
     {
-      "site": 16907,
+      "site": 16921,
       "fileCode": 0,
-      "line": 16907,
+      "line": 16921,
       "source": "book.check_name(n,true)?;"
     },
     {
-      "site": 16916,
+      "site": 16930,
       "fileCode": 0,
-      "line": 16916,
+      "line": 16930,
       "source": "self.external_post(book)?;book.check_name(n,true)?;"
     },
     {
-      "site": 16964,
+      "site": 16978,
       "fileCode": 0,
-      "line": 16964,
+      "line": 16978,
       "source": "book.check_name(app,true)?;book.clock()?;"
     },
     {
-      "site": 17021,
+      "site": 17035,
       "fileCode": 0,
-      "line": 17021,
+      "line": 17035,
       "source": "book.absent(reader,\"runtime\")?;book.check_name(reader,true)?;"
     },
     {
-      "site": 17025,
+      "site": 17039,
       "fileCode": 0,
-      "line": 17025,
+      "line": 17039,
       "source": "book.check_name(roster_reader,true)?;book.forward_close(roster_reader,\"removal-payload-control-roster-close\")?;"
     },
     {
-      "site": 17026,
+      "site": 17040,
       "fileCode": 0,
-      "line": 17026,
+      "line": 17040,
       "source": "book.check_name(reader,true)?;book.forward_close(reader,\"removal-payload-control-close\")?;"
     },
     {
-      "site": 17058,
+      "site": 17072,
       "fileCode": 0,
-      "line": 17058,
+      "line": 17072,
       "source": "book.check_name(release,true)?;book.forward_close(release,\"removal-payload-release-close\")?;"
     },
     {
-      "site": 17106,
+      "site": 17120,
       "fileCode": 0,
-      "line": 17106,
+      "line": 17120,
       "source": "book.clock()?;book.check_name(n,true)?;book.protected(n,directory,mode)?;book.clock()?;"
     },
     {
-      "site": 17110,
+      "site": 17124,
       "fileCode": 0,
-      "line": 17110,
+      "line": 17124,
       "source": "book.check_name(n,true)"
     },
     {
-      "site": 17118,
+      "site": 17132,
       "fileCode": 0,
-      "line": 17118,
+      "line": 17132,
       "source": "book.check_name(n,true)?;let size=u64::try_from(book.identity(n)?.size).map_err(|_|\"removal-resume-size\")?;"
-    },
-    {
-      "site": 17125,
-      "fileCode": 0,
-      "line": 17125,
-      "source": "book.check_name(n,true)?;Ok(digest.finalize().into())"
     },
     {
       "site": 17139,
       "fileCode": 0,
       "line": 17139,
+      "source": "book.check_name(n,true)?;Ok(digest.finalize().into())"
+    },
+    {
+      "site": 17153,
+      "fileCode": 0,
+      "line": 17153,
       "source": "book.check_name(n,true)?;Ok(raw)"
     },
     {
-      "site": 17211,
+      "site": 17225,
       "fileCode": 0,
-      "line": 17211,
+      "line": 17225,
       "source": "for n in [parts.archive,parts.snapshot,parts.tip_archive,parts.tip_original] {book.check_name(n,true)?;}"
     },
     {
-      "site": 17221,
+      "site": 17235,
       "fileCode": 0,
-      "line": 17221,
+      "line": 17235,
       "source": "for n in [parts.archive,parts.snapshot,parts.tip_archive,parts.tip_original] {book.check_name(n,true)?;}"
     },
     {
-      "site": 17515,
+      "site": 17529,
       "fileCode": 0,
-      "line": 17515,
+      "line": 17529,
       "source": "for n in self.bootstrap.iter().chain(&self.root_chain) {book.check_name(*n,true)?;}"
     },
     {
-      "site": 17525,
+      "site": 17539,
       "fileCode": 0,
-      "line": 17525,
+      "line": 17539,
       "source": "book.absent(self.root,paths::APP_NAME)?;book.check_name(self.root,true)"
     },
     {
-      "site": 17621,
+      "site": 17635,
       "fileCode": 0,
-      "line": 17621,
+      "line": 17635,
       "source": "for n in &self.bootstrap {book.check_name(*n,true)?;book.protected(*n,true,None)?;}"
     },
     {
-      "site": 17671,
+      "site": 17685,
       "fileCode": 0,
-      "line": 17671,
+      "line": 17685,
       "source": "parent=book.open(Some(parent),part,true)?;book.protected(parent,true,None)?;book.check_name(parent,true)?;"
     },
     {
-      "site": 17817,
+      "site": 17831,
       "fileCode": 0,
-      "line": 17817,
+      "line": 17831,
       "source": "book.check_name(*n,true)?;book.protected_as(*n,true,if at==3{Some(0o755)}else{None},"
     },
     {
-      "site": 18025,
+      "site": 18039,
       "fileCode": 0,
-      "line": 18025,
+      "line": 18039,
       "source": "parent=book.open(Some(parent),part,true)?;book.protected(parent,true,None)?;book.check_name(parent,true)?;"
     },
     {
-      "site": 18848,
+      "site": 18862,
       "fileCode": 0,
-      "line": 18848,
+      "line": 18862,
       "source": "drop(genesis);book.check_name(snapshot,true)?;book.check_name(archive,true)?;"
     },
     {
-      "site": 19099,
+      "site": 19113,
       "fileCode": 0,
-      "line": 19099,
+      "line": 19113,
       "source": "book.check_name(n,true)?;book.clock()"
     },
     {
-      "site": 19386,
+      "site": 19400,
       "fileCode": 0,
-      "line": 19386,
+      "line": 19400,
       "source": "book.check_name(original,true)?;book.absent(child,item.name_data())?;"
     },
     {
-      "site": 19412,
+      "site": 19426,
       "fileCode": 0,
-      "line": 19412,
+      "line": 19426,
       "source": "book.check_name(original,true)?;book.persist(root,false)?;book.persist(child,false)?;"
     },
     {
-      "site": 19475,
+      "site": 19489,
       "fileCode": 0,
-      "line": 19475,
+      "line": 19489,
       "source": "self.post(book)?;book.check_name(self.incoming.input,true)?;"
     },
     {
-      "site": 19544,
+      "site": 19558,
       "fileCode": 0,
-      "line": 19544,
+      "line": 19558,
       "source": "self.post(book)?;book.check_name(self.incoming.input,true)?;"
     },
     {
-      "site": 19689,
+      "site": 19703,
       "fileCode": 0,
-      "line": 19689,
+      "line": 19703,
       "source": "book.protected(self.root,true,Some(0o755))?;book.check_name(self.root,false)?;"
     },
     {
-      "site": 19856,
+      "site": 19870,
       "fileCode": 0,
-      "line": 19856,
+      "line": 19870,
       "source": "book.check_name(self.release,true)?;"
     },
     {
-      "site": 19917,
+      "site": 19931,
       "fileCode": 0,
-      "line": 19917,
+      "line": 19931,
       "source": "maintenance::selected_compile(self.selected)?;book.check_name(self.input,true)?;"
     },
     {
-      "site": 20026,
+      "site": 20040,
       "fileCode": 0,
-      "line": 20026,
+      "line": 20040,
       "source": "self.post_source(book)?;book.check_name(self.incoming.input,true)?;"
     },
     {
-      "site": 20119,
+      "site": 20133,
       "fileCode": 0,
-      "line": 20119,
+      "line": 20133,
       "source": "book.check_name(root,true)?;book.protected(root,true,Some(0o755))?;Ok(root)"
     },
     {
-      "site": 20122,
+      "site": 20136,
       "fileCode": 0,
-      "line": 20122,
+      "line": 20136,
       "source": "let root=self.post(book)?;book.check_name(reader,true)?;"
     },
     {
-      "site": 20127,
+      "site": 20141,
       "fileCode": 0,
-      "line": 20127,
+      "line": 20141,
       "source": "self.post(book)?;book.check_name(reader,true)?;"
     },
     {
-      "site": 20146,
+      "site": 20160,
       "fileCode": 0,
-      "line": 20146,
+      "line": 20160,
       "source": "book.source_post(source)?;book.check_name(self.root,true)?;"
     },
     {
-      "site": 20188,
+      "site": 20202,
       "fileCode": 0,
-      "line": 20188,
+      "line": 20202,
       "source": "self.book.protected(root,true,Some(0o755))?;self.book.check_name(root,true)?;root}"
     },
     {
-      "site": 21181,
+      "site": 20224,
       "fileCode": 0,
-      "line": 21181,
+      "line": 20224,
+      "source": "} else { self.book.check_name(root,true)?; }"
+    },
+    {
+      "site": 20244,
+      "fileCode": 0,
+      "line": 20244,
+      "source": "} else { self.book.check_name(root,true)?; }"
+    },
+    {
+      "site": 21207,
+      "fileCode": 0,
+      "line": 21207,
       "source": "self.book.check_name(directory,true)?;"
     },
     {
-      "site": 22046,
+      "site": 22072,
       "fileCode": 0,
-      "line": 22046,
+      "line": 22072,
       "source": "self.book.protected(root,true,Some(0o755))?;self.book.check_name(root,true)?;"
     },
     {
-      "site": 22074,
+      "site": 22100,
       "fileCode": 0,
-      "line": 22074,
+      "line": 22100,
       "source": "self.book.check_name(support,true)?;"
     },
     {
-      "site": 22145,
+      "site": 22171,
       "fileCode": 0,
-      "line": 22145,
+      "line": 22171,
       "source": "self.book.check_name(reader,true)?;"
     },
     {
-      "site": 22233,
+      "site": 22259,
       "fileCode": 0,
-      "line": 22233,
+      "line": 22259,
       "source": "book.check_name(reader,true)?;book.forward_close(reader,\"removal-observer-effects-close\")?;"
     },
     {
-      "site": 22287,
+      "site": 22313,
       "fileCode": 0,
-      "line": 22287,
+      "line": 22313,
       "source": "let root=source.root_original();self.book.check_name(root,true)?;"
     },
     {
-      "site": 23770,
+      "site": 23796,
       "fileCode": 0,
-      "line": 23770,
+      "line": 23796,
       "source": "self.check_name(parent, false)?;"
     },
     {
-      "site": 23990,
+      "site": 24016,
       "fileCode": 0,
-      "line": 23990,
+      "line": 24016,
       "source": "book.check_name(reader, true).expect(\"same held and named inventory\");"
     },
     {
@@ -1672,8 +1684,8 @@
   "siteSourcePins": [
     {
       "path": "desktop/src-tauri/src/bin/macos_install.rs",
-      "bytes": 1909514,
-      "sha256": "02c7731145b8723000dfe640b6f1b4b4f5cd4bcb9454743691aa3c00525f8710"
+      "bytes": 1911447,
+      "sha256": "7e4c307dbbff77770fa3a75b31cbee7a56ccd4a316dd334dcedd0371923c9f70"
     },
     {
       "path": "desktop/src-tauri/src/macos_applications_native.rs",

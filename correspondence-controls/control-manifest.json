@@ -10,48 +10,48 @@
       {
         "closureKnown": true,
         "evidence": {
-          "bytes": 5094,
-          "sha256": "a525d54d2c9f32b34b9f41a890efd62c871a0cbe15def5c16577159402c8b0fd"
+          "bytes": 5104,
+          "sha256": "f9847840ddca28b7240935359921e0ef60ea4449d68735e47465f8d06af3ee9a"
         },
-        "label": "two-integration-tests",
-        "peakAggregateRssBytes": 973045760,
+        "label": "parent-regression",
+        "peakAggregateRssBytes": 834945024,
         "return": 0,
         "streams": {
           "stderr": {
-            "observedBytes": 278679,
-            "observedSha256": "acf9f5c1ff9bf56bc81083c9f5ebcfb23870c9c2d3b62d8c299f9ba131c425fd",
-            "retainedBytes": 278679,
-            "retainedSha256": "acf9f5c1ff9bf56bc81083c9f5ebcfb23870c9c2d3b62d8c299f9ba131c425fd"
+            "observedBytes": 284952,
+            "observedSha256": "814838534bae2779c4380123b9dd638a6c8033315251ebbd9f1dfd57423b56ef",
+            "retainedBytes": 284952,
+            "retainedSha256": "814838534bae2779c4380123b9dd638a6c8033315251ebbd9f1dfd57423b56ef"
           },
           "stdout": {
-            "observedBytes": 131698,
-            "observedSha256": "8a97a853bc796ef70159c7211e6d14b566813d5d76dcd22719c993baccedaf93",
-            "retainedBytes": 131698,
-            "retainedSha256": "8a97a853bc796ef70159c7211e6d14b566813d5d76dcd22719c993baccedaf93"
+            "observedBytes": 132302,
+            "observedSha256": "39eae743d12bb754dca64b2f4994fdf43e8d452396d2dd409fb75be589dd1d14",
+            "retainedBytes": 132302,
+            "retainedSha256": "39eae743d12bb754dca64b2f4994fdf43e8d452396d2dd409fb75be589dd1d14"
           }
         }
       },
       {
         "closureKnown": true,
         "evidence": {
-          "bytes": 4579,
-          "sha256": "3b39727fb60bb068cb9c15340fb08f614e011775d77da779dff1638a52497ab4"
+          "bytes": 4610,
+          "sha256": "a218d1c30b35a004c4a48669edea92775281f26d77060ee789c666ea8c757bd1"
         },
-        "label": "diagnostic-release-build",
-        "peakAggregateRssBytes": 1017544704,
+        "label": "corrected-diagnostic-build",
+        "peakAggregateRssBytes": 926679040,
         "return": 0,
         "streams": {
           "stderr": {
-            "observedBytes": 272014,
-            "observedSha256": "e281db025797977f7c9d89ec300b2f516f832fc973a60293abd49e936e2ff32a",
-            "retainedBytes": 272014,
-            "retainedSha256": "e281db025797977f7c9d89ec300b2f516f832fc973a60293abd49e936e2ff32a"
+            "observedBytes": 275942,
+            "observedSha256": "cd6e6618cee4a6f2f6be97a1aac0a47378c80295476293d7ec9091a172407119",
+            "retainedBytes": 275942,
+            "retainedSha256": "cd6e6618cee4a6f2f6be97a1aac0a47378c80295476293d7ec9091a172407119"
           },
           "stdout": {
-            "observedBytes": 131302,
-            "observedSha256": "9675e886fef6cef9c2122d157ac99caa5cbe9c5cbdd75f4080a89963d12a78dd",
-            "retainedBytes": 131302,
-            "retainedSha256": "9675e886fef6cef9c2122d157ac99caa5cbe9c5cbdd75f4080a89963d12a78dd"
+            "observedBytes": 131962,
+            "observedSha256": "d58127fe05d8fc05b9480760ee3f757d1b13f77f102147f7df1d5b0dc474d919",
+            "retainedBytes": 131962,
+            "retainedSha256": "d58127fe05d8fc05b9480760ee3f757d1b13f77f102147f7df1d5b0dc474d919"
           }
         }
       }
@@ -65,8 +65,8 @@
       "runtimeManifestSha256": "3f79454e3ad2969c30ffd38c434cece202c200983368b0a020a9e0d83d482f36"
     },
     "plan": {
-      "bytes": 14374,
-      "sha256": "225cb6375cbec3ec53e171a53940e4c46a6a6fe18b71dc1b65991775f98e0722"
+      "bytes": 10009,
+      "sha256": "3e688a6d56e42eac49f82bbf1a18b3f80283e3dcdc4b76a8d7b04fd5f61cf99e"
     },
     "releaseProfile": {
       "debug_assertions": false,
@@ -76,38 +76,38 @@
       "test": false
     },
     "result": {
-      "bytes": 13046,
-      "sha256": "320924c2b75933efda3f8dbf439761d66abae58c46abbec330b06081ffea1071"
+      "bytes": 607,
+      "sha256": "c6257c6bdd360508b4137e700caf5661b89c86ada4c4239e3ea10ea48560cd76"
     },
     "sourceRoster": {
       "bytes": 693922,
-      "sha256": "c7147d8fa97ca56f25df0ccd16fd71fe2213a94d3b2cc891bfd6ff39179d0ebf"
+      "sha256": "186184165f15693fa02df36dad38bb185a8225051e1067284462bc2b95b1dc60"
     },
     "toolchain": "1.98.1",
     "toolchainReason": "Unchanged native ARM64 clock guard admits1.98.1 only; std-only DATA proof used1.98.0."
   },
-  "controlManifestSha256": "6a7e6e8aa09868e76443ed3e54563d6a6d99dc64839d2a263d23dc9fd4ac61e3",
-  "controlSourceSha256": "02c7731145b8723000dfe640b6f1b4b4f5cd4bcb9454743691aa3c00525f8710",
+  "controlManifestSha256": "6ea41fcf0caf6b85bccc7fe157cdba16ebed297e7b34680c7b1c2987afdd7fde",
+  "controlSourceSha256": "7e4c307dbbff77770fa3a75b31cbee7a56ccd4a316dd334dcedd0371923c9f70",
   "controls": {
     "diagnostic": {
-      "bytes": 3972608,
+      "bytes": 3972672,
       "compilerOriginalClosureKnown": true,
       "compilerOriginalReturn": 0,
       "path": "diagnostic/mrk-macos-install",
-      "sha256": "1096f79c3bf063fd2e0018471a07137ceec3848b0a1f4d0e96240d7dbaea3674"
+      "sha256": "9d3c21a3f913edb0ebba5f104217e42a8cbeb1a3e1012409eb6becb071399bb9"
     }
   },
   "diagnosticLegend": {
-    "bytes": 43459,
-    "sha256": "d07e023fc19e0361145f983d3e0098f4ceb86d3059dd25b9b11732d5782abc85"
+    "bytes": 43737,
+    "sha256": "115d4c7ddda8d96066523d49e7ea2c0b61018ba599d2398bde58c4bf59bce02f"
   },
-  "diagnosticSourceCommit": "179f7de2e53795080070286b92aac880d6f5725c",
+  "diagnosticSourceCommit": "715565ac2cae2664c6cbafa884792c69769c55d8",
   "diagnosticSourceIsOrdinaryProduct": false,
   "diagnosticSourceManifest": {
-    "bytes": 3799,
-    "sha256": "6a7e6e8aa09868e76443ed3e54563d6a6d99dc64839d2a263d23dc9fd4ac61e3"
+    "bytes": 4152,
+    "sha256": "6ea41fcf0caf6b85bccc7fe157cdba16ebed297e7b34680c7b1c2987afdd7fde"
   },
-  "diagnosticSourceTree": "ac00c4f7caee0ff74f7cdd1477f88428a164510f",
+  "diagnosticSourceTree": "32e1859c426b8f6a89def933989f5445fc6042c2",
   "nativeInstallerExecutedLocally": false,
   "ordinaryPackageSha256": "61dbcceb17d7ffb9f4351261e518192f38fc2b719a0e508b783b6948f9a5cffd",
   "productSource": "5c53b796a40bf788ca553ae2445e82a3e5edb87a",
