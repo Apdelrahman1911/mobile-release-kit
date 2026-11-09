@@ -4952,7 +4952,7 @@ mod installer {
         #[derive(PartialEq,Eq)]
         pub(super) struct RehomeReferenceData {
             root:Identity,flags:u32,prefix:usize,total:usize,directories:usize,files:usize,bytes:u64,digest:[u8;32],
-            retries:Vec<RehomeRetryReferenceData>,restores:Vec<restore_recovery::RestoreStageSpanData>,conservation:Option<fresh_conservation::ConservationSpanData>,
+            retries:Vec<RehomeRetryReferenceData>,restores:Vec<restore_recovery::RestoreStageSpanData>,conservation:Option<Box<fresh_conservation::ConservationSpanData>>,
         }
         impl RehomeReferenceData {
             // The original empty-cohort DATA constructor remains exact for
@@ -4981,7 +4981,7 @@ mod installer {
             fn with_conservation_data(mut self,row:Option<fresh_conservation::ConservationSpanData>)->Result<Self>{
                 if let Some(row)=&row {row.memory()?;check(self.prefix>0,"fresh-transport-before-move")?;
                     removal_archive_storage_sum_data(self.storage_bytes_data(),row.storage())?;}
-                self.conservation=row;Ok(self)
+                self.conservation=row.map(Box::new);Ok(self)
             }
             pub(super) fn observed_data(plan:&RehomeMoveSetData<'_>,root:Identity,flags:u32,prefix:usize,
                 directories:usize,files:usize,bytes:u64,digest:[u8;32])->Result<Self> {
@@ -13123,6 +13123,18 @@ mod installer {
         #[cfg(test)]
         mod output_projection_tests {
             use super::*;
+            #[test]
+            fn actual_empty_archive_table_fits_its_fixed_storage_reservation() {
+                let table=RemovalArchiveCensus::empty(0).expect("actual archive slot layout fits its fixed budget");
+                let owned=std::mem::size_of::<RemovalArchiveCensus>()
+                    +table.rows.capacity()*std::mem::size_of::<RemovalArchiveReference>();
+                assert_eq!(table.rows.capacity(),REMOVAL_ARCHIVE_COUNT);
+                assert_eq!(table.owned_bytes().unwrap(),owned);
+                assert!(owned<=REMOVAL_ARCHIVE_TABLE);
+                println!("ARCHIVE_CENSUS_LAYOUT row={} slots={} table={} limit={} conservation={}",
+                    std::mem::size_of::<RemovalArchiveReference>(),table.rows.capacity(),owned,
+                    REMOVAL_ARCHIVE_TABLE,std::mem::size_of::<fresh_conservation::ConservationSpanData>());
+            }
             fn corpus()->serde_json::Value{serde_json::from_str(include_str!(env!("MRK_OUTPUT_DATA_CORPUS"))).unwrap()}
             fn identity(v:&serde_json::Value)->Identity{Identity{
                 dev:v["dev"].as_i64().unwrap(),ino:v["ino"].as_u64().unwrap(),mode:v["mode"].as_u64().unwrap() as u32,
