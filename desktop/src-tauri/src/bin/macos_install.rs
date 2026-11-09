@@ -7663,7 +7663,7 @@ mod installer {
                 check(removal_archive_stat(book,reader,true,role.mode())?==before,"partial-fresh-fixed-roster-original")?;
                 let mut rows=Vec::new();rows.try_reserve_exact(role.bound()).map_err(|_|"partial-fresh-fixed-roster-memory")?;
                 check(rows.capacity()<=role.bound(),"partial-fresh-fixed-roster-memory")?;
-                let mut block=[0u8;16384];
+                let mut block=[0u8;PARTIAL_FRESH_BLOCK];
                 loop {book.clock()?;let got=native::directory_block(book.fd(reader)?.as_fd(),&mut block)
                     .map_err(|_|"partial-fresh-fixed-roster-read")?;book.clock()?;
                     check(got<=block.len(),"partial-fresh-fixed-roster-bound")?;if got==0{break;}

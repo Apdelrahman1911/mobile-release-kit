@@ -46,7 +46,7 @@ impl HistorySources {
         // through one fixed32KiB block, not an eager512KiB payload allocation.
         std::mem::size_of::<Self>().checked_add(PARENT_LIMIT.checked_mul(std::mem::size_of::<Descriptor>()+255)?)?
             .checked_add(4*PATH_LIMIT)?.checked_add((COMPONENT_LIMIT+2)*(std::mem::size_of::<usize>()+std::mem::size_of::<&[u8]>()))?
-            .checked_add(32768+4096+2048)
+            .checked_add(32768+65536+2048)
     }
     #[cfg(test)]
     pub(crate) fn data_checks(){history_source_data_checks();}
@@ -227,7 +227,7 @@ impl HistorySources {
     fn empty_work(&self,stop:&mut dyn FnMut()->bool)->Result<(),Reason>{
         let work=self.work.ok_or(Reason::SourceRefused)?;
         checkpoint(stop)?;unistd::lseek(self.book.fd(work)?,0,unistd::Whence::SeekSet).map_err(|_|Reason::SourceRefused)?;checkpoint(stop)?;
-        let mut buffer=[0u8;4096];let mut dots=0usize;
+        let mut buffer=[0u8;65536];let mut dots=0usize;
         loop {
             checkpoint(stop)?;
             let used=mrk_macos_installed_native::directory_block(self.book.fd(work)?.as_fd(),&mut buffer).map_err(|_|Reason::SourceRefused)?;

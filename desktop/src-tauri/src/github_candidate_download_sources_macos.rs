@@ -384,7 +384,7 @@ impl State {
         checkpoint(stop)?;
         unistd::lseek(fd, 0, unistd::Whence::SeekSet).map_err(|_| Reason::SourceRefused)?;
         checkpoint(stop)?;
-        let mut buffer = [0u8; 4096];
+        let mut buffer = [0u8; 65536];
         let mut seen = [false; 2];
         let mut dots = 0usize;
         loop {
