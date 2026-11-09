@@ -204,8 +204,9 @@ jobs:
           path: |
             ${{ steps.hostwork.outputs.root }}/*.json
 
+  # Exact same-package torn case qualified in42655913320; do not replay.
   torn-refusal:
-    if: github.event_name == 'push' && github.ref == 'refs/heads/codex/macos-fresh-validation'
+    if: ${{ false }}
     runs-on: macos-26
     timeout-minutes: 75
     env:

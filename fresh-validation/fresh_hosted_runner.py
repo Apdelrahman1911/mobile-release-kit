@@ -427,7 +427,7 @@ def log_cursor(stager, binding):
         return stager.make_log_cursor(binding, identity, info.st_size, tail, growth)
 
 
-def log_capture(stager, cursor, binding, *, refusal=False):
+def log_capture(stager, cursor, binding, *, refusal=False, evidence_sink=None):
     """Same bounded fixed install.log window, only new exact Fresh records selected."""
     stager.validate_log_cursor(cursor, binding)
     with stager.installer_log_file() as (fd, outer, name, info):
@@ -444,20 +444,35 @@ def log_capture(stager, cursor, binding, *, refusal=False):
     for line in body.splitlines(keepends=True):
         need(line.endswith(b"\n") and len(line) <= stager.LOG_LINE_BYTES, "log-line-bound")
         if b"mrk-disposable-fresh-cut-v1" in line or b"mrk-disposable-fresh-census-v1" in line:
-            index = line.find(b"{")
-            need(index >= 0, "fresh-log-json-start")
-            raw = line[index:]
-            value = document(raw)
-            need(value.get("kind") in ("mrk-disposable-fresh-cut-v1", "mrk-disposable-fresh-census-v1"),
-                 "fresh-log-kind")
-            records.append(raw)
+            records.append(line)
             selected.append(line)
         if b"fresh-census-refused:" in line:
-            need(re.search(rb"fresh-census-refused:[a-z0-9-]{1,128}\r?\n$", line), "fresh-refusal-record")
             refused.append(line)
             selected.append(line)
     retained = b"".join(selected)
     need(len(retained) <= stager.LOG_SELECTED_BYTES, "fresh-log-selection-bound")
+    metadata = {"schemaVersion": 1, "binding": binding,
+        "cursorSha256": sha(canonical(cursor)), "intervalBytes": len(body),
+        "intervalSha256": sha(body), "selectedBytes": len(retained), "selectedSha256": sha(retained),
+        "growthBeyondSnapshotBytes": growth, "authority": stager.LOG_AUTHORITY,
+        "originalInstallerRequiredSeparately": True}
+    # The source/interval/close checks above establish diagnostic bytes only.
+    # Preserve an actual native refusal before record validation can raise;
+    # metadata and file existence never qualify an Installer or a census.
+    if evidence_sink is not None:
+        evidence_sink(retained, metadata)
+    parsed = []
+    for line in records:
+        index = line.find(b"{")
+        need(index >= 0, "fresh-log-json-start")
+        raw = line[index:]
+        value = document(raw)
+        need(value.get("kind") in ("mrk-disposable-fresh-cut-v1", "mrk-disposable-fresh-census-v1"),
+             "fresh-log-kind")
+        parsed.append(raw)
+    records = parsed
+    for line in refused:
+        need(re.search(rb"fresh-census-refused:[a-z0-9-]{1,128}\r?\n$", line), "fresh-refusal-record")
     if refusal:
         need(not records and len(refused) == 1
              and refused[0].rstrip(b"\r\n").endswith(b"fresh-census-refused:fresh-output-torn-header"),
@@ -466,11 +481,7 @@ def log_capture(stager, cursor, binding, *, refusal=False):
     else:
         need(len(records) == 1 and not refused, "one-complete-fresh-record")
         result = records[0]
-    return result, retained, {"schemaVersion": 1, "binding": binding,
-        "cursorSha256": sha(canonical(cursor)), "intervalBytes": len(body),
-        "intervalSha256": sha(body), "selectedBytes": len(retained), "selectedSha256": sha(retained),
-        "growthBeyondSnapshotBytes": growth, "authority": stager.LOG_AUTHORITY,
-        "originalInstallerRequiredSeparately": True}
+    return result, retained, metadata
 
 
 class Carrier:
@@ -605,9 +616,11 @@ def captured_control(op, stager, binding, carrier, step, filename):
     op.outputs.publish(op.work / (step + "-log-cursor.json"), canonical(cursor))
     original = installer_original(op, binding, step, carrier.mount / filename)
     # Only after actual original return, source POST and full capture closes.
-    body, selected, metadata = log_capture(stager, cursor, correlation, refusal=step == "frontier-refusal")
-    op.outputs.publish(op.work / (step + "-selected-packagekit.log"), selected)
-    op.outputs.publish(op.work / (step + "-log-capture.json"), canonical(metadata))
+    def preserve(selected, metadata):
+        op.outputs.publish(op.work / (step + "-selected-packagekit.log"), selected)
+        op.outputs.publish(op.work / (step + "-log-capture.json"), canonical(metadata))
+    body, selected, metadata = log_capture(stager, cursor, correlation,
+        refusal=step == "frontier-refusal", evidence_sink=preserve)
     carrier.post()
     return original, body
 
