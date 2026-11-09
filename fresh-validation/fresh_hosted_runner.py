@@ -347,7 +347,7 @@ def build_control(op, stager, binding, role, invocation=None):
          "complete-root-owned-control-script-readback")
     op.source.book.check()
     binding.setdefault("builtPackageBytes", {})[label] = len(raw)
-    return final, raw
+    return final, {"path": str(final), "bytes": len(raw), "sha256": sha(raw)}
 
 
 def read_control_archive(op, binding, path, fixed, inputs, label):
@@ -564,6 +564,9 @@ class Carrier:
         self.call("detach", ["/usr/bin/hdiutil", "detach", self.device], 30)
         self.detached = True
         need(not self.mount.exists() and not self.mount.is_symlink(), "original-mount-retired")
+        # All mounted originals are closed and the original unforced detach
+        # returned0 with absence. Later cleanup never reads these vectors.
+        self.members.clear()
 
 
 def initial_absence(op, binding):
@@ -627,21 +630,50 @@ def snapshot_original(op, binding, role):
     return result.stdout
 
 
+def prebuilt_control_data(binding, role, fact):
+    """A validated package can stay on disk instead of retaining its full vector."""
+    labels = {"cut": "write" if binding["job"] == "write-recovery" else "torn",
+              "frontier": "frontier", "completed": "completed"}
+    need(binding["job"] in JOB_STEPS and role in labels and (role != "completed" or binding["job"] == "write-recovery"),
+         "fixed-prebuilt-control-role")
+    need(type(fact) is dict and set(fact) == {"path", "bytes", "sha256"}
+         and type(fact["bytes"]) is int and 0 < fact["bytes"] <= 512 * 1024 * 1024
+         and hex_value(fact["sha256"], 64)
+         and fact["path"] == str(binding["inputPath"].parent / ("Fresh-" + labels[role] + ".pkg")),
+         "fixed-prebuilt-control-fact")
+    return fact["bytes"]
+
+
+def read_prebuilt_control(op, binding, role, fact):
+    """Read a new no-follow original and match the complete previously audited bytes."""
+    size = prebuilt_control_data(binding, role, fact)
+    entry, body = op.outputs.file(Path(fact["path"]), 512 * 1024 * 1024, modes=(0o444, 0o644))
+    try:
+        need(len(body) == size and sha(body) == fact["sha256"], "prebuilt-control-original-bytes")
+        op.outputs.check_one(entry)
+        return body
+    finally:
+        op.outputs.close(entry)
+        need(entry["closed"], "prebuilt-control-original-close")
+
+
 def route_resource_quote(binding, packages):
     """Exact prebuilt lengths; no forecast of post-cut compression is needed."""
     limit, mib = 512 * 1024 * 1024, 1024 * 1024
     required = {"cut", "frontier", "completed"} if binding["job"] == "write-recovery" else {"cut", "frontier"}
-    need(set(packages) == required and all(type(body) is bytes and 0 < len(body) <= limit
-         for body in packages.values()), "prebuilt-control-package-roster")
+    need(set(packages) == required, "prebuilt-control-package-roster")
+    sizes = {role: prebuilt_control_data(binding, role, fact) for role, fact in packages.items()}
     ordinary, pair = len(binding["packageBody"]), len(binding["producerBody"]) + len(binding["signatureBody"])
     inputs = sum(len(item[0]) for item in binding["inputFiles"].values())
     images = sum(len(body) for body in binding["controlBodies"].values())
     need(0 < ordinary <= limit and 0 < inputs <= limit and 0 < pair <= 65536 + 512,
          "fixed-carrier-input-bounds")
-    carriers = {role: ordinary + pair + len(body) for role, body in packages.items()}
+    carriers = {role: ordinary + pair + size for role, size in sizes.items()}
     carriers["ordinary"] = ordinary + pair
     need(all(n <= limit for n in carriers.values()), "precut-carrier-aggregate-capacity")
-    retained = inputs + ordinary + pair + images + sum(map(len, packages.values())) + binding.get("sourceBytes", 0)
+    # Keep the original conservative envelope, including every prebuilt package
+    # size, even though those byte vectors now stay on disk until needed.
+    retained = inputs + ordinary + pair + images + sum(sizes.values()) + binding.get("sourceBytes", 0)
     # Existing tree writer/readback and mount readback retain at most three
     # largest complete carrier byte windows, in addition to admitted inputs.
     # Complete original captures/receipt rows reserve64MiB (128x2x256KiB).
@@ -687,6 +719,9 @@ def resource_capacity(op, host_api, binding, quote, *, label="route"):
     live = sum(row["fd"] is not None for book in (op.outputs, op.protected, op.source.book)
                for row in book.entries)
     soft, _ = resource.getrlimit(resource.RLIMIT_NOFILE)
+    op.outputs.publish(op.work / ("precut-resource-observation-" + label + ".json"), canonical({
+        "quote": quote, "observed": facts, "liveOriginals": live,
+        "softFDLimit": soft, "originalReserve": 64, "admitted": False}))
     need((soft == resource.RLIM_INFINITY or live + 64 <= soft)
          and facts["memorySufficient"] and facts["diskSufficient"], "precut-actual-capacity")
     op.outputs.publish(op.work / ("precut-resource-admission-" + label + ".json"), canonical({
@@ -716,14 +751,15 @@ def execute_job(op, stager, host_api, binding):
     binding["resourceQuote"] = quote
     request = binding["ordinaryRequestId"]
     cut_carrier = Carrier(op, stager, host_api, binding, "cut",
-                          {"Fresh-" + cut_role + ".pkg": cut_package}, request).enter()
+                          {"Fresh-" + cut_role + ".pkg": read_prebuilt_control(op, binding, "cut", cut_package)}, request).enter()
     original, body = captured_control(op, stager, binding, cut_carrier, cut_role, "Fresh-" + cut_role + ".pkg")
     cut = cut_data(body, binding, cut_role, original.returncode)
     op.outputs.publish(op.work / "controlled-original-failure.json", body)
     cut_carrier.detach()
     frontier_role = "frontier" if cut_role == "write" else "frontier-refusal"
     name = frontier_name(cut["invocation"])
-    frontier_carrier = Carrier(op, stager, host_api, binding, "frontier", {name: frontier_package}, request).enter()
+    frontier_carrier = Carrier(op, stager, host_api, binding, "frontier",
+        {name: read_prebuilt_control(op, binding, "frontier", frontier_package)}, request).enter()
     original, body = captured_control(op, stager, binding, frontier_carrier, frontier_role, name)
     if cut_role == "write":
         frontier = frontier_data(body, binding, cut["invocation"], original.returncode)
@@ -753,7 +789,7 @@ def execute_job(op, stager, host_api, binding):
         observed = publish_installation_observation(op, stager, binding, args, original)
         ordinary_carrier.detach()
         completed_carrier = Carrier(op, stager, host_api, binding, "completed",
-            {"Fresh-completed.pkg": packages["completed"]}, request).enter()
+            {"Fresh-completed.pkg": read_prebuilt_control(op, binding, "completed", packages["completed"])}, request).enter()
         completed_original, completed_body = captured_control(op, stager, binding, completed_carrier,
                                                               "completed", "Fresh-completed.pkg")
         outcome = completed_data(completed_body, binding, frontier, observed, completed_original.returncode)
@@ -788,6 +824,17 @@ def ordinary_log_begin(op, stager, args):
     return path
 
 
+def torn_parent_refusal_data(body):
+    need(type(body) is bytes, "torn-parent-log-bytes")
+    # Require a complete LF/CRLF line. A lookahead for newline followed by $
+    # incorrectly requires the following log line to be empty or EOF.
+    marker = re.compile(rb"(?<![A-Za-z0-9_])" + re.escape(TORN_COMPLETED_MARKER) + rb"(?=\r?\n)", re.M)
+    need(len(marker.findall(body)) == 1
+         and body.count(b"MRK_MACOS_INSTALL_COMPLETED_REFUSED=") == 1
+         and b"MRK_MACOS_INSTALL_RESULT=" not in body, "exact-torn-parent-refusal")
+    return True
+
+
 def ordinary_log_finish(op, stager, args, cursor, *, torn):
     args.command = "installer-log-capture"
     args.cursor = cursor
@@ -800,10 +847,7 @@ def ordinary_log_finish(op, stager, args, cursor, *, torn):
     need(value["selectedData"]["bytes"] == len(body) and value["selectedData"]["sha256"] == sha(body),
          "ordinary-selected-log-binding")
     if torn:
-        marker = re.compile(rb"(?<![A-Za-z0-9_])" + re.escape(TORN_COMPLETED_MARKER) + rb"(?=\r?\n$)", re.M)
-        need(len(marker.findall(body)) == 1
-             and body.count(b"MRK_MACOS_INSTALL_COMPLETED_REFUSED=") == 1
-             and b"MRK_MACOS_INSTALL_RESULT=" not in body, "exact-torn-parent-refusal")
+        torn_parent_refusal_data(body)
     return value
 
 
