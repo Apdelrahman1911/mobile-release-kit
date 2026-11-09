@@ -14913,6 +14913,20 @@ mod installer {
                 && before.uid==actual.uid && before.gid==actual.gid
                 && before.mode&0o170000==0o040000 && (created || before==actual)
         }
+#[cfg(test)] #[test] fn fresh_parent_effect_transition_regression(){
+ let before=Identity{dev:1,ino:22,mode:0o040755,uid:0,gid:0,links:2,size:0,mtime:1,mtime_ns:1,ctime:1,ctime_ns:1};
+ let actual=Identity{links:3,size:128,mtime_ns:2,ctime_ns:2,..before};
+ assert!(removal_parent_change_data(before,0,actual,0,actual,0,true));
+ assert!(!removal_parent_change_data(before,0,actual,0,actual,0,false));
+ assert!(removal_parent_change_data(before,0,before,0,before,0,false));
+ for i in 0..8 { let mut bad=actual; match i {0=>bad.dev+=1,1=>bad.ino+=1,2=>bad.mode=0o040777,3=>bad.uid=501,4=>bad.gid=20,5=>bad.mode=0o100755,6=>bad.mtime_ns+=1,_=>bad.ctime_ns+=1};
+   if i<6 {assert!(!removal_parent_change_data(before,0,bad,0,bad,0,true));}
+   assert!(!removal_parent_change_data(before,0,actual,0,bad,0,true));
+ }
+ assert!(!removal_parent_change_data(before,0,actual,1,actual,1,true));
+ assert!(!removal_parent_change_data(before,0,actual,0,actual,1,true));
+}
+
         fn removal_request_name_data(name:&str)->bool {
             name.len()==34 && name.starts_with("r-") && removal_hex_data::<16>(&name[2..]).is_ok()
         }
@@ -20096,7 +20110,14 @@ exec ./mrk-macos-remove --fixture-supervise "$1"
                 }else{
                     // Same ordinary preparation/order/classifier. The actual
                     // input and fixed root are moved, not reopened/re-authenticated.
+                    // The root is retained across our own gate creation. Advance
+                    // its exact baseline only after that original effect returned;
+                    // the existing helper validates FD/name, flags and aliases.
+                    let root_before_gate=fresh_conservation_parent_before(&self.book,root)?;
                     self.book.registration_before_maintenance(root)?;self.book.maintenance_gate(root)?;
+                    if self.book.gate.writer.is_some() {
+                        reinstall_parent_returned(&mut self.book,root,root_before_gate)?;
+                    } else { self.book.check_name(root,true)?; }
                     match maintenance::fresh_conservation::nominate(&mut self.book,root,&selected)? {
                         maintenance::fresh_conservation::Entry::Current(old)=>{
                             self.reinstall_input=Some(prepared);return self.conserve_current_fresh(&old,&request);
@@ -20111,7 +20132,12 @@ exec ./mrk-macos-remove --fixture-supervise "$1"
                         if self.book.registration.verified{empty.insert(paths::REGISTRATION_GATE_NAME.into());}
                         maintenance::exact_roster(&mut self.book,root,&empty)?;
                     }
+                    let root_before_versions=fresh_conservation_parent_before(&self.book,root)?;
                     let versions=self.book.directory(root,"versions",false,0o755)?;
+                    if self.book.creations.last().is_some_and(|effect|effect.parent==root
+                        && effect.name=="versions" && effect.state=="created") {
+                        reinstall_parent_returned(&mut self.book,root,root_before_versions)?;
+                    } else { self.book.check_name(root,true)?; }
                     let prepared=PreparedFresh{input:prepared.input,inventory:prepared.inventory,
                         inventory_bytes:prepared.inventory_bytes,destination:root,versions};
                     let mut observed=maintenance::observe(&mut self.book,prepared,selected,None)?;
