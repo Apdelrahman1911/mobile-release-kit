@@ -1,0 +1,19 @@
+#!/bin/sh
+set -eu
+umask 077
+[ "${3:-}" = / ] || exit 1
+case "${1:-}" in /*) ;; *) exit 1 ;; esac
+name=${1##*/}
+case "$name" in Fresh-frontier-*.pkg) ;; *) exit 1 ;; esac
+invocation=${name#Fresh-frontier-}
+invocation=${invocation%.pkg}
+[ "${#invocation}" -eq 32 ] || exit 1
+case "$invocation" in *[!0123456789abcdef]*|00000000000000000000000000000000) exit 1 ;; esac
+case "$0" in
+    ./postinstall) scripts=. ;;
+    /*/postinstall) scripts=${0%/*} ;;
+    *) exit 1 ;;
+esac
+cd -P "$scripts" 2>/dev/null || exit 1
+p="${1%/*}/Install.pkg"
+exec ./mrk-macos-install "$PWD/input" "$p" "$invocation"

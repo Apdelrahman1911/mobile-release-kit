@@ -1,0 +1,13 @@
+#!/bin/sh
+set -eu
+umask 077
+[ "${3:-}" = / ] || exit 1
+case "${1:-}" in /*) ;; *) exit 1 ;; esac
+case "$0" in
+    ./postinstall) scripts=. ;;
+    /*/postinstall) scripts=${0%/*} ;;
+    *) exit 1 ;;
+esac
+cd -P "$scripts" 2>/dev/null || exit 1
+p="${1%/*}/Install.pkg"
+exec ./mrk-macos-install "$PWD/input" "$p"

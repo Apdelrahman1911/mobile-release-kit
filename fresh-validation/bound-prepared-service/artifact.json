@@ -1,0 +1,20 @@
+{
+  "id": 13680768858,
+  "node_id": "MDg6QXJ0aWZhY3QxMzY4MDc2ODg1OA==",
+  "name": "mobile-release-kit-macos26-aarch64-apple-darwin-prepared-38ece8614245d9bf17ac9c65457383f9972aa97d-42618284137-1",
+  "size_in_bytes": 253991923,
+  "url": "https://api.github.com/repos/Apdelrahman1911/mobile-release-kit/actions/artifacts/13680768858",
+  "archive_download_url": "https://api.github.com/repos/Apdelrahman1911/mobile-release-kit/actions/artifacts/13680768858/zip",
+  "expired": false,
+  "digest": "sha256:e7244ec9219ecdc470ed8e994cdb0bfdfcefd3a51b4f2c3a0aaf404c4ac4686b",
+  "created_at": "2026-11-09T14:20:29Z",
+  "updated_at": "2026-11-09T14:20:29Z",
+  "expires_at": "2026-11-23T14:20:26Z",
+  "workflow_run": {
+    "id": 42618284137,
+    "repository_id": 1341770786,
+    "head_repository_id": 1341770786,
+    "head_branch": "verify/desktop-macos-candidate",
+    "head_sha": "38ece8614245d9bf17ac9c65457383f9972aa97d"
+  }
+}

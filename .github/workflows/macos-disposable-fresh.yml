@@ -1,0 +1,219 @@
+name: Disposable Fresh recovery and refusal validation
+
+on:
+  push:
+    branches: [codex/macos-fresh-validation]
+
+permissions:
+  contents: read
+  actions: read
+
+# Validation-only source bound to the admitted product/package/pair and
+# distinct source-bound control transport. Both jobs use the same immutable
+# prepared/carrier tuples; no credentials or owner-machine actions.
+# Final binding replaces only the named UNBOUND input pins and enables the jobs
+# after Root's source review. The Python entry independently requires its full
+# execution binding, so removing a job condition alone cannot start a route.
+
+jobs:
+  write-recovery:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/codex/macos-fresh-validation'
+    runs-on: macos-26
+    timeout-minutes: 75
+    env:
+      MRK_MACOS_RUNNER: macos-26
+      MRK_MACOS_TARGET: aarch64-apple-darwin
+      MRK_MACOS_PACKAGE_ROLE: ordinary-image
+      MRK_MACOS_STORE_RUNTIME: signed-component
+      MRK_MACOS_SAME_PACKAGE_SCOPE: disabled
+      DEVELOPER_DIR: /Library/Developer/CommandLineTools
+      MACOSX_DEPLOYMENT_TARGET: '26.0'
+    steps: &fresh_steps
+      - name: Check out the actual immutable runner source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Select DATA Python
+        id: python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: '3.14.7'
+      - name: Reserve the fixed prerequisite-only work directory
+        id: hostwork
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          [[ "$RUNNER_TEMP" == /Users/runner/work/_temp && "$GITHUB_WORKSPACE" == /Users/runner/work/mobile-release-kit/mobile-release-kit ]] || exit 1
+          host_work=$(/usr/bin/mktemp -d "$RUNNER_TEMP/mrk-macos-fresh-host.XXXXXXXX")
+          printf 'root=%s\n' "$host_work" >> "$GITHUB_OUTPUT"
+      - name: Bind the complete reviewed first-party checkout before compilation
+        id: host-source
+        shell: bash
+        env:
+          MRK_PYTHON: ${{ steps.python.outputs.python-path }}
+          MRK_MACOS_WORK: ${{ steps.hostwork.outputs.root }}
+        run: |
+          set -euo pipefail
+          set -o noclobber
+          [[ "$(git rev-parse HEAD)" == "$GITHUB_SHA" ]] || exit 1
+          [[ -z "$(git -c core.fsmonitor=false status --porcelain=v1 --untracked-files=all)" ]] || exit 1
+          "$MRK_PYTHON" -I -S -B - "$MRK_MACOS_WORK/source-inventory.json" <<'PY_SOURCE'
+          import hashlib, json, os, stat, subprocess, sys
+          def git(*args):
+              return subprocess.run(["git", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", *args], check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=15).stdout
+          rows = git("ls-tree", "-r", "-z", "--full-tree", "HEAD").split(b"\0")
+          if rows[-1] or len(rows) > 4096: raise ValueError("tracked inventory bound")
+          files = []
+          for row in rows[:-1]:
+              header, raw_name = row.split(b"\t", 1)
+              mode, kind, blob = header.split(b" ")
+              name = raw_name.decode("utf-8", "strict")
+              if kind != b"blob" or mode not in (b"100644", b"100755") or any(p in ("", ".", "..") for p in name.split("/")): raise ValueError("tracked inventory path/type")
+              fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK)
+              try:
+                  before = os.fstat(fd)
+                  if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1 or before.st_size > 32 * 1024 * 1024: raise ValueError("tracked input refused")
+                  digest = hashlib.sha256()
+                  git_digest = hashlib.sha1(b"blob " + str(before.st_size).encode() + b"\0")
+                  if stat.S_IMODE(before.st_mode) != (0o755 if mode == b"100755" else 0o644): raise ValueError("tracked input mode differs from Git")
+                  size = 0
+                  while block := os.read(fd, 65536):
+                      size += len(block)
+                      if size > before.st_size: raise ValueError("tracked input grew")
+                      digest.update(block)
+                      git_digest.update(block)
+                  if git_digest.hexdigest().encode() != blob: raise ValueError("tracked input differs from Git blob")
+                  after = os.fstat(fd)
+                  sig = lambda s: (s.st_dev,s.st_ino,s.st_mode,s.st_nlink,s.st_uid,s.st_gid,s.st_size,s.st_mtime_ns,s.st_ctime_ns)
+                  if size != before.st_size or sig(before) != sig(after) or sig(after) != sig(os.stat(name, follow_symlinks=False)): raise ValueError("tracked input changed")
+              finally:
+                  os.close(fd)
+              files.append({"path": name, "gitMode": mode.decode(), "blob": blob.decode(), "size": size, "sha256": digest.hexdigest()})
+          value = {"source": os.environ["GITHUB_SHA"], "tree": git("rev-parse", "HEAD^{tree}").decode().strip(), "files": files}
+          data = json.dumps(value, sort_keys=True, separators=(",", ":")).encode() + b"\n"
+          if len(data) > 2 * 1024 * 1024: raise ValueError("source inventory output bound")
+          fd = os.open(sys.argv[1], os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+          with os.fdopen(fd, "wb") as stream:
+              stream.write(data)
+              stream.flush()
+              os.fsync(stream.fileno())
+          PY_SOURCE
+      - name: Prepare only required disposable host ancestors before any worker
+        timeout-minutes: 2
+        # Empty environment before even this noninteractive shell starts. The
+        # second env -i carries only provider-owned, fixed-route inputs into
+        # the nonroot DATA Python; no loader/shell/tool override survives.
+        shell: /usr/bin/env -i /bin/bash --noprofile --norc -e -o pipefail {0}
+        run: |
+          cd /Users/runner/work/mobile-release-kit/mobile-release-kit
+          # Match the real-UID CF default before Python/native imports; never
+          # inherit an ambient encoding or consult the runner's preferences.
+          printf -v mrk_cf_encoding '0x%X:0:0' "$UID"
+          exec /usr/bin/env -i \
+            PATH=/usr/bin:/bin:/usr/sbin:/sbin \
+            HOME='${{ steps.hostwork.outputs.root }}' LANG=C LC_ALL=C TZ=UTC \
+            __CF_USER_TEXT_ENCODING="$mrk_cf_encoding" \
+            RUNNER_ENVIRONMENT='${{ runner.environment }}' \
+            RUNNER_OS='${{ runner.os }}' RUNNER_ARCH='${{ runner.arch }}' \
+            RUNNER_TEMP='${{ runner.temp }}' \
+            GITHUB_REPOSITORY='${{ github.repository }}' \
+            GITHUB_EVENT_NAME='${{ github.event_name }}' GITHUB_REF='${{ github.ref }}' \
+            GITHUB_SHA='${{ github.sha }}' GITHUB_WORKFLOW_SHA='${{ github.workflow_sha }}' \
+            GITHUB_WORKFLOW_REF='${{ github.workflow_ref }}' \
+            GITHUB_RUN_ID='${{ github.run_id }}' GITHUB_RUN_ATTEMPT='${{ github.run_attempt }}' \
+            GITHUB_JOB='${{ github.job }}' GITHUB_WORKSPACE='${{ github.workspace }}' \
+            MRK_EXPECTED_SHA='${{ github.sha }}' \
+            MRK_MACOS_INSTALL_SOURCE_COMMIT='${{ github.sha }}' \
+            MRK_MACOS_WORK='${{ steps.hostwork.outputs.root }}' \
+            '${{ steps.python.outputs.python-path }}' -I -S -B \
+            /Users/runner/work/mobile-release-kit/mobile-release-kit/fresh-validation/fresh_host_prerequisite.py --target 'aarch64-apple-darwin'
+          # Only this original helper's exit0 after every final close admits
+          # later steps. Its immutable JSON is explicitly provisional, not a
+          # substitute for workflow status. Never restore0775 before VM disposal.
+      - name: Check out the separately frozen product
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: 38ece8614245d9bf17ac9c65457383f9972aa97d
+          path: prepared-built-source
+          persist-credentials: false
+      - name: Check out the separate immutable control transport
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
+        with:
+          ref: 8ac91df234bb606d2ad3e3578a10a37eb5f44092
+          path: _fresh-control-transport
+          persist-credentials: false
+      - name: Reserve a fresh work directory and copy pinned service metadata
+        id: work
+        shell: bash
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: |
+          set -euo pipefail
+          umask 077
+          [[ "$RUNNER_ENVIRONMENT" == github-hosted && "$RUNNER_OS" == macOS && "$RUNNER_ARCH" == ARM64 ]] || exit 1
+          [[ "$GITHUB_WORKSPACE" == /Users/runner/work/mobile-release-kit/mobile-release-kit ]] || exit 1
+          [[ "$RUNNER_TEMP" == /Users/runner/work/_temp ]] || exit 1
+          work=$(/usr/bin/mktemp -d "$RUNNER_TEMP/mrk-macos-installed.XXXXXXXX")
+          printf 'MRK_MACOS_WORK=%s\n' "$work" >> "$GITHUB_ENV"
+          printf 'root=%s\n' "$work" >> "$GITHUB_OUTPUT"
+          /bin/cp -R fresh-validation/bound-prepared-service "$work/prepared-service"
+      - name: Download the exact successful prepared cohort
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          artifact-ids: 13680768858
+          run-id: 42618284137
+          github-token: ${{ github.token }}
+          path: ${{ steps.work.outputs.root }}/prepared-input
+      - name: Download the exact ordinary six-member carrier
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+        with:
+          artifact-ids: 13684743227
+          run-id: 42639644199
+          github-token: ${{ github.token }}
+          path: ${{ steps.work.outputs.root }}/ordinary-carrier
+      - name: Run the fixed Fresh route using the existing original owner
+        shell: bash
+        env:
+          DATA_PYTHON: ${{ steps.python.outputs.python-path }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: |
+          set -euo pipefail
+          "$DATA_PYTHON" -I -S -B fresh-validation/fresh_hosted_bootstrap.py
+      - name: Preserve all original outputs and explicit new validation evidence
+        if: ${{ always() && steps.work.outcome == 'success' && steps.work.outputs.root != '' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: fresh-${{ github.job }}-${{ github.run_id }}-${{ github.run_attempt }}
+          if-no-files-found: error
+          include-hidden-files: true
+          path: |
+            ${{ steps.work.outputs.root }}/*.json
+            ${{ steps.work.outputs.root }}/*.status
+            ${{ steps.work.outputs.root }}/*.stdout
+            ${{ steps.work.outputs.root }}/*.stderr
+            ${{ steps.work.outputs.root }}/*.log
+      - name: Preserve only the actually reserved host prerequisite evidence
+        if: ${{ always() && steps.hostwork.outcome == 'success' && steps.hostwork.outputs.root != '' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: fresh-host-${{ github.job }}-${{ github.run_id }}-${{ github.run_attempt }}
+          if-no-files-found: error
+          include-hidden-files: true
+          path: |
+            ${{ steps.hostwork.outputs.root }}/*.json
+
+  torn-refusal:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/codex/macos-fresh-validation'
+    runs-on: macos-26
+    timeout-minutes: 75
+    env:
+      MRK_MACOS_RUNNER: macos-26
+      MRK_MACOS_TARGET: aarch64-apple-darwin
+      MRK_MACOS_PACKAGE_ROLE: ordinary-image
+      MRK_MACOS_STORE_RUNTIME: signed-component
+      MRK_MACOS_SAME_PACKAGE_SCOPE: disabled
+      DEVELOPER_DIR: /Library/Developer/CommandLineTools
+      MACOSX_DEPLOYMENT_TARGET: '26.0'
+    steps: *fresh_steps
