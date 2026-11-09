@@ -1,4 +1,4 @@
-name: Disposable Fresh recovery and refusal validation
+name: Disposable Fresh interrupted-write validation
 
 on:
   push:
@@ -9,9 +9,10 @@ permissions:
   actions: read
 
 # Validation-only source bound to the admitted product/package/pair and
-# distinct source-bound control transport. Both jobs use the same immutable
+# distinct source-bound control transport. The write job uses the immutable
 # prepared/carrier tuples; no credentials or owner-machine actions.
-# Final binding replaces only the named UNBOUND input pins and enables the jobs
+# Torn-journal refusal qualified in42655913320 and is deliberately omitted.
+# Final binding replaces only the named UNBOUND input pins and enables the job
 # after Root's source review. The Python entry independently requires its full
 # execution binding, so removing a job condition alone cannot start a route.
 
@@ -28,7 +29,7 @@ jobs:
       MRK_MACOS_SAME_PACKAGE_SCOPE: disabled
       DEVELOPER_DIR: /Library/Developer/CommandLineTools
       MACOSX_DEPLOYMENT_TARGET: '26.0'
-    steps: &fresh_steps
+    steps:
       - name: Check out the actual immutable runner source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
@@ -203,18 +204,3 @@ jobs:
           include-hidden-files: true
           path: |
             ${{ steps.hostwork.outputs.root }}/*.json
-
-  # Exact same-package torn case qualified in42655913320; do not replay.
-  torn-refusal:
-    if: ${{ false }}
-    runs-on: macos-26
-    timeout-minutes: 75
-    env:
-      MRK_MACOS_RUNNER: macos-26
-      MRK_MACOS_TARGET: aarch64-apple-darwin
-      MRK_MACOS_PACKAGE_ROLE: ordinary-image
-      MRK_MACOS_STORE_RUNTIME: signed-component
-      MRK_MACOS_SAME_PACKAGE_SCOPE: disabled
-      DEVELOPER_DIR: /Library/Developer/CommandLineTools
-      MACOSX_DEPLOYMENT_TARGET: '26.0'
-    steps: *fresh_steps
