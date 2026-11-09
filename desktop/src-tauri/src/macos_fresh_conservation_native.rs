@@ -1417,3 +1417,7 @@ pub(super) fn preflight_transport_work(book:&mut Install,row:&ConservationSpanDa
         check(book.originals.len()<=bound,"fresh-transport-original-budget")?;snapshot.post(book)
     })
 }
+
+// Private actual-observation projection, absent from every shipping graph.
+#[cfg(feature="macos-installed-fresh-census-control")]
+include!("macos_fresh_census_projection.rs");

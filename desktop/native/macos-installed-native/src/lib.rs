@@ -81,6 +81,25 @@ pub fn restore_fixture_abrupt_exit() -> ! {
     unsafe { nix::libc::_exit(86) }
 }
 
+#[cfg(all(any(feature="installed-fresh-write-cut",feature="installed-fresh-torn-cut"), any(
+    all(feature="installed-fresh-write-cut",feature="installed-fresh-torn-cut"),
+    feature="installed-removal-abrupt-fixture",feature="installed-restore-cut-fixture",
+    feature="installed-observation",feature="vault-helper",feature="android-registration-helper",
+    feature="desktop-image",feature="resident-image",feature="e2-native-fixture",
+    feature="package-producer-signing",feature="xcode-setup",mrk_wrapping_keychain_qualification,test
+)))]
+compile_error!("Fresh cuts require one isolated native role");
+#[cfg(feature="installed-fresh-write-cut")]
+pub fn fresh_write_cut_exit() -> ! {
+    // SAFETY: fixed self-exit; no pointer, PID, cleanup or caller-selected status.
+    unsafe { nix::libc::_exit(87) }
+}
+#[cfg(feature="installed-fresh-torn-cut")]
+pub fn fresh_torn_cut_exit() -> ! {
+    // SAFETY: fixed self-exit; the high-level caller owns exact effect admission.
+    unsafe { nix::libc::_exit(88) }
+}
+
 // Qualification libtest must link without granting a private process role.
 // Only the two fixed example mains can return active roles 1/2. Dependencies
 // of those examples compile without cfg(test), so this definition is absent.
