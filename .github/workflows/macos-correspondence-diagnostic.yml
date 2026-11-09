@@ -15,6 +15,7 @@ permissions:
 jobs:
   correspondence-diagnostic:
     runs-on: macos-26
+    environment: macos-developer-id
     timeout-minutes: 75
     env:
       MRK_MACOS_RUNNER: macos-26
