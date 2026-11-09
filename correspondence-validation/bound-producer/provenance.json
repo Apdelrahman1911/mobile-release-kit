@@ -1,0 +1,271 @@
+{
+  "origin": {
+    "artifact": 13670956285,
+    "artifactSha256": "2f5ca0840fabb07ecbbfc1e978e957fe0d474dd3d7d3e66acdb385f5d98ccd91",
+    "attempt": 1,
+    "job": 129137156409,
+    "run": 42610439567,
+    "source": "9db571dbe542e261797c6d53b41da83af1ee890c",
+    "tree": "b271308469651a9881b7d5a1dc603f1df85e200a"
+  },
+  "receipt": {
+    "androidBuildQualified": false,
+    "androidRegisteredCopyQualified": false,
+    "androidServiceAuthenticated": false,
+    "cleanupErrors": [],
+    "credentialContexts": [
+      {
+        "closed": true,
+        "defaultUnchanged": true,
+        "purpose": "producer",
+        "retired": true,
+        "searchRestored": true
+      }
+    ],
+    "credentialOriginals": [
+      {
+        "entered": true,
+        "returned": true,
+        "role": "producer-adhoc",
+        "settled": true,
+        "status": 0
+      },
+      {
+        "entered": true,
+        "returned": true,
+        "role": "producer-adhoc-verify",
+        "settled": true,
+        "status": 0
+      },
+      {
+        "entered": true,
+        "returned": true,
+        "role": "producer-cdhash",
+        "settled": true,
+        "status": 0
+      },
+      {
+        "entered": true,
+        "returned": true,
+        "role": "search-before",
+        "settled": true,
+        "status": 0
+      },
+      {
+        "entered": true,
+        "returned": true,
+        "role": "default-before",
+        "settled": true,
+        "status": 0
+      },
+      {
+        "entered": true,
+        "returned": true,
+        "role": "create",
+        "settled": true,
+        "status": 0
+      },
+      {
+        "entered": true,
+        "returned": true,
+        "role": "search-created",
+        "settled": true,
+        "status": 0
+      },
+      {
+        "entered": true,
+        "returned": true,
+        "role": "settings",
+        "settled": true,
+        "status": 0
+      },
+      {
+        "entered": true,
+        "returned": true,
+        "role": "unlock",
+        "settled": true,
+        "status": 0
+      },
+      {
+        "entered": true,
+        "returned": true,
+        "role": "import",
+        "settled": true,
+        "status": 0
+      },
+      {
+        "entered": true,
+        "returned": true,
+        "role": "partitions",
+        "settled": true,
+        "status": 0
+      },
+      {
+        "entered": true,
+        "returned": true,
+        "role": "identity",
+        "settled": true,
+        "status": 0
+      },
+      {
+        "entered": true,
+        "returned": true,
+        "role": "certificates",
+        "settled": true,
+        "status": 0
+      },
+      {
+        "entered": true,
+        "returned": true,
+        "role": "search-admit",
+        "settled": true,
+        "status": 0
+      },
+      {
+        "entered": true,
+        "returned": true,
+        "role": "restrict",
+        "settled": true,
+        "status": 0
+      },
+      {
+        "entered": true,
+        "returned": true,
+        "role": "search-restricted",
+        "settled": true,
+        "status": 0
+      },
+      {
+        "entered": true,
+        "returned": true,
+        "role": "search-after-callback",
+        "settled": true,
+        "status": 0
+      },
+      {
+        "entered": true,
+        "returned": true,
+        "role": "restore",
+        "settled": true,
+        "status": 0
+      },
+      {
+        "entered": true,
+        "returned": true,
+        "role": "search-restored",
+        "settled": true,
+        "status": 0
+      },
+      {
+        "entered": true,
+        "returned": true,
+        "role": "delete",
+        "settled": true,
+        "status": 0
+      },
+      {
+        "entered": true,
+        "returned": true,
+        "role": "search-final",
+        "settled": true,
+        "status": 0
+      },
+      {
+        "entered": true,
+        "returned": true,
+        "role": "default-after",
+        "settled": true,
+        "status": 0
+      }
+    ],
+    "developerIdOrNotarizationQualified": false,
+    "directStagerIOPending": null,
+    "finalPackageReceiptSha256": "f724a012fa654f361c9c1b4f9b093eae6edcb2e85ed054ce898ccc127d59b295",
+    "helperIdentifier": "dev.mobile-release-kit.desktop.android-register",
+    "imageReleaseId": "macos26-arm64-desktop-04",
+    "imageReleaseSourceSha256": "8f6eecbebbd2188ebd6afe8c918a31bc4d0eacd683f2e87808b843244e633232",
+    "imageSourceCommit": "5c53b796a40bf788ca553ae2445e82a3e5edb87a",
+    "inputEvidence": {
+      "Install.pkg": {
+        "bytes": 126981541,
+        "sha256": "61dbcceb17d7ffb9f4351261e518192f38fc2b719a0e508b783b6948f9a5cffd"
+      },
+      "producer.json": {
+        "bytes": 2045,
+        "sha256": "eac0cdd4d789166ac7da9222f5baf623d0fe90f4cda44afdcebbcf11a7a583d0"
+      },
+      "producer.sig": {
+        "bytes": 256,
+        "sha256": "48657b33a6007931ac09e69cee1b309185c820aae377f6a6dd804344502b3d3d"
+      }
+    },
+    "installationQualified": false,
+    "ordinaryCarrier": false,
+    "ordinaryInstaller": false,
+    "originalCalls": [
+      {
+        "capturesSettled": true,
+        "entered": true,
+        "returncode": 0,
+        "returned": true,
+        "role": "producer-tests",
+        "stderrSha256": "381d3ddeaaa3b55282e42b0217f083c741b5d128028037c27527a88233d097b5",
+        "stdoutSha256": "12f1012736c10a22f24dc461e33e243a71984cbfb83c59f294840c3463afee1e"
+      },
+      {
+        "capturesSettled": true,
+        "entered": true,
+        "returncode": 0,
+        "returned": true,
+        "role": "producer-build",
+        "stderrSha256": "3051bb92ba8d68b5bd59864ccd1486ff3d387d9559fc12b8c26ce0de21d467ae",
+        "stdoutSha256": "2e2021460799a4d07acc8ce7d28e10de80a1cd00408cf4b95f8657ef0f78eece"
+      },
+      {
+        "capturesSettled": true,
+        "entered": true,
+        "returncode": 0,
+        "returned": true,
+        "role": "producer-emitter",
+        "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+        "stdoutSha256": "2363628fb0df727cd23231ee43f7fdd6a7c113727549e2e149caaf553d609442"
+      }
+    ],
+    "originalClosesKnown": true,
+    "outerFinalityRequired": true,
+    "packageMount": {
+      "attachEntered": false,
+      "detached": false,
+      "installerEntered": false,
+      "installerOriginalZero": false,
+      "originalKnown": false,
+      "retained": false,
+      "sameRequestV2Readback": false,
+      "systemServiceExitClaimed": false
+    },
+    "packageRole": "ordinary-image",
+    "passed": true,
+    "phase": "package-install",
+    "producerSummary": {
+      "descriptorBytes": 2045,
+      "descriptorSha256": "eac0cdd4d789166ac7da9222f5baf623d0fe90f4cda44afdcebbcf11a7a583d0",
+      "kind": "mrk-package-producer-emitted",
+      "packageSha256": "61dbcceb17d7ffb9f4351261e518192f38fc2b719a0e508b783b6948f9a5cffd",
+      "schemaVersion": 1,
+      "signatureBytes": 256,
+      "signatureSha256": "48657b33a6007931ac09e69cee1b309185c820aae377f6a6dd804344502b3d3d"
+    },
+    "productReady": false,
+    "runAttempt": "1",
+    "runId": "42610439567",
+    "schemaVersion": 1,
+    "scope": "correspondence-diagnostic-producer-prefix",
+    "signedInputPairReady": true,
+    "source": "9db571dbe542e261797c6d53b41da83af1ee890c",
+    "target": "aarch64-apple-darwin",
+    "targetRetired": true,
+    "toolchain": "1.98.1",
+    "workflow": "Apdelrahman1911/mobile-release-kit/.github/workflows/macos-correspondence-diagnostic.yml@refs/heads/codex/macos-correspondence-diagnostic",
+    "workflowSource": "9db571dbe542e261797c6d53b41da83af1ee890c"
+  }
+}

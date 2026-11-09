@@ -15,7 +15,6 @@ permissions:
 jobs:
   correspondence-diagnostic:
     runs-on: macos-26
-    environment: macos-developer-id
     timeout-minutes: 75
     env:
       MRK_MACOS_RUNNER: macos-26
@@ -196,31 +195,25 @@ jobs:
             DEVELOPER_DIR="$DEVELOPER_DIR" MACOSX_DEPLOYMENT_TARGET=26.0 \
             "/Users/runner/.rustup/toolchains/${RUSTUP_TOOLCHAIN}-$MRK_MACOS_TARGET/bin/cargo" fetch \
               --manifest-path "$checkout/desktop/src-tauri/Cargo.toml" --locked --target "$MRK_MACOS_TARGET"
-      - name: Produce signed inputs then run the one separate diagnostic control
+      - name: Run the diagnostic with frozen signed producer inputs
         timeout-minutes: 60
         shell: bash
         env:
           RUNNER_ENVIRONMENT: ${{ runner.environment }}
           DATA_PYTHON: ${{ steps.python.outputs.python-path }}
-          MRK_MACOS_DEVELOPER_ID_P12_BASE64: ${{ secrets.MRK_MACOS_DEVELOPER_ID_P12_BASE64 }}
-          MRK_MACOS_DEVELOPER_ID_P12_PASSWORD: ${{ secrets.MRK_MACOS_DEVELOPER_ID_P12_PASSWORD }}
         run: |
           set +x
           set +a
-          export -n MRK_MACOS_DEVELOPER_ID_P12_BASE64 MRK_MACOS_DEVELOPER_ID_P12_PASSWORD
           set -euo pipefail
           set -o noclobber
           umask 077
           set +e
-          MRK_MACOS_DEVELOPER_ID_P12_BASE64="$MRK_MACOS_DEVELOPER_ID_P12_BASE64" \
-          MRK_MACOS_DEVELOPER_ID_P12_PASSWORD="$MRK_MACOS_DEVELOPER_ID_P12_PASSWORD" \
             "$DATA_PYTHON" -I -S -B correspondence-validation/diagnostic_bootstrap.py \
             > "$MRK_MACOS_WORK/diagnostic-bootstrap.stdout" 2> "$MRK_MACOS_WORK/diagnostic-bootstrap.stderr"
           diagnostic_status=$?
           printf '%s\n' "$diagnostic_status" > "$MRK_MACOS_WORK/diagnostic-bootstrap.status"
           status_saved=$?
           set -e
-          unset MRK_MACOS_DEVELOPER_ID_P12_BASE64 MRK_MACOS_DEVELOPER_ID_P12_PASSWORD
           [[ "$status_saved" == 0 ]] || exit "$status_saved"
           exit "$diagnostic_status"
       - name: Preserve all original outputs and explicit new validation evidence

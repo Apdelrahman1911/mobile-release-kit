@@ -25,8 +25,7 @@ EXECUTION_BINDING = {'controlManifestSha256': '6a7e6e8aa09868e76443ed3e54563d6a6
                              'compilerOriginalReturn': 0,
                              'path': 'diagnostic/mrk-macos-install',
                              'sha256': '1096f79c3bf063fd2e0018471a07137ceec3848b0a1f4d0e96240d7dbaea3674'}},
- 'diagnosticLegend': {'bytes': 43459,
-                      'sha256': 'd07e023fc19e0361145f983d3e0098f4ceb86d3059dd25b9b11732d5782abc85'},
+ 'diagnosticLegend': {'bytes': 43459, 'sha256': 'd07e023fc19e0361145f983d3e0098f4ceb86d3059dd25b9b11732d5782abc85'},
  'diagnosticSites': [687,
                      707,
                      721,
@@ -296,12 +295,16 @@ EXECUTION_BINDING = {'controlManifestSha256': '6a7e6e8aa09868e76443ed3e54563d6a6
                               'sha256': '6a7e6e8aa09868e76443ed3e54563d6a6d99dc64839d2a263d23dc9fd4ac61e3'},
  'diagnosticSourceTree': 'ac00c4f7caee0ff74f7cdd1477f88428a164510f',
  'executionApproved': True,
+ 'frozenProducerOrigin': {'artifact': 13670956285,
+                          'artifactSha256': '2f5ca0840fabb07ecbbfc1e978e957fe0d474dd3d7d3e66acdb385f5d98ccd91',
+                          'attempt': 1,
+                          'job': 129137156409,
+                          'run': 42610439567,
+                          'source': '9db571dbe542e261797c6d53b41da83af1ee890c',
+                          'tree': 'b271308469651a9881b7d5a1dc603f1df85e200a'},
  'inventorySha256': '460d915d828c5639e28366970d5167cc3723edcde96a97ac1b56fe9df9270b9d',
- 'package': {'bytes': 126981541,
-             'sha256': '61dbcceb17d7ffb9f4351261e518192f38fc2b719a0e508b783b6948f9a5cffd'},
- 'preparedInputFacts': {'expandedScriptsBytes': 350208512,
-                        'inputFileBytes': 344923571,
-                        'inventoryBytes': 1402721},
+ 'package': {'bytes': 126981541, 'sha256': '61dbcceb17d7ffb9f4351261e518192f38fc2b719a0e508b783b6948f9a5cffd'},
+ 'preparedInputFacts': {'expandedScriptsBytes': 350208512, 'inputFileBytes': 344923571, 'inventoryBytes': 1402721},
  'preparedMembers': {'MobileReleaseKit-original.pkg': {'bytes': 126997145,
                                                        'sha256': '292a4a44a2bbc758ba8f6388676c8ebf3f9d3d9c05e1a83abe419aeb1bda3d30'},
                      'MobileReleaseKit.pkg': {'bytes': 126981541,
@@ -643,16 +646,26 @@ EXECUTION_BINDING = {'controlManifestSha256': '6a7e6e8aa09868e76443ed3e54563d6a6
                                                                                                  'sha256': '9a271f2a916b0b6ee6cecb2426f0b3206ef074578be55d9bc94f6f3fe3ab86aa'},
                             'correspondence-validation/bound-prepared-service/run.json': {'bytes': 14864,
                                                                                           'sha256': '144154b015ec0aa051a3d4299ae2d560971febfe055f499af2fbcf784a1d61ed'},
+                            'correspondence-validation/bound-producer/producer.json': {'bytes': 2045,
+                                                                                       'sha256': 'eac0cdd4d789166ac7da9222f5baf623d0fe90f4cda44afdcebbcf11a7a583d0'},
+                            'correspondence-validation/bound-producer/producer.sig': {'bytes': 256,
+                                                                                      'sha256': '48657b33a6007931ac09e69cee1b309185c820aae377f6a6dd804344502b3d3d'},
+                            'correspondence-validation/bound-producer/provenance.json': {'bytes': 7449,
+                                                                                         'sha256': 'e768e0d95a77b8b7aaa838fc2769795e5a87de616467e27f9661f642cd311d20'},
                             'correspondence-validation/diagnostic_producer_prefix.py': {'bytes': 18016,
                                                                                         'sha256': 'a28dc2299357c14ef248e9a383e8fbeee00640c317187838c8baece140e6c44c'},
                             'correspondence-validation/diagnostic_runner.py': {'bytes': 37258,
                                                                                'sha256': 'e81e4ed2e323f323af11095d904cd6685f121555b250b3d3d794b5d9d0e7b43a'},
                             'correspondence-validation/scripts/diagnostic-postinstall': {'bytes': 309,
                                                                                          'sha256': '9141573a9028fe47517dd83f2fac2e6fda06b5be34fa5293e67910bf95643ab1'},
-                            'correspondence-validation/test_control_metadata.py': {'bytes': 4151, 'sha256': 'c47be7be032915ea72cbbc44a629f840570aef3c4885bf11164bfceedcc120a7'},
-                            'correspondence-validation/test_producer_budget.py': {'bytes': 4744, 'sha256': '51abc7cb1f1fdac373b72c44406156b2e1f4b4dfa2284f5a12416e6359aeba6f'},
+                            'correspondence-validation/test_control_metadata.py': {'bytes': 4151,
+                                                                                   'sha256': 'c47be7be032915ea72cbbc44a629f840570aef3c4885bf11164bfceedcc120a7'},
                             'correspondence-validation/test_diagnostic_data.py': {'bytes': 12353,
                                                                                   'sha256': '5d50da67e12a395547aaa853881adc5e1dba89e7f7adde3797cd3d46e5dce2ab'},
+                            'correspondence-validation/test_frozen_inputs.py': {'bytes': 4111,
+                                                                                'sha256': '19acd1c9cfc668576d203cfc2d9989dd894ca51bc790c688d77198b0656264db'},
+                            'correspondence-validation/test_producer_budget.py': {'bytes': 4744,
+                                                                                  'sha256': '51abc7cb1f1fdac373b72c44406156b2e1f4b4dfa2284f5a12416e6359aeba6f'},
                             'desktop/macos-installed-inputs/Distribution.xml': {'bytes': 1152,
                                                                                 'sha256': '7bfc8c13e56bac04434b620b143af93b5a724e5bc97873230a95e1162f76e359'},
                             'desktop/macos-installed-inputs/EntryInfo.plist': {'bytes': 1059,
@@ -1840,6 +1853,51 @@ def control_image_readback(book, stager, path, body):
     book.check_one(entry)
 
 
+def prepared_input_files(stager, work, binding):
+    # The packaging root is0755; input and all other descendants remain0555.
+    files = stager.tree(work / "scripts", packager=True, mac_store_prefix="input/runtime/store")
+    need({name for name in files if not name.startswith("input/")} == {"postinstall", "mrk-macos-install"},
+         "prepared-script-root-roster")
+    inputs = {name[len("input/"):]: item for name, item in files.items() if name.startswith("input/")}
+    need(sum(len(item[0]) for item in inputs.values()) == binding["preparedInputFacts"]["inputFileBytes"],
+         "prepared-input-file-bytes")
+    return inputs
+
+
+def frozen_producer_inputs(book, bodies, binding, stager, work):
+    root = "correspondence-validation/bound-producer/"
+    def source(name):
+        relative = root + name
+        return pin(bodies[("runner", relative)], binding["sourceFiles"]["runner"][relative])
+    provenance = json.loads(source("provenance.json"))
+    receipt = provenance["receipt"]
+    need(provenance["origin"] == binding["frozenProducerOrigin"]
+         and receipt["source"] == provenance["origin"]["source"]
+         and receipt["runId"] == str(provenance["origin"]["run"])
+         and receipt["runAttempt"] == "1"
+         and all(receipt[k] is True for k in ("passed", "signedInputPairReady", "originalClosesKnown", "targetRetired"))
+         and receipt["ordinaryInstaller"] is False and receipt["ordinaryCarrier"] is False
+         and tuple(c["role"] for c in receipt["originalCalls"]) == ("producer-tests", "producer-build", "producer-emitter")
+         and all(c["returned"] and c["capturesSettled"] and c["returncode"] == 0 for c in receipt["originalCalls"])
+         and all(c["returned"] and c["settled"] and c["status"] == 0 for c in receipt["credentialOriginals"])
+         and len(receipt["credentialContexts"]) == 1
+         and all(all(c[k] for k in ("retired", "closed", "searchRestored", "defaultUnchanged"))
+                 for c in receipt["credentialContexts"]), "frozen-producer-original-proof")
+    producer, signature = source("producer.json"), source("producer.sig")
+    for name, body in (("producer.json", producer), ("producer.sig", signature)):
+        pin(body, receipt["inputEvidence"][name])
+    need(receipt["inputEvidence"]["Install.pkg"] == binding["package"], "frozen-producer-package")
+    current = stager.maintenance_producer_data(producer, target=TARGET)["releaseSet"]["current"]
+    need(current["sourceCommit"] == binding["productSource"]
+         and current["packageSha256"] == binding["package"]["sha256"]
+         and current["inventorySha256"] == binding["inventorySha256"]
+         and current["runtimeManifestSha256"] == binding["runtimeManifestSha256"], "frozen-producer-current")
+    _, package = book.file(work / "package-final/MobileReleaseKit.pkg", 512 * 1024 * 1024, modes=(0o444,))
+    pin(package, binding["package"])
+    book.check()
+    return package, producer, signature, provenance["origin"]
+
+
 def source_descriptor_quote(binding):
     """Exact source handles plus separate existing-owner and controller reserves."""
     pins = binding["sourceFiles"]
@@ -2098,39 +2156,16 @@ def main():
         need(set(binding["scriptPins"]) == set(scripts), "exact-control-script-roster")
         for name, body in scripts.items():
             pin(body, binding["scriptPins"][name])
-        prefix_module.EXECUTION_BINDING = binding
-        runner.resource_capacity(op, host_api, dict(binding, resourceModule=resource_data),
-            runner.prefix_resource_quote(binding), label="producer-prefix")
-        producer_source_before = runner.producer_source_snapshot(op, binding, e2, PRODUCT_ROOT, "before")
-        prefix = prefix_module.PrefixOwner(owner, PRODUCT_ROOT, work, "package-install",
-            product_environment, stager, target=TARGET, prepared=prepared_binding)
-        prefix_inputs, prefix_receipt = prefix.execute_prefix()
-        producer_source_after = runner.producer_source_snapshot(op, binding, e2, PRODUCT_ROOT, "after")
-        need(producer_source_before == producer_source_after, "producer-compiler-source-post")
-        del producer_source_before, producer_source_after
-        # These are NEW retained readers after the prefix owner's known closes.
-        # No returned byte vector substitutes for the actual output originals.
-        emitted = {name: {"bytes": len(body), "sha256": digest(body)}
-                   for name, body in prefix_inputs.items()}
-        need(prefix_receipt["passed"] is True and prefix_receipt["signedInputPairReady"] is True
-             and prefix_receipt["ordinaryInstaller"] is False
-             and prefix_receipt["ordinaryCarrier"] is False
-             and prefix_receipt["inputEvidence"] == emitted, "producer-prefix-known-output")
-        reacquired = cohort(book, work / "producer-root", emitted, limit=512 * 1024 * 1024)
-        need(reacquired == prefix_inputs, "producer-prefix-output-correspondence")
-        package, producer, signature = (reacquired[name] for name in ("Install.pkg", "producer.json", "producer.sig"))
-        pin(package, binding["package"])
-        binding["producer"] = emitted["producer.json"]
-        binding["signature"] = emitted["producer.sig"]
+        package, producer, signature, producer_origin = frozen_producer_inputs(book, bodies, binding, stager, work)
+        binding["producer"] = {"bytes": len(producer), "sha256": digest(producer)}
+        binding["signature"] = {"bytes": len(signature), "sha256": digest(signature)}
         op.outputs.publish(work / "diagnostic-producer-input-evidence.json", encode({
-            "schemaVersion": 1, "scope": "signed-inputs-for-one-diagnostic-control",
+            "schemaVersion": 1, "scope": "frozen-signed-inputs-for-one-diagnostic-control",
             "preparedOrigin": prepared_binding.origin, "actualConsumer": consumer,
-            "inputs": emitted, "prefixOriginalClosesKnown": prefix_receipt["originalClosesKnown"],
-            "prefixTargetRetired": prefix_receipt["targetRetired"],
+            "producerOrigin": producer_origin, "producerRebuilt": False,
             "ordinaryInstallerExecuted": False, "ordinaryCarrierQualified": False,
             "newReadersRetained": True, "nativeProducerAdmissionStillRequired": True}))
-        del prefix_inputs, prefix
-        input_files = stager.tree(work / "scripts/input", packager=True, mac_store_prefix="runtime/store")
+        input_files = prepared_input_files(stager, work, binding)
         inventory = input_files[stager.INSTALLATION_INVENTORY_NAME][0]
         need(digest(inventory) == binding["inventorySha256"]
              and prepared_binding.manifest["runtimeManifestSha256"] == binding["runtimeManifestSha256"], "hydrated-input-anchors")
@@ -2145,7 +2180,7 @@ def main():
         op.outputs.publish(work / "diagnostic-bootstrap-binding.json", encode({
             "productSource": binding["productSource"], "runnerSource": binding["runnerSourceCommit"],
             "controlTransportCommit": binding["controlTransportCommit"], "actualConsumer": consumer,
-            "job": job, "producerPairCreatedByExistingEmitter": True,
+            "job": job, "producerPairCreatedByExistingEmitter": True, "producerPairReused": True,
             "ordinaryCarrierUsed": False, "ordinaryInstallerCalls": 0, "diagnosticInstallerCalls": 1,
             "applicationBuilds": 0, "controlImagesSignedOrExecutedByBootstrap": False}))
         receipt = runner.settle_job(op, stager, host_api, actual)
