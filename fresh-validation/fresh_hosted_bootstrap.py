@@ -255,6 +255,116 @@ def prepared_input_files(stager, work, binding):
          "prepared-input-file-bytes")
     return inputs
 
+def python_framework_identity(info):
+    return [getattr(info, 'st_' + key, 0) for key in
+            ('dev', 'ino', 'mode', 'uid', 'gid', 'nlink', 'size', 'mtime_ns', 'ctime_ns', 'flags')]
+
+
+def python_framework_policy_data(info, directory):
+    mode = stat.S_IMODE(info.st_mode)
+    need(info.st_uid == 0 and info.st_gid in (0, 80)
+         and getattr(info, 'st_flags', 0) == 0, 'fixed-python-framework-owner-flags')
+    need((stat.S_ISDIR(info.st_mode) and mode in (0o755, 0o775)) if directory else
+         (stat.S_ISREG(info.st_mode) and mode in (0o555, 0o755, 0o775)
+          and info.st_nlink == 1 and 0 < info.st_size <= 64 * 1024 * 1024),
+         'fixed-python-framework-type-mode')
+
+
+def admit_data_python(op, book, runner, binding, work):
+    """Tighten only the provider-installed3.14 framework on this disposable VM.
+
+    CPython's official installer deliberately uses admin-group0775 directories
+    and group-writable files. Preserve the strict Originals policy by removing
+    group/other write bits, never by accepting them. No chown, ACL/xattr edit,
+    content write, signature change, fallback interpreter or owner-Mac action.
+    """
+    need(not getattr(op, 'fresh_python_admission_consumed', False), 'fixed-python-preparation-never-replayed')
+    op.fresh_python_admission_consumed = True
+    need(tuple(sys.version_info[:3]) == (3, 14, 7), 'fixed-data-python-version')
+    python = Path(sys.executable).resolve(strict=True)
+    framework = Path('/Library/Frameworks/Python.framework')
+    version = framework / 'Versions/3.14'
+    need(python in (version / 'bin/python3.14', version / 'Resources/Python.app/Contents/MacOS/Python'),
+         'fixed-provider-python-framework-path')
+    paths = [framework, framework / 'Versions', version]
+    for parent in reversed(python.parent.parents):
+        if version in parent.parents and parent not in paths:
+            paths.append(parent)
+    if python.parent not in paths:
+        paths.append(python.parent)
+    need(len(paths) <= 9, 'fixed-python-framework-depth')
+    # Export actual narrow metadata even if a later owner/mode gate refuses.
+    op.outputs.publish(work / 'fresh-python-parent-observation.json', encode(dict(
+        python=str(python), version=list(sys.version_info[:3]),
+        objects=[dict(path=str(p), identity=python_framework_identity(p.lstat()))
+                 for p in [Path('/Library/Frameworks'), *paths, python]])))
+    base = book.directory(Path('/Library/Frameworks'))
+    opened = []; by_path = {Path('/Library/Frameworks'): base['fd']}
+    close_errors = []
+    flags = os.O_RDONLY | os.O_NOFOLLOW | os.O_NONBLOCK | os.O_CLOEXEC
+    try:
+        for path in [*paths, python]:
+            directory = path != python
+            parent_fd = by_path[path.parent]
+            fd = os.open(path.name, flags | (os.O_DIRECTORY if directory else 0), dir_fd=parent_fd)
+            row = dict(path=path, fd=fd, parent=parent_fd, before=None)
+            opened.append(row)
+            before = os.fstat(fd); python_framework_policy_data(before, directory)
+            row['before'] = python_framework_identity(before)
+            need(row['before'] == python_framework_identity(os.stat(path.name, dir_fd=parent_fd, follow_symlinks=False)),
+                 'fixed-python-framework-named-original')
+            if directory: by_path[path] = fd
+        def binary_hash():
+            row = opened[-1]; size = row['before'][6]; h = hashlib.sha256(); offset = 0
+            while offset < size:
+                block = os.pread(row['fd'], min(65536, size - offset), offset)
+                need(bool(block), 'fixed-python-framework-short-read'); h.update(block); offset += len(block)
+            need(not os.pread(row['fd'], 1, size), 'fixed-python-framework-grew')
+            return h.hexdigest()
+        before_hash = binary_hash()
+        for row in opened:
+            need(row['before'] == python_framework_identity(os.fstat(row['fd'])) ==
+                 python_framework_identity(os.stat(row['path'].name, dir_fd=row['parent'], follow_symlinks=False)),
+                 'fixed-python-framework-pre-original')
+        op.outputs.publish(work / 'fresh-python-hardening-before.json', encode(dict(
+            kind='disposable-provider-python-mode-only-before', python=str(python), binarySha256=before_hash,
+            objects=[dict(path=str(row['path']), identity=row['before']) for row in opened],
+            recursiveScope=str(version), symlinksFollowed=False, ownerMachineEffects=False)))
+        commands = (
+            ('python-framework-ancestors', ['/usr/bin/sudo', '-n', '--', '/bin/chmod', '-h', 'go-w',
+                str(framework), str(framework / 'Versions')]),
+            ('python-framework-version', ['/usr/bin/sudo', '-n', '--', '/bin/chmod', '-R', '-P', 'go-w', str(version)]),
+        )
+        for label, argv in commands:
+            runner.original_call(op, label, argv, binding['commandEnvironment'], cwd=work, timeout=60, limit=65536, zero=True)
+        after_rows = []
+        for row in opened:
+            after = python_framework_identity(os.fstat(row['fd']))
+            need(after == python_framework_identity(os.stat(row['path'].name, dir_fd=row['parent'], follow_symlinks=False)),
+                 'fixed-python-framework-post-named')
+            before = row['before']
+            need(after[2] == before[2] & ~0o022 and all(after[i] == before[i] for i in (0, 1, 3, 4, 5, 6, 7, 9)),
+                 'fixed-python-framework-mode-only-post')
+            after_rows.append(dict(path=str(row['path']), identity=after))
+        need(binary_hash() == before_hash, 'fixed-python-framework-content-changed')
+        # The unmodified strict reader must now accept every actual ancestor
+        # and the interpreter. The chmod result alone never establishes this.
+        book.file(python, 64 * 1024 * 1024, uid=0, modes=(0o555, 0o755))
+        op.outputs.publish(work / 'fresh-python-hardening-after.json', encode(dict(
+            kind='disposable-provider-python-mode-only-after', python=str(python), binarySha256=before_hash,
+            objects=after_rows, strictOriginalsAdmissionPassed=True, modeOnly=True,
+            fixedOriginalsReturnedZero=True, originalClosesStillPending=True, ownerMachineEffects=False)))
+    finally:
+        for row in reversed(opened):
+            fd, row['fd'] = row['fd'], None
+            try: os.close(fd)
+            except OSError: close_errors.append(str(row['path']))
+        need(not close_errors, 'fixed-python-framework-close-unknown')
+    op.outputs.publish(work / 'fresh-python-hardening-closed.json', encode(dict(
+        kind='disposable-provider-python-originals-closed', closed=len(opened), originalClosesKnown=True)))
+    return python
+
+
 def main():
     # Refuse before native probes, metadata calls, or any protected path read.
     need(EXECUTION_BINDING is not None, "final-signed-input-binding-absent")
@@ -389,10 +499,7 @@ def main():
         op.outputs.publish(snapshot_dir / "darwin_metadata.py", bodies[("runner", "fresh-validation/darwin_metadata.py")], 0o444)
         for name in ("read_torn_tree.py", "darwin_metadata.py"):
             book.file(snapshot_dir / name, 65536, modes=(0o444,))
-        python = Path(sys.executable).resolve(strict=True)
-        python_owner = python.stat().st_uid
-        need(python_owner in (0, os.getuid()), "actual-data-python-owner")
-        book.file(python, 64 * 1024 * 1024, uid=python_owner, modes=(0o555, 0o755))
+        python = admit_data_python(op, book, runner, binding, work)
         scripts = {name: bodies[("runner", "fresh-validation/scripts/" + name)] for name in
                    ("cut-postinstall", "frontier-postinstall", "completed-postinstall")}
         need(set(binding["scriptPins"]) == set(scripts), "exact-control-script-roster")
