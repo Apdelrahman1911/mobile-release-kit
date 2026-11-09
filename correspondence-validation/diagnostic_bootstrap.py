@@ -649,6 +649,7 @@ EXECUTION_BINDING = {'controlManifestSha256': '6a7e6e8aa09868e76443ed3e54563d6a6
                                                                                'sha256': 'e81e4ed2e323f323af11095d904cd6685f121555b250b3d3d794b5d9d0e7b43a'},
                             'correspondence-validation/scripts/diagnostic-postinstall': {'bytes': 309,
                                                                                          'sha256': '9141573a9028fe47517dd83f2fac2e6fda06b5be34fa5293e67910bf95643ab1'},
+                            'correspondence-validation/test_control_metadata.py': {'bytes': 4151, 'sha256': 'c47be7be032915ea72cbbc44a629f840570aef3c4885bf11164bfceedcc120a7'},
                             'correspondence-validation/test_diagnostic_data.py': {'bytes': 12353,
                                                                                   'sha256': '5d50da67e12a395547aaa853881adc5e1dba89e7f7adde3797cd3d46e5dce2ab'},
                             'desktop/macos-installed-inputs/Distribution.xml': {'bytes': 1152,
@@ -1830,6 +1831,14 @@ def first_module(path, expected, name):
 
 
 
+def control_image_readback(book, stager, path, body):
+    """Check bytes and Darwin metadata on the same retained no-follow original."""
+    entry, reread = book.file(path, 16 * 1024 * 1024, modes=(0o555,))
+    need(reread == body, "control-image-readback-metadata")
+    stager.no_xattrs(entry["fd"])
+    book.check_one(entry)
+
+
 def source_descriptor_quote(binding):
     """Exact source handles plus separate existing-owner and controller reserves."""
     pins = binding["sourceFiles"]
@@ -2082,8 +2091,7 @@ def main():
                 if label == "display":
                     lines = (result.stdout + result.stderr).splitlines()
                     need(lines.count(b"Signature=adhoc") == 1, "unchanged-compiler-adhoc-image")
-            _, reread = book.file(path, 16 * 1024 * 1024, modes=(0o555,))
-            need(reread == body and not os.listxattr(path), "control-image-readback-metadata")
+            control_image_readback(book, stager, path, body)
             control_bodies[role] = body
         scripts = {"diagnostic-postinstall": bodies[("runner", "correspondence-validation/scripts/diagnostic-postinstall")]}
         need(set(binding["scriptPins"]) == set(scripts), "exact-control-script-roster")
