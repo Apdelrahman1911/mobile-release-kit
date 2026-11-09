@@ -22,6 +22,26 @@ REMOVAL_REF = helper.REMOVAL_REF
 
 
 class PrefixOwner(helper.Operation):
+    def package_compiler_seconds(self):
+        # This separately bound diagnostic consumer is deliberately NOT marked
+        # native-compatible with the signed product. Its compiler still uses
+        # the same frozen producer graph on a cold hosted runner. Select the
+        # existing prepared producer budget without widening Installer clocks.
+        binding = EXECUTION_BINDING
+        prepared = self.prepared_binding
+        need(type(binding) is dict and binding.get("executionApproved") is True
+             and self.phase == "package-install" and self.target == helper.ARM_TARGET
+             and self.checkout == Path("/Users/runner/work/mobile-release-kit/mobile-release-kit/prepared-built-source")
+             and prepared is not None and prepared.source == binding["productSource"]
+             and prepared.origin == binding["preparedOrigin"]
+             and prepared.manifest["packageRole"] == "ordinary-image"
+             and "nativeScope" not in prepared.origin
+             and self.environment.get("GITHUB_SHA") == self.environment.get("GITHUB_WORKFLOW_SHA") == binding["runnerSourceCommit"]
+             and self.environment.get("GITHUB_REF") == "refs/heads/" + binding["runnerBranch"]
+             and self.environment.get("GITHUB_JOB") == "correspondence-diagnostic",
+             "diagnostic-producer-cold-profile-binding")
+        return 900
+
     def producer_prefix(self):
         self.stage = "package-final-audit"
         if self.app_absence is None:
