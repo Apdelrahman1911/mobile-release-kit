@@ -1,8 +1,8 @@
-name: Nonshipping recovery preparation handle diagnostic
+name: Nonshipping recovery memory phase diagnostic
 
 on:
   push:
-    branches: [codex/macos-fresh-preparation-handles]
+    branches: [codex/macos-fresh-memory-phases]
 
 permissions:
   contents: read
@@ -18,7 +18,7 @@ permissions:
 
 jobs:
   write-diagnostic:
-    if: github.event_name == 'push' && github.ref == 'refs/heads/codex/macos-fresh-preparation-handles'
+    if: github.event_name == 'push' && github.ref == 'refs/heads/codex/macos-fresh-memory-phases'
     runs-on: macos-26
     timeout-minutes: 75
     env:
@@ -142,7 +142,7 @@ jobs:
       - name: Check out the separate immutable control transport
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          ref: e207721e8da6e324796351ba84b154a0f6cfd8b7
+          ref: e345d05c4a1dd70c4f49d4bae7e502bc2450a70b
           path: _fresh-control-transport
           persist-credentials: false
       - name: Reserve a fresh work directory and copy pinned service metadata

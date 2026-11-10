@@ -1,0 +1,7 @@
+# Nonshipping complete Fresh memory phase diagnostic
+
+Run42792634762 failed the conservation memory guard with Installer[1,0,1]; all51 original calls and3unforced detaches closed. Shipping draftd1067aa2 retires transient Fresh launcher parsing work and completed preparation future-record reservations while retaining actual vector capacity, names and records. Two source/resource regressions passed, including exact128MiB/one-over growth and actual-artifact full-journal/namespace overlap models. Models are explicit simulations, not reconstructed failed-run counters.
+
+Matching recovery source9876917c adds bounded primitive first-parent-note budget counters. Its3DATAtrace tests and one exclusive native compiler role passed under3GiB. Counters do not claim exact earlier guard snapshots or measured RSS. Original native FD/source/protection/copy/finality and128MiB/96FD gates remain.
+
+Only the recovery-trace image changes. Census/write images, original emitting hashes, signed3533payload and producer pair remain exact. Transport records actual per-role code sources. Runner functions/scripts, capture, controller memory accounting and four Installer/conservation/readback/unforced-detach route are unchanged; all694source pins verified. This diagnostic cannot qualify ordinary installation or shipping recovery. No signing, owner actions, publication, torn replay or automatic unchanged-source retry. After complete native success, a new signed package must pass ordinary installation and both recovery checks before owner installation.
