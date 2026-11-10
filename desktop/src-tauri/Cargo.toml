@@ -98,6 +98,10 @@ development-runtime = []
 ubuntu-runtime-publisher = []
 windows-runtime-publisher = ["mrk-windows-installed-native/runtime-publication"]
 macos-installed-installer = []
+# NONSHIPPING, separately bound disposable Fresh census/cut roles.
+macos-installed-fresh-census-control = ["macos-installed-installer"]
+macos-installed-fresh-write-cut = ["macos-installed-installer", "mrk-macos-installed-native/installed-fresh-write-cut"]
+macos-installed-fresh-torn-cut = ["macos-installed-installer", "mrk-macos-installed-native/installed-fresh-torn-cut"]
 macos-xcode-setup = ["mrk-macos-installed-native/xcode-setup"]
 # NONSHIPPING: fixed compile-time Restore cuts, no runtime failpoint selector.
 macos-installed-restore-app-write-fixture = ["macos-installed-installer", "mrk-macos-installed-native/installed-restore-cut-fixture"]
@@ -128,9 +132,9 @@ macos-installed-observation = ["mrk-macos-installed-native/installed-observation
 windows-installed-observation = ["mrk-windows-installed-native/windows-installed-observation"]
 
 [dependencies]
-mrk-android-catalogue-schema = { path = "../catalogues/macos-android-schema", version = "=0.1.0", default-features = false }
-mrk-android-catalogue-arm64 = { path = "../catalogues/macos-android-arm64", version = "=0.1.0", default-features = false }
-mrk-android-catalogue-x86_64 = { path = "../catalogues/macos-android-x86_64", version = "=0.1.0", default-features = false }
+mrk-android-catalogue-schema = { path = "../catalogues/macos-android-schema", version = "=0.1.0", default-features = false, optional = true }
+mrk-android-catalogue-arm64 = { path = "../catalogues/macos-android-arm64", version = "=0.1.0", default-features = false, optional = true }
+mrk-android-catalogue-x86_64 = { path = "../catalogues/macos-android-x86_64", version = "=0.1.0", default-features = false, optional = true }
 serde = { version = "=1.0.228", features = ["derive"] }
 serde_json = "=1.0.145"
 plist = { version = "=1.10.1", default-features = false, features = ["enable_unstable_features_that_may_break_with_minor_version_bumps"] }

@@ -26,6 +26,9 @@ e2-native-fixture = []
 installed-removal-abrupt-fixture = []
 # Fixed Restore parent/worker cuts only; never an ordinary image role.
 installed-restore-cut-fixture = []
+# Fixed disposable Fresh cuts; mutually exclusive, never ordinary images.
+installed-fresh-write-cut = []
+installed-fresh-torn-cut = []
 # Explicit nonshipping package signer; excluded from every ordinary/image role.
 package-producer-signing = []
 
