@@ -25,6 +25,23 @@ compile_error!("app-absence fixture requires its exclusive nonshipping binary ro
         not(feature="macos-installed-remover"))
 ))]
 compile_error!("removal fixture roles require exclusive remover target and never alternate roots");
+#[cfg(all(any(feature="macos-installed-fresh-census-control",feature="macos-installed-fresh-write-cut",feature="macos-installed-fresh-torn-cut"), any(
+    not(feature="macos-installed-installer"), test,
+    feature="macos-installed-remover", feature="macos-installed-installer-fixture",
+    feature="macos-installed-app-absence-fixture", feature="macos-installed-removal-abrupt-fixture",
+    feature="macos-installed-removal-observer", feature="macos-installed-observation",
+    feature="macos-installed-restore-app-write-fixture", feature="macos-installed-restore-own-attempt-fixture",
+    feature="macos-installed-restore-stage-move-fixture", feature="desktop-shell", feature="custom-protocol",
+    feature="development-runtime", feature="macos-installed-desktop-image", feature="macos-installed-resident-image",
+    feature="macos-android-registration-helper", feature="macos-package-producer", feature="macos-remove-producer",
+    feature="macos-remove-observer-producer", feature="installed-cli", feature="macos-xcode-setup"
+)))]
+compile_error!("Fresh control requires its exclusive nonshipping packaging graph");
+#[cfg(any(
+    all(feature="macos-installed-fresh-census-control", any(feature="macos-installed-fresh-write-cut",feature="macos-installed-fresh-torn-cut")),
+    all(feature="macos-installed-fresh-write-cut",feature="macos-installed-fresh-torn-cut")
+))]
+compile_error!("Fresh census/write/torn controls are distinct exclusive binaries");
 #[cfg(not(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
 fn main() { eprintln!("This Installer requires LP64 ARM64 or Intel macOS 26."); std::process::exit(1); }
 #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
@@ -230,6 +247,8 @@ mod installer {
         writer:usize,reader:usize,origin:usize,plan:FreshOutputPlan,
         pending:bool,written:usize,persist_returned:Option<bool>,readback:bool,failed:bool,
     }
+    #[cfg(any(feature="macos-installed-fresh-write-cut",feature="macos-installed-fresh-torn-cut"))]
+    include!("../macos_fresh_cut_hooks.rs");
     fn check(ok: bool, why: &'static str) -> Result<()> { if ok { Ok(()) } else { Err(why) } }
     fn sha(value: &str) -> bool { value.len() == 64 && value.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)) }
     fn component(value: &str) -> bool { value.is_ascii() && value.len() <= 255 && safe_payload_path(value) && !value.contains('/') }
@@ -956,6 +975,10 @@ mod installer {
                     // veto. This is not a promise about a future close.
                     self.payload_written = self.payload_written.checked_add(count as u64).ok_or("payload-write-count")?;
                     self.payload_write_calls = self.payload_write_calls.checked_add(1).ok_or("payload-write-count")?;
+                    #[cfg(feature="macos-installed-fresh-write-cut")]
+                    if self.fresh_outputs.is_some() && self.payload_write_calls == 1 {
+                        self.fresh_control_after_first_write(n,count)?;
+                    }
                     check(self.payload_written.checked_add(self.launcher_writes.bytes)
                         .is_some_and(|n| n <= installation_record::PAYLOAD_LIMIT), "payload-write-bound")?;
                 }
@@ -1390,6 +1413,11 @@ mod installer {
                 check(owner.index.bytes_data().checked_add(frame.len()).is_some_and(|n|n<=owner.plan.bytes),"fresh-output-enrollment-quote")?;
                 // Owner and the exact frame exist before the first native write.
                 owner.pending=true;owner.written=0;owner.persist_returned=None;owner.readback=false;
+                #[cfg(feature="macos-installed-fresh-torn-cut")]
+                if role==fresh_data::OutputRoleData::PayloadFile
+                    && !owner.index.rows_data().any(|row|row.role_data()==fresh_data::OutputRoleData::PayloadFile) {
+                    self.fresh_control_torn_first_frame(n,&mut owner,&entry,&frame)?;
+                }
                 while owner.written<frame.len(){
                     self.clock()?;
                     let returned=unistd::write(self.fd(owner.writer)?,&frame[owner.written..]).map_err(|_|"fresh-output-write");
@@ -14035,6 +14063,10 @@ mod installer {
         pub(super) mod app_absence_fixture {
             include!("../macos_app_absence_fixture.rs");
         }
+        #[cfg(any(feature="macos-installed-fresh-census-control",feature="macos-installed-fresh-write-cut",feature="macos-installed-fresh-torn-cut"))]
+        pub(super) mod fresh_census_control {
+            include!("../macos_fresh_census_control.rs");
+        }
         impl Install {
             fn worker_source(&mut self, source: &str, input: usize) -> Result<Source> {
                 self.clock()?;
@@ -20215,6 +20247,10 @@ exec ./mrk-macos-remove --fixture-supervise "$1"
                 let existed=match self.book.named(Some(support),"MobileReleaseKit") {
                     Ok(_)=>true,Err(Errno::ENOENT)=>false,Err(_)=>return Err("entry-root-observation"),
                 };
+                // Exclusive disposable cuts may not enter any existing-root
+                // recovery/update/noop/Restore branch before their fixed hook.
+                #[cfg(any(feature="macos-installed-fresh-write-cut",feature="macos-installed-fresh-torn-cut"))]
+                check(!existed,"fresh-cut-existing-root-refused")?;
                 let root=if existed {let root=self.book.open(Some(support),"MobileReleaseKit",true)?;
                     self.book.protected(root,true,Some(0o755))?;self.book.check_name(root,true)?;root}
                     else {self.book.directory(support,"MobileReleaseKit",true,0o755)?};
@@ -20262,6 +20298,8 @@ exec ./mrk-macos-remove --fixture-supervise "$1"
                     let prepared=PreparedFresh{input:prepared.input,inventory:prepared.inventory,
                         inventory_bytes:prepared.inventory_bytes,destination:root,versions};
                     let mut observed=maintenance::observe(&mut self.book,prepared,selected,None)?;
+                    #[cfg(any(feature="macos-installed-fresh-write-cut",feature="macos-installed-fresh-torn-cut"))]
+                    check(observed.action==ActionData::FreshInstall,"fresh-cut-action-refused")?;
                     let producer=self.producer.as_ref().ok_or("entry-producer-original")?;
                     observed.incoming_controls(&self.book,producer.input.descriptor_data(),producer.input.signature_data())?;
                     self.book.registration_complete_admitted(root,observed.action)?;
@@ -22002,9 +22040,16 @@ exec ./mrk-macos-remove --fixture-supervise "$1"
             if let Some(completed)=removal_fixture_supervisor_argument_data(&args) {
                 return removal_fixture_supervisor_entry(started,completed);
             }
+            #[cfg(any(feature="macos-installed-fresh-write-cut",feature="macos-installed-fresh-torn-cut"))]
+            if fresh_census_control::control_binding().is_err() { return 78; }
             match entry_kind_data(&args) {
                 Ok(EntryKind::PrivateWriter) => dispatch_private(&args), // Inherit, never renew the parent's endpoint.
-                Ok(EntryKind::CompletedPackage) => completed_entry(&args[1],&args[2],started),
+                Ok(EntryKind::CompletedPackage) => {
+                    #[cfg(any(feature="macos-installed-fresh-write-cut",feature="macos-installed-fresh-torn-cut"))]
+                    { fresh_census_control::cut_entry(&args[1],&args[2],started) }
+                    #[cfg(not(any(feature="macos-installed-fresh-write-cut",feature="macos-installed-fresh-torn-cut")))]
+                    { completed_entry(&args[1],&args[2],started) }
+                },
                 Ok(kind @ (EntryKind::Removal | EntryKind::RemovalResume)) => removal_entry(started,&args,kind),
                 Err(_) => 1,
             }
@@ -23569,8 +23614,10 @@ exec ./mrk-macos-remove --fixture-supervise "$1"
         }
     }
     #[cfg(not(any(feature = "macos-installed-installer-fixture",
-        feature = "macos-installed-app-absence-fixture")))]
+        feature = "macos-installed-app-absence-fixture", feature = "macos-installed-fresh-census-control")))]
     pub(super) fn run() -> i32 { worker::entry() }
+    #[cfg(feature="macos-installed-fresh-census-control")]
+    pub(super) fn run() -> i32 { worker::fresh_census_control::entry() }
     #[cfg(feature="macos-installed-app-absence-fixture")]
     pub(super) fn run() -> i32 { worker::app_absence_fixture::entry() }
     #[cfg(feature = "macos-installed-installer-fixture")]

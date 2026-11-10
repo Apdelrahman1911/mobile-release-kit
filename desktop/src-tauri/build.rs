@@ -250,6 +250,18 @@ fn main() {
             println!("cargo:rustc-env=MRK_MACOS_VAULT_HELPER_BYTES={value}");
         }
     }
+    // Nonshipping census source identity is separate from the observed product.
+    for (name, length) in [("MRK_FRESH_CONTROL_SOURCE_SHA256",64usize),
+        ("MRK_FRESH_CONTROL_MANIFEST_SHA256",64usize)] {
+        println!("cargo:rerun-if-env-changed={name}");
+        if cfg!(any(feature="macos-installed-fresh-census-control",feature="macos-installed-fresh-write-cut",feature="macos-installed-fresh-torn-cut")) {
+            if let Ok(value) = env::var(name) {
+                assert!(value.len()==length && value.bytes().all(|b|b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+                    && value.bytes().any(|b|b!=b'0'), "invalid census control source binding");
+                println!("cargo:rustc-env={name}={value}");
+            }
+        }
+    }
     println!("cargo:rerun-if-env-changed=MRK_MACOS_INSTALL_SOURCE_COMMIT");
     match env::var("MRK_MACOS_INSTALL_SOURCE_COMMIT") {
         Ok(value) => {
