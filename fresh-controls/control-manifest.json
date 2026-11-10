@@ -1,0 +1,105 @@
+{
+  "kind": "mrk-fixed-nonshipping-fresh-control-transport-v1",
+  "schemaVersion": 1,
+  "productSource": "63be89b96a0dd9f679ee4b77340768e04ae52aa5",
+  "productTree": "9616c3bbff27e86522e18c1451a834362ab10a08",
+  "productFreezeSha256": "c17ae8ea905b2cf54ccf340537b397b6ff85a92a16c8ed9fdfc2f82f52f21e4a",
+  "controlSourceGitCommit": "fd50c7757cbbd57ae53481ba28407a7eba40e805",
+  "controlSourceGitTree": "f8506b2724eea807334175f74fd4d3dc27d1897b",
+  "controlSourceSha256": "45f881bbdb49ed1add751a5a21821cd7b1b0a4865871d24ca25768454facfed6",
+  "controlManifestSha256": "d5e1ed079df01171ac9d319a83acbae3f9c295e96596e1821bdf1aabb5d1903e",
+  "controls": {
+    "census": {
+      "path": "fresh-controls/census/mrk-macos-install",
+      "bytes": 2194096,
+      "sha256": "c8150e8edbc38222dae8b2613fe996feb6884a717c2050152c43ca96855a7649",
+      "gitMode": "100644",
+      "originalMode": 493,
+      "compilerOriginalReturn": 0,
+      "compilerOriginalClosureKnown": true,
+      "programExecuted": false,
+      "compilerResultSha256": "dead8e260328e868183b865570a84221f45a210d7ffdbd42faa5792f5d085b91",
+      "compilerManifestSha256": "66aa30a733ab76f790b715e3a02284d39cbb03529380e0903cbdd67d75e19027",
+      "compilerReceipts": {
+        "original-return.json": {
+          "bytes": 4625,
+          "sha256": "de5cf8bffe8f376b9a6c305ab5b8e7a55e3f98b42eefb3e01787326fa11e0028"
+        },
+        "receipt.json": {
+          "bytes": 4625,
+          "sha256": "7aa522cc6b70d6e197c298063590bf7946c85e76efd9468aa26948f459d15d84"
+        },
+        "custody.jsonl": {
+          "bytes": 254719,
+          "sha256": "ba5bf22198228067b453c4e7c007d56c5274c788bf89b7b14c94e551dfeeafb9"
+        }
+      }
+    },
+    "write": {
+      "path": "fresh-controls/write/mrk-macos-install",
+      "bytes": 3737872,
+      "sha256": "baa955f4558014c007c628ff93ecd052a69126f8e21368aa85acb73599368ef3",
+      "gitMode": "100644",
+      "originalMode": 493,
+      "compilerOriginalReturn": 0,
+      "compilerOriginalClosureKnown": true,
+      "programExecuted": false,
+      "compilerResultSha256": "11481a22a8c54e288036fd36995b018f66085b2167b6d444a608f18b8606dd54",
+      "compilerManifestSha256": "66aa30a733ab76f790b715e3a02284d39cbb03529380e0903cbdd67d75e19027",
+      "compilerReceipts": {
+        "original-return.json": {
+          "bytes": 4611,
+          "sha256": "6b6b00aa12dca3e6bf892426267b8a15c858e03280548e3f7e95396ead1bc15e"
+        },
+        "receipt.json": {
+          "bytes": 4611,
+          "sha256": "8701d9e15c442d816bac3e2b2307846f72489ea695f80d6a897b648f0c1f1114"
+        },
+        "custody.jsonl": {
+          "bytes": 150246,
+          "sha256": "b2dec169c64e53e2f4b25ebcf47b3cbae1b5d0462615ddf58ef14ba911db6090"
+        }
+      }
+    },
+    "torn": {
+      "path": "fresh-controls/torn/mrk-macos-install",
+      "bytes": 3737536,
+      "sha256": "b2af34c4a265c635e20647348ffa3e2c72c199c210efbf515aeb86ecd830125a",
+      "gitMode": "100644",
+      "originalMode": 493,
+      "compilerOriginalReturn": 0,
+      "compilerOriginalClosureKnown": true,
+      "programExecuted": false,
+      "compilerResultSha256": "6e2c6a1cd526490fb38f2d3b8bc2c6ab7a1e1df97bf6d00a7f431b73945e58a3",
+      "compilerManifestSha256": "66aa30a733ab76f790b715e3a02284d39cbb03529380e0903cbdd67d75e19027",
+      "compilerReceipts": {
+        "original-return.json": {
+          "bytes": 4601,
+          "sha256": "49ae330583ebdd1c8beb7b23635d9a65e2c45872e2a7ae1dae6bd986f4961e1e"
+        },
+        "receipt.json": {
+          "bytes": 4601,
+          "sha256": "5c57a3937f545df6fbafc1f73a1a2bf406dcecc16b4fa5fde39d6452faeab929"
+        },
+        "custody.jsonl": {
+          "bytes": 153415,
+          "sha256": "9acac18365abe57bf5681c5844cca1a66a0b4739a36fa522e1346dcc49e90ad3"
+        }
+      }
+    }
+  },
+  "exactFiles": [
+    "control-manifest.json",
+    "census/mrk-macos-install",
+    "torn/mrk-macos-install",
+    "write/mrk-macos-install"
+  ],
+  "binaryBytes": 9669504,
+  "localCompilerLimitBytes": 3221225472,
+  "threeCompilerResultSha256": "7ec02623ebd976cedb8fce0198bf68b17bd96e7451da8415569b4d463dce7327",
+  "nativeSignatureQualified": false,
+  "runtimeQualified": false,
+  "shippingApplicationRebuilt": false,
+  "publicationAuthorized": false,
+  "compilersReplayed": false
+}
