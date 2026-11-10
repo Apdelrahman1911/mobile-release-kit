@@ -73,32 +73,32 @@
     },
     "recovery": {
       "path": "fresh-controls/recovery/mrk-macos-install",
-      "bytes": 4186176,
-      "sha256": "19ad44260349c7296b4fc8347f2fa7318c2d0736274d4bae9a70ef9df9035dd1",
+      "bytes": 4186448,
+      "sha256": "90c978d60eace72fb1631326e7c995be853b2fb8cb795fc873a9f69fdb0f7aed",
       "gitMode": "100644",
       "originalMode": 493,
       "compilerOriginalReturn": 0,
       "compilerOriginalClosureKnown": true,
       "programExecuted": false,
-      "compilerResultSha256": "85d266744b4944cdca189b1dd54e5de94548ec4902c26f8ffe5068c9615e511b",
-      "compilerManifestSha256": "608a4800fa2bba9967b16cd1d644ba89d439327cd46f3f470544232986d4c9e8",
+      "compilerResultSha256": "9f6589e6b165d4d7f5815a3ce7788ce9a2cf14022f74bc431d69a2a0c31abf74",
+      "compilerManifestSha256": "b12e245bf0bd4a3632b0e16938ca77dbd9fa2158c516b3687defa9e40ae2ea1a",
       "compilerReceipts": {
+        "custody.jsonl": {
+          "bytes": 152809,
+          "sha256": "eea0356435032ed3e2625d8624a41739b60c90320f05f2af3f389a443cbf9c5a"
+        },
         "original-return.json": {
-          "bytes": 4690,
-          "sha256": "894e33423b14666b5fb82ae3666eeb59579f815154871fb65b36bcdb4e805a83"
+          "bytes": 4714,
+          "sha256": "2d02aa0e4d272ebe1257252bbb14ab70dbdab24e55fc6fbcc388296897b53db0"
         },
         "receipt.json": {
-          "bytes": 4690,
-          "sha256": "8c7f252d841fac25907bfa22c92fc614edede987bc3917d4913a12cad8c4862d"
-        },
-        "custody.jsonl": {
-          "bytes": 148809,
-          "sha256": "6b49b4d5fbf3e5523bd8c31b141c6fa72c42aa28b8b5c035ed81012c8d0c9516"
+          "bytes": 4714,
+          "sha256": "611c8ea32db857b3fe72151d08483602f010589b88d55885083e4f4d49807e89"
         }
       },
       "actualSource": {
-        "commit": "0e4d05c3f2dd8e57f2abead282a00d83eb378b83",
-        "tree": "462d3859b3f07b64a241842c73c53039eaac0852",
+        "commit": "af8dac0d7e1a524dcd73536f739d3b13e6247312",
+        "tree": "4d0fecb8fba1aed83ce4c60e2eaa5a7c9465bc49",
         "feature": "macos-installed-recovery-trace",
         "reusedWithoutCompile": false
       }
@@ -110,7 +110,7 @@
     "recovery/mrk-macos-install",
     "write/mrk-macos-install"
   ],
-  "binaryBytes": 10116592,
+  "binaryBytes": 10116864,
   "localCompilerLimitBytes": 3221225472,
   "nativeSignatureQualified": false,
   "runtimeQualified": false,
@@ -119,8 +119,8 @@
   "compilersReplayed": false,
   "mixedExplicitSources": true,
   "recoveryCodeSource": {
-    "commit": "0e4d05c3f2dd8e57f2abead282a00d83eb378b83",
-    "tree": "462d3859b3f07b64a241842c73c53039eaac0852",
+    "commit": "af8dac0d7e1a524dcd73536f739d3b13e6247312",
+    "tree": "4d0fecb8fba1aed83ce4c60e2eaa5a7c9465bc49",
     "feature": "macos-installed-recovery-trace"
   },
   "compilerResults": {
@@ -129,8 +129,8 @@
       "sha256": "09bb35f23fddc8eb79489dc0c6bcbcde00b3c68e8def7c2b8464f017a8e6f51a"
     },
     "newRecoveryTrace": {
-      "bytes": 1205,
-      "sha256": "db34f8bad09544f269752ef1bca5ecfd2ddacc317a9ae8ab85b778f662839e69"
+      "bytes": 1213,
+      "sha256": "56c7e0dec2ab047125a7aaedb7e1e256a2edb348f1308d46d2ad8ea9701371a4"
     }
   }
 }
