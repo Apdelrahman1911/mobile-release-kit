@@ -1,24 +1,24 @@
 {
   "run": {
-    "id": 42745647519,
+    "id": 42810669505,
     "name": "macOS / signed package builds only / Git tests skipped",
-    "node_id": "WFR_kwLOT_nMIs8AAAAJ89bRnw",
+    "node_id": "WFR_kwLOT_nMIs8AAAAJ97b5wQ",
     "head_branch": "verify/desktop-macos-candidate",
-    "head_sha": "f778beb993691330c56b59059de5c8d970fbb27d",
+    "head_sha": "63be89b96a0dd9f679ee4b77340768e04ae52aa5",
     "path": ".github/workflows/desktop-macos-installed.yml",
     "display_title": "macOS / signed package builds only / Git tests skipped",
-    "run_number": 341,
+    "run_number": 344,
     "event": "push",
     "status": "completed",
     "conclusion": "success",
     "workflow_id": 363563168,
-    "check_suite_id": 115769510431,
-    "check_suite_node_id": "CS_kwDOT_nMIs8AAAAa9GaKHw",
-    "url": "https://api.github.com/repos/Apdelrahman1911/mobile-release-kit/actions/runs/42745647519",
-    "html_url": "https://github.com/Apdelrahman1911/mobile-release-kit/actions/runs/42745647519",
+    "check_suite_id": 115939541042,
+    "check_suite_node_id": "CS_kwDOT_nMIs8AAAAa_okAMg",
+    "url": "https://api.github.com/repos/Apdelrahman1911/mobile-release-kit/actions/runs/42810669505",
+    "html_url": "https://github.com/Apdelrahman1911/mobile-release-kit/actions/runs/42810669505",
     "pull_requests": [],
-    "created_at": "2026-11-10T02:52:04Z",
-    "updated_at": "2026-11-10T04:30:48Z",
+    "created_at": "2026-11-10T11:49:59Z",
+    "updated_at": "2026-11-10T13:25:38Z",
     "actor": {
       "login": "Apdelrahman1911",
       "id": 104788132,
@@ -43,27 +43,27 @@
     "run_attempt": 1,
     "referenced_workflows": [
       {
-        "path": "Apdelrahman1911/mobile-release-kit/.github/workflows/desktop-macos-candidate-tests.yml@f778beb993691330c56b59059de5c8d970fbb27d",
-        "sha": "f778beb993691330c56b59059de5c8d970fbb27d",
+        "path": "Apdelrahman1911/mobile-release-kit/.github/workflows/desktop-macos-candidate-python-source.yml@63be89b96a0dd9f679ee4b77340768e04ae52aa5",
+        "sha": "63be89b96a0dd9f679ee4b77340768e04ae52aa5",
         "ref": "refs/heads/verify/desktop-macos-candidate"
       },
       {
-        "path": "Apdelrahman1911/mobile-release-kit/.github/workflows/desktop-macos-update-parts.yml@f778beb993691330c56b59059de5c8d970fbb27d",
-        "sha": "f778beb993691330c56b59059de5c8d970fbb27d",
+        "path": "Apdelrahman1911/mobile-release-kit/.github/workflows/desktop-macos-candidate-python-sign.yml@63be89b96a0dd9f679ee4b77340768e04ae52aa5",
+        "sha": "63be89b96a0dd9f679ee4b77340768e04ae52aa5",
         "ref": "refs/heads/verify/desktop-macos-candidate"
       },
       {
-        "path": "Apdelrahman1911/mobile-release-kit/.github/workflows/desktop-macos-candidate-python-sign.yml@f778beb993691330c56b59059de5c8d970fbb27d",
-        "sha": "f778beb993691330c56b59059de5c8d970fbb27d",
+        "path": "Apdelrahman1911/mobile-release-kit/.github/workflows/desktop-macos-candidate-tests.yml@63be89b96a0dd9f679ee4b77340768e04ae52aa5",
+        "sha": "63be89b96a0dd9f679ee4b77340768e04ae52aa5",
         "ref": "refs/heads/verify/desktop-macos-candidate"
       },
       {
-        "path": "Apdelrahman1911/mobile-release-kit/.github/workflows/desktop-macos-candidate-python-source.yml@f778beb993691330c56b59059de5c8d970fbb27d",
-        "sha": "f778beb993691330c56b59059de5c8d970fbb27d",
+        "path": "Apdelrahman1911/mobile-release-kit/.github/workflows/desktop-macos-update-parts.yml@63be89b96a0dd9f679ee4b77340768e04ae52aa5",
+        "sha": "63be89b96a0dd9f679ee4b77340768e04ae52aa5",
         "ref": "refs/heads/verify/desktop-macos-candidate"
       }
     ],
-    "run_started_at": "2026-11-10T02:52:04Z",
+    "run_started_at": "2026-11-10T11:49:59Z",
     "triggering_actor": {
       "login": "Apdelrahman1911",
       "id": 104788132,
@@ -85,26 +85,26 @@
       "user_view_type": "public",
       "site_admin": false
     },
-    "jobs_url": "https://api.github.com/repos/Apdelrahman1911/mobile-release-kit/actions/runs/42745647519/attempts/1/jobs",
-    "logs_url": "https://api.github.com/repos/Apdelrahman1911/mobile-release-kit/actions/runs/42745647519/attempts/1/logs",
-    "check_suite_url": "https://api.github.com/repos/Apdelrahman1911/mobile-release-kit/check-suites/115769510431",
-    "artifacts_url": "https://api.github.com/repos/Apdelrahman1911/mobile-release-kit/actions/runs/42745647519/artifacts",
-    "cancel_url": "https://api.github.com/repos/Apdelrahman1911/mobile-release-kit/actions/runs/42745647519/cancel",
-    "rerun_url": "https://api.github.com/repos/Apdelrahman1911/mobile-release-kit/actions/runs/42745647519/rerun",
+    "jobs_url": "https://api.github.com/repos/Apdelrahman1911/mobile-release-kit/actions/runs/42810669505/attempts/1/jobs",
+    "logs_url": "https://api.github.com/repos/Apdelrahman1911/mobile-release-kit/actions/runs/42810669505/attempts/1/logs",
+    "check_suite_url": "https://api.github.com/repos/Apdelrahman1911/mobile-release-kit/check-suites/115939541042",
+    "artifacts_url": "https://api.github.com/repos/Apdelrahman1911/mobile-release-kit/actions/runs/42810669505/artifacts",
+    "cancel_url": "https://api.github.com/repos/Apdelrahman1911/mobile-release-kit/actions/runs/42810669505/cancel",
+    "rerun_url": "https://api.github.com/repos/Apdelrahman1911/mobile-release-kit/actions/runs/42810669505/rerun",
     "previous_attempt_url": null,
     "workflow_url": "https://api.github.com/repos/Apdelrahman1911/mobile-release-kit/actions/workflows/363563168",
     "head_commit": {
-      "id": "f778beb993691330c56b59059de5c8d970fbb27d",
-      "tree_id": "bdd9e77af2c626e435e02f9fbebfd229ef6a06a7",
-      "message": "Correct live-quote regression fixture [macos-desktop-update] [macos-builds-only]\n\nKeep runtime quote code unchanged; reuse existing deepest Store-path contract coverage.",
-      "timestamp": "2026-11-10T02:45:47Z",
+      "id": "63be89b96a0dd9f679ee4b77340768e04ae52aa5",
+      "tree_id": "9616c3bbff27e86522e18c1451a834362ab10a08",
+      "message": "macOS 0.1.4: recover unchanged signed Android inputs from retained successful preparation\n\nThe original supplier artifact expired; retained member hashes and receipt stay fixed.\n\nmacOS 0.1.4: sign verified complete interrupted-install recovery fix\n\nReviewed runtime tree fdd850e37724ccfafc3ccca5d40223567a72e9a1; diagnostic 42802921156 passed.\n\nCorrect live-quote regression fixture [macos-desktop-update] [macos-builds-only]\n\nKeep runtime quote code unchanged; reuse existing deepest Store-path contract coverage.",
+      "timestamp": "2026-11-10T11:47:07Z",
       "author": {
-        "name": "Codex",
-        "email": "codex@openai.com"
+        "name": "Apdelrahman1911",
+        "email": "abdofahmymr14@gmail.com"
       },
       "committer": {
-        "name": "Codex",
-        "email": "codex@openai.com"
+        "name": "Apdelrahman1911",
+        "email": "abdofahmymr14@gmail.com"
       }
     },
     "repository": {
@@ -245,21 +245,21 @@
     }
   },
   "job": {
-    "id": 129604707983,
-    "run_id": 42745647519,
+    "id": 129820663096,
+    "run_id": 42810669505,
     "workflow_name": "macOS / signed package builds only / Git tests skipped",
     "head_branch": "verify/desktop-macos-candidate",
-    "run_url": "https://api.github.com/repos/Apdelrahman1911/mobile-release-kit/actions/runs/42745647519",
+    "run_url": "https://api.github.com/repos/Apdelrahman1911/mobile-release-kit/actions/runs/42810669505",
     "run_attempt": 1,
-    "node_id": "CR_kwDOT_nMIs8AAAAeLQrmjw",
-    "head_sha": "f778beb993691330c56b59059de5c8d970fbb27d",
-    "url": "https://api.github.com/repos/Apdelrahman1911/mobile-release-kit/actions/jobs/129604707983",
-    "html_url": "https://github.com/Apdelrahman1911/mobile-release-kit/actions/runs/42745647519/job/129604707983",
+    "node_id": "CR_kwDOT_nMIs8AAAAeOeodOA",
+    "head_sha": "63be89b96a0dd9f679ee4b77340768e04ae52aa5",
+    "url": "https://api.github.com/repos/Apdelrahman1911/mobile-release-kit/actions/jobs/129820663096",
+    "html_url": "https://github.com/Apdelrahman1911/mobile-release-kit/actions/runs/42810669505/job/129820663096",
     "status": "completed",
     "conclusion": "success",
-    "created_at": "2026-11-10T03:13:35Z",
-    "started_at": "2026-11-10T03:13:38Z",
-    "completed_at": "2026-11-10T03:37:12Z",
+    "created_at": "2026-11-10T12:10:39Z",
+    "started_at": "2026-11-10T12:10:41Z",
+    "completed_at": "2026-11-10T12:33:06Z",
     "name": "Desktop update / macOS part (Desktop26 / image)",
     "steps": [
       {
@@ -267,141 +267,141 @@
         "status": "completed",
         "conclusion": "success",
         "number": 1,
-        "started_at": "2026-11-10T03:13:38Z",
-        "completed_at": "2026-11-10T03:13:39Z"
+        "started_at": "2026-11-10T12:10:41Z",
+        "completed_at": "2026-11-10T12:10:42Z"
       },
       {
         "name": "Check out exact reviewed source without retained credentials",
         "status": "completed",
         "conclusion": "success",
         "number": 2,
-        "started_at": "2026-11-10T03:13:39Z",
-        "completed_at": "2026-11-10T03:13:48Z"
+        "started_at": "2026-11-10T12:10:42Z",
+        "completed_at": "2026-11-10T12:10:51Z"
       },
       {
         "name": "Admit a fresh part runner and bind current SOURCE",
         "status": "completed",
         "conclusion": "success",
         "number": 3,
-        "started_at": "2026-11-10T03:13:48Z",
-        "completed_at": "2026-11-10T03:14:32Z"
+        "started_at": "2026-11-10T12:10:51Z",
+        "completed_at": "2026-11-10T12:11:24Z"
       },
       {
         "name": "Record only the freshly admitted part work root",
         "status": "completed",
         "conclusion": "success",
         "number": 4,
-        "started_at": "2026-11-10T03:14:32Z",
-        "completed_at": "2026-11-10T03:14:32Z"
+        "started_at": "2026-11-10T12:11:24Z",
+        "completed_at": "2026-11-10T12:11:24Z"
       },
       {
         "name": "Admit and restore only completed source-bound predecessor parts",
         "status": "completed",
         "conclusion": "success",
         "number": 5,
-        "started_at": "2026-11-10T03:14:32Z",
-        "completed_at": "2026-11-10T03:14:47Z"
+        "started_at": "2026-11-10T12:11:24Z",
+        "completed_at": "2026-11-10T12:11:42Z"
       },
       {
         "name": "Latch fresh runtime and SOURCE packaging bindings",
         "status": "completed",
         "conclusion": "success",
         "number": 6,
-        "started_at": "2026-11-10T03:14:47Z",
-        "completed_at": "2026-11-10T03:14:49Z"
+        "started_at": "2026-11-10T12:11:42Z",
+        "completed_at": "2026-11-10T12:11:43Z"
       },
       {
         "name": "Install and verify the pinned Mac Rust toolchain",
         "status": "completed",
         "conclusion": "success",
         "number": 7,
-        "started_at": "2026-11-10T03:14:49Z",
-        "completed_at": "2026-11-10T03:15:00Z"
+        "started_at": "2026-11-10T12:11:43Z",
+        "completed_at": "2026-11-10T12:11:52Z"
       },
       {
         "name": "Build the genuine ordinary Desktop image",
         "status": "completed",
         "conclusion": "success",
         "number": 8,
-        "started_at": "2026-11-10T03:15:00Z",
-        "completed_at": "2026-11-10T03:36:57Z"
+        "started_at": "2026-11-10T12:11:52Z",
+        "completed_at": "2026-11-10T12:32:56Z"
       },
       {
         "name": "Record the effective pinned ordinary Desktop compiler",
         "status": "completed",
         "conclusion": "success",
         "number": 9,
-        "started_at": "2026-11-10T03:36:58Z",
-        "completed_at": "2026-11-10T03:36:59Z"
+        "started_at": "2026-11-10T12:32:56Z",
+        "completed_at": "2026-11-10T12:32:56Z"
       },
       {
         "name": "Verify and freeze completed part originals",
         "status": "completed",
         "conclusion": "success",
         "number": 10,
-        "started_at": "2026-11-10T03:36:59Z",
-        "completed_at": "2026-11-10T03:37:01Z"
+        "started_at": "2026-11-10T12:32:56Z",
+        "completed_at": "2026-11-10T12:32:58Z"
       },
       {
         "name": "Upload immutable completed part",
         "status": "completed",
         "conclusion": "success",
         "number": 11,
-        "started_at": "2026-11-10T03:37:01Z",
-        "completed_at": "2026-11-10T03:37:03Z"
+        "started_at": "2026-11-10T12:32:58Z",
+        "completed_at": "2026-11-10T12:33:00Z"
       },
       {
         "name": "Post Admit a fresh part runner and bind current SOURCE",
         "status": "completed",
         "conclusion": "success",
         "number": 21,
-        "started_at": "2026-11-10T03:37:03Z",
-        "completed_at": "2026-11-10T03:37:03Z"
+        "started_at": "2026-11-10T12:33:00Z",
+        "completed_at": "2026-11-10T12:33:00Z"
       },
       {
         "name": "Post Check out exact reviewed source without retained credentials",
         "status": "completed",
         "conclusion": "success",
         "number": 22,
-        "started_at": "2026-11-10T03:37:03Z",
-        "completed_at": "2026-11-10T03:37:04Z"
+        "started_at": "2026-11-10T12:33:00Z",
+        "completed_at": "2026-11-10T12:33:00Z"
       },
       {
         "name": "Complete job",
         "status": "completed",
         "conclusion": "success",
         "number": 23,
-        "started_at": "2026-11-10T03:37:04Z",
-        "completed_at": "2026-11-10T03:37:08Z"
+        "started_at": "2026-11-10T12:33:00Z",
+        "completed_at": "2026-11-10T12:33:03Z"
       }
     ],
-    "check_run_url": "https://api.github.com/repos/Apdelrahman1911/mobile-release-kit/check-runs/129604707983",
+    "check_run_url": "https://api.github.com/repos/Apdelrahman1911/mobile-release-kit/check-runs/129820663096",
     "labels": [
       "macos-26"
     ],
-    "runner_id": 1000012966,
-    "runner_name": "GitHub Actions 1000012966",
+    "runner_id": 1000012993,
+    "runner_name": "GitHub Actions 1000012993",
     "runner_group_id": 0,
     "runner_group_name": "GitHub Actions"
   },
   "artifact": {
-    "id": 13732714473,
-    "node_id": "MDg6QXJ0aWZhY3QxMzczMjcxNDQ3Mw==",
-    "name": "macos-candidate-part-image-disabled-f778beb993691330c56b59059de5c8d970fbb27d-42745647519-1",
+    "id": 13766000751,
+    "node_id": "MDg6QXJ0aWZhY3QxMzc2NjAwMDc1MQ==",
+    "name": "macos-candidate-part-image-disabled-63be89b96a0dd9f679ee4b77340768e04ae52aa5-42810669505-1",
     "size_in_bytes": 85352098,
-    "url": "https://api.github.com/repos/Apdelrahman1911/mobile-release-kit/actions/artifacts/13732714473",
-    "archive_download_url": "https://api.github.com/repos/Apdelrahman1911/mobile-release-kit/actions/artifacts/13732714473/zip",
+    "url": "https://api.github.com/repos/Apdelrahman1911/mobile-release-kit/actions/artifacts/13766000751",
+    "archive_download_url": "https://api.github.com/repos/Apdelrahman1911/mobile-release-kit/actions/artifacts/13766000751/zip",
     "expired": false,
-    "digest": "sha256:3c25541bc76672cfc6523e70d7211ca970f0095f6af7ed7db9d0b37c9fcae667",
-    "created_at": "2026-11-10T03:37:03Z",
-    "updated_at": "2026-11-10T03:37:03Z",
-    "expires_at": "2026-11-24T03:37:01Z",
+    "digest": "sha256:9e1bd66132c94366ff4a6ebdfbefcd0775bb0bc0ea872ffb06874de83c72b91e",
+    "created_at": "2026-11-10T12:33:00Z",
+    "updated_at": "2026-11-10T12:33:00Z",
+    "expires_at": "2026-11-24T12:32:58Z",
     "workflow_run": {
-      "id": 42745647519,
+      "id": 42810669505,
       "repository_id": 1341770786,
       "head_repository_id": 1341770786,
       "head_branch": "verify/desktop-macos-candidate",
-      "head_sha": "f778beb993691330c56b59059de5c8d970fbb27d"
+      "head_sha": "63be89b96a0dd9f679ee4b77340768e04ae52aa5"
     }
   }
 }

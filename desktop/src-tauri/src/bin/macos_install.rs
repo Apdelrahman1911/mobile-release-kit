@@ -175,6 +175,8 @@ mod installer {
             parent_persisted:false,parent:None,writer:None,participant:None,verified:false,
             lock_attempted:false,exclusive_acquired:false,closed_under_maintenance:false,verified_after_go:false,fresh_birth:None } }
     }
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum FreshPreparationPhase { None, HandlesRetired, StorageRebased }
     struct Install {
         originals: Vec<Original>, creations: Vec<Creation>, end: Instant, unknown: bool,
         // Fixed bounded native-only mappings enrolled after complete generation
@@ -189,6 +191,7 @@ mod installer {
         removal_live_reserved: usize, removal_control_reserved: u64, removal_original_storage_reserved:u64,
         fresh_birth_control_reserved: bool,
         fresh_outputs:Option<FreshOutputOwner>,
+        fresh_preparation_phase:FreshPreparationPhase,
         fresh_census_metadata:Vec<maintenance::fresh_conservation::AppMetadata>,
         fresh_conservation_projection:Option<maintenance::fresh_conservation::Projection>,
         removal_snapshot_capture: Option<maintenance::RemovalSnapshotCapture>,
@@ -585,7 +588,8 @@ mod installer {
                 worker_deadline:None,worker_stderr_is_gate:false,worker_go_eof:false,payload_written:0,payload_write_calls:0,launcher_writes:applications::WriteCounts::default(),launcher_effects:None,
                 removal_live_reserved:0,removal_control_reserved:0,removal_original_storage_reserved:0,removal_snapshot_capture:None,removal_snapshot_work_reserved:false,archived_install_reserved:false,removal_payload_plan:None,removal_observation_control:None,removal_observation_reserved:0,removal_archive_scan:None,
                 fresh_birth_control_reserved:false,
-                fresh_outputs:None,fresh_census_metadata:Vec::new(),fresh_conservation_projection:None,
+                fresh_outputs:None,fresh_preparation_phase:FreshPreparationPhase::None,
+                fresh_census_metadata:Vec::new(),fresh_conservation_projection:None,
                 #[cfg(feature = "macos-installed-removal-observer")]
                 removal_observer_projection:None,
                 stage:None,stage_name:None,app:None,runtime:None,runtime_publication:"not-attempted",app_publication:"not-attempted",payload_verified:false,
@@ -883,6 +887,35 @@ mod installer {
         fn forward_close(&mut self, n: usize, reason: &'static str) -> Result<()> {
             check(self.close(n), reason)?;
             self.clock() // Deadline refusal never rewrites a positive close.
+        }
+        // Retire a completed preparation scope before opening the next one.
+        // Only its authenticated blank versions original crosses the boundary.
+        // POST every live name before any close: a moved child's new parent
+        // can have a later Book index and must remain open for that POST.
+        fn close_preparation_originals(&mut self, first: usize, keep: usize) -> Result<()> {
+            check(first <= keep && keep < self.originals.len()
+                && self.originals[keep].fd.is_some() && self.originals[keep].state == State::Owned
+                && self.originals[keep].role == Role::Reader
+                && [self.gate.parent, self.gate.writer, self.gate.participant,
+                    self.registration.parent, self.registration.writer, self.registration.participant]
+                    .into_iter().flatten().all(|index| index < first),
+                "fresh-preparation-scope")?;
+            for index in first..self.originals.len() {
+                let row = &self.originals[index];
+                check(if row.fd.is_some() { row.state == State::Owned && row.role == Role::Reader }
+                    else { matches!(row.state, State::Closed | State::NoHandle) },
+                    "fresh-preparation-unsettled")?;
+                if row.fd.is_some() { self.check_name(index, false)?; }
+            }
+            let mut failure = None;
+            for index in (first..self.originals.len()).rev() {
+                if index != keep && !self.close(index) && failure.is_none() {
+                    failure = Some("fresh-preparation-close-unknown");
+                }
+            }
+            if let Err(why) = self.clock() { failure.get_or_insert(why); }
+            if let Some(why) = failure { return Err(why); }
+            self.check_name(keep, true)
         }
         fn read(&self, n: usize, size: u64, collect: bool) -> Result<(String, Vec<u8>)> {
             self.read_context(n, size, collect.then_some(1024*1024))
@@ -5116,6 +5149,36 @@ mod installer {
             book.originals.try_reserve_exact(absolute_future_rows-book.originals.len())
                 .map_err(|_|"removal-original-storage-allocation")?;
             check(book.originals.capacity()<=old.max(absolute_future_rows),"removal-original-storage-capacity")?;
+            book.clock()
+        }
+        // The completed Fresh preparation no longer promises its old future
+        // rows. Keep every existing record, name allocation and full Vec
+        // capacity; quote the already observed remaining operation instead.
+        // This explicit one-use boundary does not alter monotone reservations
+        // inside any other allocation phase, worker, update or removal route.
+        pub(super) fn retire_fresh_preparation_storage(book:&mut Install,future_rows:usize)->Result<()> {
+            book.clock()?;
+            check(book.fresh_preparation_phase==FreshPreparationPhase::HandlesRetired
+                && !book.worker_stderr_is_gate && book.gate.verified && book.gate.exclusive_acquired
+                && book.removal_observation_control.is_none() && book.removal_observation_reserved==0
+                && book.removal_original_storage_reserved<=book.removal_control_reserved
+                && book.removal_control_reserved<=installation_record::CONTROL_LIMIT as u64 && !book.unknown,
+                "fresh-preparation-storage-phase")?;
+            let names=book.originals.iter().try_fold(0usize,|n,row|n.checked_add(row.name.capacity())
+                .ok_or("fresh-preparation-storage-memory"))?;
+            let quote=removal_original_storage_quote_data(book.originals.len(),book.originals.capacity(),names,future_rows)?;
+            if future_rows>book.originals.capacity() {
+                // Preserve the established old+new allocation-peak check and
+                // actual reserve when the remaining phase needs more space.
+                reserve_removal_original_storage(book,future_rows)?;
+            }else{
+                let next=book.removal_control_reserved.checked_sub(book.removal_original_storage_reserved)
+                    .and_then(|n|n.checked_add(quote)).filter(|n|*n<=installation_record::CONTROL_LIMIT as u64)
+                    .ok_or("fresh-preparation-storage-memory")?;
+                book.removal_control_reserved=next;
+                book.removal_original_storage_reserved=quote;
+            }
+            book.fresh_preparation_phase=FreshPreparationPhase::StorageRebased;
             book.clock()
         }
         fn rehome_originals_before(book:&mut Install,count:usize)->Result<usize> {
@@ -10566,16 +10629,40 @@ mod installer {
             if book.registration.verified { names.insert(paths::REGISTRATION_GATE_NAME.into()); }
             exact_roster(book, root, &names)?; exact_roster(book, versions, &BTreeSet::new())
         }
+        pub(super) enum MetadataReadRole { Control, Inventory }
+        impl MetadataReadRole {
+            pub(super) fn read(self, book: &Install, reader: usize, name: &str, size: u64, limit: usize) -> Result<(String, Vec<u8>)> {
+                match self {
+                    Self::Control => book.read(reader, size, true),
+                    Self::Inventory => {
+                        check(name == installation_record::INVENTORY_NAME || name == "inventory.json",
+                            "maintenance-inventory-name")?;
+                        book.read_collect_bounded(reader, size, limit)
+                    }
+                }
+            }
+        }
         pub(super) fn metadata_original(book: &mut Install, parent: usize, name: &str, limit: usize) -> Result<(usize, Vec<u8>)> {
+            let role = if name == installation_record::INVENTORY_NAME { MetadataReadRole::Inventory }
+                else { MetadataReadRole::Control };
+            metadata_original_context(book, parent, name, limit, role)
+        }
+        // Conservation uses a fixed inventory alias. Its explicit role retains
+        // the inventory bound without raising the ordinary control-file cap.
+        pub(super) fn metadata_inventory_original(book: &mut Install, parent: usize, name: &str, limit: usize) -> Result<(usize, Vec<u8>)> {
+            check(name == installation_record::INVENTORY_NAME || name == "inventory.json",
+                "maintenance-inventory-name")?;
+            check(limit > 0 && limit <= installation_record::INVENTORY_LIMIT, "maintenance-record-size")?;
+            metadata_original_context(book, parent, name, limit, MetadataReadRole::Inventory)
+        }
+        fn metadata_original_context(book: &mut Install, parent: usize, name: &str, limit: usize, role: MetadataReadRole) -> Result<(usize, Vec<u8>)> {
             let reader = book.open(Some(parent), name, false)?;
             book.protected(reader, false, Some(0o444))?;
             native::no_xattrs(book.fd(reader)?.as_fd()).map_err(|_| "maintenance-record-attributes")?;
             let original = stat::fstat(book.fd(reader)?).map_err(|_| "maintenance-record-stat")?;
             let size = usize::try_from(original.st_size).map_err(|_| "maintenance-record-size")?;
             check(original.st_flags == 0 && size > 0 && size <= limit, "maintenance-record-size")?;
-            let bytes = if name == installation_record::INVENTORY_NAME {
-                book.read_collect_bounded(reader, size as u64, limit)?.1
-            } else { book.read(reader, size as u64, true)?.1 };
+            let bytes = role.read(book, reader, name, size as u64, limit)?.1;
             let post = stat::fstat(book.fd(reader)?).map_err(|_| "maintenance-record-stat")?;
             check(post.st_flags == 0 && Identity::of(&post) == book.identity(reader)?, "maintenance-record-post")?;
             removal_snapshot_metadata(book,reader,&bytes)?;
@@ -12359,8 +12446,9 @@ mod installer {
             let launcher = if wants_launcher && removal_source.is_none() {
                 applications::Observation::capture(book,&prepared,history.as_ref(),old_release,action,control_bound)?
             } else {None};
-            let control_bound = control_bound.checked_add(if launcher.is_some() {
-                applications::OBSERVATION_CONTROL_QUOTE } else {0}).ok_or("maintenance-control-bound")?;
+            let control_bound = control_bound.checked_add(launcher.as_ref()
+                .map(|value|value.retained_control_quote(action)).transpose()?.unwrap_or(0))
+                .ok_or("maintenance-control-bound")?;
             // Convenience copies are physical bytes outside the embedded app.
             // Charge the maximum old+new extent during update before any writes;
             // each generation's file/byte and original-descriptor caps remain.
@@ -12396,6 +12484,14 @@ mod installer {
             let live = book.originals.iter().filter(|r| r.fd.is_some()).count() as u64 + 2 * 16 + 12 + 1
                 + book.removal_live_reserved as u64 + if launcher.is_some() || launcher_removal.is_some() {20} else {0}
                 + if creates_launcher_phase {applications::PHASE_LIVE_QUOTE} else {0};
+            let control_bound=if action==ActionData::FreshInstall && conservation.is_some()
+                && book.fresh_preparation_phase==FreshPreparationPhase::HandlesRetired {
+                check(history.is_none() && !book.worker_stderr_is_gate,"fresh-preparation-storage-phase")?;
+                let before=book.removal_control_reserved;
+                retire_fresh_preparation_storage(book,usize::try_from(records).map_err(|_|"maintenance-original-bound")?)?;
+                control_bound.checked_sub(before).and_then(|n|n.checked_add(book.removal_control_reserved))
+                    .ok_or("fresh-preparation-storage-memory")?
+            }else{control_bound};
             let budget=transaction::BudgetData::checked_with_reason_data(&costs, invocation_count, planned_evidence, control_bound, records, live)
                 .map_err(transaction::BudgetRefusalData::reason_data)?;
             if restore_originals!=0 {
@@ -13667,7 +13763,8 @@ mod installer {
                 Self { originals: Vec::new(), creations: Vec::new(), end: Instant::now(), unknown:false,
                     legacy_volumes:[None;mobile_release_desktop::macos_install_maintenance::PREDECESSOR_LIMIT+1],
                     worker_deadline:Some(deadline),worker_stderr_is_gate:stderr_is_gate,worker_go_eof:false,
-                    fresh_birth_control_reserved:false,fresh_outputs:None,fresh_census_metadata:Vec::new(),fresh_conservation_projection:None,
+                    fresh_birth_control_reserved:false,fresh_outputs:None,fresh_preparation_phase:FreshPreparationPhase::None,
+                    fresh_census_metadata:Vec::new(),fresh_conservation_projection:None,
                     removal_live_reserved:0,removal_control_reserved:0,removal_original_storage_reserved:0,removal_snapshot_capture:None,removal_snapshot_work_reserved:false,archived_install_reserved:false,removal_payload_plan:None,removal_observation_control:None,removal_observation_reserved:0,removal_archive_scan:None,
                 #[cfg(feature = "macos-installed-removal-observer")]
                 removal_observer_projection:None,
@@ -13989,7 +14086,8 @@ mod installer {
             "launcher-inverse-previous-absence", "launcher-inverse-publication", "launcher-inverse-quarantine",
             "launcher-inverse-restoration-refused-or-unknown", "launcher-inverse-withdrawal-refused-or-unknown", "launcher-lifecycle-decision",
             "launcher-lifecycle-once", "launcher-maintenance-required", "launcher-observation-bundle-close",
-            "launcher-observation-memory", "launcher-observation-parent-close", "launcher-observation-refused",
+            "launcher-observation-memory", "launcher-observation-retained-memory", "launcher-fresh-retained-shape",
+            "launcher-observation-parent-close", "launcher-observation-refused",
             "launcher-observation-root-close", "launcher-operation-once", "launcher-original-absence",
             "launcher-original-binding", "launcher-original-identity", "launcher-original-missing",
             "launcher-parent-bundle-close", "launcher-parent-copy-bytes", "launcher-parent-existing-result",
@@ -20519,6 +20617,7 @@ exec ./mrk-macos-remove --fixture-supervise "$1"
             fn conserve_current_fresh(&mut self,old:&str,request:&str)->Result<()> {
                 check(self.fresh_recovery.is_none() && self.fresh_launcher_recovery.is_none()
                     && self.maintenance.is_none() && self.child.is_none() && self.command.is_none(),"fresh-conservation-parent-once")?;
+                let scope=maintenance::fresh_conservation::PreparationOriginals::begin(&self.book);
                 let view=FreshRecoveryInput::new(&mut self.book,self.source.as_ref().ok_or("fresh-conservation-source")?,
                     self.producer.as_ref().ok_or("fresh-conservation-producer")?,self.reinstall_input.as_ref().ok_or("fresh-conservation-input")?,old)?;
                 self.fresh_launcher_recovery=applications::FreshRecovery::observe_fresh(&mut self.book,&view)?;
@@ -20532,9 +20631,10 @@ exec ./mrk-macos-remove --fixture-supervise "$1"
                 let mut context=ReinstallPreservationContext::Fresh{source:&view,owner};
                 maintenance::preserve_partial_fresh(&mut self.book,&mut context)?;drop(context);
                 let ready=self.fresh_recovery.as_mut().ok_or("fresh-conservation-owner")?.blank(&mut self.book,&view)?;
-                drop(view);self.prepare_conserved_fresh(request,ready)
+                drop(view);scope.finish(&mut self.book,&ready)?;self.prepare_conserved_fresh(request,ready)
             }
             fn continue_conserved_fresh(&mut self,request:&str)->Result<()> {
+                let scope=maintenance::fresh_conservation::PreparationOriginals::begin(&self.book);
                 let prepared=self.reinstall_input.as_ref().ok_or("fresh-conservation-input")?;
                 if let Some(pending)=maintenance::fresh_conservation::pending(&mut self.book,prepared.destination)? {
                     let view=FreshRecoveryInput::resume(&mut self.book,self.source.as_ref().ok_or("fresh-conservation-source")?,
@@ -20544,12 +20644,12 @@ exec ./mrk-macos-remove --fixture-supervise "$1"
                     let mut context=ReinstallPreservationContext::Fresh{source:&view,owner:self.fresh_recovery.as_mut().ok_or("fresh-conservation-owner")?};
                     maintenance::preserve_partial_fresh(&mut self.book,&mut context)?;drop(context);
                     let ready=self.fresh_recovery.as_mut().ok_or("fresh-conservation-owner")?.blank(&mut self.book,&view)?;
-                    drop(view);return self.prepare_conserved_fresh(request,ready);
+                    drop(view);scope.finish(&mut self.book,&ready)?;return self.prepare_conserved_fresh(request,ready);
                 }
                 let input=ReinstallInputRead::parent(&self.book,self.source.as_ref().ok_or("fresh-conservation-source")?,
                     self.producer.as_ref().ok_or("fresh-conservation-producer")?,prepared.destination,prepared.input,&prepared.inventory,&prepared.inventory_bytes)?;
                 let ready=maintenance::fresh_conservation::FreshBlankReady::reobserve(&mut self.book,&input)?;
-                drop(input);self.prepare_conserved_fresh(request,ready)
+                drop(input);scope.finish(&mut self.book,&ready)?;self.prepare_conserved_fresh(request,ready)
             }
             fn prepare_conserved_fresh(&mut self,request:&str,ready:maintenance::fresh_conservation::FreshBlankReady)->Result<()> {
                 let incoming=self.reinstall_input.take().ok_or("fresh-conservation-input")?;
@@ -23766,8 +23866,215 @@ exec ./mrk-macos-remove --fixture-supervise "$1"
     }
     #[cfg(test)]
     mod tests {
+        fn fresh_memory_test_book(other: u64) -> super::Install {
+            use super::*;
+            let mut book=Install::new();
+            for n in 0..2048 {book.originals.push(Original {fd:None,state:State::Closed,role:Role::Reader,
+                parent:None,name:format!("retained-{n:04}"),identity:None,existing_app_metadata:None});}
+            book.removal_control_reserved=other;
+            maintenance::reserve_removal_original_storage(&mut book,120_000).unwrap();
+            book
+        }
         #[test]
-        fn collected_inventory_uses_original_reader_with_exact_bound_and_post() {
+        fn fresh_memory_retirement_preserves_records_and_capacity_and_real_growth_boundaries() {
+            use super::*;
+            let mut book=fresh_memory_test_book(0);
+            let before=(book.removal_control_reserved,book.removal_original_storage_reserved,
+                book.originals.as_ptr(),book.originals.len(),book.originals.capacity());
+            assert_eq!(maintenance::retire_fresh_preparation_storage(&mut book,30_000).unwrap_err(),"fresh-preparation-storage-phase");
+            assert_eq!(book.removal_control_reserved,before.0);
+            book.gate.verified=true;book.gate.exclusive_acquired=true;
+            book.fresh_preparation_phase=FreshPreparationPhase::HandlesRetired;
+            book.worker_stderr_is_gate=true;
+            assert_eq!(maintenance::retire_fresh_preparation_storage(&mut book,30_000).unwrap_err(),"fresh-preparation-storage-phase");
+            book.worker_stderr_is_gate=false;
+            book.removal_observation_control=Some(1);
+            assert_eq!(maintenance::retire_fresh_preparation_storage(&mut book,30_000).unwrap_err(),"fresh-preparation-storage-phase");
+            book.removal_observation_control=None;
+            assert_eq!(maintenance::retire_fresh_preparation_storage(&mut book,usize::MAX).unwrap_err(),"removal-original-storage-count");
+            maintenance::retire_fresh_preparation_storage(&mut book,30_000).unwrap();
+            assert!(book.removal_original_storage_reserved<before.1);
+            assert_eq!((book.originals.as_ptr(),book.originals.len(),book.originals.capacity()),(before.2,before.3,before.4));
+            assert!(book.originals.iter().enumerate().all(|(n,row)|row.name==format!("retained-{n:04}")
+                &&row.fd.is_none()&&row.state==State::Closed&&row.role==Role::Reader
+                &&row.parent.is_none()&&row.identity.is_none()&&row.existing_app_metadata.is_none()));
+            assert!(book.fresh_preparation_phase==FreshPreparationPhase::StorageRebased);
+            assert_eq!(maintenance::retire_fresh_preparation_storage(&mut book,30_000).unwrap_err(),"fresh-preparation-storage-phase");
+            // Measure the actual existing growth quote, then exercise its exact
+            //128MiB boundary and one-over against real allocated Vec capacity.
+            let mut probe=fresh_memory_test_book(0);
+            probe.gate.verified=true;probe.gate.exclusive_acquired=true;
+            probe.fresh_preparation_phase=FreshPreparationPhase::HandlesRetired;
+            maintenance::retire_fresh_preparation_storage(&mut probe,160_000).unwrap();
+            let wanted=probe.removal_original_storage_reserved;
+            assert_eq!(probe.originals.capacity(),160_000);
+            drop(probe);
+            for extra in [0,1] {
+                let mut boundary=fresh_memory_test_book(installation_record::CONTROL_LIMIT as u64-wanted+extra);
+                boundary.gate.verified=true;boundary.gate.exclusive_acquired=true;
+                boundary.fresh_preparation_phase=FreshPreparationPhase::HandlesRetired;
+                let old=(boundary.originals.as_ptr(),boundary.originals.capacity(),boundary.removal_control_reserved);
+                let result=maintenance::retire_fresh_preparation_storage(&mut boundary,160_000);
+                if extra==0 {
+                    result.unwrap();assert_eq!(boundary.removal_control_reserved,installation_record::CONTROL_LIMIT as u64);
+                    assert_eq!(boundary.originals.capacity(),160_000);
+                }else{
+                    assert_eq!(result.unwrap_err(),"removal-original-storage-memory");
+                    assert_eq!((boundary.originals.as_ptr(),boundary.originals.capacity(),boundary.removal_control_reserved),old);
+                    assert!(boundary.fresh_preparation_phase==FreshPreparationPhase::HandlesRetired);
+                }
+            }
+        }
+        #[test]
+        fn fresh_memory_full_journal_namespace_and_retained_launcher_share_the_strict_pool() {
+            use super::*;
+            let raw=std::fs::read(env!("MRK_PHASE_AUDIT_INVENTORY")).unwrap();
+            assert_eq!(format!("{:x}",Sha256::digest(&raw)),"80d4a0f648f61032cacc0c1cb0cd600d32b1234e1aa4b6631a01666a90026d25");
+            let producer=std::fs::read(env!("MRK_PHASE_AUDIT_PRODUCER")).unwrap();
+            assert_eq!(format!("{:x}",Sha256::digest(&producer)),"a631cba5d7b7dd130c35efc885752376492e83fd4798d10708dcf11597840870");
+            let descriptor=mobile_release_desktop::macos_install_producer::ProducerData::parse_data(&producer,
+                mobile_release_desktop::macos_install_maintenance::MaintenanceTargetData::Arm64).unwrap();
+            let selected=descriptor.release_set_data();
+            let inventory=Inventory::parse_for_selected_release(&raw,selected.current_data()).unwrap();
+            let (retained,old_launcher)=applications::fresh_retained_memory_data_checks(&inventory.index().unwrap()).unwrap();
+            assert_eq!(old_launcher-retained,36*1024*1024);
+            let intent_raw=transaction::IntentData::encode_data(&"1".repeat(32),&"2".repeat(32),
+                ActionData::FreshInstall,None,selected).unwrap();
+            let intent=transaction::IntentData::parse_data(&intent_raw,selected).unwrap();
+            let prepared=PreparedFresh{input:0,destination:1,versions:2,inventory,inventory_bytes:raw};
+            for other in [24*1024*1024,28*1024*1024] {
+                // This is an explicit simulated bookkeeping shape; original
+                // failed-run counters were never exported and are not inferred.
+                let mut book=fresh_memory_test_book(other);
+                let old=book.removal_control_reserved;
+                assert!(maintenance::fresh_conservation::namespace_memory_quote_data(old+old_launcher).is_err());
+                book.gate.verified=true;book.gate.exclusive_acquired=true;
+                book.fresh_preparation_phase=FreshPreparationPhase::HandlesRetired;
+                maintenance::retire_fresh_preparation_storage(&mut book,30_000).unwrap();
+                let base=book.removal_control_reserved+retained;
+                book.removal_observation_control=Some(base);
+                book.removal_observation_reserved=book.removal_control_reserved;
+                let plan=book.fresh_output_plan(&prepared,&intent,selected).unwrap();
+                assert_eq!(plan.control,42_148_604);
+                let effective=maintenance::removal_effective_control_bytes(&book).unwrap();
+                let namespace=maintenance::fresh_conservation::namespace_memory_quote_data(effective).unwrap();
+                let partial_size=4*(fresh_data::ENTRY_LIMIT+4);
+                let enrollment=partial_size*4+(partial_size/(fresh_data::ENTRY_MIN+4))*1152+131072;
+                assert!(effective+namespace as u64+enrollment as u64<=installation_record::CONTROL_LIMIT as u64);
+                println!("MRK_MEMORY_OVERLAP_MODEL={}",serde_json::json!({"simulatedBookkeeping":true,
+                    "originalRows":book.originals.len(),"capacity":book.originals.capacity(),"otherBytes":other,
+                    "before":old,"rebasedBaseWithLauncher":base,"journalQuote":plan.control,
+                    "namespaceQuote":namespace,"partialEnrollmentUpperQuote":enrollment,
+                    "combined":effective+namespace as u64+enrollment as u64}));
+            }
+            let reserve=maintenance::fresh_conservation::namespace_memory_quote_data(0).unwrap() as u64;
+            assert!(maintenance::fresh_conservation::namespace_memory_quote_data(installation_record::CONTROL_LIMIT as u64-reserve).is_ok());
+            assert!(maintenance::fresh_conservation::namespace_memory_quote_data(installation_record::CONTROL_LIMIT as u64-reserve+1).is_err());
+            assert!(maintenance::fresh_conservation::namespace_memory_quote_data(u64::MAX).is_err());
+        }
+        #[test]
+        fn recovery_memory_phase_profile_uses_exact_admitted_inventory() {
+            use super::*;
+            let raw = std::fs::read(env!("MRK_PHASE_AUDIT_INVENTORY")).unwrap();
+            assert_eq!(format!("{:x}",Sha256::digest(&raw)),"80d4a0f648f61032cacc0c1cb0cd600d32b1234e1aa4b6631a01666a90026d25");
+            let producer = std::fs::read(env!("MRK_PHASE_AUDIT_PRODUCER")).unwrap();
+            assert_eq!(format!("{:x}",Sha256::digest(&producer)),"a631cba5d7b7dd130c35efc885752376492e83fd4798d10708dcf11597840870");
+            let descriptor = mobile_release_desktop::macos_install_producer::ProducerData::parse_data(
+                &producer,mobile_release_desktop::macos_install_maintenance::MaintenanceTargetData::Arm64).unwrap();
+            let selected = descriptor.release_set_data();
+            let inventory = Inventory::parse_for_selected_release(&raw,selected.current_data()).unwrap();
+            let (files,dirs,index_peak) = worker::reinstall_index_quote_data(&inventory).unwrap();
+            assert_eq!((files,dirs),(7230,1279));
+            let material = applications::material_memory_phase_profile(&inventory.index().unwrap()).unwrap();
+            let intent_raw = transaction::IntentData::encode_data(&"1".repeat(32),&"2".repeat(32),
+                ActionData::FreshInstall,None,selected).unwrap();
+            let intent = transaction::IntentData::parse_data(&intent_raw,selected).unwrap();
+            let prepared = PreparedFresh{input:0,destination:1,versions:2,inventory,inventory_bytes:raw};
+            let mut book = Install::new();
+            // Exact production DATA quote; no FDs/gates/Installer are entered.
+            let plan = book.fresh_output_plan(&prepared,&intent,selected).unwrap();
+            assert_eq!(plan.entries,files+dirs+12);
+            assert!(plan.bytes <= fresh_data::JOURNAL_LIMIT);
+            println!("MRK_MEMORY_PHASE_PROFILE={}",serde_json::json!({
+                "inventoryBytes":prepared.inventory_bytes.len(),"files":files,"directories":dirs,
+                "indexPeak":index_peak,"originalSize":std::mem::size_of::<Original>(),
+                "fullFreshJournalEntries":plan.entries,"fullFreshJournalQuotedBytes":plan.bytes,
+                "fullFreshOutputQuote":plan.control,"launcher":material,
+                "controlLimit":installation_record::CONTROL_LIMIT,
+                "nativeRootOrInstallerEntered":false,"actualFailedRunMemoryCountersKnown":false}));
+            assert!(book.originals.is_empty() && book.creations.is_empty());
+        }
+        #[test]
+        fn preparation_handoff_retires_native_handles_and_preserves_anchors_and_cap() {
+            use super::*;
+            use std::{fs, os::{fd::AsRawFd, unix::fs::DirBuilderExt}};
+            // Ordinary-user owned inert fixture; no administrator admission.
+            let directory = std::env::temp_dir().canonicalize().unwrap()
+                .join(format!("mrk-preparation-handles-{}", std::process::id()));
+            fs::DirBuilder::new().mode(0o700).create(&directory).unwrap();
+            for name in ["versions", "move", "late"] {
+                fs::DirBuilder::new().mode(0o700).create(directory.join(name)).unwrap();
+            }
+            fs::write(directory.join("anchor"), b"source").unwrap();
+            fs::write(directory.join("move/file"), b"preserved").unwrap();
+            let mut book = Install::new();
+            let tested = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let mut root = book.open(None, "/", true).unwrap();
+                for part in directory.components().skip(1) {
+                    root = book.open(Some(root), part.as_os_str().to_str().unwrap(), true).unwrap();
+                }
+                let anchor = book.open(Some(root), "anchor", false).unwrap();
+                book.gate.parent = Some(root);
+                book.gate.participant = Some(anchor);
+                let first = book.originals.len();
+                let moved = book.open(Some(root), "move", true).unwrap();
+                let file = book.open(Some(moved), "file", false).unwrap();
+                let late_parent = book.open(Some(root), "late", true).unwrap();
+                // Real preservation likewise rebinds an earlier original to
+                // a later parent. All POSTs must precede the first close.
+                fs::rename(directory.join("move"), directory.join("late/move")).unwrap();
+                book.originals[moved].parent = Some(late_parent);
+                let keep = book.open(Some(root), "versions", true).unwrap();
+                let before = book.originals.iter().filter(|row| row.fd.is_some()).count();
+                assert_eq!(book.close_preparation_originals(keep + 1, keep).unwrap_err(), "fresh-preparation-scope");
+                assert_eq!(book.originals.iter().filter(|row| row.fd.is_some()).count(), before);
+                book.gate.participant = Some(late_parent);
+                assert_eq!(book.close_preparation_originals(first, keep).unwrap_err(), "fresh-preparation-scope");
+                book.gate.participant = Some(anchor);
+                book.originals[file].role = Role::MetadataWriter;
+                assert_eq!(book.close_preparation_originals(first, keep).unwrap_err(), "fresh-preparation-unsettled");
+                book.originals[file].role = Role::Reader;
+                fs::rename(directory.join("late/move/file"), directory.join("late/move/held")).unwrap();
+                fs::write(directory.join("late/move/file"), b"preserved").unwrap();
+                assert_eq!(book.close_preparation_originals(first, keep).unwrap_err(), "original-correspondence");
+                assert_eq!(book.originals.iter().filter(|row| row.fd.is_some()).count(), before);
+                fs::remove_file(directory.join("late/move/file")).unwrap();
+                fs::rename(directory.join("late/move/held"), directory.join("late/move/file")).unwrap();
+                let raw: Vec<_> = (first..book.originals.len()).filter(|index| *index != keep)
+                    .map(|index| book.fd(index).unwrap().as_raw_fd()).collect();
+                book.close_preparation_originals(first, keep).unwrap();
+                for fd in raw {
+                    let error = fs::metadata(format!("/dev/fd/{fd}")).expect_err("closed original FD");
+                    assert_eq!(error.raw_os_error(), Some(nix::libc::EBADF));
+                }
+                assert!((first..book.originals.len()).all(|index| index == keep
+                    || book.originals[index].fd.is_none() && book.originals[index].state == State::Closed));
+                book.check_name(keep, true).unwrap();
+                book.check_name(anchor, true).unwrap();
+                let live = book.originals.iter().filter(|row| row.fd.is_some()).count();
+                for _ in live..96 { book.open(Some(root), "anchor", false).unwrap(); }
+                assert_eq!(book.open(Some(root), "anchor", false).unwrap_err(), "original-bound");
+            }));
+            let settled = book.settle_originals();
+            assert!(settled && book.originals_settled());
+            if let Err(error) = tested { std::panic::resume_unwind(error); }
+            fs::remove_file(directory.join("late/move/file")).unwrap();
+            fs::remove_file(directory.join("anchor")).unwrap();
+            for name in ["late/move", "late", "versions"] { fs::remove_dir(directory.join(name)).unwrap(); }
+            fs::remove_dir(directory).unwrap();
+        }
+        #[test]
+        fn collected_inventory_roles_use_original_reader_with_exact_bound_and_post() {
             use super::*;
             use std::{fs::{self, OpenOptions}, io::Write, os::unix::fs::{DirBuilderExt, OpenOptionsExt}};
             // This exercises the real Mac Install book/FD/read/name/close path
@@ -23794,6 +24101,7 @@ exec ./mrk-macos-remove --fixture-supervise "$1"
             assert!(bytes.len() > 1024*1024 && bytes.len() < installation_record::INVENTORY_LIMIT);
             assert_eq!(Inventory::parse(bytes, &manifest).expect("real inventory DATA").files.len(), 8_622);
             create_leaf(installation_record::INVENTORY_NAME, bytes).expect("inventory writer settled");
+            create_leaf("inventory.json", bytes).expect("conserved inventory writer settled");
             create_leaf("control", b"ok").expect("control writer settled");
             let mut book = Install::new();
             let tested = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -23832,6 +24140,32 @@ exec ./mrk-macos-remove --fixture-supervise "$1"
                 let control = book.open(Some(root), "control", false).unwrap();
                 assert_eq!(book.read(control, 2, true).unwrap().1, b"ok");
                 book.forward_close(control, "test-control-close").unwrap();
+                let alias = book.open(Some(root), "inventory.json", false).unwrap();
+                // A large limit alone cannot grant the inventory role. Both
+                // production alias readers select it explicitly; ordinary
+                // controls retain their original 1 MiB cap.
+                use maintenance::MetadataReadRole;
+                assert_eq!(MetadataReadRole::Control.read(&book, alias, "inventory.json", size,
+                    installation_record::INVENTORY_LIMIT).unwrap_err(), "read-bound");
+                assert_eq!(MetadataReadRole::Inventory.read(&book, alias, "producer.json", size,
+                    installation_record::INVENTORY_LIMIT).unwrap_err(), "maintenance-inventory-name");
+                for limit in [0, bytes.len()-1, installation_record::INVENTORY_LIMIT+1] {
+                    assert_eq!(MetadataReadRole::Inventory.read(&book, alias, "inventory.json", size, limit)
+                        .unwrap_err(), "read-bound");
+                    assert_eq!(position(&book, alias), 0);
+                }
+                let (alias_digest, alias_raw) = MetadataReadRole::Inventory.read(&book, alias, "inventory.json", size,
+                    installation_record::INVENTORY_LIMIT).expect("explicit conservation inventory read");
+                assert_eq!(alias_digest, digest); assert_eq!(alias_raw, bytes);
+                assert_eq!(alias_raw.capacity(), bytes.len());
+                book.check_name(alias, true).expect("same held and named conservation inventory POST");
+                book.forward_close(alias, "test-alias-close").unwrap();
+                let replaced_alias = book.open(Some(root), "inventory.json", false).unwrap();
+                fs::rename(directory.join("inventory.json"), directory.join("held-alias")).unwrap();
+                create_leaf("inventory.json", bytes).unwrap();
+                assert_eq!(MetadataReadRole::Inventory.read(&book, replaced_alias, "inventory.json", size,
+                    installation_record::INVENTORY_LIMIT).unwrap_err(), "original-correspondence");
+                book.forward_close(replaced_alias, "test-replaced-alias-close").unwrap();
                 // A replaced name does not authorize the still-held old FD,
                 // even when both files contain byte-for-byte identical DATA.
                 let replaced = book.open(Some(root), installation_record::INVENTORY_NAME, false).unwrap();
@@ -23850,7 +24184,7 @@ exec ./mrk-macos-remove --fixture-supervise "$1"
             let settled = book.settle_originals();
             assert!(settled && book.originals_settled(), "test original closes");
             if let Err(error) = tested { std::panic::resume_unwind(error); }
-            for name in [installation_record::INVENTORY_NAME, "held-inventory", "control"] {
+            for name in [installation_record::INVENTORY_NAME, "held-inventory", "control", "inventory.json", "held-alias"] {
                 fs::remove_file(directory.join(name)).expect("exact test leaf retirement");
             }
             fs::remove_dir(&directory).expect("empty test directory retirement");

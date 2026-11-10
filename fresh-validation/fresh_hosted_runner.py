@@ -17,9 +17,9 @@ import xml.etree.ElementTree as ET
 
 EXECUTION_BINDING = None
 TARGET = "aarch64-apple-darwin"
-PRODUCT = {'source': 'f778beb993691330c56b59059de5c8d970fbb27d', 'tree': 'bdd9e77af2c626e435e02f9fbebfd229ef6a06a7'}
+PRODUCT = {'source': '63be89b96a0dd9f679ee4b77340768e04ae52aa5', 'tree': '9616c3bbff27e86522e18c1451a834362ab10a08'}
 # This is the frozen ordinary product, independent of runner/transport sources.
-CONTROL_TRANSPORT = {'commit': '99ecb0a65b5564ef5b48092a349c0348630aaa92', 'tree': '922933f51fc5a38f67ebb6c5daa21bb42d24dfd0', 'manifestSha256': 'db68cae255509939b5c9ec13019109118873af497948a0f291a62abd92e76044', 'remoteAvailable': True}
+CONTROL_TRANSPORT = {'commit': '54b18bed94fdc7828dc1295377146524ce7fa759', 'tree': '6f7acd75f707dbcc6731e591708f9e9b4ccba96b', 'manifestSha256': '9a918e031bd632e2121bfb7b501060815afeb6029fc028bb9bc86635573e628e', 'remoteAvailable': True}
 JOB_STEPS = {
     "write-recovery": ("write", "frontier", "ordinary-recovery", "completed"),
     "torn-refusal": ("torn", "frontier-refusal", "ordinary-refusal"),
@@ -290,6 +290,9 @@ def package_info(body, identifier):
     return info
 
 
+def control_build_fixed_bytes(binding):
+    return binding.get("sourceBytes", 0) + len(binding["packageBody"]) + sum(map(len, binding["controlBodies"].values())) + 64 * 1024 * 1024
+
 def build_control(op, stager, binding, role, invocation=None):
     """Reuse original DATA stager + pkgbuild/root-cpio/xar sequence, never sudo."""
     need(EXECUTION_BINDING is not None, "source-preparation-only")
@@ -307,8 +310,8 @@ def build_control(op, stager, binding, role, invocation=None):
              **{"input/" + path: item for path, item in binding["inputFiles"].items()}}
     inputs = sum(len(item[0]) for item in files.values())
     need(inputs <= stager.MAX_BYTES, "control-scripts-existing-aggregate-cap")
-    prior = sum(binding.get("builtPackageBytes", {}).values())
-    fixed = binding.get("sourceBytes", 0) + len(binding["packageBody"]) + sum(map(len, binding["controlBodies"].values())) + prior + 64 * 1024 * 1024
+    # Prior audited packages are closed on disk, not retained byte vectors.
+    fixed = control_build_fixed_bytes(binding)
     resource_capacity(op, binding["hostAPI"], binding,
         {"memoryBytes": fixed + 3 * inputs, "diskBytes": 3 * inputs + 32 * 1024 * 1024},
         label="build-" + label + "-stage")
@@ -684,9 +687,9 @@ def route_resource_quote(binding, packages):
     carriers = {role: ordinary + pair + size for role, size in sizes.items()}
     carriers["ordinary"] = ordinary + pair
     need(all(n <= limit for n in carriers.values()), "precut-carrier-aggregate-capacity")
-    # Keep the original conservative envelope, including every prebuilt package
-    # size, even though those byte vectors now stay on disk until needed.
-    retained = inputs + ordinary + pair + images + sum(sizes.values()) + binding.get("sourceBytes", 0)
+    # Only one prebuilt body is read at a time; known detach clears members.
+    # Keep that largest body plus the existing three complete carrier windows.
+    retained = inputs + ordinary + pair + images + max(sizes.values()) + binding.get("sourceBytes", 0)
     # Existing tree writer/readback and mount readback retain at most three
     # largest complete carrier byte windows, in addition to admitted inputs.
     # Complete original captures/receipt rows reserve64MiB (128x2x256KiB).

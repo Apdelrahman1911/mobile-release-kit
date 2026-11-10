@@ -1,0 +1,35 @@
+name: Recover the unchanged signed Android capsule from a retained successful part
+description: Verify three SOURCE-pinned original members without executing or signing them
+inputs:
+  work-root:
+    required: true
+    description: Existing private candidate workspace
+  python:
+    required: true
+    description: Selected DATA interpreter
+  github-token:
+    required: true
+    description: Read-only Actions download token
+runs:
+  using: composite
+  steps:
+    - name: Download the exact retained successful preparation part
+      uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
+      with:
+        artifact-ids: '13731635223'
+        run-id: '42745647519'
+        repository: Apdelrahman1911/mobile-release-kit
+        github-token: ${{ inputs.github-token }}
+        path: ${{ inputs.work-root }}/signed-android-retained-part
+        merge-multiple: 'false'
+        digest-mismatch: error
+    - name: Verify the retained origin and project only the unchanged signed capsule
+      shell: bash
+      env:
+        MRK_DATA_PYTHON: ${{ inputs.python }}
+        MRK_RETAINED_WORK: ${{ inputs.work-root }}
+        GH_TOKEN: ${{ inputs.github-token }}
+      run: |
+        set -euo pipefail
+        umask 077
+        "$MRK_DATA_PYTHON" -I -S -B desktop/tools/macos_android_support_retained.py --work "$MRK_RETAINED_WORK"

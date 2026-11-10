@@ -1051,18 +1051,13 @@ jobs:
         if: "github.ref != 'refs/heads/verify/desktop-macos-app-signature' && (github.ref == 'refs/heads/verify/desktop-macos-installed')"
         timeout-minutes: 2
         uses: "./.github/actions/macos-candidate-recipes/fail-fast-on-the-selected-sdk-actual-no-acl-and-ace-"
-      - name: Download the fixed once-signed Android support capsule
+      - name: "Download the fixed once-signed Android support capsule"
         timeout-minutes: 3
-        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        uses: "./.github/actions/macos-retained-android-support"
         with:
-          artifact-ids: '11691308054'
-          run-id: '38109802320'
-          repository: Apdelrahman1911/mobile-release-kit
-          github-token: ${{ github.token }}
-          path: ${{ steps.work.outputs.root }}/signed-android-transport
-          merge-multiple: 'false'
-          digest-mismatch: error
-          skip-decompress: 'false'
+          work-root: "${{ steps.work.outputs.root }}"
+          python: "${{ steps.python.outputs.python-path }}"
+          github-token: "${{ github.token }}"
       - name: Acquire and verify the two fixed Android support archives as DATA
         timeout-minutes: 1
         shell: /usr/bin/env -i /bin/bash --noprofile --norc -e -o pipefail {0}
@@ -4040,16 +4035,11 @@ jobs:
         uses: "./.github/actions/macos-candidate-recipes/fail-fast-on-the-selected-sdk-actual-no-acl-and-ace-"
       - name: "Download the fixed once-signed Android support capsule"
         timeout-minutes: 3
-        uses: "actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c"
+        uses: "./.github/actions/macos-retained-android-support"
         with:
-          artifact-ids: "11691308054"
-          run-id: "38109802320"
-          repository: "Apdelrahman1911/mobile-release-kit"
+          work-root: "${{ steps.work.outputs.root }}"
+          python: "${{ steps.python.outputs.python-path }}"
           github-token: "${{ github.token }}"
-          path: "${{ steps.work.outputs.root }}/signed-android-transport"
-          merge-multiple: "false"
-          digest-mismatch: error
-          skip-decompress: "false"
       - name: "Acquire and verify the two fixed Android support archives as DATA"
         timeout-minutes: 1
         uses: "./.github/actions/macos-candidate-recipes/acquire-and-verify-the-two-fixed-android-support-arc"
@@ -6083,16 +6073,11 @@ jobs:
         uses: "./.github/actions/macos-candidate-recipes/fail-fast-on-the-selected-sdk-actual-no-acl-and-ace-"
       - name: "Download the fixed once-signed Android support capsule"
         timeout-minutes: 3
-        uses: "actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c"
+        uses: "./.github/actions/macos-retained-android-support"
         with:
-          artifact-ids: "11691308054"
-          run-id: "38109802320"
-          repository: "Apdelrahman1911/mobile-release-kit"
+          work-root: "${{ steps.work.outputs.root }}"
+          python: "${{ steps.python.outputs.python-path }}"
           github-token: "${{ github.token }}"
-          path: "${{ steps.work.outputs.root }}/signed-android-transport"
-          merge-multiple: "false"
-          digest-mismatch: error
-          skip-decompress: "false"
       - name: "Acquire and verify the two fixed Android support archives as DATA"
         timeout-minutes: 1
         uses: "./.github/actions/macos-candidate-recipes/acquire-and-verify-the-two-fixed-android-support-arc"

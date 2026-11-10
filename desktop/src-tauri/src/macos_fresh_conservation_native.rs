@@ -555,6 +555,29 @@ pub(in crate::installer) struct FreshBlankReady {
     root:usize,versions:usize,versions_birth:transaction::FreshBirthIdentityData,
     reference:transaction::FreshConservationReferenceData,
 }
+// A native preparation boundary, never a serialized or caller-selected list.
+// Failure leaves every remaining capability in the same Book for finality.
+// The completed preservation owner is no longer used after its blank cut;
+// the following ordinary observation independently reads the full namespace.
+pub(in crate::installer) struct PreparationOriginals { first: usize }
+impl PreparationOriginals {
+    pub(in crate::installer) fn begin(book: &Install) -> Self {
+        Self { first: book.originals.len() }
+    }
+    pub(in crate::installer) fn finish(self, book: &mut Install, ready: &FreshBlankReady) -> Result<()> {
+        check(book.fresh_preparation_phase == FreshPreparationPhase::None
+            && ready.root < self.first && book.gate.parent == Some(ready.root)
+            && book.gate.verified && book.gate.exclusive_acquired && !book.worker_stderr_is_gate
+            && book.originals.get(ready.versions).is_some_and(|row|
+                row.parent == Some(ready.root) && row.name == "versions"),
+            "fresh-preparation-blank")?;
+        check(book.fresh_output_identity(ready.versions)? == ready.versions_birth,
+            "fresh-preparation-blank")?;
+        book.close_preparation_originals(self.first, ready.versions)?;
+        book.fresh_preparation_phase = FreshPreparationPhase::HandlesRetired;
+        Ok(())
+    }
+}
 impl ConservationAttemptOriginal {
     pub(in crate::installer) fn blank(&mut self,book:&mut Install,source:&worker::FreshRecoveryInput<'_>)->Result<FreshBlankReady> {
         let result=(|| {
@@ -709,7 +732,8 @@ fn read_attempt(book:&mut Install,root:usize,parent:usize,container:usize,select
         for (n,name,limit) in [(0,"producer.json",mobile_release_desktop::macos_install_producer::DESCRIPTOR_LIMIT),
             (1,"producer.sig",mobile_release_desktop::macos_install_producer::SIGNATURE_LIMIT),
             (2,"inventory.json",installation_record::INVENTORY_LIMIT)] {
-            let value=metadata_original(book,child,name,limit)?;originals[n]=value.0;raw[n]=value.1;
+            let value=if n==2 {metadata_inventory_original(book,child,name,limit)?}
+                else {metadata_original(book,child,name,limit)?};originals[n]=value.0;raw[n]=value.1;
             check(attempt["source"][n]==hash(&raw[n]),"fresh-conservation-source-copy")?;
         }
         let descriptor=mobile_release_desktop::macos_install_producer::ProducerData::parse_data(&raw[0],selected.target_data())
@@ -802,10 +826,7 @@ fn namespace_at(book:&mut Install,root:usize,parent:usize,selected:&ReleaseSetDa
     }
     retained_live(book)?;
     let start=book.originals.len();
-    let reserve=RECEIPT_QUOTE.checked_mul(4).and_then(|n|n.checked_add(2*installation_record::INVENTORY_LIMIT))
-        .and_then(|n|n.checked_add(PARTIAL_FRESH_WORK+131072)).ok_or("fresh-conservation-memory")?;
-    check(removal_effective_control_bytes(book)?.checked_add(reserve as u64)
-        .is_some_and(|n|n<=installation_record::CONTROL_LIMIT as u64),"fresh-conservation-memory")?;
+    let reserve=namespace_memory_quote_data(removal_effective_control_bytes(book)?)?;
     book.removal_control_reserved=book.removal_control_reserved.checked_add(reserve as u64).ok_or("fresh-conservation-memory")?;
     let result=removal_archive_scope(book,|book|{
         let container=book.open(Some(parent),ROOT_NAME,true)?;let identity=removal_archive_stat(book,container,true,0o700)?.0;
@@ -876,6 +897,14 @@ fn namespace_at(book:&mut Install,root:usize,parent:usize,selected:&ReleaseSetDa
     // array, even for temporary observations; no allocator/drop credit.
     book.removal_control_reserved=book.removal_control_reserved.checked_sub(reserve as u64-32768).ok_or("fresh-conservation-memory")?;
     Ok(result)
+}
+
+pub(in crate::installer) fn namespace_memory_quote_data(existing:u64)->Result<usize> {
+    let reserve=RECEIPT_QUOTE.checked_mul(4).and_then(|n|n.checked_add(2*installation_record::INVENTORY_LIMIT))
+        .and_then(|n|n.checked_add(PARTIAL_FRESH_WORK+131072)).ok_or("fresh-conservation-memory")?;
+    check(existing.checked_add(reserve as u64).is_some_and(|n|n<=installation_record::CONTROL_LIMIT as u64),
+        "fresh-conservation-memory")?;
+    Ok(reserve)
 }
 
 fn retained_enrollment(book:&mut Install,read:&RetainedInput,audit:&PartialFreshAttemptAudit,origin:&serde_json::Value)->Result<()> {
@@ -1201,7 +1230,8 @@ impl ConservationAttemptOriginal {
         let (value,head,receipts)=removal_archive_scope(book,|book|{
             let mut originals=[0usize;3];let mut raw:[Vec<u8>;3]=std::array::from_fn(|_|Vec::new());
             for (at,name,body) in [(0,"producer.json",producer),(1,"producer.sig",signature),(2,"inventory.json",inventory_bytes)] {
-                let observed=metadata_original(book,pending.child,name,body.len())?;
+                let observed=if at==2 {metadata_inventory_original(book,pending.child,name,body.len())?}
+                    else {metadata_original(book,pending.child,name,body.len())?};
                 check(observed.1==body,"fresh-conservation-resume-source-copy")?;originals[at]=observed.0;raw[at]=observed.1;
             }
             let descriptor=mobile_release_desktop::macos_install_producer::ProducerData::parse_data(&raw[0],source.new_selection(book)?.target_data())
