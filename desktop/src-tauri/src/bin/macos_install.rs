@@ -23966,8 +23966,8 @@ exec ./mrk-macos-remove --fixture-supervise "$1"
                     .map(|index| book.fd(index).unwrap().as_raw_fd()).collect();
                 book.close_preparation_originals(first, keep).unwrap();
                 for fd in raw {
-                    assert_eq!(unsafe { nix::libc::fcntl(fd, nix::libc::F_GETFD) }, -1);
-                    assert_eq!(Errno::last(), Errno::EBADF);
+                    let error = fs::metadata(format!("/dev/fd/{fd}")).expect_err("closed original FD");
+                    assert_eq!(error.raw_os_error(), Some(nix::libc::EBADF));
                 }
                 assert!((first..book.originals.len()).all(|index| index == keep
                     || book.originals[index].fd.is_none() && book.originals[index].state == State::Closed));
