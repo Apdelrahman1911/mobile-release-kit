@@ -17,9 +17,9 @@ import xml.etree.ElementTree as ET
 
 EXECUTION_BINDING = None
 TARGET = "aarch64-apple-darwin"
-PRODUCT = {'source': 'bc173947cc55284eafb0986380e25fd38778f454', 'tree': 'ed1fb641ca1828cf79ed71203c230eafd92998db'}
+PRODUCT = {'source': '8097137e9204c2e1dfa5d3bf5d3785e662ee64ef', 'tree': 'b22b79ff626604d41b7d8698ee5428bde58633fd'}
 # This is the frozen ordinary product, independent of runner/transport sources.
-CONTROL_TRANSPORT = {'commit': '5b6f9f3d17718a1e4286ad478478e4d3ecb1da40', 'tree': '55cb4784a01e9dc384d56cec69f91cf260e200bc', 'manifestSha256': '373d5853c8c8d46fba347019ea1c6db2738fc925426c7e98cb51ab6776877b7f', 'remoteAvailable': True}
+CONTROL_TRANSPORT = {'commit': 'ad782615a2d7b46e03ce717bacc58f023344924f', 'tree': '46c0c7cc1ea34527da35186e56de56ff21798421', 'manifestSha256': '135ba39630c5148bf4f462ba3eec621db8a0930b3bcf6003884c7234c85e3cce', 'remoteAvailable': True}
 JOB_STEPS = {
     "write-recovery": ("write", "frontier", "ordinary-recovery", "completed"),
     "torn-refusal": ("torn", "frontier-refusal", "ordinary-refusal"),

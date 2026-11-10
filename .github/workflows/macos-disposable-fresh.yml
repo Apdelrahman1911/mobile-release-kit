@@ -135,13 +135,13 @@ jobs:
       - name: Check out the separately frozen product
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          ref: bc173947cc55284eafb0986380e25fd38778f454
+          ref: 8097137e9204c2e1dfa5d3bf5d3785e662ee64ef
           path: prepared-built-source
           persist-credentials: false
       - name: Check out the separate immutable control transport
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          ref: 5b6f9f3d17718a1e4286ad478478e4d3ecb1da40
+          ref: ad782615a2d7b46e03ce717bacc58f023344924f
           path: _fresh-control-transport
           persist-credentials: false
       - name: Reserve a fresh work directory and copy pinned service metadata
@@ -162,15 +162,15 @@ jobs:
       - name: Download the exact successful prepared cohort
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
         with:
-          artifact-ids: 13706694958
-          run-id: 42678087424
+          artifact-ids: 13723730839
+          run-id: 42713277623
           github-token: ${{ github.token }}
           path: ${{ steps.work.outputs.root }}/prepared-input
       - name: Download the exact ordinary six-member carrier
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c
         with:
-          artifact-ids: 13711473813
-          run-id: 42699551107
+          artifact-ids: 13728354070
+          run-id: 42739329043
           github-token: ${{ github.token }}
           path: ${{ steps.work.outputs.root }}/ordinary-carrier
       - name: Run the fixed Fresh route using the existing original owner

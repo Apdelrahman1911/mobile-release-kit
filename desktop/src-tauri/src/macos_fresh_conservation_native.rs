@@ -374,6 +374,32 @@ fn slots_value(book:&mut Install,source:&worker::FreshRecoveryInput<'_>,value:&P
         book.forward_close(original,"fresh-conservation-top-close")?;
     }Ok(serde_json::Value::Array(out))
 }
+// Repeated preservation audits traverse the authenticated interrupted output,
+// not every member of the incoming package. A paired audit opens at most two
+// originals per present file and four per present directory (source/output
+// handles and separate roster readers). The fixed allowance also covers the
+// control readers, roots, retry roster, and optional launcher ancestors.
+// Moving slots cannot grow these counts: every before/after/receipt audit is
+// checked against the SAME retained initial facts by partial_fresh_equivalent.
+// Keep four full-source POST allowances and the full Fresh allowance; no
+// credit is taken for closed originals or already executed phases.
+fn preservation_original_quote_data(used:usize,files:u64,directories:u64,slots:usize,incoming:usize)->Result<usize> {
+    let reason="fresh-conservation-original-quote";
+    check((1..=8).contains(&slots),reason)?;
+    let files=usize::try_from(files).map_err(|_|reason)?;
+    let directories=usize::try_from(directories).map_err(|_|reason)?;
+    let audit=partial_fresh_retry_original_quote_data(files,directories)?
+        .checked_add(PARTIAL_FRESH_LAUNCHER_ORIGINALS).ok_or(reason)?;
+    // Initial audit, retry-creation receipt, three audits per move, blank audit,
+    // and five additional whole-observation/transport margins. Prefixes use the
+    // entire slot count, so resumption never refunds consumed original records.
+    let audits=slots.checked_mul(3).and_then(|n|n.checked_add(8)).ok_or(reason)?;
+    used.checked_add(audit.checked_mul(audits).ok_or(reason)?)
+        .and_then(|n|n.checked_add(incoming.checked_mul(5)?))
+        .and_then(|n|n.checked_add(64+256)).filter(|n|*n<=installation_record::ORIGINAL_LIMIT)
+        .ok_or(reason)
+}
+
 struct ConservationRootOriginal { root:usize,namespace:usize,birth:transaction::FreshBirthIdentityData }
 // Current-process native owner. The immutable receipts describe only completed
 // observations. Historical reobservation is a separate constructor; it cannot
@@ -405,9 +431,8 @@ impl ConservationAttemptOriginal {
             .and_then(|n|n.checked_add(RECEIPT_QUOTE)).ok_or("fresh-conservation-control-quote")?;
         let (files,dirs,index_peak)=source.incoming_index_peak(book)?;
         let retry=partial_fresh_inventory_quote_data(files,dirs,inventory)?;
-        let before=book.originals.len().checked_add(retry.checked_mul(24).ok_or("fresh-conservation-original-quote")?)
-            .and_then(|n|n.checked_add(256)).filter(|n|*n<=installation_record::ORIGINAL_LIMIT)
-            .ok_or("fresh-conservation-original-quote")?;
+        let before=preservation_original_quote_data(book.originals.len(),value.facts.files,
+            value.facts.directories,value.slots.len(),retry)?;
         reserve_removal_original_storage(book,before)?;
         check(removal_effective_control_bytes(book)?.checked_add(controls as u64).and_then(|n|n.checked_add(index_peak as u64))
             .and_then(|n|n.checked_add(PARTIAL_FRESH_WORK as u64)).is_some_and(|n|n<=installation_record::CONTROL_LIMIT as u64),
@@ -483,10 +508,8 @@ impl ConservationAttemptOriginal {
     }
     pub(in crate::installer) fn quote(&self,book:&mut Install,context:&worker::ReinstallPreservationContext<'_>)->Result<()> {
         context.post_source(book)?;
-        let future=book.originals.len().checked_add(self.ledger.planned_preservation_originals_data()?)
-            .and_then(|n|n.checked_add(self.ledger.planned_fresh_originals_data().ok()?))
-            .and_then(|n|n.checked_add(self.ledger.retry_quote.checked_mul(4)?)).and_then(|n|n.checked_add(256))
-            .filter(|n|*n<=installation_record::ORIGINAL_LIMIT).ok_or("fresh-conservation-original-quote")?;
+        let future=preservation_original_quote_data(book.originals.len(),self.ledger.initial.files,
+            self.ledger.initial.directories,self.ledger.slots.len(),self.ledger.retry_quote)?;
         reserve_removal_original_storage(book,future)?;
         check(book.originals.iter().filter(|r|r.fd.is_some()).count().checked_add(72).is_some_and(|n|n<=96),"fresh-conservation-live-quote")?;
         context.post_source(book)
@@ -1416,4 +1439,38 @@ pub(super) fn preflight_transport_work(book:&mut Install,row:&ConservationSpanDa
         audit_transport(book,if current{root}else{child.ok_or("fresh-transport-child")?},row,snapshot)?;
         check(book.originals.len()<=bound,"fresh-transport-original-budget")?;snapshot.post(book)
     })
+}
+
+#[cfg(test)]
+mod original_quote_tests {
+    use super::*;
+    #[test]
+    fn interrupted_output_and_incoming_install_have_separate_quotes() {
+        // Exact retained failing package shape and real copying frontier.
+        let incoming=partial_fresh_retry_original_quote_data(7230,1279).unwrap()
+            +PARTIAL_FRESH_LAUNCHER_ORIGINALS;
+        assert_eq!(incoming,19864);
+        assert!(incoming*24+256>installation_record::ORIGINAL_LIMIT);
+        let expected=5*incoming+(2*5+4*4+192+96)*(3*3+8)+320;
+        assert_eq!(preservation_original_quote_data(0,5,4,3,incoming).unwrap(),expected);
+        assert!(preservation_original_quote_data(0,6,4,3,incoming).unwrap()>expected);
+        assert!(preservation_original_quote_data(0,5,5,3,incoming).unwrap()>expected);
+        for slots in 1..=8 {
+            let cost=preservation_original_quote_data(0,5,4,slots,incoming).unwrap();
+            assert_eq!(preservation_original_quote_data(installation_record::ORIGINAL_LIMIT-cost,5,4,slots,incoming).unwrap(),installation_record::ORIGINAL_LIMIT);
+            assert!(preservation_original_quote_data(installation_record::ORIGINAL_LIMIT-cost+1,5,4,slots,incoming).is_err());
+        }
+        // Keep refusal for large output, overflow, and invalid slot shape.
+        for (used,files,dirs,slots,source) in [
+            (0,7230,1279,8,incoming),(usize::MAX,5,4,3,incoming),
+            (0,u64::MAX,4,3,incoming),(0,5,u64::MAX,3,incoming),
+            (0,5,4,0,incoming),(0,5,4,9,incoming),(0,5,4,3,usize::MAX),
+        ] {assert!(preservation_original_quote_data(used,files,dirs,slots,source).is_err());}
+        let future=preservation_original_quote_data(4000,5,4,3,incoming).unwrap();
+        // Check old/new vector overlap and255-byte future names using the
+        // actual production Original layout and128MiB containing budget.
+        let storage=removal_original_storage_quote_data(4000,incoming*3,4000*255,future).unwrap();
+        assert!(storage+20*1024*1024<=installation_record::CONTROL_LIMIT as u64);
+        println!("FRESH_PRESERVATION_QUOTE incoming={} files=5 dirs=4 slots=3 future={} originalBytes={} storageBytes={}",incoming,future,std::mem::size_of::<Original>(),storage);
+    }
 }

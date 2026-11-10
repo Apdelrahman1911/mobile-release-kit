@@ -1,28 +1,28 @@
 {
-  "sha": "bc173947cc55284eafb0986380e25fd38778f454",
-  "node_id": "C_kwDOT_nMItoAKGJjMTczOTQ3Y2M1NTI4NGVhZmIwOTg2MzgwZTI1ZmQzODc3OGY0NTQ",
-  "url": "https://api.github.com/repos/Apdelrahman1911/mobile-release-kit/git/commits/bc173947cc55284eafb0986380e25fd38778f454",
-  "html_url": "https://github.com/Apdelrahman1911/mobile-release-kit/commit/bc173947cc55284eafb0986380e25fd38778f454",
+  "sha": "8097137e9204c2e1dfa5d3bf5d3785e662ee64ef",
+  "node_id": "C_kwDOT_nMItoAKDgwOTcxMzdlOTIwNGMyZTFkZmE1ZDNiZjVkMzc4NWU2NjJlZTY0ZWY",
+  "url": "https://api.github.com/repos/Apdelrahman1911/mobile-release-kit/git/commits/8097137e9204c2e1dfa5d3bf5d3785e662ee64ef",
+  "html_url": "https://github.com/Apdelrahman1911/mobile-release-kit/commit/8097137e9204c2e1dfa5d3bf5d3785e662ee64ef",
   "author": {
     "name": "Codex",
     "email": "codex@openai.com",
-    "date": "2026-11-09T18:50:15Z"
+    "date": "2026-11-09T22:30:05Z"
   },
   "committer": {
     "name": "Codex",
     "email": "codex@openai.com",
-    "date": "2026-11-09T18:50:15Z"
+    "date": "2026-11-09T22:30:05Z"
   },
   "tree": {
-    "sha": "ed1fb641ca1828cf79ed71203c230eafd92998db",
-    "url": "https://api.github.com/repos/Apdelrahman1911/mobile-release-kit/git/trees/ed1fb641ca1828cf79ed71203c230eafd92998db"
+    "sha": "b22b79ff626604d41b7d8698ee5428bde58633fd",
+    "url": "https://api.github.com/repos/Apdelrahman1911/mobile-release-kit/git/trees/b22b79ff626604d41b7d8698ee5428bde58633fd"
   },
-  "message": "docs(macos): record verified directory and archive correction [macos-desktop-update] [macos-builds-only]",
+  "message": "fix(macos): bound Fresh preservation by authenticated output [macos-desktop-update] [macos-builds-only]",
   "parents": [
     {
-      "sha": "0dd070ab04b8d33188e8311d03a39edf77bd001c",
-      "url": "https://api.github.com/repos/Apdelrahman1911/mobile-release-kit/git/commits/0dd070ab04b8d33188e8311d03a39edf77bd001c",
-      "html_url": "https://github.com/Apdelrahman1911/mobile-release-kit/commit/0dd070ab04b8d33188e8311d03a39edf77bd001c"
+      "sha": "bc173947cc55284eafb0986380e25fd38778f454",
+      "url": "https://api.github.com/repos/Apdelrahman1911/mobile-release-kit/git/commits/bc173947cc55284eafb0986380e25fd38778f454",
+      "html_url": "https://github.com/Apdelrahman1911/mobile-release-kit/commit/bc173947cc55284eafb0986380e25fd38778f454"
     }
   ],
   "verification": {
