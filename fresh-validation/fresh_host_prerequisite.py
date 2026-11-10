@@ -42,7 +42,7 @@ import sys
 import time
 
 REPOSITORY = "Apdelrahman1911/mobile-release-kit"
-REF = "refs/heads/codex/macos-fresh-validation"
+REF = "refs/heads/codex/macos-fresh-inventory-diagnostic"
 WORKFLOW = ".github/workflows/macos-disposable-fresh.yml"
 HELPER = "fresh-validation/fresh_host_prerequisite.py"
 TEST_SOURCE = "fresh-validation/test_fresh_hosted_data.py"
@@ -195,7 +195,7 @@ def _validate_context(environment, identity, uname, version, python_flags, *, ta
     if (e["RUNNER_ENVIRONMENT"] != "github-hosted" or e["RUNNER_OS"] != "macOS"
             or e["RUNNER_ARCH"] != runner_arch or e["GITHUB_REPOSITORY"] != REPOSITORY
             or e["GITHUB_EVENT_NAME"] != "push" or e["GITHUB_REF"] != REF
-            or e["GITHUB_JOB"] not in ("write-recovery", "torn-refusal")):
+            or e["GITHUB_JOB"] != "write-diagnostic"):
         raise Refused("dedicated-hosted-route-required")
     source = e["GITHUB_SHA"]
     if (not re.fullmatch(r"[0-9a-f]{40}", source)

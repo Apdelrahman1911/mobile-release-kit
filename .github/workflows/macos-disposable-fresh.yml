@@ -1,23 +1,24 @@
-name: Disposable Fresh recovery and refusal validation
+name: Nonshipping inventory write recovery diagnostic
 
 on:
   push:
-    branches: [codex/macos-fresh-validation]
+    branches: [codex/macos-fresh-inventory-diagnostic]
 
 permissions:
   contents: read
   actions: read
 
 # Validation-only source bound to the admitted product/package/pair and
-# distinct source-bound control transport. Both jobs use the same immutable
-# prepared/carrier tuples; no credentials or owner-machine actions.
+# distinct source-bound diagnostic control transport. One write-only job uses
+# the retained prepared/carrier tuple. This cannot qualify ordinary installation
+# or final shipping recovery. No credentials or owner-machine actions.
 # Final binding replaces only the named UNBOUND input pins and enables the jobs
 # after Root's source review. The Python entry independently requires its full
 # execution binding, so removing a job condition alone cannot start a route.
 
 jobs:
-  write-recovery:
-    if: github.event_name == 'push' && github.ref == 'refs/heads/codex/macos-fresh-validation'
+  write-diagnostic:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/codex/macos-fresh-inventory-diagnostic'
     runs-on: macos-26
     timeout-minutes: 75
     env:
@@ -28,7 +29,7 @@ jobs:
       MRK_MACOS_SAME_PACKAGE_SCOPE: disabled
       DEVELOPER_DIR: /Library/Developer/CommandLineTools
       MACOSX_DEPLOYMENT_TARGET: '26.0'
-    steps: &fresh_steps
+    steps:
       - name: Check out the actual immutable runner source
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
@@ -141,7 +142,7 @@ jobs:
       - name: Check out the separate immutable control transport
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          ref: 99ecb0a65b5564ef5b48092a349c0348630aaa92
+          ref: 2b290309aebc352e4312956d448d34154148b4eb
           path: _fresh-control-transport
           persist-credentials: false
       - name: Reserve a fresh work directory and copy pinned service metadata
@@ -173,7 +174,7 @@ jobs:
           run-id: 42763886616
           github-token: ${{ github.token }}
           path: ${{ steps.work.outputs.root }}/ordinary-carrier
-      - name: Run the fixed Fresh route using the existing original owner
+      - name: Diagnose corrected write recovery using retained signed payload
         shell: bash
         env:
           DATA_PYTHON: ${{ steps.python.outputs.python-path }}
@@ -203,17 +204,3 @@ jobs:
           include-hidden-files: true
           path: |
             ${{ steps.hostwork.outputs.root }}/*.json
-
-  torn-refusal:
-    if: github.event_name == 'push' && github.ref == 'refs/heads/codex/macos-fresh-validation'
-    runs-on: macos-26
-    timeout-minutes: 75
-    env:
-      MRK_MACOS_RUNNER: macos-26
-      MRK_MACOS_TARGET: aarch64-apple-darwin
-      MRK_MACOS_PACKAGE_ROLE: ordinary-image
-      MRK_MACOS_STORE_RUNTIME: signed-component
-      MRK_MACOS_SAME_PACKAGE_SCOPE: disabled
-      DEVELOPER_DIR: /Library/Developer/CommandLineTools
-      MACOSX_DEPLOYMENT_TARGET: '26.0'
-    steps: *fresh_steps

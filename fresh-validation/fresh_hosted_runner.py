@@ -19,16 +19,15 @@ EXECUTION_BINDING = None
 TARGET = "aarch64-apple-darwin"
 PRODUCT = {'source': 'f778beb993691330c56b59059de5c8d970fbb27d', 'tree': 'bdd9e77af2c626e435e02f9fbebfd229ef6a06a7'}
 # This is the frozen ordinary product, independent of runner/transport sources.
-CONTROL_TRANSPORT = {'commit': '99ecb0a65b5564ef5b48092a349c0348630aaa92', 'tree': '922933f51fc5a38f67ebb6c5daa21bb42d24dfd0', 'manifestSha256': 'db68cae255509939b5c9ec13019109118873af497948a0f291a62abd92e76044', 'remoteAvailable': True}
+CONTROL_TRANSPORT = {'commit': '2b290309aebc352e4312956d448d34154148b4eb', 'tree': '1d064085209ae3944596ab8abf78dcb1fb66f9d1', 'manifestSha256': '1c7fc137ed80b052ea1b65c9c355fbade3e713720ef0b2c1449579b006db4baf', 'remoteAvailable': True}
 JOB_STEPS = {
-    "write-recovery": ("write", "frontier", "ordinary-recovery", "completed"),
-    "torn-refusal": ("torn", "frontier-refusal", "ordinary-refusal"),
+    "write-diagnostic": ("write", "frontier", "diagnostic-recovery", "completed"),
 }
 CUT_ROLES = {"write": ("first-payload-write", 87), "torn": ("torn-first-payload-frame", 88)}
 CONTROL_ROLE = {"write": "write", "torn": "torn", "frontier": "census",
-                "frontier-refusal": "census", "completed": "census"}
+                "frontier-refusal": "census", "completed": "census", "recovery": "recovery"}
 CONTROL_IDS = {role: "dev.mobile-release-kit.disposable-fresh." + role
-               for role in ("write", "torn", "frontier", "completed")}
+               for role in ("write", "frontier", "completed", "recovery")}
 OUTPUT_LIMIT = 256 * 1024
 RECORD_LIMIT = 16 * 1024
 
@@ -151,7 +150,8 @@ def completed_data(body, binding, frontier, installation, outer_returncode):
     # Native create/read_attempt/retained_enrollment and two reobservations
     # prove retained physical conservation. Do not invent a digest field that
     # completed output does not export or rename this case clean Fresh.
-    return {"case": "recovered-Fresh", "cleanFreshQualified": False,
+    return {"case": "diagnostic-recovered-Fresh", "diagnosticOnly": True,
+            "ordinaryInstallationQualified": False, "freshRecoveryQualified": False, "cleanFreshQualified": False,
             "interruptedInvocation": old["invocation"],
             "recoveryInvocation": installation["invocation"], "reference": observed["reference"],
             "physicalConservationBasis": "native-authenticated-retained-audit-and-owned-sequence",
@@ -241,6 +241,11 @@ def compare_torn(before_body, after_body, binding, cut):
 
 
 def control_script(scripts, role, invocation=None):
+    if role == "recovery":
+        need(hex_value(invocation, 32), "diagnostic-fixed-request")
+        template = scripts["diagnostic-recovery-postinstall"]
+        need(template.count(b"@REQUEST@") == 1, "diagnostic-single-request-slot")
+        return template.replace(b"@REQUEST@", invocation.encode("ascii"))
     if role in ("write", "torn"):
         need(invocation is None, "cut-script-no-nomination")
         return scripts["cut-postinstall"]
@@ -401,8 +406,8 @@ def installer_original(op, binding, step, package):
         cwd=op.work, timeout=123, limit=OUTPUT_LIMIT, zero=False)
 
 
-def publish_installation_observation(op, stager, binding, args, original):
-    need(original.returncode == 0, "ordinary-Installer-zero-before-readback")
+def publish_diagnostic_installation_observation(op, stager, binding, args, original):
+    need(original.returncode == 0, "diagnostic-Installer-zero-before-readback")
     need(binding["inputPath"] == op.work / "input", "existing-stager-input-parent")
     status = op.work / "installer-output.status"
     op.outputs.publish(status, b"0\n")
@@ -411,8 +416,10 @@ def publish_installation_observation(op, stager, binding, args, original):
     need(observed.get("originalInstallerReturnedZero") is True
          and observed.get("originalWriterJoined") is True, "ordinary-readback-finality")
     # Explicit new validation evidence, never silently added to old six-member carrier.
+    observed.update(diagnosticOnly=True, ordinaryInstallationQualified=False, freshRecoveryQualified=False,
+        diagnosticImageSha256=sha(binding["controlBodies"]["recovery"]))
     body = stager.canonical(observed) + b"\n"
-    op.outputs.publish(op.work / "installation-observation.json", body)
+    op.outputs.publish(op.work / "diagnostic-installation-observation.json", body)
     return observed
 
 
@@ -496,7 +503,7 @@ class Carrier:
         self.cleanup_grace_entered = False
         self.device = self.root = self.filesystem = None
         ordinary = stager.distribution_request_name(request) if label == "ordinary" else "Install.pkg"
-        need(len(packages) == (0 if label == "ordinary" else 1), "one-control-per-carrier")
+        need(len(packages) == 1, "one-diagnostic-control-per-carrier")
         self.members = {ordinary: binding["packageBody"], "producer.json": binding["producerBody"],
                         "producer.sig": binding["signatureBody"], **packages}
         self.stage = op.work / ("fresh-" + label + "-carrier")
@@ -645,9 +652,8 @@ def snapshot_original(op, binding, role):
 
 def prebuilt_control_data(binding, role, fact):
     """A validated package can stay on disk instead of retaining its full vector."""
-    labels = {"cut": "write" if binding["job"] == "write-recovery" else "torn",
-              "frontier": "frontier", "completed": "completed"}
-    need(binding["job"] in JOB_STEPS and role in labels and (role != "completed" or binding["job"] == "write-recovery"),
+    labels = {"cut": "write", "frontier": "frontier", "completed": "completed", "recovery": "recovery"}
+    need(binding["job"] in JOB_STEPS and role in labels and (role != "completed" or binding["job"] == "write-diagnostic"),
          "fixed-prebuilt-control-role")
     need(type(fact) is dict and set(fact) == {"path", "bytes", "sha256"}
          and type(fact["bytes"]) is int and 0 < fact["bytes"] <= 512 * 1024 * 1024
@@ -673,7 +679,7 @@ def read_prebuilt_control(op, binding, role, fact):
 def route_resource_quote(binding, packages):
     """Exact prebuilt lengths; no forecast of post-cut compression is needed."""
     limit, mib = 512 * 1024 * 1024, 1024 * 1024
-    required = {"cut", "frontier", "completed"} if binding["job"] == "write-recovery" else {"cut", "frontier"}
+    required = {"cut", "frontier", "completed", "recovery"}
     need(set(packages) == required, "prebuilt-control-package-roster")
     sizes = {role: prebuilt_control_data(binding, role, fact) for role, fact in packages.items()}
     ordinary, pair = len(binding["packageBody"]), len(binding["producerBody"]) + len(binding["signatureBody"])
@@ -681,8 +687,8 @@ def route_resource_quote(binding, packages):
     images = sum(len(body) for body in binding["controlBodies"].values())
     need(0 < ordinary <= limit and 0 < inputs <= limit and 0 < pair <= 65536 + 512,
          "fixed-carrier-input-bounds")
-    carriers = {role: ordinary + pair + size for role, size in sizes.items()}
-    carriers["ordinary"] = ordinary + pair
+    carriers = {role: ordinary + pair + size for role, size in sizes.items() if role != "recovery"}
+    carriers["ordinary"] = ordinary + pair + sizes["recovery"]
     need(all(n <= limit for n in carriers.values()), "precut-carrier-aggregate-capacity")
     # Keep the original conservative envelope, including every prebuilt package
     # size, even though those byte vectors now stay on disk until needed.
@@ -753,12 +759,13 @@ def execute_job(op, stager, host_api, binding):
     op.fresh_carriers = []
     need(binding["inputPath"] == op.work / "input", "existing-stager-input-parent")
     initial_absence(op, binding)
-    cut_role = "write" if binding["job"] == "write-recovery" else "torn"
+    cut_role = "write" if binding["job"] == "write-diagnostic" else "torn"
     _, cut_package = build_control(op, stager, binding, cut_role)
     _, frontier_package = build_control(op, stager, binding, "frontier")
     packages = {"cut": cut_package, "frontier": frontier_package}
     if cut_role == "write":
         _, packages["completed"] = build_control(op, stager, binding, "completed")
+        _, packages["recovery"] = build_control(op, stager, binding, "recovery", binding["ordinaryRequestId"])
     quote = route_resource_quote(binding, packages)
     resource_capacity(op, host_api, binding, quote)
     binding["resourceQuote"] = quote
@@ -783,8 +790,9 @@ def execute_job(op, stager, host_api, binding):
     frontier_carrier.detach()
     if cut_role == "torn":
         before = snapshot_original(op, binding, "before-ordinary-refusal")
-    ordinary_carrier = Carrier(op, stager, host_api, binding, "ordinary", {}, request).enter()
-    ordinary_step = "ordinary-recovery" if cut_role == "write" else "ordinary-refusal"
+    ordinary_carrier = Carrier(op, stager, host_api, binding, "ordinary",
+        {"Fresh-recovery.pkg": read_prebuilt_control(op, binding, "recovery", packages["recovery"])}, request).enter()
+    ordinary_step = "diagnostic-recovery"
     ordinary_path = ordinary_carrier.mount / stager.distribution_request_name(request)
     args = argparse.Namespace(target=TARGET, fixture=False, input=binding["inputPath"],
         expected_source=binding["productSource"], expected_inventory=binding["inventorySha256"],
@@ -794,12 +802,19 @@ def execute_job(op, stager, host_api, binding):
         run_id=binding["runId"], run_attempt=binding["runAttempt"])
     stager.installer_result_absent_command(args)
     ordinary_carrier.post()
-    ordinary_cursor = ordinary_log_begin(op, stager, args)
-    original = installer_original(op, binding, ordinary_step, ordinary_path)
-    ordinary_log_finish(op, stager, args, ordinary_cursor, torn=cut_role == "torn")
+    diagnostic_path = ordinary_carrier.mount / "Fresh-recovery.pkg"
+    correlation = {"kind": "nonshipping-inventory-recovery-window", "job": binding["job"],
+        "step": ordinary_step, "runId": binding["runId"], "runAttempt": binding["runAttempt"],
+        "packageIdentifier": CONTROL_IDS["recovery"], "packagePath": str(diagnostic_path),
+        "diagnosticPackageSha256": packages["recovery"]["sha256"],
+        "completedPackageSha256": binding["package"]["sha256"]}
+    diagnostic_cursor = log_cursor(stager, correlation)
+    op.outputs.publish(op.work / "diagnostic-recovery-log-cursor.json", canonical(diagnostic_cursor))
+    original = installer_original(op, binding, ordinary_step, diagnostic_path)
+    diagnostic_log_finish(op, stager, diagnostic_cursor, correlation)
     ordinary_carrier.post()
     if cut_role == "write":
-        observed = publish_installation_observation(op, stager, binding, args, original)
+        observed = publish_diagnostic_installation_observation(op, stager, binding, args, original)
         ordinary_carrier.detach()
         completed_carrier = Carrier(op, stager, host_api, binding, "completed",
             {"Fresh-completed.pkg": read_prebuilt_control(op, binding, "completed", packages["completed"])}, request).enter()
@@ -814,7 +829,7 @@ def execute_job(op, stager, host_api, binding):
         outcome = compare_torn(before, after, binding, cut)
         ordinary_carrier.detach()
     actual = [row["role"].removeprefix("install-") for row in op.calls if row["role"].startswith("install-")]
-    need(actual == list(JOB_STEPS[binding["job"]]), "exact-seven-Installer-route")
+    need(actual == list(JOB_STEPS[binding["job"]]), "exact-four-diagnostic-Installer-route")
     op.outputs.publish(op.work / "fresh-validation-outcome.json", canonical(outcome))
     return outcome
 
@@ -824,6 +839,28 @@ TORN_COMPLETED_MARKER = (
     "MRK_MACOS_INSTALL_COMPLETED_REFUSED=reasonSha256=" + TORN_REASON_SHA256
     + ";exit=1;originals=1;native=1;timely=1;unknown=0"
 ).encode("ascii")
+
+
+def diagnostic_log_finish(op, stager, cursor, correlation):
+    stager.validate_log_cursor(cursor, correlation)
+    with stager.installer_log_file() as (fd, outer, name, info):
+        identity = stager.installer_log_identity(info)
+        need(identity == cursor["identity"], "log-original-identity")
+        start, end = cursor["offsetBytes"], info.st_size
+        need(start <= end <= start + stager.LOG_INTERVAL_BYTES, "log-interval-bound")
+        anchor = stager.positioned_log_read(fd, start - cursor["precedingTailBytes"], cursor["precedingTailBytes"])
+        body = stager.positioned_log_read(fd, start, end - start)
+        stager.validate_log_window(cursor, identity, end, anchor, body)
+        need(stager.positioned_log_read(fd, start - len(anchor), len(anchor)) == anchor, "log-anchor-post")
+        growth = stager.log_growth(fd, outer, name, identity, end)
+    selected, selection = stager.select_installer_log(body, correlation)
+    need(len(selected) <= stager.LOG_SELECTED_BYTES, "diagnostic-log-selection-bound")
+    op.outputs.publish(op.work / "diagnostic-recovery-selected-packagekit.log", selected)
+    op.outputs.publish(op.work / "diagnostic-recovery-log-capture.json", canonical({
+        "binding": correlation, "cursorSha256": sha(canonical(cursor)), "intervalBytes": len(body),
+        "intervalSha256": sha(body), "selectedBytes": len(selected), "selectedSha256": sha(selected),
+        "growthBeyondSnapshotBytes": growth, "authority": stager.LOG_AUTHORITY,
+        "selection": selection, "diagnosticOnly": True, "originalInstallerRequiredSeparately": True}))
 
 
 def ordinary_log_begin(op, stager, args):
@@ -891,7 +928,8 @@ def settle_job(op, stager, host_api, binding):
         if not book.finish():
             cleanup_errors.append("owned-original-close-unknown")
     passed = failure is None and finality and not cleanup_errors
-    receipt = {"schemaVersion": 1, "scope": "disposable-Fresh-validation-originals",
+    receipt = {"schemaVersion": 1, "scope": "nonshipping-inventory-recovery-diagnostic-originals",
+        "diagnosticOnly": True, "ordinaryInstallationQualified": False, "freshRecoveryQualified": False,
         "passed": passed, "outcome": outcome, "originalClosesKnown": finality and not cleanup_errors,
         "ownedMountsDetached": all(c.detached for c in getattr(op, "fresh_carriers", ())),
         "calls": op.calls, "cleanFreshQualified": False,
@@ -899,7 +937,7 @@ def settle_job(op, stager, host_api, binding):
         "firstFailureReason": str(failure) if isinstance(failure, Refused) else None,
         "cleanupErrors": cleanup_errors,
         "transportState": "pending-original-process-exit",
-        "ordinaryInstallationObservationExplicitlyExported": outcome is not None and binding["job"] == "write-recovery"}
+        "diagnosticInstallationObservationExplicitlyExported": outcome is not None and binding["job"] == "write-diagnostic"}
     # Preserve actual failed originals and cleanup uncertainty, too. The final
     # publisher is separate from already consumed source/mount/capture books;
     # its own close and this driver's actual return remain caller requirements.
@@ -917,34 +955,13 @@ def settle_job(op, stager, host_api, binding):
 
 
 def source_plan():
-    return {
-        "schemaVersion": 1, "scope": "disabled-disposable-Fresh-validation-preparation",
-        "executionEnabled": False, "jobs": JOB_STEPS, "installerOriginalCount": 7,
-        "ordinaryProduct": PRODUCT, "controlImages": ("census", "write", "torn"),
-        "productStatus": "signed-build-failed-no-final-package-or-pair",
-        "runnerBindingStatus": "source-neutral-preparation-no-final-freeze",
-        "controlStatus": "old-images-preserved-new-script-manifest-rebind-pending",
-        "frontierNomination": "fixed-Fresh-frontier-32-lowercase-nonzero-hex.pkg-basename",
-        "packageBuildsAfterFirstCut": 0,
-        "carrierLifetime": "one-invoked-package-per-readonly-carrier",
-        "appBuildCount": 0, "producerPairRegenerated": False,
-        "rootSnapshot": {"script": "read_torn_tree.py", "job": "torn-refusal",
-                         "times": ("before-ordinary-refusal", "after-ordinary-refusal"),
-                         "pathsChosenByCaller": False, "bounds": "pending-final-inventory-quote",
-                         "originIntentProjection": "same-held-read-bytes-no-journal-parse"},
-        "explicitEvidence": "installation-observation.json",
-        "requiredBeforeEnablement": (
-            "final product commit/tree and exact signed package/producer pair",
-            "actual hydrated input inventory/runtime and full source closure",
-            "three compiler originals/output closures and exact control image hashes",
-            "actual immutable control ad-hoc/Mach-O admission",
-            "two different hosted job identities and initial protected absence",
-            "PackageKit protected extraction and fixed control log transport",
-            "derived snapshot bounds and actual FD/memory/output reserve",
-            "reviewed readonly carrier and mount custody adapter",
-            "root peer of complete source, command table and live input binding",
-        ),
-    }
+    return {"schemaVersion": 1, "scope": "nonshipping-inventory-recovery-diagnostic-preparation",
+        "executionEnabled": False, "jobs": JOB_STEPS, "installerOriginalCount": 4,
+        "signedPayload": PRODUCT, "controlImages": ("census", "write", "recovery"),
+        "diagnosticOnly": True, "ordinaryInstallationQualified": False, "freshRecoveryQualified": False,
+        "packageBuildsAfterFirstCut": 0, "appBuildCount": 0, "producerPairRegenerated": False,
+        "tornCaseReplayed": False, "ownerMachineEffects": False,
+        "explicitEvidence": "diagnostic-installation-observation.json"}
 
 
 def main():
