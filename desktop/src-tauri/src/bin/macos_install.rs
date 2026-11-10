@@ -951,6 +951,35 @@ mod installer {
             check(self.close(n), reason)?;
             self.clock() // Deadline refusal never rewrites a positive close.
         }
+        // Retire a completed preparation scope before opening the next one.
+        // Only its authenticated blank versions original crosses the boundary.
+        // POST every live name before any close: a moved child's new parent
+        // can have a later Book index and must remain open for that POST.
+        fn close_preparation_originals(&mut self, first: usize, keep: usize) -> Result<()> {
+            check(first <= keep && keep < self.originals.len()
+                && self.originals[keep].fd.is_some() && self.originals[keep].state == State::Owned
+                && self.originals[keep].role == Role::Reader
+                && [self.gate.parent, self.gate.writer, self.gate.participant,
+                    self.registration.parent, self.registration.writer, self.registration.participant]
+                    .into_iter().flatten().all(|index| index < first),
+                "fresh-preparation-scope")?;
+            for index in first..self.originals.len() {
+                let row = &self.originals[index];
+                check(if row.fd.is_some() { row.state == State::Owned && row.role == Role::Reader }
+                    else { matches!(row.state, State::Closed | State::NoHandle) },
+                    "fresh-preparation-unsettled")?;
+                if row.fd.is_some() { self.check_name(index, false)?; }
+            }
+            let mut failure = None;
+            for index in (first..self.originals.len()).rev() {
+                if index != keep && !self.close(index) && failure.is_none() {
+                    failure = Some("fresh-preparation-close-unknown");
+                }
+            }
+            if let Err(why) = self.clock() { failure.get_or_insert(why); }
+            if let Some(why) = failure { return Err(why); }
+            self.check_name(keep, true)
+        }
         fn read(&self, n: usize, size: u64, collect: bool) -> Result<(String, Vec<u8>)> {
             self.read_context(n, size, collect.then_some(1024*1024))
         }
@@ -20617,6 +20646,7 @@ exec ./mrk-macos-remove --fixture-supervise "$1"
             fn conserve_current_fresh(&mut self,old:&str,request:&str)->Result<()> {
                 check(self.fresh_recovery.is_none() && self.fresh_launcher_recovery.is_none()
                     && self.maintenance.is_none() && self.child.is_none() && self.command.is_none(),"fresh-conservation-parent-once")?;
+                let scope=maintenance::fresh_conservation::PreparationOriginals::begin(&self.book);
                 let view=FreshRecoveryInput::new(&mut self.book,self.source.as_ref().ok_or("fresh-conservation-source")?,
                     self.producer.as_ref().ok_or("fresh-conservation-producer")?,self.reinstall_input.as_ref().ok_or("fresh-conservation-input")?,old)?;
                 self.fresh_launcher_recovery=applications::FreshRecovery::observe_fresh(&mut self.book,&view)?;
@@ -20630,9 +20660,10 @@ exec ./mrk-macos-remove --fixture-supervise "$1"
                 let mut context=ReinstallPreservationContext::Fresh{source:&view,owner};
                 maintenance::preserve_partial_fresh(&mut self.book,&mut context)?;drop(context);
                 let ready=self.fresh_recovery.as_mut().ok_or("fresh-conservation-owner")?.blank(&mut self.book,&view)?;
-                drop(view);self.prepare_conserved_fresh(request,ready)
+                drop(view);scope.finish(&mut self.book,&ready)?;self.prepare_conserved_fresh(request,ready)
             }
             fn continue_conserved_fresh(&mut self,request:&str)->Result<()> {
+                let scope=maintenance::fresh_conservation::PreparationOriginals::begin(&self.book);
                 let prepared=self.reinstall_input.as_ref().ok_or("fresh-conservation-input")?;
                 if let Some(pending)=maintenance::fresh_conservation::pending(&mut self.book,prepared.destination)? {
                     let view=FreshRecoveryInput::resume(&mut self.book,self.source.as_ref().ok_or("fresh-conservation-source")?,
@@ -20642,12 +20673,12 @@ exec ./mrk-macos-remove --fixture-supervise "$1"
                     let mut context=ReinstallPreservationContext::Fresh{source:&view,owner:self.fresh_recovery.as_mut().ok_or("fresh-conservation-owner")?};
                     maintenance::preserve_partial_fresh(&mut self.book,&mut context)?;drop(context);
                     let ready=self.fresh_recovery.as_mut().ok_or("fresh-conservation-owner")?.blank(&mut self.book,&view)?;
-                    drop(view);return self.prepare_conserved_fresh(request,ready);
+                    drop(view);scope.finish(&mut self.book,&ready)?;return self.prepare_conserved_fresh(request,ready);
                 }
                 let input=ReinstallInputRead::parent(&self.book,self.source.as_ref().ok_or("fresh-conservation-source")?,
                     self.producer.as_ref().ok_or("fresh-conservation-producer")?,prepared.destination,prepared.input,&prepared.inventory,&prepared.inventory_bytes)?;
                 let ready=maintenance::fresh_conservation::FreshBlankReady::reobserve(&mut self.book,&input)?;
-                drop(input);self.prepare_conserved_fresh(request,ready)
+                drop(input);scope.finish(&mut self.book,&ready)?;self.prepare_conserved_fresh(request,ready)
             }
             fn prepare_conserved_fresh(&mut self,request:&str,ready:maintenance::fresh_conservation::FreshBlankReady)->Result<()> {
                 let incoming=self.reinstall_input.take().ok_or("fresh-conservation-input")?;
@@ -23885,6 +23916,75 @@ exec ./mrk-macos-remove --fixture-supervise "$1"
     }
     #[cfg(test)]
     mod tests {
+        #[test]
+        fn preparation_handoff_retires_native_handles_and_preserves_anchors_and_cap() {
+            use super::*;
+            use std::{fs, os::{fd::AsRawFd, unix::fs::DirBuilderExt}};
+            // Ordinary-user owned inert fixture; no administrator admission.
+            let directory = std::env::temp_dir().canonicalize().unwrap()
+                .join(format!("mrk-preparation-handles-{}", std::process::id()));
+            fs::DirBuilder::new().mode(0o700).create(&directory).unwrap();
+            for name in ["versions", "move", "late"] {
+                fs::DirBuilder::new().mode(0o700).create(directory.join(name)).unwrap();
+            }
+            fs::write(directory.join("anchor"), b"source").unwrap();
+            fs::write(directory.join("move/file"), b"preserved").unwrap();
+            let mut book = Install::new();
+            let tested = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                let mut root = book.open(None, "/", true).unwrap();
+                for part in directory.components().skip(1) {
+                    root = book.open(Some(root), part.as_os_str().to_str().unwrap(), true).unwrap();
+                }
+                let anchor = book.open(Some(root), "anchor", false).unwrap();
+                book.gate.parent = Some(root);
+                book.gate.participant = Some(anchor);
+                let first = book.originals.len();
+                let moved = book.open(Some(root), "move", true).unwrap();
+                let file = book.open(Some(moved), "file", false).unwrap();
+                let late_parent = book.open(Some(root), "late", true).unwrap();
+                // Real preservation likewise rebinds an earlier original to
+                // a later parent. All POSTs must precede the first close.
+                fs::rename(directory.join("move"), directory.join("late/move")).unwrap();
+                book.originals[moved].parent = Some(late_parent);
+                let keep = book.open(Some(root), "versions", true).unwrap();
+                let before = book.originals.iter().filter(|row| row.fd.is_some()).count();
+                assert_eq!(book.close_preparation_originals(keep + 1, keep).unwrap_err(), "fresh-preparation-scope");
+                assert_eq!(book.originals.iter().filter(|row| row.fd.is_some()).count(), before);
+                book.gate.participant = Some(late_parent);
+                assert_eq!(book.close_preparation_originals(first, keep).unwrap_err(), "fresh-preparation-scope");
+                book.gate.participant = Some(anchor);
+                book.originals[file].role = Role::MetadataWriter;
+                assert_eq!(book.close_preparation_originals(first, keep).unwrap_err(), "fresh-preparation-unsettled");
+                book.originals[file].role = Role::Reader;
+                fs::rename(directory.join("late/move/file"), directory.join("late/move/held")).unwrap();
+                fs::write(directory.join("late/move/file"), b"preserved").unwrap();
+                assert_eq!(book.close_preparation_originals(first, keep).unwrap_err(), "original-correspondence");
+                assert_eq!(book.originals.iter().filter(|row| row.fd.is_some()).count(), before);
+                fs::remove_file(directory.join("late/move/file")).unwrap();
+                fs::rename(directory.join("late/move/held"), directory.join("late/move/file")).unwrap();
+                let raw: Vec<_> = (first..book.originals.len()).filter(|index| *index != keep)
+                    .map(|index| book.fd(index).unwrap().as_raw_fd()).collect();
+                book.close_preparation_originals(first, keep).unwrap();
+                for fd in raw {
+                    assert_eq!(unsafe { nix::libc::fcntl(fd, nix::libc::F_GETFD) }, -1);
+                    assert_eq!(Errno::last(), Errno::EBADF);
+                }
+                assert!((first..book.originals.len()).all(|index| index == keep
+                    || book.originals[index].fd.is_none() && book.originals[index].state == State::Closed));
+                book.check_name(keep, true).unwrap();
+                book.check_name(anchor, true).unwrap();
+                let live = book.originals.iter().filter(|row| row.fd.is_some()).count();
+                for _ in live..96 { book.open(Some(root), "anchor", false).unwrap(); }
+                assert_eq!(book.open(Some(root), "anchor", false).unwrap_err(), "original-bound");
+            }));
+            let settled = book.settle_originals();
+            assert!(settled && book.originals_settled());
+            if let Err(error) = tested { std::panic::resume_unwind(error); }
+            fs::remove_file(directory.join("late/move/file")).unwrap();
+            fs::remove_file(directory.join("anchor")).unwrap();
+            for name in ["late/move", "late", "versions"] { fs::remove_dir(directory.join(name)).unwrap(); }
+            fs::remove_dir(directory).unwrap();
+        }
         #[test]
         fn collected_inventory_roles_use_original_reader_with_exact_bound_and_post() {
             use super::*;

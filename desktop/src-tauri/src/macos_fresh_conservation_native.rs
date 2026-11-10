@@ -555,6 +555,26 @@ pub(in crate::installer) struct FreshBlankReady {
     root:usize,versions:usize,versions_birth:transaction::FreshBirthIdentityData,
     reference:transaction::FreshConservationReferenceData,
 }
+// A native preparation boundary, never a serialized or caller-selected list.
+// Failure leaves every remaining capability in the same Book for finality.
+// The completed preservation owner is no longer used after its blank cut;
+// the following ordinary observation independently reads the full namespace.
+pub(in crate::installer) struct PreparationOriginals { first: usize }
+impl PreparationOriginals {
+    pub(in crate::installer) fn begin(book: &Install) -> Self {
+        Self { first: book.originals.len() }
+    }
+    pub(in crate::installer) fn finish(self, book: &mut Install, ready: &FreshBlankReady) -> Result<()> {
+        check(ready.root < self.first && book.gate.parent == Some(ready.root)
+            && book.gate.verified && book.gate.exclusive_acquired && !book.worker_stderr_is_gate
+            && book.originals.get(ready.versions).is_some_and(|row|
+                row.parent == Some(ready.root) && row.name == "versions"),
+            "fresh-preparation-blank")?;
+        check(book.fresh_output_identity(ready.versions)? == ready.versions_birth,
+            "fresh-preparation-blank")?;
+        book.close_preparation_originals(self.first, ready.versions)
+    }
+}
 impl ConservationAttemptOriginal {
     pub(in crate::installer) fn blank(&mut self,book:&mut Install,source:&worker::FreshRecoveryInput<'_>)->Result<FreshBlankReady> {
         let result=(|| {
