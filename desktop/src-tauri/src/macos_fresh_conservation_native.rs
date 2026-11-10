@@ -1505,3 +1505,7 @@ mod original_quote_tests {
         println!("FRESH_PRESERVATION_QUOTE incoming={} files=5 dirs=4 slots=3 future={} originalBytes={} storageBytes={}",incoming,future,std::mem::size_of::<Original>(),storage);
     }
 }
+
+// Private actual-observation projection, absent from every shipping graph.
+#[cfg(feature="macos-installed-fresh-census-control")]
+include!("macos_fresh_census_projection.rs");
