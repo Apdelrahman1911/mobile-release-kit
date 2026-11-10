@@ -10594,16 +10594,40 @@ mod installer {
             if book.registration.verified { names.insert(paths::REGISTRATION_GATE_NAME.into()); }
             exact_roster(book, root, &names)?; exact_roster(book, versions, &BTreeSet::new())
         }
+        pub(super) enum MetadataReadRole { Control, Inventory }
+        impl MetadataReadRole {
+            pub(super) fn read(self, book: &Install, reader: usize, name: &str, size: u64, limit: usize) -> Result<(String, Vec<u8>)> {
+                match self {
+                    Self::Control => book.read(reader, size, true),
+                    Self::Inventory => {
+                        check(name == installation_record::INVENTORY_NAME || name == "inventory.json",
+                            "maintenance-inventory-name")?;
+                        book.read_collect_bounded(reader, size, limit)
+                    }
+                }
+            }
+        }
         pub(super) fn metadata_original(book: &mut Install, parent: usize, name: &str, limit: usize) -> Result<(usize, Vec<u8>)> {
+            let role = if name == installation_record::INVENTORY_NAME { MetadataReadRole::Inventory }
+                else { MetadataReadRole::Control };
+            metadata_original_context(book, parent, name, limit, role)
+        }
+        // Conservation uses a fixed inventory alias. Its explicit role retains
+        // the inventory bound without raising the ordinary control-file cap.
+        pub(super) fn metadata_inventory_original(book: &mut Install, parent: usize, name: &str, limit: usize) -> Result<(usize, Vec<u8>)> {
+            check(name == installation_record::INVENTORY_NAME || name == "inventory.json",
+                "maintenance-inventory-name")?;
+            check(limit > 0 && limit <= installation_record::INVENTORY_LIMIT, "maintenance-record-size")?;
+            metadata_original_context(book, parent, name, limit, MetadataReadRole::Inventory)
+        }
+        fn metadata_original_context(book: &mut Install, parent: usize, name: &str, limit: usize, role: MetadataReadRole) -> Result<(usize, Vec<u8>)> {
             let reader = book.open(Some(parent), name, false)?;
             book.protected(reader, false, Some(0o444))?;
             native::no_xattrs(book.fd(reader)?.as_fd()).map_err(|_| "maintenance-record-attributes")?;
             let original = stat::fstat(book.fd(reader)?).map_err(|_| "maintenance-record-stat")?;
             let size = usize::try_from(original.st_size).map_err(|_| "maintenance-record-size")?;
             check(original.st_flags == 0 && size > 0 && size <= limit, "maintenance-record-size")?;
-            let bytes = if name == installation_record::INVENTORY_NAME {
-                book.read_collect_bounded(reader, size as u64, limit)?.1
-            } else { book.read(reader, size as u64, true)?.1 };
+            let bytes = role.read(book, reader, name, size as u64, limit)?.1;
             let post = stat::fstat(book.fd(reader)?).map_err(|_| "maintenance-record-stat")?;
             check(post.st_flags == 0 && Identity::of(&post) == book.identity(reader)?, "maintenance-record-post")?;
             removal_snapshot_metadata(book,reader,&bytes)?;
@@ -23800,7 +23824,7 @@ exec ./mrk-macos-remove --fixture-supervise "$1"
     #[cfg(test)]
     mod tests {
         #[test]
-        fn collected_inventory_uses_original_reader_with_exact_bound_and_post() {
+        fn collected_inventory_roles_use_original_reader_with_exact_bound_and_post() {
             use super::*;
             use std::{fs::{self, OpenOptions}, io::Write, os::unix::fs::{DirBuilderExt, OpenOptionsExt}};
             // This exercises the real Mac Install book/FD/read/name/close path
@@ -23827,6 +23851,7 @@ exec ./mrk-macos-remove --fixture-supervise "$1"
             assert!(bytes.len() > 1024*1024 && bytes.len() < installation_record::INVENTORY_LIMIT);
             assert_eq!(Inventory::parse(bytes, &manifest).expect("real inventory DATA").files.len(), 8_622);
             create_leaf(installation_record::INVENTORY_NAME, bytes).expect("inventory writer settled");
+            create_leaf("inventory.json", bytes).expect("conserved inventory writer settled");
             create_leaf("control", b"ok").expect("control writer settled");
             let mut book = Install::new();
             let tested = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
@@ -23865,6 +23890,32 @@ exec ./mrk-macos-remove --fixture-supervise "$1"
                 let control = book.open(Some(root), "control", false).unwrap();
                 assert_eq!(book.read(control, 2, true).unwrap().1, b"ok");
                 book.forward_close(control, "test-control-close").unwrap();
+                let alias = book.open(Some(root), "inventory.json", false).unwrap();
+                // A large limit alone cannot grant the inventory role. Both
+                // production alias readers select it explicitly; ordinary
+                // controls retain their original 1 MiB cap.
+                use maintenance::MetadataReadRole;
+                assert_eq!(MetadataReadRole::Control.read(&book, alias, "inventory.json", size,
+                    installation_record::INVENTORY_LIMIT).unwrap_err(), "read-bound");
+                assert_eq!(MetadataReadRole::Inventory.read(&book, alias, "producer.json", size,
+                    installation_record::INVENTORY_LIMIT).unwrap_err(), "maintenance-inventory-name");
+                for limit in [0, bytes.len()-1, installation_record::INVENTORY_LIMIT+1] {
+                    assert_eq!(MetadataReadRole::Inventory.read(&book, alias, "inventory.json", size, limit)
+                        .unwrap_err(), "read-bound");
+                    assert_eq!(position(&book, alias), 0);
+                }
+                let (alias_digest, alias_raw) = MetadataReadRole::Inventory.read(&book, alias, "inventory.json", size,
+                    installation_record::INVENTORY_LIMIT).expect("explicit conservation inventory read");
+                assert_eq!(alias_digest, digest); assert_eq!(alias_raw, bytes);
+                assert_eq!(alias_raw.capacity(), bytes.len());
+                book.check_name(alias, true).expect("same held and named conservation inventory POST");
+                book.forward_close(alias, "test-alias-close").unwrap();
+                let replaced_alias = book.open(Some(root), "inventory.json", false).unwrap();
+                fs::rename(directory.join("inventory.json"), directory.join("held-alias")).unwrap();
+                create_leaf("inventory.json", bytes).unwrap();
+                assert_eq!(MetadataReadRole::Inventory.read(&book, replaced_alias, "inventory.json", size,
+                    installation_record::INVENTORY_LIMIT).unwrap_err(), "original-correspondence");
+                book.forward_close(replaced_alias, "test-replaced-alias-close").unwrap();
                 // A replaced name does not authorize the still-held old FD,
                 // even when both files contain byte-for-byte identical DATA.
                 let replaced = book.open(Some(root), installation_record::INVENTORY_NAME, false).unwrap();
@@ -23883,7 +23934,7 @@ exec ./mrk-macos-remove --fixture-supervise "$1"
             let settled = book.settle_originals();
             assert!(settled && book.originals_settled(), "test original closes");
             if let Err(error) = tested { std::panic::resume_unwind(error); }
-            for name in [installation_record::INVENTORY_NAME, "held-inventory", "control"] {
+            for name in [installation_record::INVENTORY_NAME, "held-inventory", "control", "inventory.json", "held-alias"] {
                 fs::remove_file(directory.join(name)).expect("exact test leaf retirement");
             }
             fs::remove_dir(&directory).expect("empty test directory retirement");

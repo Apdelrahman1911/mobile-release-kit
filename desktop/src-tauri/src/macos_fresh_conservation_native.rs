@@ -709,7 +709,8 @@ fn read_attempt(book:&mut Install,root:usize,parent:usize,container:usize,select
         for (n,name,limit) in [(0,"producer.json",mobile_release_desktop::macos_install_producer::DESCRIPTOR_LIMIT),
             (1,"producer.sig",mobile_release_desktop::macos_install_producer::SIGNATURE_LIMIT),
             (2,"inventory.json",installation_record::INVENTORY_LIMIT)] {
-            let value=metadata_original(book,child,name,limit)?;originals[n]=value.0;raw[n]=value.1;
+            let value=if n==2 {metadata_inventory_original(book,child,name,limit)?}
+                else {metadata_original(book,child,name,limit)?};originals[n]=value.0;raw[n]=value.1;
             check(attempt["source"][n]==hash(&raw[n]),"fresh-conservation-source-copy")?;
         }
         let descriptor=mobile_release_desktop::macos_install_producer::ProducerData::parse_data(&raw[0],selected.target_data())
@@ -1201,7 +1202,8 @@ impl ConservationAttemptOriginal {
         let (value,head,receipts)=removal_archive_scope(book,|book|{
             let mut originals=[0usize;3];let mut raw:[Vec<u8>;3]=std::array::from_fn(|_|Vec::new());
             for (at,name,body) in [(0,"producer.json",producer),(1,"producer.sig",signature),(2,"inventory.json",inventory_bytes)] {
-                let observed=metadata_original(book,pending.child,name,body.len())?;
+                let observed=if at==2 {metadata_inventory_original(book,pending.child,name,body.len())?}
+                    else {metadata_original(book,pending.child,name,body.len())?};
                 check(observed.1==body,"fresh-conservation-resume-source-copy")?;originals[at]=observed.0;raw[at]=observed.1;
             }
             let descriptor=mobile_release_desktop::macos_install_producer::ProducerData::parse_data(&raw[0],source.new_selection(book)?.target_data())
