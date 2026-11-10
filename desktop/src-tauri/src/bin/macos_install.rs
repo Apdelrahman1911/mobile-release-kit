@@ -13653,7 +13653,17 @@ mod installer {
         use mobile_release_desktop::protocol::strict_json;
 
         const SECOND: u64 = 1_000_000_000;
-        const TOTAL: u64 = 120 * SECOND;
+        const REMOVAL_TOTAL: u64 = 120 * SECOND;
+        // Durable enrollment and payload sealing each require a full disk flush.
+        // The owner APFS installation exceeded the old 110s work window while
+        // copying 7,038 of 7,230 files. Keep one entry-anchored endpoint, with
+        // a bounded 290s install/recovery window and the original 10s settlement.
+        // The standalone Remover retains its native 120s protocol unchanged.
+        const fn compiled_total_data(installer: bool, remover: bool) -> u64 {
+            if installer && !remover { 300 * SECOND } else { REMOVAL_TOTAL }
+        }
+        const TOTAL: u64 = compiled_total_data(cfg!(feature="macos-installed-installer"),
+            cfg!(feature="macos-installed-remover"));
         const SETTLEMENT: u64 = 10 * SECOND;
         const ROLE: &str = "--mrk-installer-private-writer-v2";
         pub(super) const INIT_LIMIT: usize = 16 * 1024;
@@ -22421,6 +22431,26 @@ exec ./mrk-macos-remove --fixture-supervise "$1"
         mod tests {
             use super::*;
             #[test]
+            fn installer_budget_is_bounded_and_remover_keeps_its_native_profile() {
+                assert_eq!(compiled_total_data(true,false),300*SECOND);
+                assert_eq!(compiled_total_data(false,true),120*SECOND);
+                assert_eq!(compiled_total_data(false,false),120*SECOND);
+                assert_eq!(compiled_total_data(true,true),120*SECOND);
+                assert_eq!(SETTLEMENT,10*SECOND);
+                assert_eq!(TOTAL,compiled_total_data(cfg!(feature="macos-installed-installer"),
+                    cfg!(feature="macos-installed-remover")));
+            }
+            #[test]
+            fn entry_endpoint_does_not_renew_for_a_slower_installer() {
+                let start=20*SECOND;let end=start+TOTAL;
+                assert!(time_data(start,end,start,end-SETTLEMENT-1,true).is_ok());
+                assert_eq!(time_data(start,end,start,end-SETTLEMENT,true),Err("worker-work-deadline"));
+                assert!(time_data(start,end,start,end-1,false).is_ok());
+                assert_eq!(time_data(start,end,start,end,false),Err("worker-final-deadline"));
+                assert_eq!(time_data(start+1,end,start+1,start+1,true),Err("worker-clock-regressed"));
+                assert_eq!(time_data(start,end,start,start+110*SECOND,true).is_ok(),TOTAL>120*SECOND);
+            }
+            #[test]
             fn same_absolute_endpoint_reserves_settlement_and_rejects_backwards_or_overflow() {
                 let start = 20 * SECOND; let end = start + TOTAL;
                 assert_eq!(time_data(start,end,start,start,true),Ok(start));
@@ -23214,14 +23244,14 @@ exec ./mrk-macos-remove --fixture-supervise "$1"
                     let request=BindingData::new_data(BindingInputData { request_id:&"1".repeat(32),root_nonce:&"2".repeat(32),
                         source_commit:&"3".repeat(40),release,target,remove_producer_sha256:&"4".repeat(64),
                         installed_producer_sha256:&"5".repeat(64),installed_inventory_sha256:&"6".repeat(64),
-                        protocol_sha256:&"7".repeat(64),start:10,work:10+TOTAL-SETTLEMENT,hard:10+TOTAL }).unwrap();
+                        protocol_sha256:&"7".repeat(64),start:10,work:10+REMOVAL_TOTAL-SETTLEMENT,hard:10+REMOVAL_TOTAL }).unwrap();
                     let actual=removal_native_binding_data(&request).unwrap();let mut expected_release=[0;128];
                     expected_release[..release.len()].copy_from_slice(release.as_bytes());
                     assert_eq!(actual,native::removal_coordinator::RemovalChallengeData {
                         request_id:[0x11;16],root_nonce:[0x22;16],source:[0x33;20],target:native_target,
                         release:expected_release,release_len:release.len() as u8,remove_producer:[0x44;32],
                         installed_producer:[0x55;32],inventory:[0x66;32],protocol:[0x77;32],
-                        start:10,work:10+TOTAL-SETTLEMENT,hard:10+TOTAL });
+                        start:10,work:10+REMOVAL_TOTAL-SETTLEMENT,hard:10+REMOVAL_TOTAL });
                 }
                 let signature=Some(SignatureResult::SignatureVerified);
                 let purpose=Some(CurrentProductResult::PurposeVerified);
