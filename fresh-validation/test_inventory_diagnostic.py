@@ -51,5 +51,51 @@ class DiagnosticContracts(unittest.TestCase):
                 r.route_resource_quote(dict(bind, job=job), packages)
 
 
+class DiagnosticCollectorContracts(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        spec = importlib.util.spec_from_file_location("actual_signed_product_stager", HERE.parent / "desktop/tools/stage_macos_installed.py")
+        cls.stager = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(cls.stager)
+
+    def fixture(self):
+        from types import SimpleNamespace
+        binding = dict(job="write-diagnostic", runId="123", runAttempt="1", package={"sha256": "a" * 64})
+        correlation = r.diagnostic_recovery_correlation(binding, Path("/Volumes/MRK-Install-123/Fresh-recovery.pkg"), {"sha256": "b" * 64})
+        native = b'2026-11-10 package_script_service: ./postinstall: MRK_RECOVERY_DIAGNOSTIC={"schemaVersion":1,"reason":"original-correspondence","check":null,"comparison":null}\n'
+        refused = b'2026-11-10 package_script_service: ./postinstall: MRK_MACOS_INSTALL_COMPLETED_REFUSED=reasonSha256=' + b'a' * 64 + b';exit=1;originals=1;native=1;timely=1;unknown=0\n'
+        body = b'unrelated system message\n' + native + refused
+        published = {}
+        def publish(path, data):
+            self.assertNotIn(path.name, published)
+            published[path.name] = data
+        op = SimpleNamespace(work=Path("/private/diagnostic-DATA"), outputs=SimpleNamespace(publish=publish))
+        return correlation, native + refused, body, op, published
+
+    def test_actual_parser_accepts_production_binding_and_retains_native_failure(self):
+        correlation, native, body, op, published = self.fixture()
+        r.publish_diagnostic_log(op, self.stager, body, correlation, {"fixture": "DATA"}, 0)
+        self.assertEqual(published["diagnostic-recovery-native-context.log"], native)
+        self.assertNotIn(b'unrelated system message', published["diagnostic-recovery-selected-packagekit.log"])
+        self.assertIn(b'MRK_MACOS_INSTALL_COMPLETED_REFUSED=', published["diagnostic-recovery-selected-packagekit.log"])
+        self.assertEqual(correlation["packageKind"], "ordinary")
+        facts = r.document(published["diagnostic-recovery-window-facts.json"])
+        self.assertEqual((facts["nativeBytes"], facts["nativeSha256"]), (len(native), r.sha(native)))
+        self.assertTrue(facts["diagnosticOnly"])
+
+    def test_real_missing_field_failure_preserves_bytes_before_parser_raises(self):
+        correlation, native, body, op, published = self.fixture()
+        del correlation["packageKind"]
+        with self.assertRaisesRegex(KeyError, "packageKind"):
+            r.publish_diagnostic_log(op, self.stager, body, correlation, {"fixture": "DATA"}, 0)
+        self.assertEqual(published["diagnostic-recovery-native-context.log"], native)
+        self.assertIn("diagnostic-recovery-window-facts.json", published)
+        self.assertNotIn("diagnostic-recovery-selected-packagekit.log", published)
+        with self.assertRaises(r.Refused):
+            r.diagnostic_native_lines(self.stager, body[:-1])
+        with self.assertRaises(r.Refused):
+            r.diagnostic_native_lines(self.stager, native * 3)
+
+
 if __name__ == "__main__":
     unittest.main()

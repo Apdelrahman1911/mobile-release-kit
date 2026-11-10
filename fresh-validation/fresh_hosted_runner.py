@@ -19,7 +19,7 @@ EXECUTION_BINDING = None
 TARGET = "aarch64-apple-darwin"
 PRODUCT = {'source': 'f778beb993691330c56b59059de5c8d970fbb27d', 'tree': 'bdd9e77af2c626e435e02f9fbebfd229ef6a06a7'}
 # This is the frozen ordinary product, independent of runner/transport sources.
-CONTROL_TRANSPORT = {'commit': '2b290309aebc352e4312956d448d34154148b4eb', 'tree': '1d064085209ae3944596ab8abf78dcb1fb66f9d1', 'manifestSha256': '1c7fc137ed80b052ea1b65c9c355fbade3e713720ef0b2c1449579b006db4baf', 'remoteAvailable': True}
+CONTROL_TRANSPORT = {'commit': '6cf1d138781e652b26c28051470254c338186982', 'tree': 'ad1eadeb560bd4a24a9b4f9e8e6254686a8c3fdf', 'manifestSha256': 'b7184e4e296b5bef9392ceb08e702c9f5be74d79cc90a0947a26f6f4408eb176', 'remoteAvailable': True}
 JOB_STEPS = {
     "write-diagnostic": ("write", "frontier", "diagnostic-recovery", "completed"),
 }
@@ -803,11 +803,7 @@ def execute_job(op, stager, host_api, binding):
     stager.installer_result_absent_command(args)
     ordinary_carrier.post()
     diagnostic_path = ordinary_carrier.mount / "Fresh-recovery.pkg"
-    correlation = {"kind": "nonshipping-inventory-recovery-window", "job": binding["job"],
-        "step": ordinary_step, "runId": binding["runId"], "runAttempt": binding["runAttempt"],
-        "packageIdentifier": CONTROL_IDS["recovery"], "packagePath": str(diagnostic_path),
-        "diagnosticPackageSha256": packages["recovery"]["sha256"],
-        "completedPackageSha256": binding["package"]["sha256"]}
+    correlation = diagnostic_recovery_correlation(binding, diagnostic_path, packages["recovery"])
     diagnostic_cursor = log_cursor(stager, correlation)
     op.outputs.publish(op.work / "diagnostic-recovery-log-cursor.json", canonical(diagnostic_cursor))
     original = installer_original(op, binding, ordinary_step, diagnostic_path)
@@ -841,6 +837,46 @@ TORN_COMPLETED_MARKER = (
 ).encode("ascii")
 
 
+def diagnostic_recovery_correlation(binding, package_path, package):
+    need(binding["job"] == "write-diagnostic", "fixed-diagnostic-job")
+    return {"kind": "nonshipping-inventory-recovery-window", "packageKind": "ordinary",
+        "job": binding["job"], "step": "diagnostic-recovery", "runId": binding["runId"],
+        "runAttempt": binding["runAttempt"], "packageIdentifier": CONTROL_IDS["recovery"],
+        "packagePath": str(package_path), "diagnosticPackageSha256": package["sha256"],
+        "completedPackageSha256": binding["package"]["sha256"]}
+
+
+def diagnostic_native_lines(stager, body):
+    need(type(body) is bytes and len(body) <= stager.LOG_INTERVAL_BYTES
+         and (not body or body.endswith(b"\n")), "diagnostic-window-bound")
+    selected = []
+    for line in body.splitlines(keepends=True):
+        need(line.endswith(b"\n") and len(line) <= stager.LOG_LINE_BYTES, "diagnostic-line-bound")
+        if b"MRK_RECOVERY_DIAGNOSTIC=" in line or b"MRK_MACOS_INSTALL_COMPLETED_REFUSED=" in line:
+            selected.append(line)
+    retained = b"".join(selected)
+    need(len(selected) <= 4 and len(retained) <= stager.LOG_SELECTED_BYTES, "diagnostic-native-projection-bound")
+    return retained
+
+
+def publish_diagnostic_log(op, stager, body, correlation, cursor, growth):
+    # Preserve the bounded native failure bytes and original-window identity
+    # before any semantic parser can fail. These bytes carry no success authority.
+    native = diagnostic_native_lines(stager, body)
+    op.outputs.publish(op.work / "diagnostic-recovery-native-context.log", native)
+    facts = {"binding": correlation, "cursorSha256": sha(canonical(cursor)),
+        "intervalBytes": len(body), "intervalSha256": sha(body),
+        "nativeBytes": len(native), "nativeSha256": sha(native),
+        "growthBeyondSnapshotBytes": growth, "authority": stager.LOG_AUTHORITY,
+        "diagnosticOnly": True, "originalInstallerRequiredSeparately": True}
+    op.outputs.publish(op.work / "diagnostic-recovery-window-facts.json", canonical(facts))
+    selected, selection = stager.select_installer_log(body, correlation)
+    need(len(selected) <= stager.LOG_SELECTED_BYTES, "diagnostic-log-selection-bound")
+    op.outputs.publish(op.work / "diagnostic-recovery-selected-packagekit.log", selected)
+    op.outputs.publish(op.work / "diagnostic-recovery-log-capture.json", canonical(dict(facts,
+        selectedBytes=len(selected), selectedSha256=sha(selected), selection=selection)))
+
+
 def diagnostic_log_finish(op, stager, cursor, correlation):
     stager.validate_log_cursor(cursor, correlation)
     with stager.installer_log_file() as (fd, outer, name, info):
@@ -853,14 +889,7 @@ def diagnostic_log_finish(op, stager, cursor, correlation):
         stager.validate_log_window(cursor, identity, end, anchor, body)
         need(stager.positioned_log_read(fd, start - len(anchor), len(anchor)) == anchor, "log-anchor-post")
         growth = stager.log_growth(fd, outer, name, identity, end)
-    selected, selection = stager.select_installer_log(body, correlation)
-    need(len(selected) <= stager.LOG_SELECTED_BYTES, "diagnostic-log-selection-bound")
-    op.outputs.publish(op.work / "diagnostic-recovery-selected-packagekit.log", selected)
-    op.outputs.publish(op.work / "diagnostic-recovery-log-capture.json", canonical({
-        "binding": correlation, "cursorSha256": sha(canonical(cursor)), "intervalBytes": len(body),
-        "intervalSha256": sha(body), "selectedBytes": len(selected), "selectedSha256": sha(selected),
-        "growthBeyondSnapshotBytes": growth, "authority": stager.LOG_AUTHORITY,
-        "selection": selection, "diagnosticOnly": True, "originalInstallerRequiredSeparately": True}))
+    publish_diagnostic_log(op, stager, body, correlation, cursor, growth)
 
 
 def ordinary_log_begin(op, stager, args):

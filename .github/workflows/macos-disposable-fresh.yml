@@ -1,8 +1,8 @@
-name: Nonshipping inventory write recovery diagnostic
+name: Nonshipping recovery failure trace diagnostic
 
 on:
   push:
-    branches: [codex/macos-fresh-inventory-diagnostic]
+    branches: [codex/macos-fresh-inventory-trace]
 
 permissions:
   contents: read
@@ -18,7 +18,7 @@ permissions:
 
 jobs:
   write-diagnostic:
-    if: github.event_name == 'push' && github.ref == 'refs/heads/codex/macos-fresh-inventory-diagnostic'
+    if: github.event_name == 'push' && github.ref == 'refs/heads/codex/macos-fresh-inventory-trace'
     runs-on: macos-26
     timeout-minutes: 75
     env:
@@ -142,7 +142,7 @@ jobs:
       - name: Check out the separate immutable control transport
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1
         with:
-          ref: 2b290309aebc352e4312956d448d34154148b4eb
+          ref: 6cf1d138781e652b26c28051470254c338186982
           path: _fresh-control-transport
           persist-credentials: false
       - name: Reserve a fresh work directory and copy pinned service metadata
