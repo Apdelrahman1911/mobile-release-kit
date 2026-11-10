@@ -1467,11 +1467,9 @@ mod original_quote_tests {
         for retained in 0..=4 {
             assert!(preservation_live_quote_data(24+retained).is_ok());
         }
-        // Tie the traversal allowance to the actual accepted path depth, not
-        // a second independently maintained depth number.
-        let deepest=std::iter::once("app").chain(std::iter::repeat("x").take(16)).collect::<Vec<_>>().join("/");
-        assert!(payload_depth_data(&deepest,16,true));
-        assert!(!payload_depth_data(&(deepest+"/x"),17,true));
+        // The existing contextual Store-path regression covers the real
+        // deepest accepted path. The quote uses that same depth constant.
+        assert_eq!(PAYLOAD_DIRECTORY_DEPTH_LIMIT,16);
         // Exact process-wide boundary, one above, and arithmetic overflow.
         assert_eq!(preservation_live_quote_data(32).unwrap(),96);
         assert!(preservation_live_quote_data(33).is_err());
