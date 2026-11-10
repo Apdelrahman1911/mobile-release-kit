@@ -565,14 +565,17 @@ impl PreparationOriginals {
         Self { first: book.originals.len() }
     }
     pub(in crate::installer) fn finish(self, book: &mut Install, ready: &FreshBlankReady) -> Result<()> {
-        check(ready.root < self.first && book.gate.parent == Some(ready.root)
+        check(book.fresh_preparation_phase == FreshPreparationPhase::None
+            && ready.root < self.first && book.gate.parent == Some(ready.root)
             && book.gate.verified && book.gate.exclusive_acquired && !book.worker_stderr_is_gate
             && book.originals.get(ready.versions).is_some_and(|row|
                 row.parent == Some(ready.root) && row.name == "versions"),
             "fresh-preparation-blank")?;
         check(book.fresh_output_identity(ready.versions)? == ready.versions_birth,
             "fresh-preparation-blank")?;
-        book.close_preparation_originals(self.first, ready.versions)
+        book.close_preparation_originals(self.first, ready.versions)?;
+        book.fresh_preparation_phase = FreshPreparationPhase::HandlesRetired;
+        Ok(())
     }
 }
 impl ConservationAttemptOriginal {
@@ -823,10 +826,7 @@ fn namespace_at(book:&mut Install,root:usize,parent:usize,selected:&ReleaseSetDa
     }
     retained_live(book)?;
     let start=book.originals.len();
-    let reserve=RECEIPT_QUOTE.checked_mul(4).and_then(|n|n.checked_add(2*installation_record::INVENTORY_LIMIT))
-        .and_then(|n|n.checked_add(PARTIAL_FRESH_WORK+131072)).ok_or("fresh-conservation-memory")?;
-    check(removal_effective_control_bytes(book)?.checked_add(reserve as u64)
-        .is_some_and(|n|n<=installation_record::CONTROL_LIMIT as u64),"fresh-conservation-memory")?;
+    let reserve=namespace_memory_quote_data(removal_effective_control_bytes(book)?)?;
     book.removal_control_reserved=book.removal_control_reserved.checked_add(reserve as u64).ok_or("fresh-conservation-memory")?;
     let result=removal_archive_scope(book,|book|{
         let container=book.open(Some(parent),ROOT_NAME,true)?;let identity=removal_archive_stat(book,container,true,0o700)?.0;
@@ -897,6 +897,14 @@ fn namespace_at(book:&mut Install,root:usize,parent:usize,selected:&ReleaseSetDa
     // array, even for temporary observations; no allocator/drop credit.
     book.removal_control_reserved=book.removal_control_reserved.checked_sub(reserve as u64-32768).ok_or("fresh-conservation-memory")?;
     Ok(result)
+}
+
+pub(in crate::installer) fn namespace_memory_quote_data(existing:u64)->Result<usize> {
+    let reserve=RECEIPT_QUOTE.checked_mul(4).and_then(|n|n.checked_add(2*installation_record::INVENTORY_LIMIT))
+        .and_then(|n|n.checked_add(PARTIAL_FRESH_WORK+131072)).ok_or("fresh-conservation-memory")?;
+    check(existing.checked_add(reserve as u64).is_some_and(|n|n<=installation_record::CONTROL_LIMIT as u64),
+        "fresh-conservation-memory")?;
+    Ok(reserve)
 }
 
 fn retained_enrollment(book:&mut Install,read:&RetainedInput,audit:&PartialFreshAttemptAudit,origin:&serde_json::Value)->Result<()> {

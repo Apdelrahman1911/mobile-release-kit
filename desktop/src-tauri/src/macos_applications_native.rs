@@ -53,7 +53,37 @@ pub(super) const PHASE_ORIGINAL_QUOTE: u64 = 5;
 pub(super) const PHASE_LIVE_QUOTE: u64 = 2;
 pub(super) const OBSERVATION_CONTROL_QUOTE: u64 = 3 * installation_record::INVENTORY_LIMIT as u64 + 64 * 1024
     + PHASE_CONTROL_QUOTE;
+const FRESH_RETAINED_CONTROL_QUOTE: u64 = 64 * 1024 + PHASE_CONTROL_QUOTE;
 pub(super) struct Material { entries: Vec<Entry>, bytes: u64 }
+#[cfg(test)]
+pub(super) fn material_memory_phase_profile(index: &InventoryIndex<'_>) -> Result<serde_json::Value> {
+    let material = Material::from_index(index)?.ok_or("test-launcher-missing")?;
+    let owned = std::mem::size_of::<Material>() + material.entries.capacity() * std::mem::size_of::<Entry>()
+        + material.entries.iter().map(|row| row.path.capacity() + row.sha256.capacity()).sum::<usize>();
+    let derived = material.index();
+    Ok(serde_json::json!({"leaves":material.entries.len(),"entryCapacity":material.entries.capacity(),
+        "ownedMaterialBytes":owned,"derivedFiles":derived.files.len(),"derivedDirectories":derived.directories.len(),
+        "bindingJsonBytes":serde_json::to_vec(&material.binding()).map_err(|_|"test-json")?.len(),
+        "capturePeakQuote":OBSERVATION_CONTROL_QUOTE,"phaseQuote":PHASE_CONTROL_QUOTE}))
+}
+#[cfg(test)]
+pub(super) fn fresh_retained_memory_data_checks(index: &InventoryIndex<'_>) -> Result<(u64,u64)> {
+    use mobile_release_desktop::macos_install_maintenance::ActionData;
+    let current = Material::from_index(index)?.ok_or("test-launcher-missing")?;
+    let mut value = Observation { current, previous:None,
+        operation:Operation { applications:0,system_root:1,bundle:None,
+            returned:Returned::NotAttempted,verified:false },
+        decision:launcher::Decision::PublishAbsent,absent:true,prior_capsule:None };
+    let retained = value.retained_control_quote(ActionData::FreshInstall)?;
+    assert_eq!(value.retained_control_quote(ActionData::Update)?,OBSERVATION_CONTROL_QUOTE);
+    assert!(retained < OBSERVATION_CONTROL_QUOTE && retained >= 64*1024 + PHASE_CONTROL_QUOTE);
+    value.prior_capsule=Some("a".repeat(64));
+    assert_eq!(value.retained_control_quote(ActionData::FreshInstall).unwrap_err(),"launcher-fresh-retained-shape");
+    value.prior_capsule=None;
+    value.current.entries[0].path.reserve_exact(128*1024);
+    assert_eq!(value.retained_control_quote(ActionData::FreshInstall).unwrap_err(),"launcher-observation-retained-memory");
+    Ok((retained,OBSERVATION_CONTROL_QUOTE))
+}
 impl Material {
     fn from_index(index: &InventoryIndex<'_>) -> Result<Option<Self>> {
         let Some(selected) = launcher::LauncherInventory::from_index(index)? else { return Ok(None); };
@@ -121,6 +151,28 @@ pub(super) struct Observation {
     prior_capsule: Option<String>,
 }
 impl Observation {
+    pub(super) fn retained_control_quote(&self, action: mobile_release_desktop::macos_install_maintenance::ActionData) -> Result<u64> {
+        if action != mobile_release_desktop::macos_install_maintenance::ActionData::FreshInstall {
+            return Ok(OBSERVATION_CONTROL_QUOTE);
+        }
+        check(self.previous.is_none() && self.prior_capsule.is_none() && self.absent
+            && self.decision == launcher::Decision::PublishAbsent && self.current.entries.len() <= 5,
+            "launcher-fresh-retained-shape")?;
+        let reason = "launcher-observation-retained-memory";
+        let owned = self.current.entries.capacity().checked_mul(std::mem::size_of::<Entry>())
+            .and_then(|n| n.checked_add(std::mem::size_of::<Self>())).ok_or(reason)?;
+        let owned = self.current.entries.iter().try_fold(owned, |n, row|
+            n.checked_add(row.path.capacity()).and_then(|n| n.checked_add(row.sha256.capacity())).ok_or(reason))?;
+        // One fixed launcher index (five leaves/five directories), its cloned
+        // path storage and binding JSON. Phase round trips remain separately
+        // charged by PHASE_CONTROL_QUOTE. No full inventory survives capture.
+        let work = self.current.entries.len().checked_add(5).and_then(|n| n.checked_mul(1024))
+            .and_then(|n| n.checked_add(8192)).ok_or(reason)?;
+        let work = self.current.entries.iter().try_fold(work, |n, row|
+            row.path.capacity().checked_mul(2).and_then(|extra| n.checked_add(extra)).ok_or(reason))?;
+        check(owned.checked_add(work).is_some_and(|n| n <= 64*1024), reason)?;
+        Ok(FRESH_RETAINED_CONTROL_QUOTE)
+    }
     pub(super) fn capture(book: &mut Install, prepared: &PreparedFresh,
         history: Option<&maintenance::History>, old_release: Option<usize>,
         action: mobile_release_desktop::macos_install_maintenance::ActionData,
@@ -168,7 +220,9 @@ impl Observation {
             operation.hold_matching(book,&old.index(),history.and_then(|h|h.current.capsule.launcher_data()).and_then(|row|row.published_identity),true)?;
             occupied_decision(action,prior_capsule.is_some(),current.same(old)?)?
         };
-        Ok(Some(Self { current,previous,operation,decision,absent,prior_capsule }))
+        let out = Self { current,previous,operation,decision,absent,prior_capsule };
+        out.retained_control_quote(action)?;
+        Ok(Some(out))
     }
     pub(super) fn close_for_reobservation(self, book: &mut Install) -> Result<()> {
         self.post(book)?;

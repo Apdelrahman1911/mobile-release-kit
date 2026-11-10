@@ -20,9 +20,21 @@ struct Check {
 }
 
 #[derive(Clone, Copy)]
+pub struct BudgetCounters {
+    pub control_reserved: u64,
+    pub observation_control: Option<u64>,
+    pub observation_reserved: u64,
+    pub original_storage_reserved: u64,
+    pub originals_len: u64,
+    pub originals_capacity: u64,
+    pub live_book_fds: u64,
+}
+
+#[derive(Clone, Copy)]
 struct ParentFailure {
     reason: &'static str,
     check: Option<Check>,
+    budget_counters: Option<BudgetCounters>,
 }
 
 thread_local! {
@@ -50,10 +62,10 @@ pub fn check_refused(reason: &'static str, site: &'static Location<'static>) {
     LAST.set(Some(Check { reason, site, comparison }));
 }
 
-pub fn note_parent(reason: &'static str) {
+pub fn note_parent(reason: &'static str, budget_counters: Option<BudgetCounters>) {
     if FIRST_PARENT.get().is_none() {
         let check = LAST.get().filter(|value| value.reason == reason);
-        FIRST_PARENT.set(Some(ParentFailure { reason, check }));
+        FIRST_PARENT.set(Some(ParentFailure { reason, check, budget_counters }));
     }
 }
 
@@ -64,7 +76,8 @@ fn label(value: &str) -> bool {
 
 pub fn render(reason: &'static str) -> Option<String> {
     if !label(reason) { return None; }
-    let check = FIRST_PARENT.get().filter(|value| value.reason == reason).and_then(|value| value.check);
+    let failure = FIRST_PARENT.get().filter(|value| value.reason == reason);
+    let check = failure.and_then(|value| value.check);
     let (site, identity) = if let Some(check) = check {
         // The basename and line identify frozen source; never emit local paths.
         let file = check.site.file().rsplit('/').next()?;
@@ -79,7 +92,13 @@ pub fn render(reason: &'static str) -> Option<String> {
         } else { "null".to_owned() };
         (site, identity)
     } else { ("null".to_owned(), "null".to_owned()) };
-    let line = format!("MRK_RECOVERY_DIAGNOSTIC={{\"schemaVersion\":1,\"scope\":\"outer-parent-failure-data\",\"reason\":\"{reason}\",\"check\":{site},\"comparison\":{identity},\"workerContextClaimed\":false}}\n");
+    let counters = if let Some(value) = failure.and_then(|value| value.budget_counters) {
+        let observed = value.observation_control.map_or_else(|| "null".to_owned(), |n| n.to_string());
+        format!("{{\"samplePhase\":\"first-parent-note\",\"controlReservedBytes\":{},\"observationControlBytes\":{observed},\"observationReservedBytes\":{},\"originalStorageReservedBytes\":{},\"originalsLen\":{},\"originalsCapacity\":{},\"liveBookFds\":{},\"actualRssMeasured\":false}}",
+            value.control_reserved, value.observation_reserved, value.original_storage_reserved,
+            value.originals_len, value.originals_capacity, value.live_book_fds)
+    } else { "null".to_owned() };
+    let line = format!("MRK_RECOVERY_DIAGNOSTIC={{\"schemaVersion\":1,\"scope\":\"outer-parent-failure-data\",\"reason\":\"{reason}\",\"check\":{site},\"comparison\":{identity},\"budgetCounters\":{counters},\"workerContextClaimed\":false}}\n");
     (line.len() <= 4096).then_some(line)
 }
 
@@ -95,9 +114,9 @@ mod tests {
             expected: [1; 12], actual: [1; 12], named: [2; 12] };
         comparison(site, value);
         check_refused("original-correspondence", site);
-        note_parent("original-correspondence");
+        note_parent("original-correspondence", None);
         check_refused("later-close", site);
-        note_parent("later-close");
+        note_parent("later-close", None);
         let output = render("original-correspondence").unwrap();
         assert!(output.contains("\"original\":7") && output.contains("\"parent\":3"));
         assert!(output.contains("\"named\":[2, 2, 2") && output.contains("\"actual\":[1, 1, 1"));
@@ -109,7 +128,7 @@ mod tests {
     fn unmatched_errors_are_reported_without_inventing_source_or_worker_context() {
         reset();
         check_refused("ignored-optional-check", Location::caller());
-        note_parent("native-read");
+        note_parent("native-read", None);
         let output = render("native-read").unwrap();
         assert!(output.contains("\"reason\":\"native-read\""));
         assert!(output.contains("\"check\":null,\"comparison\":null"));
@@ -122,7 +141,25 @@ mod tests {
             expected: [i128::MIN; 12], actual: [i128::MAX; 12], named: [i128::MIN; 12] });
         // A pending sample cannot leak into a different source location/reason.
         check_refused("read-bound", Location::caller());
-        note_parent("read-bound");
+        note_parent("read-bound", None);
         assert!(render("read-bound").unwrap().contains("\"comparison\":null"));
+    }
+
+    #[test]
+    fn first_parent_budget_counters_are_bounded_and_never_replaced_or_claimed_as_rss() {
+        reset();
+        let value = BudgetCounters { control_reserved: u64::MAX, observation_control: Some(7),
+            observation_reserved: 3, original_storage_reserved: 5, originals_len: 11,
+            originals_capacity: 19, live_book_fds: 23 };
+        note_parent("fresh-conservation-memory", Some(value));
+        note_parent("fresh-conservation-memory", Some(BudgetCounters { live_book_fds: 91, ..value }));
+        let line = render("fresh-conservation-memory").unwrap();
+        assert!(line.contains("\"samplePhase\":\"first-parent-note\""));
+        assert!(line.contains("\"controlReservedBytes\":18446744073709551615"));
+        assert!(line.contains("\"observationControlBytes\":7"));
+        assert!(line.contains("\"originalStorageReservedBytes\":5"));
+        assert!(line.contains("\"liveBookFds\":23,\"actualRssMeasured\":false"));
+        assert!(line.len() <= 4096 && !line.contains("/Users/"));
+        assert!(render("different-error").unwrap().contains("\"budgetCounters\":null"));
     }
 }
