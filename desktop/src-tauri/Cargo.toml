@@ -98,6 +98,7 @@ development-runtime = []
 ubuntu-runtime-publisher = []
 windows-runtime-publisher = ["mrk-windows-installed-native/runtime-publication"]
 macos-installed-installer = []
+macos-installed-recovery-trace = ["macos-installed-installer"]
 # NONSHIPPING, separately bound disposable Fresh census/cut roles.
 macos-installed-fresh-census-control = ["macos-installed-installer"]
 macos-installed-fresh-write-cut = ["macos-installed-installer", "mrk-macos-installed-native/installed-fresh-write-cut"]

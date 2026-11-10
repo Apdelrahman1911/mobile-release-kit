@@ -2,6 +2,23 @@
 //! into the final app/runtime destinations. One original parent admits the
 //! completed package; its exact self-worker owns the existing copy writer.
 //! No Python, app, daemon or general publisher runs as root.
+#[cfg(all(feature="macos-installed-recovery-trace", any(
+    not(feature="macos-installed-installer"), feature="macos-installed-fresh-census-control",
+    feature="macos-installed-fresh-write-cut", feature="macos-installed-fresh-torn-cut",
+    feature="macos-installed-remover", feature="macos-installed-installer-fixture",
+    feature="macos-installed-app-absence-fixture", feature="macos-installed-removal-abrupt-fixture",
+    feature="macos-installed-removal-observer", feature="macos-installed-observation",
+    feature="desktop-shell", feature="custom-protocol", feature="development-runtime",
+    feature="macos-installed-desktop-image", feature="macos-installed-resident-image",
+    feature="macos-android-registration-helper", feature="macos-package-producer",
+    feature="macos-remove-producer", feature="macos-remove-observer-producer",
+    feature="installed-cli", feature="macos-xcode-setup"
+)))]
+compile_error!("Recovery trace requires its exclusive nonshipping installer graph");
+#[cfg(feature="macos-installed-recovery-trace")]
+#[path = "../macos_recovery_trace.rs"]
+mod recovery_trace;
+
 // A separately compiled test role must never enable a shipping or other
 // native observation/producer role through Cargo feature unification.
 #[cfg(all(feature="macos-installed-app-absence-fixture", any(
@@ -246,7 +263,14 @@ mod installer {
     }
     #[cfg(any(feature="macos-installed-fresh-write-cut",feature="macos-installed-fresh-torn-cut"))]
     include!("../macos_fresh_cut_hooks.rs");
-    fn check(ok: bool, why: &'static str) -> Result<()> { if ok { Ok(()) } else { Err(why) } }
+    #[cfg_attr(feature="macos-installed-recovery-trace",track_caller)]
+    fn check(ok: bool, why: &'static str) -> Result<()> {
+        if ok { Ok(()) } else {
+            #[cfg(feature="macos-installed-recovery-trace")]
+            crate::recovery_trace::check_refused(why,std::panic::Location::caller());
+            Err(why)
+        }
+    }
     fn sha(value: &str) -> bool { value.len() == 64 && value.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b)) }
     fn component(value: &str) -> bool { value.is_ascii() && value.len() <= 255 && safe_payload_path(value) && !value.contains('/') }
     // Full paths come from the authenticated inventory or the same owned
@@ -744,11 +768,31 @@ mod installer {
             self.originals[n].identity = Some(Identity::of(&stat::fstat(self.fd(n)?).map_err(|_| "created-stat")?));
             self.protected(n, false, Some(0o600))?; self.check_name(n, true)?; Ok(n)
         }
+        #[cfg(feature="macos-installed-recovery-trace")]
+        fn trace_comparison(&self,n:usize,exact:bool,expected:Identity,actual:Identity,named:Identity,
+            site:&'static std::panic::Location<'static>) {
+            // Only the same already-sampled native Identities and held slots;
+            // no additional native calls, paths, names lookup or worker output.
+            let fields=|v:Identity|[v.dev as i128,v.ino as i128,(v.mode&0o170000) as i128,
+                (v.mode&!0o170000) as i128,v.uid as i128,v.gid as i128,v.links as i128,v.size as i128,
+                v.mtime as i128,v.mtime_ns as i128,v.ctime as i128,v.ctime_ns as i128];
+            let original=&self.originals[n];
+            let role=match original.role {Role::Reader=>0,Role::PayloadWriter=>1,Role::LauncherWriter=>2,
+                Role::MetadataWriter=>3,Role::ReceiptWriter=>4,Role::GateWriter=>5,Role::GateParticipant=>6,
+                Role::ReservationWriter=>7,Role::ReservationParticipant=>8,Role::FreshEnrollmentWriter=>9};
+            crate::recovery_trace::comparison(site,crate::recovery_trace::Comparison {
+                original:n,parent:original.parent,role,exact,expected:fields(expected),actual:fields(actual),named:fields(named)});
+        }
+        #[cfg_attr(feature="macos-installed-recovery-trace",track_caller)]
         fn check_name(&self, n: usize, exact: bool) -> Result<()> {
             self.clock()?;
             let original = &self.originals[n]; let expected = self.identity(n)?;
             let actual = Identity::of(&stat::fstat(self.fd(n)?).map_err(|_| "original-stat")?);
             let named = Identity::of(&self.named(original.parent, &original.name).map_err(|_| "original-name")?);
+            #[cfg(feature="macos-installed-recovery-trace")]
+            if !(actual == named && if exact {actual == expected}else{expected.same_object(actual)}) {
+                self.trace_comparison(n,exact,expected,actual,named,std::panic::Location::caller());
+            }
             check(actual == named && if exact { actual == expected } else { expected.same_object(actual) }, "original-correspondence")?;
             if original.existing_app_metadata.is_some() {
                 self.existing_app_metadata_post(n,"maintenance-app-attributes")?;
@@ -756,6 +800,10 @@ mod installer {
                 // POST; a pre-read name match cannot cover a later replacement.
                 let actual=Identity::of(&stat::fstat(self.fd(n)?).map_err(|_|"original-stat")?);
                 let named=Identity::of(&self.named(original.parent,&original.name).map_err(|_|"original-name")?);
+                #[cfg(feature="macos-installed-recovery-trace")]
+                if !(actual==named && if exact {actual==expected}else{expected.same_object(actual)}) {
+                    self.trace_comparison(n,exact,expected,actual,named,std::panic::Location::caller());
+                }
                 check(actual==named && if exact {actual==expected}else{expected.same_object(actual)},"original-correspondence")?;
                 self.clock()?;
             }
@@ -20396,6 +20444,8 @@ exec ./mrk-macos-remove --fixture-supervise "$1"
                     command_gate_kernel_retained:false,parent_book_settled:false })
             }
             fn note(&mut self, error: &'static str) {
+                #[cfg(feature="macos-installed-recovery-trace")]
+                if self.errors.is_empty() {crate::recovery_trace::note_parent(error);}
                 if !self.errors.contains(&error) && self.errors.len() < 16 { self.errors.push(error); }
             }
             fn settlement_time(&mut self) -> bool {
@@ -22331,6 +22381,8 @@ exec ./mrk-macos-remove --fixture-supervise "$1"
         // Postinstall must supply ONLY the genuinely qualified completed outer
         // package field. A fixed spelling/UID/mount is not producer authority.
         fn completed_entry(source: &str, completed_path: &str, started: u64) -> i32 {
+            #[cfg(feature="macos-installed-recovery-trace")]
+            crate::recovery_trace::reset();
             let mut parent = match Deadline::from_entry(started).and_then(Parent::new) { Ok(parent) => parent, Err(_) => return 1 };
             let returned = parent.run_completed(source,completed_path);
             let mut writer_reason = None;
@@ -22364,6 +22416,16 @@ exec ./mrk-macos-remove --fixture-supervise "$1"
             // Missing producer is unentered-known for this diagnostic gate, not native success.
             let native_settled = parent.producer.as_ref().is_none_or(|producer| producer.signature.settled()
                 && producer.entry.settled() && producer.payload.settled());
+            #[cfg(feature="macos-installed-recovery-trace")]
+            if matches!(exit,1|20) && originals && timely && native_settled {
+                let reason=completed_reason_data(parent.errors.first().copied(),writer_reason)
+                    .unwrap_or("completed-original-finality-refused");
+                if let Some(line)=crate::recovery_trace::render(reason) {
+                    // Failure-only outer parent: never write private worker
+                    // frames or the worker stderr command-gate channel.
+                    let _=std::io::Write::write(&mut std::io::stderr().lock(),line.as_bytes());
+                }
+            }
             if let Some(line) = completed_failure_line_data(
                 completed_reason_data(parent.errors.first().copied(),writer_reason),exit,
                 originals,native,timely,unknown,native_settled) {
