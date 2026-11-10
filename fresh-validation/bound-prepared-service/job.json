@@ -1,19 +1,19 @@
 {
-  "id": 129530385683,
-  "run_id": 42713277623,
+  "id": 129626512872,
+  "run_id": 42745647519,
   "workflow_name": "macOS / signed package builds only / Git tests skipped",
   "head_branch": "verify/desktop-macos-candidate",
-  "run_url": "https://api.github.com/repos/Apdelrahman1911/mobile-release-kit/actions/runs/42713277623",
+  "run_url": "https://api.github.com/repos/Apdelrahman1911/mobile-release-kit/actions/runs/42745647519",
   "run_attempt": 1,
-  "node_id": "CR_kwDOT_nMIs8AAAAeKJzVEw",
-  "head_sha": "8097137e9204c2e1dfa5d3bf5d3785e662ee64ef",
-  "url": "https://api.github.com/repos/Apdelrahman1911/mobile-release-kit/actions/jobs/129530385683",
-  "html_url": "https://github.com/Apdelrahman1911/mobile-release-kit/actions/runs/42713277623/job/129530385683",
+  "node_id": "CR_kwDOT_nMIs8AAAAeLled6A",
+  "head_sha": "f778beb993691330c56b59059de5c8d970fbb27d",
+  "url": "https://api.github.com/repos/Apdelrahman1911/mobile-release-kit/actions/jobs/129626512872",
+  "html_url": "https://github.com/Apdelrahman1911/mobile-release-kit/actions/runs/42745647519/job/129626512872",
   "status": "completed",
   "conclusion": "success",
-  "created_at": "2026-11-10T00:05:44Z",
-  "started_at": "2026-11-10T00:05:48Z",
-  "completed_at": "2026-11-10T00:21:11Z",
+  "created_at": "2026-11-10T04:16:15Z",
+  "started_at": "2026-11-10T04:16:18Z",
+  "completed_at": "2026-11-10T04:30:47Z",
   "name": "Desktop update / Build signed candidate (Desktop26)",
   "steps": [
     {
@@ -21,136 +21,136 @@
       "status": "completed",
       "conclusion": "success",
       "number": 1,
-      "started_at": "2026-11-10T00:05:48Z",
-      "completed_at": "2026-11-10T00:05:49Z"
+      "started_at": "2026-11-10T04:16:19Z",
+      "completed_at": "2026-11-10T04:16:21Z"
     },
     {
       "name": "Check out exact reviewed source without retained credentials",
       "status": "completed",
       "conclusion": "success",
       "number": 2,
-      "started_at": "2026-11-10T00:05:49Z",
-      "completed_at": "2026-11-10T00:05:58Z"
+      "started_at": "2026-11-10T04:16:21Z",
+      "completed_at": "2026-11-10T04:16:30Z"
     },
     {
       "name": "Admit a fresh part runner and bind current SOURCE",
       "status": "completed",
       "conclusion": "success",
       "number": 3,
-      "started_at": "2026-11-10T00:05:58Z",
-      "completed_at": "2026-11-10T00:06:33Z"
+      "started_at": "2026-11-10T04:16:30Z",
+      "completed_at": "2026-11-10T04:17:16Z"
     },
     {
       "name": "Record only the freshly admitted part work root",
       "status": "completed",
       "conclusion": "success",
       "number": 4,
-      "started_at": "2026-11-10T00:06:33Z",
-      "completed_at": "2026-11-10T00:06:33Z"
+      "started_at": "2026-11-10T04:17:16Z",
+      "completed_at": "2026-11-10T04:17:16Z"
     },
     {
       "name": "Admit and restore only completed source-bound predecessor parts",
       "status": "completed",
       "conclusion": "success",
       "number": 5,
-      "started_at": "2026-11-10T00:06:33Z",
-      "completed_at": "2026-11-10T00:09:47Z"
+      "started_at": "2026-11-10T04:17:16Z",
+      "completed_at": "2026-11-10T04:20:16Z"
     },
     {
       "name": "Latch fresh runtime and SOURCE packaging bindings",
       "status": "completed",
       "conclusion": "success",
       "number": 6,
-      "started_at": "2026-11-10T00:09:47Z",
-      "completed_at": "2026-11-10T00:09:49Z"
+      "started_at": "2026-11-10T04:20:16Z",
+      "completed_at": "2026-11-10T04:20:17Z"
     },
     {
       "name": "Install and verify the pinned Mac Rust toolchain",
       "status": "completed",
       "conclusion": "success",
       "number": 7,
-      "started_at": "2026-11-10T00:09:49Z",
-      "completed_at": "2026-11-10T00:10:01Z"
+      "started_at": "2026-11-10T04:20:17Z",
+      "completed_at": "2026-11-10T04:20:28Z"
     },
     {
       "name": "Sign and notarize the completed ordinary Desktop package",
       "status": "completed",
       "conclusion": "success",
       "number": 8,
-      "started_at": "2026-11-10T00:10:01Z",
-      "completed_at": "2026-11-10T00:20:33Z"
+      "started_at": "2026-11-10T04:20:28Z",
+      "completed_at": "2026-11-10T04:30:21Z"
     },
     {
       "name": "Publish only the prepared signed input checkpoint; not installed",
       "status": "completed",
       "conclusion": "success",
       "number": 9,
-      "started_at": "2026-11-10T00:20:33Z",
-      "completed_at": "2026-11-10T00:20:50Z"
+      "started_at": "2026-11-10T04:30:21Z",
+      "completed_at": "2026-11-10T04:30:35Z"
     },
     {
       "name": "Upload the immutable prepared input; first retention attempt",
       "status": "completed",
       "conclusion": "success",
       "number": 10,
-      "started_at": "2026-11-10T00:20:50Z",
-      "completed_at": "2026-11-10T00:21:01Z"
+      "started_at": "2026-11-10T04:30:35Z",
+      "completed_at": "2026-11-10T04:30:40Z"
     },
     {
       "name": "Retry the same immutable prepared input once after returned upload failure",
       "status": "completed",
       "conclusion": "skipped",
       "number": 11,
-      "started_at": "2026-11-10T00:21:01Z",
-      "completed_at": "2026-11-10T00:21:01Z"
+      "started_at": "2026-11-10T04:30:40Z",
+      "completed_at": "2026-11-10T04:30:40Z"
     },
     {
       "name": "Retain prepared signed input for failed-job-only installation retries",
       "status": "completed",
       "conclusion": "success",
       "number": 12,
-      "started_at": "2026-11-10T00:21:01Z",
-      "completed_at": "2026-11-10T00:21:01Z"
+      "started_at": "2026-11-10T04:30:40Z",
+      "completed_at": "2026-11-10T04:30:40Z"
     },
     {
       "name": "Retire only the completed candidate's disposable compiler outputs",
       "status": "completed",
       "conclusion": "success",
       "number": 13,
-      "started_at": "2026-11-10T00:21:01Z",
-      "completed_at": "2026-11-10T00:21:02Z"
+      "started_at": "2026-11-10T04:30:40Z",
+      "completed_at": "2026-11-10T04:30:40Z"
     },
     {
       "name": "Post Admit a fresh part runner and bind current SOURCE",
       "status": "completed",
       "conclusion": "success",
       "number": 25,
-      "started_at": "2026-11-10T00:21:02Z",
-      "completed_at": "2026-11-10T00:21:02Z"
+      "started_at": "2026-11-10T04:30:40Z",
+      "completed_at": "2026-11-10T04:30:41Z"
     },
     {
       "name": "Post Check out exact reviewed source without retained credentials",
       "status": "completed",
       "conclusion": "success",
       "number": 26,
-      "started_at": "2026-11-10T00:21:02Z",
-      "completed_at": "2026-11-10T00:21:03Z"
+      "started_at": "2026-11-10T04:30:41Z",
+      "completed_at": "2026-11-10T04:30:41Z"
     },
     {
       "name": "Complete job",
       "status": "completed",
       "conclusion": "success",
       "number": 27,
-      "started_at": "2026-11-10T00:21:03Z",
-      "completed_at": "2026-11-10T00:21:06Z"
+      "started_at": "2026-11-10T04:30:41Z",
+      "completed_at": "2026-11-10T04:30:43Z"
     }
   ],
-  "check_run_url": "https://api.github.com/repos/Apdelrahman1911/mobile-release-kit/check-runs/129530385683",
+  "check_run_url": "https://api.github.com/repos/Apdelrahman1911/mobile-release-kit/check-runs/129626512872",
   "labels": [
     "macos-26"
   ],
-  "runner_id": 1000012956,
-  "runner_name": "GitHub Actions 1000012956",
+  "runner_id": 1000012974,
+  "runner_name": "GitHub Actions 1000012974",
   "runner_group_id": 0,
   "runner_group_name": "GitHub Actions"
 }

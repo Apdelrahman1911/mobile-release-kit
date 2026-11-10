@@ -242,9 +242,10 @@ mod installer {
     }
     // Runtime/app are depth0. Store's largest file has18parts; its deepest
     // derived parent has17parts/depth16, so existing17directoryslots suffice.
+    const PAYLOAD_DIRECTORY_DEPTH_LIMIT:usize=16;
     fn payload_depth_data(path:&str,depth:usize,directory:bool)->bool {
         safe_macos_install_path(path) && depth==path.bytes().filter(|b|*b==b'/').count()
-            && depth<=if directory{16}else{17}
+            && depth<=if directory{PAYLOAD_DIRECTORY_DEPTH_LIMIT}else{PAYLOAD_DIRECTORY_DEPTH_LIMIT+1}
     }
     // Audits use inventory-absolute depth, unlike the separate launcher copier's
     // local recursion depth. This fixed subtree begins three levels below app.

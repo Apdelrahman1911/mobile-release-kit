@@ -401,6 +401,21 @@ fn preservation_original_quote_data(used:usize,files:u64,directories:u64,slots:u
 }
 
 struct ConservationRootOriginal { root:usize,namespace:usize,birth:transaction::FreshBirthIdentityData }
+// A paired audit retains two directories per inventory depth (0..=16),
+// with at most two leaf-file readers OR a separate roster reader. Its fixed
+// top-level readers fit18: intent, stage, enrollment pair, four phase receipts,
+// versions/release, inventory/record, published app and four root controls.
+// Launcher ancestors run in a nested scope before versions/release and root
+// controls, and fit the same18. Tree recursion closes each child before its
+// sibling; payload files do not accumulate across the inventory.
+// Charge five more owners (namespace, attempt, retry, moved top, blank versions),
+// four worker handles and one extra roster reader even when already held or
+// mutually exclusive. This is64 future handles, not72 new handles on top of
+// the newly retained conservation owners. The actual Book96 cap is unchanged.
+fn preservation_live_quote_data(live:usize)->Result<usize> {
+    let future=2*(PAYLOAD_DIRECTORY_DEPTH_LIMIT+1)+2+18+5+worker::EXTRA_LIVE+1;
+    live.checked_add(future).filter(|n|*n<=96).ok_or("fresh-conservation-live-quote")
+}
 // Current-process native owner. The immutable receipts describe only completed
 // observations. Historical reobservation is a separate constructor; it cannot
 // fill this owner's syscall-return ledger or manufacture settle_return_data.
@@ -441,7 +456,7 @@ impl ConservationAttemptOriginal {
         let prior_bytes=source.prior_namespace().map_or(0,|v|v.bytes);
         partial_fresh_storage_data(prior_bytes.checked_add(controls as u64).ok_or("fresh-conservation-storage-quote")?,
             value.facts.payload_bytes+value.facts.control_bytes,payload,raw.len(),producer.len(),signature.len())?;
-        check(book.originals.iter().filter(|r|r.fd.is_some()).count().checked_add(72).is_some_and(|n|n<=96),"fresh-conservation-live-quote")?;
+        preservation_live_quote_data(book.originals.iter().filter(|r|r.fd.is_some()).count())?;
         book.removal_control_reserved=book.removal_control_reserved.checked_add(controls as u64).ok_or("fresh-conservation-control-quote")?;
         let commitments=[hash(producer),hash(signature),hash(raw)];
         let (namespace,namespace_birth,origin)=if let Some(prior)=source.prior_namespace() {
@@ -511,7 +526,7 @@ impl ConservationAttemptOriginal {
         let future=preservation_original_quote_data(book.originals.len(),self.ledger.initial.files,
             self.ledger.initial.directories,self.ledger.slots.len(),self.ledger.retry_quote)?;
         reserve_removal_original_storage(book,future)?;
-        check(book.originals.iter().filter(|r|r.fd.is_some()).count().checked_add(72).is_some_and(|n|n<=96),"fresh-conservation-live-quote")?;
+        preservation_live_quote_data(book.originals.iter().filter(|r|r.fd.is_some()).count())?;
         context.post_source(book)
     }
     pub(in crate::installer) fn record_prefix(&mut self,book:&mut Install,source:&worker::FreshRecoveryInput<'_>)->Result<()> {
@@ -1444,6 +1459,22 @@ pub(super) fn preflight_transport_work(book:&mut Install,row:&ConservationSpanDa
 #[cfg(test)]
 mod original_quote_tests {
     use super::*;
+    #[test]
+    fn live_quote_covers_retained_conservation_owners_and_deepest_paired_read() {
+        // Initial census permits up to24 held originals. Retaining namespace,
+        // attempt, retry and blank versions must not make that same source
+        // impossible before the next bounded audit.
+        for retained in 0..=4 {
+            assert!(preservation_live_quote_data(24+retained).is_ok());
+        }
+        // The existing contextual Store-path regression covers the real
+        // deepest accepted path. The quote uses that same depth constant.
+        assert_eq!(PAYLOAD_DIRECTORY_DEPTH_LIMIT,16);
+        // Exact process-wide boundary, one above, and arithmetic overflow.
+        assert_eq!(preservation_live_quote_data(32).unwrap(),96);
+        assert!(preservation_live_quote_data(33).is_err());
+        assert!(preservation_live_quote_data(usize::MAX).is_err());
+    }
     #[test]
     fn interrupted_output_and_incoming_install_have_separate_quotes() {
         // Exact retained failing package shape and real copying frontier.
