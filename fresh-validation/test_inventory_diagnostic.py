@@ -97,5 +97,61 @@ class DiagnosticCollectorContracts(unittest.TestCase):
             r.diagnostic_native_lines(self.stager, native * 3)
 
 
+class MemoryLifetimeContracts(unittest.TestCase):
+    def binding(self):
+        return dict(job="write-diagnostic", inputPath=Path("/private/memory-DATA/input"),
+            packageBody=b"p"*100, producerBody=b"d", signatureBody=b"s", sourceBytes=1000,
+            inputFiles={"a": (b"input", 0o444)}, controlBodies={"census":b"c", "write":b"w", "recovery":b"r"})
+
+    def packages(self, sizes):
+        labels = dict(cut="write", frontier="frontier", completed="completed", recovery="recovery")
+        return {role: dict(path="/private/memory-DATA/Fresh-"+label+".pkg", bytes=size, sha256="a"*64)
+                for (role,label),size in zip(labels.items(), sizes)}
+
+    def test_disk_package_growth_does_not_accumulate_live_memory(self):
+        first=self.binding();second=dict(first,builtPackageBytes={"write":10000000,"frontier":20000000})
+        self.assertEqual(r.control_build_fixed_bytes(first),r.control_build_fixed_bytes(second))
+        small=r.route_resource_quote(first,self.packages((10,20,30,400)))
+        large=r.route_resource_quote(first,self.packages((100,200,300,400)))
+        self.assertEqual(small["memoryBytes"],large["memoryBytes"])
+        self.assertGreater(large["diskBytes"],small["diskBytes"])
+        self.assertEqual(large["installerCalls"],4)
+        with self.assertRaises(r.Refused):
+            r.route_resource_quote(dict(first,sourceBytes=3*1024**3),self.packages((10,20,30,400)))
+
+    def test_memory_boundary_still_refuses_insufficient_actual_capacity(self):
+        spec=importlib.util.spec_from_file_location("actual_resource_guard",HERE.parent/"desktop/tools/macos_fixed_carrier_resume.py")
+        resource=importlib.util.module_from_spec(spec);spec.loader.exec_module(resource)
+        required=r.route_resource_quote(self.binding(),self.packages((10,20,30,400)))["memoryBytes"]
+        self.assertFalse(resource.resource_admission_data(required-1,required,100,100)["memorySufficient"])
+        self.assertTrue(resource.resource_admission_data(required,required,100,100)["memorySufficient"])
+        self.assertFalse(resource.resource_admission_data(required,required,99,100)["diskSufficient"])
+
+    def test_carrier_body_is_released_only_after_known_detach(self):
+        from types import SimpleNamespace
+        from unittest import mock
+        import time
+        for succeeds in (True,False):
+            with self.subTest(succeeds=succeeds):
+                carrier=object.__new__(r.Carrier)
+                carrier.members={"fixture.pkg":b"retained DATA"}
+                carrier.detached=False;carrier.cleanup_grace_entered=False;carrier.label="cut";carrier.device="DATA-only"
+                carrier.op=SimpleNamespace(fresh_deadline=time.monotonic_ns()+300*10**9,
+                    work=Path("/private/memory-DATA"),outputs=SimpleNamespace(publish=lambda *args:None))
+                carrier.book=SimpleNamespace(finish=lambda:True)
+                carrier.mount=SimpleNamespace(exists=lambda:False,is_symlink=lambda:False)
+                carrier.post=lambda:self.assertTrue(carrier.members)
+                def detach(*args):
+                    self.assertTrue(carrier.members)
+                    if not succeeds:raise r.Refused("original-nonzero")
+                carrier.call=detach
+                with mock.patch.object(r.time,"sleep",lambda _:None):
+                    if succeeds:carrier.detach()
+                    else:
+                        with self.assertRaises(r.Refused):carrier.detach()
+                self.assertEqual(carrier.detached,succeeds)
+                self.assertEqual(bool(carrier.members),not succeeds)
+
+
 if __name__ == "__main__":
     unittest.main()

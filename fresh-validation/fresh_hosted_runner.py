@@ -295,6 +295,10 @@ def package_info(body, identifier):
     return info
 
 
+def control_build_fixed_bytes(binding):
+    return binding.get("sourceBytes", 0) + len(binding["packageBody"]) + sum(map(len, binding["controlBodies"].values())) + 64 * 1024 * 1024
+
+
 def build_control(op, stager, binding, role, invocation=None):
     """Reuse original DATA stager + pkgbuild/root-cpio/xar sequence, never sudo."""
     need(EXECUTION_BINDING is not None, "source-preparation-only")
@@ -312,8 +316,9 @@ def build_control(op, stager, binding, role, invocation=None):
              **{"input/" + path: item for path, item in binding["inputFiles"].items()}}
     inputs = sum(len(item[0]) for item in files.values())
     need(inputs <= stager.MAX_BYTES, "control-scripts-existing-aggregate-cap")
-    prior = sum(binding.get("builtPackageBytes", {}).values())
-    fixed = binding.get("sourceBytes", 0) + len(binding["packageBody"]) + sum(map(len, binding["controlBodies"].values())) + prior + 64 * 1024 * 1024
+    # Earlier packages are closed, audited files; builtPackageBytes holds only
+    # integer lengths. Their bodies are read later, one carrier at a time.
+    fixed = control_build_fixed_bytes(binding)
     resource_capacity(op, binding["hostAPI"], binding,
         {"memoryBytes": fixed + 3 * inputs, "diskBytes": 3 * inputs + 32 * 1024 * 1024},
         label="build-" + label + "-stage")
@@ -524,7 +529,7 @@ class Carrier:
         need(sum(map(len, self.members.values())) == expected_bytes, "precut-carrier-exact-size")
         # Actual script bytes, package pair and all final readback hashes are already admitted.
         stager.write_tree(self.stage, {name: (body, 0o444) for name, body in self.members.items()})
-        self.call("create", ["/usr/bin/hdiutil", "create", "-srcfolder", str(self.stage),
+        self.call("create", ["/usr/bin/hdiutil", "create", "-verbose", "-srcfolder", str(self.stage),
             "-fs", "HFS+", "-format", "UDZO", "-volname", "MRK Fresh Validation", str(self.image)], 180)
         info = self.image.lstat()
         need(stat.S_ISREG(info.st_mode) and info.st_nlink == 1
@@ -690,9 +695,11 @@ def route_resource_quote(binding, packages):
     carriers = {role: ordinary + pair + size for role, size in sizes.items() if role != "recovery"}
     carriers["ordinary"] = ordinary + pair + sizes["recovery"]
     need(all(n <= limit for n in carriers.values()), "precut-carrier-aggregate-capacity")
-    # Keep the original conservative envelope, including every prebuilt package
-    # size, even though those byte vectors now stay on disk until needed.
-    retained = inputs + ordinary + pair + images + sum(sizes.values()) + binding.get("sourceBytes", 0)
+    # Prebuilt packages stay on disk. The fixed route reads one body into a
+    # Carrier, then detach closes its originals and clears members before the
+    # next read. Keep one largest body in addition to the existing three full
+    # carrier windows. Disk charges still include every package and carrier.
+    retained = inputs + ordinary + pair + images + max(sizes.values()) + binding.get("sourceBytes", 0)
     # Existing tree writer/readback and mount readback retain at most three
     # largest complete carrier byte windows, in addition to admitted inputs.
     # Complete original captures/receipt rows reserve64MiB (128x2x256KiB).

@@ -1,8 +1,8 @@
-name: Nonshipping recovery failure trace diagnostic
+name: Nonshipping recovery memory lifetime diagnostic
 
 on:
   push:
-    branches: [codex/macos-fresh-inventory-trace]
+    branches: [codex/macos-fresh-memory-lifetimes]
 
 permissions:
   contents: read
@@ -18,7 +18,7 @@ permissions:
 
 jobs:
   write-diagnostic:
-    if: github.event_name == 'push' && github.ref == 'refs/heads/codex/macos-fresh-inventory-trace'
+    if: github.event_name == 'push' && github.ref == 'refs/heads/codex/macos-fresh-memory-lifetimes'
     runs-on: macos-26
     timeout-minutes: 75
     env:
