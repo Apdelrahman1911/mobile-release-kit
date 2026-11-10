@@ -42,7 +42,7 @@ import sys
 import time
 
 REPOSITORY = "Apdelrahman1911/mobile-release-kit"
-REF = "refs/heads/codex/macos-fresh-memory-lifetimes"
+REF = "refs/heads/codex/macos-fresh-preparation-handles"
 WORKFLOW = ".github/workflows/macos-disposable-fresh.yml"
 HELPER = "fresh-validation/fresh_host_prerequisite.py"
 TEST_SOURCE = "fresh-validation/test_fresh_hosted_data.py"

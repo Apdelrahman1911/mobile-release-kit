@@ -1,0 +1,7 @@
+# Nonshipping completed-preparation handle diagnostic
+
+Run42785122992 reached native recovery and refused the calculated maintenance live-FD budget; all51 original calls and3unforced detaches closed. New shipping draft658f1c1 has a passing real-native scope/close/replacement/96FD regression. Matching recovery sourceaf8dac0d closes completed preparation handles at all3Fresh continuations while retaining the original blank versions/source/root/gate/registration handles. Forecast, cap, source/security and finality guards remain unchanged.
+
+Only the recovery-trace executable changes. Census/write bytes, original emitting source/manifest hashes, signed3533payload and producer pair are retained exactly. The explicit mixed-source transport records each actual code source and compiler receipt. Runner route, memory-lifetime fix, bounded verbose output, four original Installer calls, native conservation/readback, and unforced detach gates are unchanged. Python function ASTs and all694source pins are identical. Only bootstrap binding/ref, host ref and workflow binding/ref change.
+
+This run is diagnostic only. It cannot qualify ordinary or shipping recovery. No signing, package download, torn-case replay, owner authentication/install, publication or automatic unchanged-source retry is authorized by this diagnostic. After complete native diagnostic success, a new signed installer must pass ordinary installation and both recovery cases before owner installation.
