@@ -1,0 +1,99 @@
+name: Linux installer candidate (no publication)
+on:
+  push:
+    branches: [verify/desktop-linux-installer-candidate-014]
+permissions:
+  contents: read
+  actions: read
+concurrency:
+  group: linux-installer-candidate-014
+  cancel-in-progress: false
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 150
+    env:
+      PYTHONDONTWRITEBYTECODE: '1'
+      CANDIDATE_COMMIT: ${{ github.sha }}
+      RUNNER_ENVIRONMENT: ${{ runner.environment }}
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683 # v4.2.2
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Bind candidate and reject duplicate execution
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          CANDIDATE_TREE=$(git rev-parse 'HEAD^{tree}')
+          python3 -B desktop/tools/check_ubuntu_execution.py "$RUNNER_TEMP/admission" "$CANDIDATE_COMMIT" "$CANDIDATE_TREE"
+          echo "CANDIDATE_TREE=$CANDIDATE_TREE" >> "$GITHUB_ENV"
+      - name: Acquire pinned inputs and construct current runtime and plan
+        run: python3 -B desktop/tools/prepare_ubuntu_execution.py --work "$RUNNER_TEMP/preparation" --commit "$CANDIDATE_COMMIT" --tree "$CANDIDATE_TREE"
+      - name: Build once under original bounded owner
+        run: |
+          plan_sha=$(sha256sum "$RUNNER_TEMP/preparation/plan.json" | cut -d' ' -f1)
+          python3 -B desktop/tools/build_ubuntu_candidate.py --plan "$RUNNER_TEMP/preparation/plan.json" --plan-sha256 "$plan_sha" --work "$RUNNER_TEMP/candidate" --compiler-lock "$RUNNER_TEMP/preparation/compiler.lock"
+      - name: Retain candidate and original evidence even on failure
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: linux-candidate-${{ github.run_id }}-attempt-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/admission
+            ${{ runner.temp }}/preparation/evidence
+            ${{ runner.temp }}/preparation/*.json
+            ${{ runner.temp }}/preparation/failure.txt
+            ${{ runner.temp }}/candidate/evidence
+            ${{ runner.temp }}/candidate/*.json
+            ${{ runner.temp }}/candidate/assembly/*.json
+            ${{ runner.temp }}/candidate/assembly/*.deb
+            ${{ runner.temp }}/candidate/assembly/*original
+          if-no-files-found: error
+          retention-days: 14
+      - name: Retain original input archives and source build outputs
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: linux-inputs-${{ github.run_id }}-attempt-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/preparation/inputs
+            ${{ runner.temp }}/preparation/*-source
+            ${{ runner.temp }}/preparation/source-kit
+            ${{ runner.temp }}/preparation/runtime
+          if-no-files-found: warn
+          retention-days: 14
+          compression-level: 1
+  install:
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      max-parallel: 3
+      matrix:
+        case: [ordinary, unknown-final, unknown-stage, pending-record, orphan-record, changed-record, changed-inode, extra-member, record-owner, aliased-record, same-inode-restored]
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: linux-candidate-${{ github.run_id }}-attempt-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/download
+      - name: Exercise this case in its fresh disposable VM
+        env:
+          CASE: ${{ matrix.case }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: sudo -n --preserve-env=GITHUB_ACTIONS,RUNNER_ENVIRONMENT /usr/bin/python3 -B desktop/tools/test_ubuntu_installer_vm.py --download "$RUNNER_TEMP/download" --case "$CASE" --work "$RUNNER_TEMP/install-evidence"
+      - name: Preserve exact installer and original install logs
+        if: always()
+        run: sudo -n chmod -R a+rX "$RUNNER_TEMP/install-evidence"
+      - if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: linux-install-${{ matrix.case }}-${{ github.run_id }}
+          path: ${{ runner.temp }}/install-evidence
+          if-no-files-found: error
+          retention-days: 14

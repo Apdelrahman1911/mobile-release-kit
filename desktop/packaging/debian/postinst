@@ -3,7 +3,8 @@ set -eu
 case "${1-}" in
   configure)
     # Only the fixed, package-owned Rust publisher runs as administrator.
-    # Its error (including an existing publication) is never repaired or hidden.
+    # Known completed publication is revalidated by native identities.
+    # Unknown/partial publication errors are never repaired or hidden.
     exec /usr/bin/env -i PATH=/usr/bin:/bin LANG=C LC_ALL=C \
       /usr/lib/mobile-release-kit/mrk-runtime-publish
     ;;

@@ -9,7 +9,7 @@
 compile_error!("ubuntu-runtime-publisher is a separate headless build, without desktop-shell or development-runtime");
 
 use std::{
-    collections::BTreeSet,
+    collections::{BTreeMap, BTreeSet},
     fmt,
     mem::{ManuallyDrop, MaybeUninit},
     os::fd::{AsFd, BorrowedFd, OwnedFd},
@@ -22,6 +22,9 @@ use crate::{installed_runtime::{self as policy, Identity, Inventory, RootMount,
     ENTRY_COUNT, INITIAL_PID_INODE, INITIAL_USER_INODE, MANIFEST_LIMIT, TREE_DEPTH},
     runtime::{safe_payload_path, COMPILED_TARGET}};
 
+#[path = "runtime_publication_completion.rs"]
+mod completion_policy;
+
 const TARGET: &str = "x86_64-unknown-linux-gnu";
 const BLOCK: usize = 64 * 1024;
 const LIVE_LIMIT: usize = 48;
@@ -29,6 +32,7 @@ const LIVE_LIMIT: usize = 48;
 // and fixed prefix/proc/manifest originals. Completed slots are never reused.
 const RECORD_LIMIT: usize = 3 * ENTRY_COUNT + 128;
 const OPERATION: Duration = Duration::from_secs(180);
+const COMPLETION_LIMIT: usize = 2 * 1024 * 1024;
 const MAP_LIMIT: usize = 4096;
 const STATUS_LIMIT: usize = 64 * 1024;
 const MOUNTINFO_LIMIT: usize = 1024 * 1024;
@@ -165,13 +169,14 @@ struct Binding { slot: Slot, parent: Option<Slot>, name: String, key: DirectoryK
 struct Entry { name: String, relative: String, inode: u64, kind: FileType }
 
 struct Publisher {
+    final_tree: bool, identities: BTreeMap<String, String>, completion: Option<Vec<u8>>,
     originals: Originals, end: Instant, root_mount: Option<mount::MountObservation>, retained: Vec<Binding>,
     #[cfg(test)] fail_sync: Option<Slot>,
     #[cfg(test)] renames: usize,
 }
 impl Publisher {
     fn new() -> Self {
-        Self { originals: Originals::new(), end: Instant::now() + OPERATION, root_mount: None, retained: Vec::with_capacity(16),
+        Self { final_tree: false, identities: BTreeMap::new(), completion: None, originals: Originals::new(), end: Instant::now() + OPERATION, root_mount: None, retained: Vec::with_capacity(16),
             #[cfg(test)] fail_sync: None, #[cfg(test)] renames: 0 }
     }
     fn tick(&self) -> Result<()> { require(Instant::now() < self.end, PublicationError::Deadline) }
@@ -534,7 +539,8 @@ impl Publisher {
         release: &Release<'_>, manifest_size: u64, seen: &mut BTreeSet<String>) -> Result<()> {
         require(depth < TREE_DEPTH, PublicationError::Bounds)?;
         let before = self.protected(directory, FileType::Directory, None)?;
-        require(before.st_mode & 0o7777 == if relative.is_empty() { 0o700 } else { 0o555 }, PublicationError::Identity)?;
+        require(before.st_mode & 0o7777 == if relative.is_empty() && !self.final_tree { 0o700 } else { 0o555 }, PublicationError::Identity)?;
+        self.identities.insert(relative.to_owned(), identity_line(&before));
         let entries = self.scan(directory, relative, inventory, seen)?;
         for entry in entries {
             let child = self.open(Some(directory), &entry.name, read_flags(entry.kind == FileType::Directory), beneath())?;
@@ -548,6 +554,7 @@ impl Publisher {
                 let actual = self.protected(child, FileType::RegularFile, Some(size))?;
                 require(actual.st_ino == entry.inode && actual.st_mode & 0o7777 == payload_mode(&entry.relative), PublicationError::Identity)?;
                 self.verify_bytes(child, size, digest)?;
+                self.identities.insert(entry.relative.clone(), identity_line(&actual));
                 let named = self.named(directory, &entry.name)?.ok_or(PublicationError::Identity)?;
                 require(Identity::of(&actual) == Identity::of(&named)
                     && Identity::of(&actual) == Identity::of(&self.protected(child, FileType::RegularFile, Some(size))?), PublicationError::Identity)?;
@@ -555,6 +562,28 @@ impl Publisher {
             self.originals.close(child)?;
         }
         require(Identity::of(&before) == Identity::of(&self.protected(directory, FileType::Directory, None)?), PublicationError::Identity)
+    }
+    fn write_completion(&mut self, parent: Slot, pending: &str, final_name: &str, bytes: &[u8]) -> Result<()> {
+        // Separate record outside the immutable runtime roster. Exclusive creation;
+        // never chmod an existing object, unlink, overwrite, or retry a collision.
+        let writer = self.open(Some(parent), pending, write_flags(), beneath())?;
+        let fresh = self.protected(writer, FileType::RegularFile, Some(0))?;
+        require(fresh.st_mode & 0o7777 == 0o600, PublicationError::Identity)?;
+        self.write_all(writer, bytes)?;
+        fs::fchmod(self.originals.fd(writer)?, Mode::from_raw_mode(0o444)).map_err(native)?;
+        self.sync(writer)?;
+        let written = self.protected(writer, FileType::RegularFile, Some(bytes.len() as u64))?;
+        require(DirectoryKey::of(&written) == DirectoryKey::of(&fresh).with_mode(0o444), PublicationError::Identity)?;
+        self.originals.close(writer)?;
+        let reader = self.open(Some(parent), pending, read_flags(false), beneath())?;
+        require(Identity::of(&self.protected(reader, FileType::RegularFile, Some(bytes.len() as u64))?) == Identity::of(&written), PublicationError::Identity)?;
+        require(self.read_bytes(reader, COMPLETION_LIMIT, Some(bytes.len() as u64))? == bytes, PublicationError::Inventory)?;
+        self.originals.close(reader)?;
+        require(Identity::of(&self.named(parent, pending)?.ok_or(PublicationError::Identity)?) == Identity::of(&written), PublicationError::Identity)?;
+        self.check_retained()?;
+        self.originals.before_publication()?;
+        fs::renameat_with(self.originals.fd(parent)?, pending, self.originals.fd(parent)?, final_name, RenameFlags::NOREPLACE).map_err(native)?;
+        self.sync(parent)
     }
     fn commit_directory(&mut self, parent: Slot, stage: Slot, stage_name: &str, final_name: &str) -> Result<()> {
         self.originals.before_publication()?;
@@ -589,7 +618,7 @@ impl Publisher {
         self.originals.close(os_release)?;
         Ok((root, lib))
     }
-    fn run(&mut self, release: &Release<'_>) -> Result<()> {
+    fn run(&mut self, release: &Release<'_>, completion: Option<&[u8]>) -> Result<()> {
         let (root, lib) = self.root_context()?;
         let mut source = lib;
         for name in ["mobile-release-kit", "runtime-input", TARGET, release.manifest] { source = self.keep_child(source, name)?; }
@@ -610,8 +639,41 @@ impl Publisher {
         let mut parent = self.keep_child(var, "lib")?;
         for name in ["mobile-release-kit", "versions", TARGET] { parent = self.prefix(parent, name)?; }
         let stage_name = format!(".publish-{}", release.manifest);
+        let record_name = format!(".complete-{}", release.manifest);
+        let pending_name = format!(".complete-pending-{}", release.manifest);
+        // No partial record, stage, or unexplained final is ever adopted.
+        let action = completion_policy::action(self.named(parent, release.manifest)?.is_some(),
+            self.named(parent, &stage_name)?.is_some(), self.named(parent, &pending_name)?.is_some(),
+            self.named(parent, &record_name)?.is_some(), completion.is_some());
+        require(action != completion_policy::Action::Refuse, PublicationError::Collision)?;
+        if action != completion_policy::Action::Publish {
+            let final_slot = self.keep_child(parent, release.manifest)?;
+            self.final_tree = true;
+            let mut seen = BTreeSet::new();
+            self.verify_tree(final_slot, "", 0, &inventory, release, manifest_size, &mut seen)?;
+            complete_names(&inventory, &seen)?;
+            let current = completion_bytes(release, &self.identities)?;
+            if let Some(expected) = completion {
+                // Only reachable after the first publisher's successful settlement.
+                require(completion_policy::exact(expected, &current), PublicationError::Identity)?;
+                self.absent(parent, &record_name)?;
+                self.write_completion(parent, &pending_name, &record_name, &current)?;
+            } else {
+                let record = self.open(Some(parent), &record_name, read_flags(false), beneath())?;
+                let before = self.protected(record, FileType::RegularFile, Some(current.len() as u64))?;
+                require(before.st_mode & 0o7777 == 0o444, PublicationError::Identity)?;
+                let recorded = self.read_bytes(record, COMPLETION_LIMIT, Some(current.len() as u64))?;
+                require(completion_policy::exact(&recorded, &current), PublicationError::Identity)?;
+                require(Identity::of(&before) == Identity::of(&self.named(parent, &record_name)?.ok_or(PublicationError::Identity)?), PublicationError::Identity)?;
+                self.originals.close(record)?;
+                // A visible record after a crash is re-synced before success.
+                self.sync(parent)?;
+            }
+            self.check_retained()?;
+            admin_ids()?;
+            return self.tick();
+        }
         self.absent(parent, release.manifest)?;
-        self.absent(parent, &stage_name)?;
         let mut stage = self.new_directory(parent, &stage_name)?;
         let mut source_names = BTreeSet::new();
         self.copy_tree(source, stage.slot, "", 0, &inventory, release, manifest_size, &mut source_names)?;
@@ -626,11 +688,30 @@ impl Publisher {
         self.check_retained()?;
         self.commit_directory(parent, stage.slot, &stage_name, release.manifest)?;
         stage.name = release.manifest.to_owned(); // Expected successful rename of this SAME original directory.
+        self.identities.insert(String::new(), identity_line(&self.stat(stage.slot)?));
+        self.completion = Some(completion_bytes(release, &self.identities)?);
         self.check_binding(&stage)?;
         self.check_retained()?;
         admin_ids()?;
         self.tick()
     }
+}
+
+// Exact native identity, deliberately excluding read-induced atime. ctime
+// detects same-inode edits/restored bytes; hashes alone never authorize reuse.
+fn identity_line(s: &Stat) -> String {
+    format!("{}:{}:{}:{}:{}:{}:{}:{}:{}:{}:{}", s.st_dev, s.st_ino,
+        s.st_mode, s.st_uid, s.st_gid, s.st_nlink, s.st_size,
+        s.st_mtime, s.st_mtime_nsec, s.st_ctime, s.st_ctime_nsec)
+}
+fn completion_bytes(release: &Release<'_>, identities: &BTreeMap<String, String>) -> Result<Vec<u8>> {
+    let mut bytes = format!("MRK-UBUNTU-COMPLETE-1\n{TARGET}\n{}\n{}\n", release.manifest, release.protocol).into_bytes();
+    for (path, identity) in identities {
+        require(path.is_empty() || safe_payload_path(path), PublicationError::Inventory)?;
+        bytes.extend_from_slice(format!("{path}\t{identity}\n").as_bytes());
+        require(bytes.len() <= COMPLETION_LIMIT, PublicationError::Bounds)?;
+    }
+    Ok(bytes)
 }
 
 fn file_expected<'a>(inventory: &'a Inventory, name: &str, release: &'a Release<'_>, manifest_size: u64) -> Result<(u64, &'a str)> {
@@ -652,12 +733,23 @@ pub fn publish_fixed() -> Result<()> {
     let release = Release::checked(COMPILED_TARGET, option_env!("MRK_BUNDLED_RUNTIME_MANIFEST_SHA256"),
         option_env!("MRK_BUNDLED_PROTOCOL_SHA256"))?;
     let mut publisher = Publisher::new();
-    let result = publisher.run(&release);
+    let result = publisher.run(&release, None);
     // Also runs after any refusal/partial copy/post-rename error. Never traversal
     // cleanup: settle just these returned originals, once, even after expiry.
     publisher.originals.settle()?;
     result?;
-    publisher.tick()
+    publisher.tick()?;
+    if let Some(expected) = publisher.completion.take() {
+        // No completion evidence exists until ALL original publication handles
+        // positively settle and its deadline/result succeed. Reopen from / and
+        // validate the complete tree against those exact historical identities.
+        let mut recorder = Publisher::new();
+        let result = recorder.run(&release, Some(&expected));
+        recorder.originals.settle()?;
+        result?;
+        recorder.tick()?;
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -665,6 +757,49 @@ mod tests {
     use super::*;
     use crate::installed_runtime::PayloadFile;
     use std::{ffi::OsStr, sync::atomic::{AtomicU64, Ordering}};
+
+    #[test]
+    #[ignore = "explicit disposable nonroot native IO fixture only"]
+    fn helper_completion_identity_survives_reopen_after_rename() -> Result<()> {
+        let (mut publisher, root) = fixture()?;
+        let result = (|| {
+            fs::mkdirat(publisher.originals.fd(root)?, "stage", Mode::from_raw_mode(0o700)).map_err(native)?;
+            let stage = publisher.open(Some(root), "stage", read_flags(true), beneath())?;
+            let original = DirectoryKey::of(&publisher.stat(stage)?);
+            fs::fchmod(publisher.originals.fd(stage)?, Mode::from_raw_mode(0o555)).map_err(native)?;
+            publisher.commit_directory(root, stage, "stage", "final")?;
+            let after = publisher.stat(stage)?;
+            assert_eq!(DirectoryKey::of(&after), original.with_mode(0o555));
+            let expected = identity_line(&after);
+            publisher.originals.close(stage)?;
+            let reopened = publisher.open(Some(root), "final", read_flags(true), beneath())?;
+            assert_eq!(identity_line(&publisher.stat(reopened)?), expected);
+            assert!(publisher.named(root, "stage")?.is_none());
+            Ok(())
+        })();
+        publisher.originals.settle()?;
+        result
+    }
+
+    #[test]
+    #[ignore = "explicit disposable nonroot native IO fixture only"]
+    fn helper_completion_same_bytes_replacement_refuses_identity() -> Result<()> {
+        let (mut publisher, root) = fixture()?;
+        let result = (|| {
+            let first = publisher.open(Some(root), "original", write_flags(), beneath())?;
+            publisher.write_all(first, b"same")?;
+            publisher.sync(first)?;
+            let expected = identity_line(&publisher.stat(first)?);
+            publisher.originals.close(first)?;
+            let second = publisher.open(Some(root), "replacement", write_flags(), beneath())?;
+            publisher.write_all(second, b"same")?;
+            publisher.sync(second)?;
+            assert!(!completion_policy::exact(expected.as_bytes(), identity_line(&publisher.stat(second)?).as_bytes()));
+            Ok(())
+        })();
+        publisher.originals.settle()?;
+        result
+    }
 
     #[test]
     fn release_inputs_are_fixed_and_lowercase() {
