@@ -93,3 +93,15 @@ jobs:
           if-no-files-found: error
           retention-days: 14
           compression-level: 1
+      - name: Preserve exact bounded signed fixture images as diagnostic DATA
+        if: always() && !cancelled() && steps.prepare.outcome == 'success'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: macos-native-maintenance-images-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ steps.prepare.outputs.root }}/e2-native-transport-client-image.dylib
+            ${{ steps.prepare.outputs.root }}/e2-native-transport-resident-image.dylib
+            ${{ steps.prepare.outputs.root }}/e2-native-transport-images.json
+          if-no-files-found: warn
+          retention-days: 14
+          compression-level: 1

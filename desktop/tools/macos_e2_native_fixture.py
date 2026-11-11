@@ -43,6 +43,7 @@ SERVICE = IDENTIFIER + ".resident"
 PACKAGE = IDENTIFIER + ".pkg.v1"
 PLIST = CONTENTS + "Library/LaunchDaemons/" + SERVICE + ".plist"
 GATE = "maintenance-gate-v1"
+REGISTRATION_GATE = "registration-reservation-v1"
 TARGET = "aarch64-apple-darwin"
 NATIVE = "desktop/native/macos-installed-native"
 HELPER = "desktop/helpers/macos-android-register"
@@ -5210,6 +5211,11 @@ class Operation:
             self.write_payload(relative, plistlib.dumps(value, sort_keys=True), 0o444)
         if self.transport_selected:
             self.write_payload(TRANSPORT_PLIST, transport_plist_data(),0o444)
+        # Genuine entry.c requires R before loading the diagnostic Client.
+        need(self.stager.REGISTRATION_GATE_NAME == REGISTRATION_GATE
+             and self.stager.REGISTRATION_GATE_BYTES == b"MRK-MACOS-REGISTRATION-RESERVATION-v1\n",
+             "fixture-registration-reservation-source")
+        self.write_payload(REGISTRATION_GATE, self.stager.REGISTRATION_GATE_BYTES, 0o444)
         self.write_payload(GATE, self.stager.MAINTENANCE_GATE_BYTES, 0o444)
         code = ((IMAGES["client"], IDENTIFIER + ".client.image"),
                 (IMAGES["resident"], SERVICE + ".image"), (RESIDENT, SERVICE),
@@ -5241,12 +5247,20 @@ class Operation:
             self.artifacts[role].update(signedSha256=self.stage_roster[IMAGES[role]]["sha256"],
                                         signedBytes=self.stage_roster[IMAGES[role]]["bytes"])
         self.publish("stage-roster.json", canonical(self.stage_roster))
+        if self.transport_selected:
+            self.publish("transport-images.json", canonical({"schemaVersion":1,
+                "type":"mrk-fixture-signed-transport-images-v1", "sourceCommit":self.environment["GITHUB_SHA"],
+                "target":TARGET, "releaseId":self.release, "shippingQualified":False,
+                "productionIdentityQualified":False, "crossSourceReuseQualified":False,
+                "images":[{"role":role, "file":"e2-native-transport-"+role+"-image.dylib",
+                    "bytes":self.stage_roster[IMAGES[role]]["bytes"],
+                    "sha256":self.stage_roster[IMAGES[role]]["sha256"]} for role in ("client","resident")]}))
 
     def payload_roster(self, root, *, installed, seal=False):
         """Exact fixture leaves only, bounded and held; no recursive adoption."""
         need(not (installed and seal), "protected-write-forbidden")
         book = self.protected if installed else self.outputs
-        expected = {ENTRY, CLIENT, RESIDENT, IMAGES["client"], IMAGES["resident"], PLIST, GATE,
+        expected = {ENTRY, CLIENT, RESIDENT, IMAGES["client"], IMAGES["resident"], PLIST, GATE, REGISTRATION_GATE,
                     APP + "/Contents/Info.plist", CONTENTS + "Info.plist",
                     APP + "/Contents/_CodeSignature/CodeResources", CONTENTS + "_CodeSignature/CodeResources"}
         if self.transport_selected: expected.add(TRANSPORT_PLIST)
@@ -5300,13 +5314,20 @@ class Operation:
             total += len(body)
             need(total <= 3 * IMAGE_LIMIT, "fixture-total-bytes")
             if relative in IMAGES.values():
-                fixture_image_macho(body, next(role for role, name in IMAGES.items() if name == relative))
+                role = next(role for role, name in IMAGES.items() if name == relative)
+                fixture_image_macho(body, role)
+                if seal and self.transport_selected:
+                    # Exact final signed body, existing readback+known-close
+                    # publisher; no executable/Cargo target or custody export.
+                    self.publish("transport-" + role + "-image.dylib", body)
             elif relative in layout_executables:
                 service_observer_macho(body, self.stager, cocoa=self.service_cocoa_selected)
             elif executable:
                 self.stager.entry_macho(body)
             elif relative == GATE:
                 need(body == self.stager.MAINTENANCE_GATE_BYTES, "fixture-gate-bytes")
+            elif relative == REGISTRATION_GATE:
+                need(body == self.stager.REGISTRATION_GATE_BYTES, "fixture-registration-reservation-bytes")
             found[relative] = {"bytes": len(body), "sha256": digest(body),
                                "mode": "100555" if executable else "100444"}
             if relative in layout_files:
@@ -5601,6 +5622,10 @@ class Operation:
         allowed_cases = ("transport-only",) if self.transport_selected else CASES
         allowed_names = (TRANSPORT_DIAGNOSTIC,) if self.transport_selected else DIAGNOSTIC_NAMES
         self.native_entered = True
+        if self.transport_selected:
+            # Entry process attempt is distinct from a Rust worker/Client record.
+            self.transport_entry_observation = {"entryProcessAttempted": True, "processReturned": False,
+                "processExitCode": None, "clientDiagnosticAvailable": False, "clientCreated": None}
         self.btm_started = btm_clock_sample()
         try:
             result = self.call("native-run", [str(ROOT / ENTRY)], {}, cwd=self.scratch / "cwd",
@@ -5616,6 +5641,9 @@ class Operation:
                     if name not in names: continue
                     _entry, body = self.outputs.file(self.scratch / "cwd" / name, 2048, modes=(0o600,))
                     records.append(maintenance_diagnostic(body, case))
+                if self.transport_selected:
+                    self.transport_entry_observation.update(clientDiagnosticAvailable=bool(records),
+                        clientCreated=records[0]["clientCreated"] if records else None)
                 self.publish("maintenance-diagnostics.json", canonical({"schemaVersion":1,
                     "type":"mrk-fixture-maintenance-diagnostics-v1","sourceCommit":self.environment["GITHUB_SHA"],
                     "nativeFinalityQualified":False,"shippingQualified":False,"records":records}))
@@ -5623,6 +5651,11 @@ class Operation:
                 pass # Publication failure cannot replace the original native outcome.
         self.native_returned = True
         self.btm_finished = btm_clock_sample()
+        if self.transport_selected:
+            self.transport_entry_observation.update(processReturned=True, processExitCode=result.returncode)
+            # This nonreturning transport image has no ordinary native_result
+            # stdout protocol. Preserve the actual entry return, not a parser error.
+            raise Refused("transport-entry-returned")
         self.native = native_result(result.stdout, result.returncode, self.environment["GITHUB_SHA"], self.release)
         # Actual source, installed originals, capture custody and native finality
         # all participate. A native JSON assertion alone can never pass.
@@ -5775,7 +5808,9 @@ class Operation:
                            and self.native["outcome"] == "unavailable" else "failed",
                 "failure": failure, "phase": self.phase, "originalCalls": self.calls,
                 "workTimeoutSeconds": WORK_SECONDS, "hardTimeoutSeconds": HARD_SECONDS,
-                **({"transportBudgetAccounting": transport_budget_accounting()} if self.transport_selected else {}),
+                **({"transportBudgetAccounting": transport_budget_accounting(),
+                    "transportEntryObservation": getattr(self, "transport_entry_observation", None)}
+                   if self.transport_selected else {}),
                 "auxiliaryBudgetNanoseconds": str(AUXILIARY_NS), "artifacts": self.artifacts,
                 "protectedMetadataObservations": self.metadata,
                 "package": self.package, "installedArtifactRoster": getattr(self, "stage_roster", None),
@@ -6124,6 +6159,7 @@ class Operation:
             self.run_native()
         except BaseException as error:
             primary = error
+            original_failure_phase = self.phase
             raise
         finally:
             if bootstrapped:
@@ -6131,6 +6167,9 @@ class Operation:
                     self.command("transport-bootout",["/usr/bin/sudo","-n","--","/bin/launchctl","bootout","system/"+SERVICE],self.native_environment(),cwd=self.scratch,timeout=30)
                 except BaseException:
                     if primary is None: raise
+                finally:
+                    if primary is not None:
+                        self.phase = original_failure_phase
 
     def execute(self):
         if getattr(self, "removal_selected", False):
