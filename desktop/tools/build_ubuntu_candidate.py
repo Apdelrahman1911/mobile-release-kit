@@ -52,6 +52,7 @@ def execute(plan, work, lock):
     env = dict(PATH='/usr/bin:/bin', HOME=str(work/'home'), TMPDIR=str(work/'tmp'),
                LANG='C', LC_ALL='C', TZ='UTC', CI='true', CARGO_BUILD_JOBS='1',
                RAYON_NUM_THREADS='1', CARGO_INCREMENTAL='0', RUSTC=tools['rustc']['path'],
+               CARGO_PROFILE_DEV_DEBUG='0', CARGO_PROFILE_TEST_DEBUG='0',
                CARGO_HOME=plan['cargoHome'],
                MRK_BUNDLED_RUNTIME_MANIFEST_SHA256=config['manifest_sha256'],
                MRK_BUNDLED_PROTOCOL_SHA256=config['protocol_sha256'])
@@ -68,10 +69,23 @@ def execute(plan, work, lock):
         frontend={str(p.relative_to(source/'desktop/dist')):sha(p) for p in sorted((source/'desktop/dist').rglob('*')) if p.is_file()}
         assert 'index.html' in frontend and len(frontend)>1
         (evidence/'frontend.json').write_text(json.dumps(frontend,indent=2)+'\n')
-        shared=['--offline','--locked','--jobs','1','--target','x86_64-unknown-linux-gnu','--no-default-features']
+        # Preserve release cfg/panic/overflow settings and optimized dependencies.
+        # Only the enormous application package's optimizer is disabled, matching
+        # the existing no-debuginfo dev compilation's memory-oriented codegen.
+        # The original 3GiB process-group ceiling and jobs1 remain authoritative.
+        root_override='profile.release.package.mobile-release-kit-desktop.opt-level=0'
+        shared=['--offline','--locked','--jobs','1','--target','x86_64-unknown-linux-gnu','--no-default-features',
+                '--config',root_override]
+        (evidence/'requested-build-settings.json').write_text(json.dumps(dict(
+            rootReleaseOverride=root_override,devDebug=0,testDebug=0,
+            releaseCfg='unchanged',dependencyReleaseOptimization='unchanged',
+            jobs=1,observedGroupRssLimitBytes=3*1024**3),indent=2)+'\n')
         env['CARGO_TARGET_DIR']=str(work/'publisher-target')
         run([('publisher-build',[cargo,'build',*shared,'--release','--features','ubuntu-runtime-publisher','--bin','mrk-runtime-publish'],1800),
-             ('publisher-tests',[cargo,'test',*shared,'--features','ubuntu-runtime-publisher','--lib','runtime_publication::','--','--test-threads=1'],1800)],source/'desktop/src-tauri',evidence,env)
+             ('publisher-tests',[cargo,'test',*shared,'--features','ubuntu-runtime-publisher','--lib','runtime_publication::','--','--test-threads=1'],1800),
+             ('publisher-kernel-profile-tests',[cargo,'test',*shared,'--features','ubuntu-runtime-publisher','--lib','installed_runtime::kernel_profile_tests::','--','--test-threads=1'],300)],source/'desktop/src-tauri',evidence,env)
+        kernel_log=(evidence/'publisher-kernel-profile-tests/stdout.log').read_text()
+        assert 'installed_runtime::kernel_profile_tests::exact_reviewed_hosted_kernel_and_neighbor_refusal ... ok' in kernel_log
         env['MRK_RUNTIME_PUBLICATION_HELPER_TESTS']='1'
         run([('publisher-native-helpers',[cargo,'test',*shared,'--features','ubuntu-runtime-publisher','--lib','runtime_publication::tests::helper_','--','--ignored','--test-threads=1','--nocapture'],1800)],source/'desktop/src-tauri',evidence,env)
         native_log=(evidence/'publisher-native-helpers/stdout.log').read_text()
@@ -86,7 +100,8 @@ def execute(plan, work, lock):
     inventory=work/'compiler-files.json'; inventory.write_text(json.dumps(binaries,indent=2)+'\n')
     config.update(compiled=str(work/'compiled'),compiler_files=str(inventory),compiler_files_sha256=sha(inventory))
     receipt.update({k:config[k] for k in ('compiler_files_sha256','prepared_files_sha256','manifest_sha256','protocol_sha256','desktop_notice_files_sha256')})
-    receipt.update(frontendFiles=frontend,tools=tools,qualified=False,signed=False)
+    receipt.update(frontendFiles=frontend,tools=tools,qualified=False,signed=False,
+                   requestedBuildSettings=json.loads((evidence/'requested-build-settings.json').read_text()))
     A.source_binding(receipt)
     for row in tools.values(): assert sha(Path(row['path']))==row['sha256']
     rp=work/'build-receipt.json'; rp.write_text(json.dumps(receipt,indent=2)+'\n')
