@@ -23,6 +23,20 @@ NS = 'http://wixtoolset.org/schemas/v4/wxs'
 LIMIT = 512 * 1024 * 1024
 TOTAL = 1024 * 1024 * 1024
 SOURCE_REQUIRED = {
+    'desktop/github-ca.pem',
+    'desktop/src-tauri/src/lib.rs',
+    'desktop/src-tauri/src/lib_windows_packaging.rs',
+    'desktop/src-tauri/src/runtime_manifest_data.rs',
+    'desktop/src-tauri/src/runtime_hash_data.rs',
+    'desktop/src-tauri/src/runtime_windows_version.rs',
+    'desktop/src-tauri/src/runtime_publication_inputs.rs',
+    'desktop/src-tauri/src/protocol.rs',
+    'desktop/src-tauri/src/protocol_version.rs',
+    'desktop/src-tauri/src/protocol_json.rs',
+    'desktop/src-tauri/src/runtime_paths.rs',
+    'desktop/src-tauri/src/error.rs',
+    'desktop/tools/prepare_windows_embedded_payload.py',
+    'desktop/tools/prepare_runtime.py',
     'desktop/src-tauri/src/runtime.rs', 'desktop/src-tauri/src/shell_windows.rs',
     'desktop/src-tauri/src/installed_runtime_windows.rs',
     'desktop/src-tauri/src/runtime_publication_windows.rs',
@@ -33,6 +47,71 @@ SOURCE_REQUIRED = {
     'desktop/src-tauri/build.rs', 'desktop/src-tauri/Cargo.toml',
     'desktop/src-tauri/Cargo.lock', 'desktop/src-tauri/tauri.conf.json',
 }
+# Exact cumulative successor implementation inputs; source/tree remains authoritative.
+SOURCE_REQUIRED |= {
+    'desktop/native/windows-installed-native/src/lib.rs',
+    'desktop/native/windows-installed-native/src/publication.rs',
+    'desktop/native/windows-installed-native/src/publication_exclusion.rs',
+    'desktop/packaging/windows/native-transaction/CMakeLists.txt',
+    'desktop/packaging/windows/native-transaction/Invoke-Lifecycle.ps1',
+    'desktop/packaging/windows/native-transaction/native_tests.cpp',
+    'desktop/packaging/windows/native-transaction/transaction.cpp',
+    'desktop/src-tauri/src/apple_provisioning_windows_closed.rs',
+    'desktop/src-tauri/src/application_project_binding_data.rs',
+    'desktop/src-tauri/src/application_service.rs',
+    'desktop/src-tauri/src/application_service_error_data.rs',
+    'desktop/src-tauri/src/application_service_host_windows_closed.rs',
+    'desktop/src-tauri/src/application_service_windows_closed.rs',
+    'desktop/src-tauri/src/application_state_data.rs',
+    'desktop/src-tauri/src/application_state_store.rs',
+    'desktop/src-tauri/src/application_state_windows_closed.rs',
+    'desktop/src-tauri/src/asset_commands.rs',
+    'desktop/src-tauri/src/asset_session.rs',
+    'desktop/src-tauri/src/asset_session_apple_key_material.rs',
+    'desktop/src-tauri/src/asset_session_apple_p12_material.rs',
+    'desktop/src-tauri/src/asset_session_apple_profile_material.rs',
+    'desktop/src-tauri/src/asset_session_apple_windows_closed.rs',
+    'desktop/src-tauri/src/asset_session_application_service.rs',
+    'desktop/src-tauri/src/asset_session_application_service_windows_data.rs',
+    'desktop/src-tauri/src/asset_session_vault_windows_closed.rs',
+    'desktop/src-tauri/src/asset_source.rs',
+    'desktop/src-tauri/src/bin/windows_runtime_publish.rs',
+    'desktop/src-tauri/src/installed_runtime.rs',
+    'desktop/src-tauri/src/installed_runtime_data.rs',
+    'desktop/src-tauri/src/lib.rs',
+    'desktop/src-tauri/src/lib_application.rs',
+    'desktop/src-tauri/src/lib_platform_data.rs',
+    'desktop/src-tauri/src/lib_ubuntu_packaging.rs',
+    'desktop/src-tauri/src/lib_windows_packaging.rs',
+    'desktop/src-tauri/src/protocol.rs',
+    'desktop/src-tauri/src/protocol_json.rs',
+    'desktop/src-tauri/src/protocol_json_common.rs',
+    'desktop/src-tauri/src/protocol_version.rs',
+    'desktop/src-tauri/src/runtime.rs',
+    'desktop/src-tauri/src/runtime_hash_data.rs',
+    'desktop/src-tauri/src/runtime_manifest_data.rs',
+    'desktop/src-tauri/src/runtime_publication_inputs.rs',
+    'desktop/src-tauri/src/runtime_publication_windows.rs',
+    'desktop/src-tauri/src/runtime_windows_version.rs',
+    'desktop/src-tauri/src/saved_command_apple_key.rs',
+    'desktop/src-tauri/src/saved_command_apple_key_private.rs',
+    'desktop/src-tauri/src/saved_command_apple_p12.rs',
+    'desktop/src-tauri/src/saved_command_apple_p12_private.rs',
+    'desktop/src-tauri/src/saved_command_apple_profile_private.rs',
+    'desktop/src-tauri/src/saved_command_apple_signing.rs',
+    'desktop/src-tauri/src/version_allocation_windows_data.rs',
+    'desktop/tools/build_windows_transaction.py',
+    'desktop/tools/ci_foundation.py',
+    'desktop/tools/create_windows_validation_transform.py',
+    'desktop/tools/prepare_windows_embedded_payload.py',
+    'desktop/tools/prepare_windows_msi.py',
+    'desktop/tools/prepare_windows_transaction_run.py',
+    'desktop/tools/windows_build_command.py',
+    'desktop/tools/windows_msi_transaction.py',
+    'tests/desktop/test_windows_msi_preparation.py',
+    'tests/desktop/test_windows_native_transaction.py',
+}
+
 class Refused(ValueError): pass
 
 def need(ok, message):
@@ -106,10 +185,10 @@ def version(value):
 
 def roster(source):
     body = read(source / 'desktop/native/windows-installed-native/src/publication.rs', 256 * 1024).decode()
-    match = re.search(r'pub const PUBLICATION_PAYLOADS: \[&str; 47\] = \[(.*?)\];', body, re.S)
+    match = re.search(r'pub const PUBLICATION_PAYLOADS: \[&str; 65\] = \[(.*?)\];', body, re.S)
     need(match is not None, 'fixed publisher roster missing')
     paths = re.findall(r'"([^"]+)"', match[1])
-    need(len(paths) == len(set(paths)) == 47, 'publisher roster count')
+    need(len(paths) == len(set(paths)) == 65, 'publisher roster count')
     return [relative(p) for p in paths]
 
 def validate(source, inputs, binding, expected):
@@ -130,11 +209,11 @@ def validate(source, inputs, binding, expected):
     config = decode(read(source / 'desktop/src-tauri/tauri.conf.json', 65536))
     need(config['version'] == b['version'] and config['identifier'] == 'dev.mobile-release-kit.desktop' and config['bundle']['active'] is False, 'product mapping')
     expected_paths = {SHELL, PUBLISHER} | {'runtime/' + p for p in roster(source)}
-    need(isinstance(b['files'], dict) and set(b['files']) == expected_paths, 'exact 49 input files required')
+    need(isinstance(b['files'], dict) and set(b['files']) == expected_paths, 'exact 67 input files required')
     actual = set()
     # Bounded traversal; no recursive symlink following, hidden extras or empty directories.
     for root, dirs, files in os.walk(inputs, followlinks=False):
-        need(len(dirs) + len(files) <= 49, 'directory entry bound')
+        need(len(dirs) + len(files) <= 67, 'directory entry bound')
         for name in dirs:
             p = Path(root) / name
             rel = p.relative_to(inputs).as_posix()
@@ -142,7 +221,7 @@ def validate(source, inputs, binding, expected):
                  and not getattr(p.lstat(), 'st_file_attributes', 0) & 0x400, 'unexpected directory')
         for name in files:
             actual.add((Path(root) / name).relative_to(inputs).as_posix())
-            need(len(actual) <= 49, 'input count bound')
+            need(len(actual) <= 67, 'input count bound')
     need(actual == expected_paths, 'unexpected or missing input file')
     total = 0
     for name in sorted(expected_paths):

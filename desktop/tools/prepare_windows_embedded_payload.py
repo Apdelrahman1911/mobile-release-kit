@@ -130,7 +130,7 @@ def github_ca_bytes(source: Path) -> bytes:
 
 def _source_payloads(source: Path, github_ca: bytes) -> list[tuple[str, bytes]]:
     """Snapshot only current core, six bootstraps and the separately pinned CA."""
-    fixed_files = len(runtime_preparation.BOOTSTRAPS) + 1
+    fixed_files = len(runtime_preparation.CURRENT_BOOTSTRAPS) + 1
     package = runtime_preparation._root(source / "src/mobile_release")
     # The full projection adds src/, src/mobile_release/, desktop/ and seven
     # desktop leaves to the core census. Reserve that overhead before output.
@@ -145,7 +145,7 @@ def _source_payloads(source: Path, github_ca: bytes) -> list[tuple[str, bytes]]:
         total += len(content)
         payloads["src/mobile_release/" + path.relative_to(package).as_posix()] = content
     desktop = runtime_preparation._root(source / "desktop")
-    for name in runtime_preparation.BOOTSTRAPS:
+    for name in runtime_preparation.CURRENT_BOOTSTRAPS:
         payloads["desktop/" + name] = runtime_preparation.read_checked(
             desktop / name, limit=runtime_preparation.MAX_BOOTSTRAP_BYTES)
     payloads["desktop/" + runtime_preparation.GITHUB_CA_NAME] = github_ca
@@ -273,7 +273,7 @@ def prepare(source: Path, archive: Path, runtime: Path) -> dict[str, str]:
         with (python / NOTICE_NAME).open("xb") as output:
             require(output.write(notices) == len(notices), "Windows notice copy was incomplete")
         check_supplier_copy(python, notices)
-    prepared = runtime_preparation.prepare(projection, runtime, TARGET)
+    prepared = runtime_preparation.prepare_current(projection, runtime, TARGET)
     # These are preparation bindings, not a new execution/provenance grant. The
     # existing CI receipt adds source/run/attempt and original native observations.
     return {**prepared, "inputSha256": ZIP_SHA256,

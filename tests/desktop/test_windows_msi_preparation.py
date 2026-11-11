@@ -46,8 +46,8 @@ class Preparation(unittest.TestCase):
         for name in self.b['files']:
             self.assertEqual((out/'payload'/name).read_bytes(), (self.inputs/name).read_bytes())
         xml=ET.parse(out/'Package.wxs'); ns={'w':m.NS}
-        self.assertEqual(len(xml.findall('.//w:File',ns)),49)
-        self.assertEqual(len(xml.findall('.//w:Component',ns)),49)
+        self.assertEqual(len(xml.findall('.//w:File',ns)),67)
+        self.assertEqual(len(xml.findall('.//w:Component',ns)),67)
         self.assertEqual(xml.find('.//w:Launch',ns).get('Condition'),'0')
         self.assertEqual(xml.find('.//w:CustomAction',ns).get('Return'),'check')
         self.assertEqual(xml.find('.//w:CustomAction',ns).get('ExeCommand'),'')
@@ -194,3 +194,32 @@ class Policy(unittest.TestCase):
         x=self.complete()
         self.assertFalse(x.maintenance(same_binding='b'*64,completion_owner_authenticated=True,original_exit_settled=True,protected_fullwalk=True))
 if __name__=='__main__': unittest.main(verbosity=2)
+
+class CurrentWindowsRuntime(unittest.TestCase):
+    setUp=Preparation.setUp
+    bind=Preparation.bind
+    valid=Preparation.valid
+    refused=Preparation.refused
+    def test_current_base_has_all_twenty_four_bootstraps(self):
+        names=m.roster(SOURCE)
+        self.assertEqual(len(names),65)
+        self.assertEqual(len([name for name in names if name.endswith('_bootstrap.py')]),24)
+        for name in ('project_recovery_bootstrap.py','artifact_inspection_bootstrap.py',
+                     'github_preflight_bootstrap.py','git_remote_helper_bootstrap.py',
+                     'git_push_helper_bootstrap.py','android_upload_key_bootstrap.py'):
+            self.assertIn(name,names)
+        self.assertFalse(any(name.startswith(('tools/','store/')) for name in names))
+    def test_legacy_forty_seven_layout_cannot_be_adopted(self):
+        old={'engine_bootstrap.py','config_edit_bootstrap.py','github_connection_bootstrap.py',
+             'environment_bootstrap.py','offline_preflight_bootstrap.py','android_build_bootstrap.py'}
+        for name in list(self.b['files']):
+            relative=name.removeprefix('runtime/')
+            if relative.endswith('_bootstrap.py') and relative not in old:
+                (self.inputs/name).unlink();del self.b['files'][name]
+        self.assertEqual(len(self.b['files']),49)
+        self.refused()
+    def test_actual_original_identity_packet_remains_bounded(self):
+        # Pure wire bound, never a fabricated original identity or native proof.
+        identity='0'*16+':'+'0'*32+'\n'
+        packet='ROOT '+identity+'PYTHON '+identity+('FILE '+identity)*len(m.roster(SOURCE))
+        self.assertLess(len(packet),4096)

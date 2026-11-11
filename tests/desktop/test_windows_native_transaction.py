@@ -13,7 +13,7 @@ class NativeAssembly(unittest.TestCase):
  def binding(self):
   return {'version':'0.1.4','sourceCommit':'a'*40,'sourceTree':'b'*40,'manifestSha256':'c'*64,
           'files':{p.PUBLISHER:{'size':8,'sha256':'d'*64},**{'runtime/'+k:{'size':i+1,'sha256':'e'*64}
-                for i,k in enumerate(['manifest.json']+['python/file%d.dll'%i for i in range(46)])}}}
+                for i,k in enumerate(['manifest.json']+['python/file%d.dll'%i for i in range(64)])}}}
  def test_lifecycle_order_and_privilege(self):
   root=ET.fromstring(n.assembly(self.binding())); ns={'w':p.NS}
   actions={a.get('Id'):a.attrib for a in root.findall('.//w:CustomAction',ns)}

@@ -14,7 +14,6 @@ pub(crate) struct DirectoryIdentity { dev: u64, ino: u64, mode: u32, uid: u32, g
 impl DirectoryIdentity {
     /// Native service placement checks compare the actual selected directory,
     /// not its spelling (macOS firmlinks/case aliases can name the same inode).
-    #[cfg(any(target_os = "linux", target_os = "macos"))]
     pub(crate) fn service_identity(self) -> (u64, u64) { (self.dev, self.ino) }
     // Only a private store's actual held Linux/macOS directory observation calls
     // this bridge. It is not renderer input, a synthetic source or write lease.

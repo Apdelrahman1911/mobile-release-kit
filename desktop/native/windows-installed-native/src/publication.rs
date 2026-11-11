@@ -12,21 +12,38 @@ use std::time::{Duration, Instant};
 use windows_sys::Win32::System::SystemServices as SS;
 
 const TARGET: &str = "x86_64-pc-windows-msvc";
-const MANIFEST: usize = 7;
+const MANIFEST: usize = 23;
 const MANIFEST_LIMIT: usize = 1024 * 1024;
 const OPERATION: Duration = Duration::from_secs(180);
 
 /// Literal DATA roster, not caller-selected destinations or executable authority.
-pub const PUBLICATION_PAYLOADS: [&str; 47] = [
+pub const PUBLICATION_PAYLOADS: [&str; 65] = [
     "android_build_bootstrap.py",
+    "android_upload_key_bootstrap.py",
+    "artifact_inspection_bootstrap.py",
     "config_edit_bootstrap.py",
     "core.zip",
     "engine_bootstrap.py",
     "environment_bootstrap.py",
+    "git_local_bootstrap.py",
+    "git_push_bootstrap.py",
+    "git_push_helper_bootstrap.py",
+    "git_read_bootstrap.py",
+    "git_remote_bootstrap.py",
+    "git_remote_helper_bootstrap.py",
     "github-ca.pem",
+    "github_auth_bootstrap.py",
     "github_connection_bootstrap.py",
+    "github_device_bootstrap.py",
+    "github_history_bootstrap.py",
+    "github_preflight_bootstrap.py",
+    "github_release_bootstrap.py",
+    "github_setup_bootstrap.py",
+    "ios_archive_bootstrap.py",
+    "local_release_history_bootstrap.py",
     "manifest.json",
     "offline_preflight_bootstrap.py",
+    "project_recovery_bootstrap.py",
     "python/LICENSE.txt",
     "python/MRK-EMBEDDED-NOTICES.txt",
     "python/_asyncio.pyd",
@@ -65,6 +82,7 @@ pub const PUBLICATION_PAYLOADS: [&str; 47] = [
     "python/vcruntime140.dll",
     "python/vcruntime140_1.dll",
     "python/winsound.pyd",
+    "tool_acquisition_bootstrap.py",
 ];
 
 fn need(value: bool) -> Result<()> { if value { Ok(()) } else { Err(Error::Unsafe) } }
@@ -656,7 +674,7 @@ pub struct Publication {
     source_root: Option<usize>, source_python: Option<usize>, mrk: Option<usize>,
     output_dirs: Vec<usize>, version: Option<usize>, python: Option<usize>,
     manifest: Vec<u8>, manifest_original: Option<usize>, manifest_facts: Option<Facts>,
-    sizes: Option<[u64; 47]>, transfer: Option<Transfer>, copied: Vec<Copied>, settlement_attempted: bool,
+    sizes: Option<[u64; 65]>, transfer: Option<Transfer>, copied: Vec<Copied>, settlement_attempted: bool,
     copy_failure: Cell<Option<PublicationCopyObservation>>,
     exclusion: super::publication_exclusion::PublicationExclusion,
 }
@@ -1123,7 +1141,7 @@ impl Publication {
     }
     /// The safe app has authenticated D/Q, all37 suppliers and this exact roster.
     /// Sizes count BOTH source and readback under the original aggregate budget.
-    pub fn create_once(&mut self, sizes: [u64; 47]) -> Result<()> {
+    pub fn create_once(&mut self, sizes: [u64; 65]) -> Result<()> {
         self.step(|this| {
             this.order.live(Stage::Manifest)?;
             need(sizes[MANIFEST] == this.manifest.len() as u64 && sizes.iter().all(|n| *n <= MAX_FILE_BYTES))?;
@@ -1145,7 +1163,7 @@ impl Publication {
     }
     pub fn start_copy(&mut self, index: usize) -> Result<()> {
         self.step(|this| {
-            this.order.live(Stage::Copying)?; need(this.transfer.is_none() && index == this.order.copies && index < 47)?;
+            this.order.live(Stage::Copying)?; need(this.transfer.is_none() && index == this.order.copies && index < 65)?;
             let size = this.sizes.as_ref().ok_or(Error::State)?[index];
             let (source, source_facts) = if index == MANIFEST {
                 (this.manifest_original.ok_or(Error::State)?, this.manifest_facts.clone().ok_or(Error::State)?)
@@ -1275,7 +1293,7 @@ impl Publication {
     }
 
     fn inventories(&mut self) -> Result<()> {
-        need(self.transfer.is_none() && self.copied.len() == 47)?;
+        need(self.transfer.is_none() && self.copied.len() == 65)?;
         for copied in &self.copied {
             need(copied.proof.complete() && self.closed(copied.source) && self.closed(copied.writer) && self.closed(copied.readback))?;
         }
@@ -1356,7 +1374,7 @@ impl Publication {
     pub fn seal_once(&mut self) -> Result<()> {
         self.step(|this| {
             this.order.live(Stage::Copying)?; this.inventories()?; this.order.seal()?;
-            // All47 source/data-writer/readback originals are known closed before
+            // All65 source/data-writer/readback originals are known closed before
             // the first ordinary grant. Retire unchanged source directories too.
             for index in this.source_dirs.clone().into_iter().rev() {
                 this.recheck_dir(index)?; this.close(this.directories[index].initial)?;
@@ -1855,7 +1873,7 @@ mod tests {
             assert_eq!(exact_names_in(&[], false, trace.at(O::Inventory)), exact_names(&[], false));
             admission_fault(&trace, R::Version, O::Inventory, C::RosterMissing, None);
         }
-        need(PUBLICATION_PAYLOADS.len() == 47 && PUBLICATION_PAYLOADS[MANIFEST] == "manifest.json")?;
+        need(PUBLICATION_PAYLOADS.len() == 65 && PUBLICATION_PAYLOADS[MANIFEST] == "manifest.json")?;
         need(PUBLICATION_PAYLOADS.windows(2).all(|p| p[0] < p[1]))?;
         need(PUBLICATION_PAYLOADS.iter().filter(|p| p.starts_with("python/")).count() == 38)?;
         for (i, path) in PUBLICATION_PAYLOADS.iter().enumerate() {
@@ -2156,9 +2174,9 @@ mod tests {
             need(order.copied(0, bad).is_err() && order.seal().is_err() && order.expose().is_err())?;
         }
         let mut order = Order::new(); order.stage = Stage::Copying;
-        for i in 0..47 { order.copied(i, proof())?; }
+        for i in 0..65 { order.copied(i, proof())?; }
         need(order.seal().is_err())?; order.inventories = true; order.seal()?;
-        need(order.expose().is_err())?; order.sealed_files = 47;
+        need(order.expose().is_err())?; order.sealed_files = 65;
         need(order.expose().is_err())?; order.python_closed = true; order.expose()?;
         need(order.completed(true).is_err())?; order.stage = Stage::RootClosed;
         need(order.completed(false).is_err())?; order.completed(true)?;

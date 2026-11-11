@@ -19,7 +19,8 @@ mod project_identity;
 #[path = "asset_session_saved_observation.rs"]
 mod saved_observation;
 use saved_observation::{SavedObservationLane, SavedInputBinding, AppleProvisioningSavedInput};
-#[path="asset_session_apple_provisioning.rs"]
+#[cfg_attr(any(target_os="linux",target_os="macos"),path="asset_session_apple_provisioning.rs")]
+#[cfg_attr(not(any(target_os="linux",target_os="macos")),path="asset_session_apple_windows_closed.rs")]
 pub(crate) mod apple_provisioning;
 pub(crate) use apple_provisioning::AppleProvisioningDocumentInput;
 #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
@@ -45,8 +46,8 @@ pub(crate) use version_reserve::agent::{ReserveRelay,decode_allow as decode_agen
 mod version_enrollment;
 pub(crate) use version_enrollment::VersionEnrollmentGoGate;
 pub(crate) use version_enrollment::agent::Capture as CounterEnrollmentCapture;
-#[cfg(any(target_os = "linux", target_os = "macos"))]
-#[path = "asset_session_application_service.rs"]
+#[cfg_attr(any(target_os="linux",target_os="macos"),path="asset_session_application_service.rs")]
+#[cfg_attr(not(any(target_os="linux",target_os="macos")),path="asset_session_application_service_windows_data.rs")]
 pub(crate) mod application_service;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 #[path = "asset_session_repository_summary.rs"]
@@ -111,6 +112,11 @@ const NATIVE_QUALIFIED: bool = false;
 #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
 #[path = "asset_session_vault.rs"]
 mod vault;
+#[cfg(not(any(all(target_os="linux",target_arch="x86_64",target_env="gnu"),all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64")))))]
+#[path="asset_session_vault_windows_closed.rs"]
+mod vault;
+#[cfg(not(any(all(target_os="linux",target_arch="x86_64",target_env="gnu"),all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64")))))]
+pub(crate) use vault::{AppleDistributionKeyDestination,AppleDistributionKeyLoan,AppleP12Destination,AppleProfileDestination};
 #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
 use crate::vault_keyring_linux as keyring;
 #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
@@ -3700,8 +3706,8 @@ impl DocumentBinding {
         if state.quit_pending || state.retiring || state.lock_pending || state.compatibility_picker_pending || state.maintenance.closed() || gh_auth::pending(state) || (version_allocation::pending(state) || version_enrollment::pending(state)) || git_read::pending(state) || git_local::pending(state)
             || state.saved_observation.as_ref().is_some_and(|lane| !lane.returned())
             || state.slot.as_ref().is_some_and(|slot| (slot.phase != Phase::Idle || !slot.owner.resources_settled())
-                && !profile.is_some_and(|sources| apple_profile::current_slot(slot,sources))
-                && !key.is_some_and(|sources| apple_key::current_slot(slot,sources)))
+                && !profile.is_some_and(|sources| windows_compatible_profile_current_slot(slot,sources))
+                && !key.is_some_and(|sources| windows_compatible_key_current_slot(slot,sources)))
             || state.github.registration().is_some() || !self.inner.bridge.edits.can_exit() || self.inner.bridge.edits.preflight_attention()
             || !self.inner.bridge.supervisor.can_exit() || self.inner.bridge.diagnostics.busy() || self.inner.bridge.preflight.busy()
             || (self.inner.bridge.android_build.busy() || (self.inner.bridge.project_recovery.busy() || (self.inner.bridge.ios_archive.busy() || (self.inner.bridge.artifact_inspection.busy() || (self.inner.bridge.tool_acquisition.busy() || self.inner.bridge.upload_key.busy()))))) { return Availability::Busy; }
@@ -10373,3 +10379,20 @@ pub(crate) fn github_setup_consent_data_checks() {
 pub(crate) use vault::installed_upload_observation::{Sample as InstalledUploadSample, Trace as InstalledUploadTrace, ProducerSample as InstalledUploadProducerSample, ColdState as InstalledUploadColdState};
 #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
 pub(crate) use vault::installed_backup_observation::Trace as InstalledUploadBackupTrace;
+
+fn windows_compatible_profile_current_slot(slot:&Slot,sources:&Arc<vault::profile_sources::AppleProfileSources>)->bool {
+#[cfg(any(target_os="linux",target_os="macos"))] {apple_profile::current_slot(slot,sources)}
+#[cfg(not(any(target_os="linux",target_os="macos")))] {match **sources {}}
+}
+fn windows_compatible_key_current_slot(slot:&Slot,sources:&Arc<vault::key_sources::AppleKeySources>)->bool {
+#[cfg(any(target_os="linux",target_os="macos"))] {apple_key::current_slot(slot,sources)}
+#[cfg(not(any(target_os="linux",target_os="macos")))] {match **sources {}}
+}
+#[cfg(not(any(target_os="linux",target_os="macos")))]
+impl OriginalWork {
+ pub(crate) fn request_apple_profile_stop(&self) { self.stop(); }
+ pub(crate) fn apple_profile_source_checked(&self,parent:&crate::saved_command_owner::AppleProfileSession)->bool {false}
+ pub(crate) fn apple_key_source_checked(&self,parent:&crate::saved_command_owner::AppleKeySession)->bool {false}
+ pub(crate) fn apple_key_before_pending_checked(&self,parent:&crate::saved_command_owner::AppleKeySession)->bool {false}
+ pub(crate) fn apple_p12_before_pending_checked(&self,parent:&crate::saved_command_owner::AppleKeySession)->bool {false}
+}

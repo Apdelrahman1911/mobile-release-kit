@@ -157,7 +157,7 @@ void enumerate(const std::wstring& p,std::vector<std::wstring>& actual,const std
  WIN32_FIND_DATAW d{};HANDLE raw=FindFirstFileW((p+L"\\*").c_str(),&d);
 win32_need(raw!=INVALID_HANDLE_VALUE);Search f(raw);
  do{std::wstring n=d.cFileName;if(n==L"."||n==L"..")continue;
-need(actual.size()<48 && !(d.dwFileAttributes&FILE_ATTRIBUTE_REPARSE_POINT));if(d.dwFileAttributes&FILE_ATTRIBUTE_DIRECTORY){
+need(actual.size()<66 && !(d.dwFileAttributes&FILE_ATTRIBUTE_REPARSE_POINT));if(d.dwFileAttributes&FILE_ATTRIBUTE_DIRECTORY){
 need(prefix.empty()&&n==L"python");enumerate(child(p,n),actual,L"python\\");}else actual.push_back(prefix+n);}while(FindNextFileW(raw,&d));
 last_error_need(ERROR_NO_MORE_FILES);f.settled();
 }

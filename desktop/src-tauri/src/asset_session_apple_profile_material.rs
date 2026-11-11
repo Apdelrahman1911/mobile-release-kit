@@ -12,6 +12,8 @@ pub(super) fn borrow(
     registration: u32,
     root: &asset_source::RegisteredRoot,
 ) -> Result<Arc<SelectedStoreMaterial>, BridgeError> {
+#[cfg(any(all(target_os="linux",target_arch="x86_64",target_env="gnu"),all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"))))]
+{
     if !context.mode.profile() || !context.valid() {
         return Err(refused());
     }
@@ -65,17 +67,27 @@ pub(super) fn borrow(
     result.parts()?;
     Ok(result)
 }
+#[cfg(not(any(all(target_os="linux",target_arch="x86_64",target_env="gnu"),all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64")))))]
+{Err(refused())}
+}
 
 impl SelectedStoreMaterial {
     pub(crate) fn profile_sources(&self) -> Option<&Arc<AppleProfileSources>> {
+#[cfg(any(all(target_os="linux",target_arch="x86_64",target_env="gnu"),all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"))))]
+{
         self.profile_sources.as_ref()
     }
+#[cfg(not(any(all(target_os="linux",target_arch="x86_64",target_env="gnu"),all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64")))))]
+{None}
+}
     pub(super) fn profile_current(
         &self,
         state: &DocumentState,
         registration: u32,
         root: &asset_source::RegisteredRoot,
     ) -> bool {
+#[cfg(any(all(target_os="linux",target_arch="x86_64",target_env="gnu"),all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"))))]
+{
         let Some(StoreCommand::Provisioning(context)) = &self.command else {
             return false;
         };
@@ -92,7 +104,12 @@ impl SelectedStoreMaterial {
             && Arc::ptr_eq(&self.native, sources.native())
             && apple_parts(&self.payload).is_some()
     }
+#[cfg(not(any(all(target_os="linux",target_arch="x86_64",target_env="gnu"),all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64")))))]
+{false}
+}
     pub(super) fn profile_parts(&self) -> Result<Vec<(&'static str, &[u8])>, BridgeError> {
+#[cfg(any(all(target_os="linux",target_arch="x86_64",target_env="gnu"),all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"))))]
+{
         let Some(StoreCommand::Provisioning(context)) = &self.command else {
             return Err(refused());
         };
@@ -113,11 +130,19 @@ impl SelectedStoreMaterial {
         ]);
         Ok(result)
     }
+#[cfg(not(any(all(target_os="linux",target_arch="x86_64",target_env="gnu"),all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64")))))]
+{Err(refused())}
+}
     pub(crate) fn provisioning_profile_input_bytes(&self) -> Option<usize> {
+#[cfg(any(all(target_os="linux",target_arch="x86_64",target_env="gnu"),all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"))))]
+{
         self.profile_sources.as_ref()?;
         self.profile_parts()
             .ok()?
             .iter()
             .try_fold(0usize, |sum, (_, value)| sum.checked_add(value.len()))
     }
+#[cfg(not(any(all(target_os="linux",target_arch="x86_64",target_env="gnu"),all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64")))))]
+{None}
+}
 }

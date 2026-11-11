@@ -12,7 +12,7 @@ use sha2::{Digest, Sha256};
 use crate::runtime::windows_version::{Inventory, VersionSpec, MANIFEST_BYTES, TARGET};
 
 static OWNER: OnceLock<Mutex<Publication>> = OnceLock::new();
-const MANIFEST: usize = 7;
+const MANIFEST: usize = 23;
 const FILE_LIMIT: u64 = 512 * 1024 * 1024;
 const TOTAL_READ_LIMIT: u64 = 1024 * 1024 * 1024;
 
@@ -61,7 +61,7 @@ impl PublicationFailure {
     }
     fn copy_observation_allowed(self) -> bool {
         self.phase == FailurePhase::FinishCopy && self.native == Some(NativeError::Unsafe)
-            && self.ordinal.is_some_and(|index| index < 47)
+            && self.ordinal.is_some_and(|index| index < 65)
     }
     fn class(self) -> &'static str {
         match self.native {
@@ -87,7 +87,7 @@ impl PublicationError {
         let mut line = String::with_capacity(192);
         line.push_str("MRK_WINDOWS_RUNTIME_PUBLISH_FAILURE_V1=phase="); line.push_str(phase);
         line.push_str(";class="); line.push_str(class); line.push_str(";ordinal=");
-        if let Some(index) = ordinal.filter(|index| *index < 47) {
+        if let Some(index) = ordinal.filter(|index| *index < 65) {
             if index >= 10 { line.push(char::from(b'0' + (index / 10) as u8)); }
             line.push(char::from(b'0' + (index % 10) as u8));
         } else { line.push_str("none"); }
@@ -127,7 +127,7 @@ fn hex(bytes: &[u8]) -> String {
     result
 }
 
-struct Expected { sizes: [u64; 47], hashes: [String; 47] }
+struct Expected { sizes: [u64; 65], hashes: [String; 65] }
 impl Expected {
     fn decode(spec: &VersionSpec, bytes: &[u8]) -> Checked<Self> {
         // The existing VersionSpec hashes before JSON and retains Q/core/target,
@@ -145,7 +145,7 @@ impl Expected {
             .chain(std::iter::once("manifest.json")).collect();
         let expected: BTreeSet<&str> = PUBLICATION_PAYLOADS.into_iter().collect();
         require(actual == expected && actual.len() == PUBLICATION_PAYLOADS.len())?;
-        let mut sizes = [0; 47];
+        let mut sizes = [0; 65];
         let mut hashes = std::array::from_fn(|_| String::new());
         for (i, path) in PUBLICATION_PAYLOADS.iter().enumerate() {
             if i == MANIFEST {
@@ -301,10 +301,10 @@ mod tests {
             // The same closed gate controls both the owner snapshot and formatter.
             // No public factory fabricates native diagnostic values for this crate.
             for native in [NativeError::Unavailable, NativeError::Unsafe, NativeError::Bounds, NativeError::State, NativeError::Unknown] {
-                for ordinal in [None, Some(0), Some(2), Some(9), Some(10), Some(46), Some(47), Some(usize::MAX)] {
+                for ordinal in [None, Some(0), Some(2), Some(9), Some(10), Some(64), Some(65), Some(usize::MAX)] {
                     let cause = PublicationFailure::native(phase, ordinal, native);
                     let allowed = phase == FailurePhase::FinishCopy && native == NativeError::Unsafe
-                        && ordinal.is_some_and(|index| index < 47);
+                        && ordinal.is_some_and(|index| index < 65);
                     assert_eq!(cause.admission_observation_allowed(), phase == FailurePhase::Admit && native == NativeError::Unsafe);
                     assert_eq!(cause.copy_observation_allowed(), allowed);
                     assert!(!(cause.admission_observation_allowed() && cause.copy_observation_allowed()));
@@ -326,12 +326,12 @@ mod tests {
         }
         for (native, class) in [(NativeError::Unavailable, "unavailable"), (NativeError::Unsafe, "unsafe"),
             (NativeError::Bounds, "bounds"), (NativeError::State, "state"), (NativeError::Unknown, "unknown")] {
-            let error = PublicationError::Failed { cause: PublicationFailure::native(FailurePhase::CopyNext, Some(46), native), possibly_exposed: true, originals_unknown: false, frame: None, admission: None, copy: Some(copy) };
-            assert_eq!(error.diagnostic_line(), Some(format!("MRK_WINDOWS_RUNTIME_PUBLISH_FAILURE_V1=phase=copy-next;class={class};ordinal=46;possiblyExposed=true;originalsUnknown=false\n")));
+            let error = PublicationError::Failed { cause: PublicationFailure::native(FailurePhase::CopyNext, Some(64), native), possibly_exposed: true, originals_unknown: false, frame: None, admission: None, copy: Some(copy) };
+            assert_eq!(error.diagnostic_line(), Some(format!("MRK_WINDOWS_RUNTIME_PUBLISH_FAILURE_V1=phase=copy-next;class={class};ordinal=64;possiblyExposed=true;originalsUnknown=false\n")));
             assert!(error.copy_diagnostic_line().is_none());
         }
         for (ordinal, encoded) in [(None, "none"), (Some(0), "0"), (Some(9), "9"), (Some(10), "10"),
-            (Some(46), "46"), (Some(47), "none"), (Some(usize::MAX), "none")] {
+            (Some(64), "64"), (Some(65), "none"), (Some(usize::MAX), "none")] {
             let error = PublicationError::Failed { cause: PublicationFailure::policy(FailurePhase::CopyCount, ordinal), possibly_exposed: true, originals_unknown: true, frame: None, admission: None, copy: Some(copy) };
             let line = error.diagnostic_line().unwrap();
             assert_eq!(line, format!("MRK_WINDOWS_RUNTIME_PUBLISH_FAILURE_V1=phase=copy-count;class=policy;ordinal={encoded};possiblyExposed=true;originalsUnknown=true\n"));
@@ -367,7 +367,7 @@ mod tests {
     fn roster_refuses_extras_omissions_case_aliases_and_extra_directories() {
         let digest = "d".repeat(64);
         assert!(Expected::roster(&roster_fixture(), 1, &digest).is_ok());
-        for missing in 0..46 {
+        for missing in 0..64 {
             let mut inventory = roster_fixture(); inventory.manifest.files.remove(missing);
             assert!(Expected::roster(&inventory, 1, &digest).is_err());
         }

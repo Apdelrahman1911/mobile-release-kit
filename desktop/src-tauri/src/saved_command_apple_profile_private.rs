@@ -148,6 +148,7 @@ impl ReceiveBook {
             })
     }
 
+    #[cfg(any(target_os="linux",target_os="macos"))]
     pub(super) fn seal_profile(
         &self,
         reserved: &mut crate::vault_crypto::ReservedAppleProfile,
@@ -172,6 +173,7 @@ impl ReceiveBook {
         )
     }
 
+    #[cfg(any(target_os="linux",target_os="macos"))]
     pub(super) fn matches_readback(
         &self,
         record: &crate::vault_crypto::AuthenticatedRecord,

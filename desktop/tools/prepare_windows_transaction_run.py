@@ -56,6 +56,8 @@ def main():
  run('npm-ci',['npm.cmd','ci','--ignore-scripts'],source/'desktop',600)
  run('frontend-build',['npm.cmd','run','build'],source/'desktop',600)
  manifest=str(source/'desktop/src-tauri/Cargo.toml')
+ run('shell-typecheck',['cargo','check','--locked','--release','--jobs','1','--target',msi.TARGET,'--manifest-path',manifest,'--no-default-features','--features','desktop-shell,custom-protocol','--bin',msi.SHELL.removesuffix('.exe')])
+ run('publisher-data-tests',['cargo','test','--locked','--release','--jobs','1','--target',msi.TARGET,'--manifest-path',manifest,'--no-default-features','--features','windows-runtime-publisher','--lib','--','--nocapture'])
  for role,binary,features in [('publisher',msi.PUBLISHER.removesuffix('.exe'),'windows-runtime-publisher'),('shell',msi.SHELL.removesuffix('.exe'),'desktop-shell,custom-protocol')]:
   run(role+'-compile',['cargo','build','--locked','--release','--jobs','1','--target',msi.TARGET,'--manifest-path',manifest,'--no-default-features','--features',features,'--bin',binary])
  inputs=out/'inputs';inputs.mkdir();shutil.copytree(runtime,inputs/'runtime')

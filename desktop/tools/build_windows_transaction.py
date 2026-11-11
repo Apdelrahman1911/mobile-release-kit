@@ -30,8 +30,8 @@ def header(b):
     lines.append('inline constexpr wchar_t RuntimeManifestW[] = '+wide(b['manifestSha256'])+';')
     lines.append('inline constexpr std::uint64_t PublisherSize = '+str(b['files'][prep.PUBLISHER]['size'])+'ULL;')
     rows = [(k.removeprefix('runtime/'), v) for k, v in sorted(b['files'].items()) if k.startswith('runtime/')]
-    prep.need(len(rows) == 47, 'fixed native runtime roster')
-    lines.append('inline constexpr std::array<RuntimeFile, 47> RuntimeFiles = {{')
+    prep.need(len(rows) == 65, 'fixed native runtime roster')
+    lines.append('inline constexpr std::array<RuntimeFile, 65> RuntimeFiles = {{')
     lines += ['    {'+wide(k)+', '+str(v['size'])+'ULL, '+string(v['sha256'])+'},' for k,v in rows]
     return '\n'.join(lines+['}};', ''])
 

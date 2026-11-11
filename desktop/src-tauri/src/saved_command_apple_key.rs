@@ -544,6 +544,7 @@ impl AppleKeySavePermit {
             && self.parent.destination_matches(original, destination)
             && self.reservation.intent().destination == destination.descriptor()
     }
+    #[cfg(any(target_os="linux",target_os="macos"))]
     pub(crate) fn seal_key(
         &mut self,
         reserved: &mut crate::vault_crypto::ReservedAppleDistributionKey,
@@ -570,6 +571,7 @@ impl AppleKeySavePermit {
             .ok_or(Error::Authentication)?
             .seal_key(reserved, key, allowance, &self.output)
     }
+    #[cfg(any(target_os="linux",target_os="macos"))]
     pub(crate) fn matches_authenticated_readback(
         &mut self,
         record: &crate::vault_crypto::AuthenticatedRecord,
