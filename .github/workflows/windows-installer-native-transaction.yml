@@ -1,0 +1,148 @@
+name: Windows installer native transaction validation
+on:
+  push:
+    branches: [verify/desktop-windows-installer-candidate-014]
+permissions:
+  contents: read
+  actions: read
+concurrency:
+  group: windows-native-transaction-${{ github.sha }}
+  cancel-in-progress: false
+jobs:
+  build:
+    if: github.run_attempt == 1 && github.repository == 'Apdelrahman1911/mobile-release-kit' && github.workflow_sha == github.sha
+    runs-on: windows-2025
+    timeout-minutes: 60
+    env:
+      REVIEWED_COMMIT: ${{ github.sha }}
+      DOTNET_ROLL_FORWARD: Major
+    steps:
+      - name: Admit exact hosted source workflow
+        shell: pwsh
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: |
+          if($env:GITHUB_REPOSITORY -cne 'Apdelrahman1911/mobile-release-kit' -or $env:GITHUB_WORKFLOW_SHA -cne $env:GITHUB_SHA -or $env:RUNNER_ENVIRONMENT -cne 'github-hosted' -or $env:GITHUB_RUN_ATTEMPT -cne '1' -or $env:GITHUB_REF -cne 'refs/heads/verify/desktop-windows-installer-candidate-014'){throw 'Exact hosted source/workflow/run admission refused'}
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97
+        with:
+          python-version: '3.14.7'
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38
+        with:
+          node-version: '24.20.0'
+      - name: Validate exact source run1 identity duplicate guard and build tools
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: |
+          $ErrorActionPreference='Stop'
+          if($env:GITHUB_EVENT_NAME -cne 'push' -or $env:GITHUB_REF -cne 'refs/heads/verify/desktop-windows-installer-candidate-014' -or $env:GITHUB_RUN_ATTEMPT -cne '1'){throw 'Exact push/run1 route required'}
+          if($env:REVIEWED_COMMIT -cnotmatch '^[0-9a-f]{40}$' -or (git rev-parse HEAD) -cne $env:REVIEWED_COMMIT){throw 'Exact source commit mismatch'}
+          $tree=git rev-parse 'HEAD^{tree}'
+          if($tree -cnotmatch '^[0-9a-f]{40}$'){throw 'Exact source tree missing'}
+          $runs=gh api "repos/$env:GITHUB_REPOSITORY/actions/workflows/windows-installer-native-transaction.yml/runs?head_sha=$env:GITHUB_SHA&event=push&per_page=100" | ConvertFrom-Json
+          if($LASTEXITCODE){throw 'Duplicate-run inspection failed'}
+          $same=@($runs.workflow_runs | Where-Object {$_.head_sha -ceq $env:GITHUB_SHA -and $_.event -ceq 'push'})
+          if($same.Count -ne 1 -or [string]$same[0].id -cne $env:GITHUB_RUN_ID){throw 'Duplicate or ambiguous source run refused'}
+          "REVIEWED_TREE=$tree" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          [ordered]@{schema=1;repository=$env:GITHUB_REPOSITORY;workflowSha=$env:GITHUB_WORKFLOW_SHA;runnerEnvironment=$env:RUNNER_ENVIRONMENT;sourceCommit=$env:GITHUB_SHA;sourceTree=$tree;runId=$env:GITHUB_RUN_ID;attempt=1;ref=$env:GITHUB_REF;event='push';workflow=$env:GITHUB_WORKFLOW_REF;duplicateGuard='PASS'} | ConvertTo-Json | Set-Content "$env:RUNNER_TEMP\mrk-source-run-binding.json"
+          python -m pip install --disable-pip-version-check cmake==3.31.6
+          if($LASTEXITCODE){throw 'Pinned CMake unavailable'}
+          rustup toolchain install 1.98.0 --profile minimal --target x86_64-pc-windows-msvc
+          if($LASTEXITCODE){throw 'Pinned Rust unavailable'}
+          rustup default 1.98.0
+          dotnet tool install --tool-path "$env:RUNNER_TEMP\mrk-wix" wix --version 4.0.6
+          if($LASTEXITCODE){throw 'Pinned WiX unavailable'}
+          "$env:RUNNER_TEMP\mrk-wix" | Out-File -FilePath $env:GITHUB_PATH -Encoding utf8 -Append
+      - name: Compile reviewed binaries native owner and actual nonshipping MSI
+        shell: pwsh
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: |
+          python desktop/tools/prepare_windows_transaction_run.py --source "$env:GITHUB_WORKSPACE" --source-commit $env:REVIEWED_COMMIT --source-tree $env:REVIEWED_TREE --output "$env:RUNNER_TEMP\mrk-transaction-build"
+          $buildExit=$LASTEXITCODE
+          if(Test-Path "$env:RUNNER_TEMP\mrk-transaction-build"){Copy-Item "$env:RUNNER_TEMP\mrk-source-run-binding.json" "$env:RUNNER_TEMP\mrk-transaction-build\source-run-binding.json"}
+          if($buildExit){throw 'Native build failed'}
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: windows-native-transaction-build
+          path: |
+            ${{ runner.temp }}/mrk-transaction-build/msi
+            ${{ runner.temp }}/mrk-transaction-build/logs
+            ${{ runner.temp }}/mrk-transaction-build/runtime-prepared.json
+            ${{ runner.temp }}/mrk-transaction-build/binding.json
+            ${{ runner.temp }}/mrk-transaction-build/source-run-binding.json
+          retention-days: 7
+          if-no-files-found: error
+  lifecycle:
+    needs: build
+    runs-on: windows-2025
+    timeout-minutes: 15
+    strategy:
+      fail-fast: false
+      max-parallel: 2
+      matrix:
+        scenario: [fresh, occupied, partial, corrupt, parent-death, replaced-runtime, replaced-record, corrupt-record, pending, msi]
+    steps:
+      - name: Admit exact hosted source workflow
+        shell: pwsh
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: |
+          if($env:GITHUB_REPOSITORY -cne 'Apdelrahman1911/mobile-release-kit' -or $env:GITHUB_WORKFLOW_SHA -cne $env:GITHUB_SHA -or $env:RUNNER_ENVIRONMENT -cne 'github-hosted' -or $env:GITHUB_RUN_ATTEMPT -cne '1' -or $env:GITHUB_REF -cne 'refs/heads/verify/desktop-windows-installer-candidate-014'){throw 'Exact hosted source/workflow/run admission refused'}
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: windows-native-transaction-build
+          path: ${{ runner.temp }}/mrk-transaction-build
+      - name: Run actual native lifecycle under original SYSTEM task
+        shell: pwsh
+        env:
+          SCENARIO: ${{ matrix.scenario }}
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: |
+          $ErrorActionPreference='Stop'
+          if($env:GITHUB_REPOSITORY -cne 'Apdelrahman1911/mobile-release-kit' -or $env:GITHUB_WORKFLOW_SHA -cne $env:GITHUB_SHA -or $env:RUNNER_ENVIRONMENT -cne 'github-hosted'){throw 'Lifecycle source/host admission refused'}
+          $sourceBinding=Get-Content "$env:RUNNER_TEMP\mrk-transaction-build\source-run-binding.json" -Raw | ConvertFrom-Json
+          $tree=git rev-parse 'HEAD^{tree}'
+          if($sourceBinding.sourceCommit -cne $env:GITHUB_SHA -or $sourceBinding.sourceTree -cne $tree -or $sourceBinding.runId -cne $env:GITHUB_RUN_ID -or $sourceBinding.attempt -ne 1){throw 'Artifact original source/run binding refused'}
+          $stage="$env:RUNNER_TEMP\mrk-transaction-build\msi"
+          $evidence="$env:RUNNER_TEMP\mrk-lifecycle-$env:SCENARIO"
+          $script=Join-Path $env:GITHUB_WORKSPACE 'desktop\packaging\windows\native-transaction\Invoke-Lifecycle.ps1'
+          $wrapper="$env:RUNNER_TEMP\mrk-system-wrapper.ps1"
+          @"
+          `$env:GITHUB_ACTIONS='true'
+          `$env:GITHUB_REPOSITORY='Apdelrahman1911/mobile-release-kit'
+          `$env:GITHUB_WORKFLOW_SHA='$env:GITHUB_WORKFLOW_SHA'
+          `$env:GITHUB_SHA='$env:GITHUB_SHA'
+          `$env:RUNNER_ENVIRONMENT='github-hosted'
+          `$env:MRK_EXPECTED_TREE='$tree'
+
+          try { & '$script' -Stage '$stage' -Scenario '$env:SCENARIO' -Evidence '$evidence'; exit 0 } catch { `$_ | Out-File '$env:RUNNER_TEMP\mrk-system-error.log'; exit 1 }
+          "@ | Set-Content $wrapper
+          $action=New-ScheduledTaskAction -Execute 'C:\Windows\System32\WindowsPowerShell\v1.0\powershell.exe' -Argument "-NoProfile -NonInteractive -ExecutionPolicy Bypass -File `"$wrapper`""
+          $principal=New-ScheduledTaskPrincipal -UserId 'SYSTEM' -LogonType ServiceAccount -RunLevel Highest
+          Register-ScheduledTask -TaskName 'MRKNativeTransactionValidation' -Action $action -Principal $principal -Force | Out-Null
+          try {
+            Start-ScheduledTask -TaskName 'MRKNativeTransactionValidation'
+            $until=[DateTime]::UtcNow.AddMinutes(5)
+            do {Start-Sleep -Seconds 1;$state=Get-ScheduledTask -TaskName 'MRKNativeTransactionValidation';$info=Get-ScheduledTaskInfo -TaskName 'MRKNativeTransactionValidation'} while($state.State -eq 'Running' -and [DateTime]::UtcNow -lt $until)
+            if($state.State -eq 'Running' -or $info.LastTaskResult -ne 0 -or !(Test-Path "$evidence\result.json")){throw 'Original SYSTEM lifecycle failed or timed out'}
+          } finally {Unregister-ScheduledTask -TaskName 'MRKNativeTransactionValidation' -Confirm:$false}
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: windows-native-lifecycle-${{ matrix.scenario }}
+          path: |
+            ${{ runner.temp }}/mrk-lifecycle-${{ matrix.scenario }}
+            ${{ runner.temp }}/mrk-system-error.log
+          retention-days: 7
+          if-no-files-found: error

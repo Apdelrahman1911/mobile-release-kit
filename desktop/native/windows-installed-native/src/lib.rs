@@ -57,6 +57,8 @@ pub use qualification_result::{normal_ui_project, mutate_normal_ui_fixture, veri
 #[cfg(feature = "runtime-publication")]
 mod publication;
 #[cfg(feature = "runtime-publication")]
+mod publication_exclusion;
+#[cfg(feature = "runtime-publication")]
 pub use publication::{Publication, PublicationFrameObservation, PublicationCopyObservation, PUBLICATION_PAYLOADS};
 pub use decode::{DirectoryEntry, FileIdentity, Metadata};
 pub use security::{AceFact, GroupFact, SecurityFacts, Sid, TokenFacts, TokenIdentity};

@@ -658,6 +658,7 @@ pub struct Publication {
     manifest: Vec<u8>, manifest_original: Option<usize>, manifest_facts: Option<Facts>,
     sizes: Option<[u64; 47]>, transfer: Option<Transfer>, copied: Vec<Copied>, settlement_attempted: bool,
     copy_failure: Cell<Option<PublicationCopyObservation>>,
+    exclusion: super::publication_exclusion::PublicationExclusion,
 }
 // SAFETY: only the serialized owner moves. All native arguments/output cells
 // are in pinned allocations, and no borrowed handle or UnsafeCell escapes. Like
@@ -698,7 +699,7 @@ impl Publication {
             source_dirs: Vec::new(), source_root: None, source_python: None, mrk: None,
             output_dirs: Vec::new(), version: None, python: None,
             manifest: Vec::new(), manifest_original: None, manifest_facts: None,
-            sizes: None, transfer: None, copied: Vec::new(), settlement_attempted: false, copy_failure: Cell::new(None) })
+            sizes: None, transfer: None, copied: Vec::new(), settlement_attempted: false, copy_failure: Cell::new(None), exclusion: super::publication_exclusion::PublicationExclusion::new() })
     }
     fn tick(&mut self) -> Result<()> {
         self.expired |= Instant::now() >= self.end;
@@ -1057,6 +1058,9 @@ impl Publication {
         let result = self.step(|this| {
             this.book.admission.at(O::Owner).result(this.order.live(Stage::Fresh), C::OrderFresh)?;
             this.admit_installer()?;
+            // Registered in the original owner before entry; no output mutation
+            // is allowed while another live publisher holds the fixed name.
+            this.exclusion.enter_once()?;
             this.book.admission.role.set(R::ProgramFiles);
             let location = this.book.location(LocationKind::ProgramFiles)?;
             let trace = this.book.admission.at(O::Location);
@@ -1406,6 +1410,26 @@ impl Publication {
         self.order.stage == Stage::Complete && !self.order.failed && !self.order.unknown && !self.expired
             && Instant::now() < self.end && self.order.exposure && self.mutation.is_none() && self.book.settled()
     }
+    /// Closed identity DATA from the ACTUAL successfully settled original owner.
+    /// A later pathname/fullwalk cannot manufacture this publisher's identities.
+    pub fn settled_identity_lines(&self) -> Option<String> {
+        if !self.published_and_settled() || self.copied.len() != PUBLICATION_PAYLOADS.len() { return None; }
+        fn append(out: &mut String, role: &str, id: FileIdentity) {
+            use std::fmt::Write;
+            out.push_str(role); out.push(' ');
+            for byte in id.volume_serial.to_le_bytes() { let _ = write!(out, "{byte:02x}"); }
+            out.push(':');
+            for byte in id.file_id { let _ = write!(out, "{byte:02x}"); }
+            out.push('\n');
+        }
+        let mut output = String::with_capacity(3072);
+        append(&mut output, "ROOT", self.directories.get(self.version?)?.facts.metadata.identity);
+        append(&mut output, "PYTHON", self.directories.get(self.python?)?.facts.metadata.identity);
+        let mut indices: Vec<usize> = (0..PUBLICATION_PAYLOADS.len()).collect();
+        indices.sort_unstable_by_key(|index| PUBLICATION_PAYLOADS[*index]);
+        for index in indices { append(&mut output, "FILE", self.copied.get(index)?.destination.metadata.identity); }
+        (output.len() < 4096).then_some(output)
+    }
     pub fn possibly_exposed(&self) -> bool { self.order.grant_attempted || self.order.exposure }
     /// Only the recorded original target-D `(0, ERROR_ALREADY_EXISTS)` after
     /// actual failure settlement. Not adoption, retry, absence or cleanup proof.
@@ -1436,7 +1460,8 @@ impl Publication {
     /// independent known originals to close once. Any active native arena retains
     /// EVERYTHING it might reference; no replacement handle or Drop-as-finality.
     pub fn fail_and_settle_once(&mut self) -> CloseOutcome {
-        self.order.fail(self.book.is_unknown() || self.mutation.is_some());
+        self.order.fail(self.book.is_unknown() || self.mutation.is_some() || self.exclusion.unresolved());
+        if self.exclusion.unresolved() { return CloseOutcome::Unknown; }
         if self.settlement_attempted { return if self.book.settled() { CloseOutcome::Settled } else { CloseOutcome::Unknown }; }
         self.settlement_attempted = true;
         if self.mutation.is_some() { self.book.mark_interrupted(); return CloseOutcome::Unknown; }

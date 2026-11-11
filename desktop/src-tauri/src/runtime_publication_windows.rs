@@ -205,7 +205,7 @@ fn produce(owner: &mut Publication, spec: &VersionSpec) -> Result<(), Publicatio
 
 /// No arguments, environment paths, current directory, self-executable lookup,
 /// MSI property or renderer input can select source/destination/target/anchors.
-pub fn publish_fixed() -> Result<(), PublicationError> {
+pub fn publish_fixed() -> Result<String, PublicationError> {
     if !no_arguments(std::env::args_os().take(2).count()) { return Err(PublicationError::Invocation); }
     let spec = VersionSpec::compiled().map_err(|_| PublicationError::Profile)?;
     let owner = Publication::new(spec.manifest_sha256()).map_err(|_| PublicationError::Profile)?;
@@ -217,7 +217,10 @@ pub fn publish_fixed() -> Result<(), PublicationError> {
     // Keep BOTH original deadline-sensitive postconditions and their short-circuit.
     // A later finality/settlement observation cannot replace produce's first cause.
     let cause = match produce(&mut original, &spec) {
-        Ok(()) if original.published_and_settled() => return Ok(()),
+        Ok(()) if original.published_and_settled() => {
+            if let Some(lines) = original.settled_identity_lines() { return Ok(lines); }
+            PublicationFailure::policy(FailurePhase::FinalPostcondition, None)
+        },
         Ok(()) => PublicationFailure::policy(FailurePhase::FinalPostcondition, None),
         Err(first) => first,
     };
