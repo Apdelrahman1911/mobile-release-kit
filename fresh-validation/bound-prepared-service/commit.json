@@ -1,28 +1,28 @@
 {
-  "sha": "a3e7f20161e5240660ff5f2e2cfcf8410b9c0ab5",
-  "node_id": "C_kwDOT_nMItoAKGEzZTdmMjAxNjFlNTI0MDY2MGZmNWYyZTJjZmNmODQxMGI5YzBhYjU",
-  "url": "https://api.github.com/repos/Apdelrahman1911/mobile-release-kit/git/commits/a3e7f20161e5240660ff5f2e2cfcf8410b9c0ab5",
-  "html_url": "https://github.com/Apdelrahman1911/mobile-release-kit/commit/a3e7f20161e5240660ff5f2e2cfcf8410b9c0ab5",
+  "sha": "ac506bb3aa663b1389f21d2cc2ff4b9b21ad96e3",
+  "node_id": "C_kwDOT_nMItoAKGFjNTA2YmIzYWE2NjNiMTM4OWYyMWQyY2MyZmY0YjliMjFhZDk2ZTM",
+  "url": "https://api.github.com/repos/Apdelrahman1911/mobile-release-kit/git/commits/ac506bb3aa663b1389f21d2cc2ff4b9b21ad96e3",
+  "html_url": "https://github.com/Apdelrahman1911/mobile-release-kit/commit/ac506bb3aa663b1389f21d2cc2ff4b9b21ad96e3",
   "author": {
     "name": "Apdelrahman1911",
     "email": "abdofahmymr14@gmail.com",
-    "date": "2026-11-10T16:12:44Z"
+    "date": "2026-11-11T00:16:41Z"
   },
   "committer": {
     "name": "Apdelrahman1911",
     "email": "abdofahmymr14@gmail.com",
-    "date": "2026-11-10T16:12:44Z"
+    "date": "2026-11-11T00:16:41Z"
   },
   "tree": {
-    "sha": "903932227bc9ac2192bba7b47f88de53b1cd0fa7",
-    "url": "https://api.github.com/repos/Apdelrahman1911/mobile-release-kit/git/trees/903932227bc9ac2192bba7b47f88de53b1cd0fa7"
+    "sha": "e88750f60d1027cd8f7bb5a3f736cbb38ace2770",
+    "url": "https://api.github.com/repos/Apdelrahman1911/mobile-release-kit/git/trees/e88750f60d1027cd8f7bb5a3f736cbb38ace2770"
   },
-  "message": "fix(macos): allow bounded installer work for durable file enrollment\n\nmacOS 0.1.4: recover unchanged signed Android inputs from retained successful preparation\n\nThe original supplier artifact expired; retained member hashes and receipt stay fixed.\n\nmacOS 0.1.4: sign verified complete interrupted-install recovery fix\n\nReviewed runtime tree fdd850e37724ccfafc3ccca5d40223567a72e9a1; diagnostic 42802921156 passed.\n\nCorrect live-quote regression fixture [macos-desktop-update] [macos-builds-only]\n\nKeep runtime quote code unchanged; reuse existing deepest Store-path contract coverage.\n\nKeep the standalone Remover native 120-second endpoint. Allow Installer and its inherited private writer 290 seconds of work and 10 seconds of settlement, anchored to the original entry sample. Preserve full fsync, ownership, signatures, inventory and finality checks.",
+  "message": "fix(macos): accept echoed kevent receipt flags\n\nDarwin returns EV_ERROR plus the submitted flags for successful EV_RECEIPT registration and preserves EV_RECEIPT on the later NOTE_EXIT event. Preserve identity, errno, userdata, exit and cleanup checks while accepting those requested bits in the app and removal paths.\n\nAdd real Darwin receipt and exit-event regression checks with 28 refusal cases.\n\n[macos-desktop-update] [macos-builds-only]",
   "parents": [
     {
-      "sha": "63be89b96a0dd9f679ee4b77340768e04ae52aa5",
-      "url": "https://api.github.com/repos/Apdelrahman1911/mobile-release-kit/git/commits/63be89b96a0dd9f679ee4b77340768e04ae52aa5",
-      "html_url": "https://github.com/Apdelrahman1911/mobile-release-kit/commit/63be89b96a0dd9f679ee4b77340768e04ae52aa5"
+      "sha": "a3e7f20161e5240660ff5f2e2cfcf8410b9c0ab5",
+      "url": "https://api.github.com/repos/Apdelrahman1911/mobile-release-kit/git/commits/a3e7f20161e5240660ff5f2e2cfcf8410b9c0ab5",
+      "html_url": "https://github.com/Apdelrahman1911/mobile-release-kit/commit/a3e7f20161e5240660ff5f2e2cfcf8410b9c0ab5"
     }
   ],
   "verification": {

@@ -493,7 +493,8 @@ static int maintenance_peer_poll(mrk_android_client *c) {
     struct kevent event;memset(&event,0,sizeof(event));const struct timespec zero={0,0};
     const int count=kevent(c->watcher_fd,NULL,0,&event,1,&zero);
     if (count==0) return 1;
-    const uint16_t allowed=EV_ADD|EV_ENABLE|EV_ONESHOT|EV_EOF|EV_CLEAR;
+    // Darwin also retains the requested EV_RECEIPT bit on the later exit event.
+    const uint16_t allowed=EV_ADD|EV_ENABLE|EV_ONESHOT|EV_RECEIPT|EV_EOF|EV_CLEAR;
     if (count!=1 || event.ident!=(uintptr_t)c->peer_pid || event.filter!=EVFILT_PROC
         || (event.flags&~allowed) || !(event.flags&EV_EOF) || event.fflags!=NOTE_EXIT || event.udata) {
         client_failure(c,EPROTO,1);return 0;
@@ -535,8 +536,10 @@ int mrk_android_maintenance_watch(void *raw) {
     EV_SET(&change,(uintptr_t)c->peer_pid,EVFILT_PROC,EV_ADD|EV_ENABLE|EV_ONESHOT|EV_RECEIPT,NOTE_EXIT,0,NULL);
     const struct timespec zero={0,0};
     const int count=kevent(c->watcher_fd,&change,1,&receipt,1,&zero);
+    // EV_RECEIPT preserves submitted flags and adds EV_ERROR even on success.
+    // Require success and reject flags that were neither requested nor EV_ERROR.
     if (count!=1 || receipt.ident!=(uintptr_t)c->peer_pid || receipt.filter!=EVFILT_PROC
-        || receipt.flags!=EV_ERROR || receipt.data!=0 || receipt.udata) { client_failure(c,EPROTO,0);goto done; }
+        || !(receipt.flags&EV_ERROR) || (receipt.flags&~(EV_ERROR|change.flags)) || receipt.data!=0 || receipt.udata) { client_failure(c,EPROTO,0);goto done; }
     if (!maintenance_peer_poll(c) || c->peer_exited || !client_point(c,0)) { client_failure(c,ENOTCONN,0);goto done; }
     c->maintenance_phase=2;ready=1;
 done:return client_leave(c,ready);
