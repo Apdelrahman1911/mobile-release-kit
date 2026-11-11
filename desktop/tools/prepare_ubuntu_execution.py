@@ -1,7 +1,7 @@
 """Disposable Ubuntu 24.04 candidate constructor; no publication or qualification.
 Pinned source inputs, original bounded commands, actual dependency census.
 """
-import argparse, fcntl, hashlib, json, os, platform, shutil, subprocess, tarfile, time
+import argparse, fcntl, hashlib, json, os, platform, re, shutil, subprocess, tarfile, time
 from pathlib import Path
 from ubuntu_candidate_supervisor import run
 import assemble_ubuntu_deb as A
@@ -38,6 +38,87 @@ def unpack(archive,out):
 def command(role,args,cwd,evidence,env,seconds=600):run([(role,list(map(str,args)),seconds)],cwd,evidence,env)
 def git(*args):return subprocess.check_output(['/usr/bin/git','--git-dir='+str(SOURCE/'.git'),'--work-tree='+str(SOURCE),*args],timeout=30).decode().strip()
 
+
+def ubuntu_inputs(work,evidence,env):
+ # Read metadata for the declared build packages and their installed dependency
+ # closure. APT may print uninstalled alternative providers; dpkg status filters
+ # those names. Unrelated preinstalled runner packages never become byte inputs.
+ command('apt-build-dependency-closure',['/usr/bin/apt-cache','depends','--recurse','--installed',
+  '--no-recommends','--no-suggests','--no-conflicts','--no-breaks','--no-replaces','--no-enhances',*PACKAGES],work,evidence,env)
+ command('dpkg-installed-status',['/usr/bin/dpkg-query','-W','-f=${binary:Package}\t${Version}\t${Architecture}\t${db:Status-Status}\n'],work,evidence,env)
+ status={}
+ for line in (evidence/'dpkg-installed-status/stdout.log').read_text().splitlines():
+  name,version,arch,state=line.split('\t')
+  if state=='installed' and arch in ('amd64','all'):
+   base=name.split(':',1)[0];assert base not in status
+   status[base]=dict(package=name,version=version,architecture=arch)
+ text=(evidence/'apt-build-dependency-closure/stdout.log').read_text()
+ candidates={line.split(':',1)[0] for line in text.splitlines() if re.fullmatch(r'[a-z0-9][a-z0-9+.-]*(?::[a-z0-9]+)?',line)}
+ names=sorted(candidates&status.keys());assert set(PACKAGES)<=set(names)
+ files=set()
+ for i in range(0,len(names),32):
+  role='dpkg-build-files-'+str(i//32)
+  command(role,['/usr/bin/dpkg-query','-L',*[status[n]['package'] for n in names[i:i+32]]],work,evidence,env)
+  for line in (evidence/role/'stdout.log').read_text().splitlines():
+   p=Path(line)
+   if p.is_absolute() and p.is_file():
+    resolved=p.resolve(strict=True)
+    if len(resolved.parts)>1 and resolved.parts[1] in ('usr','etc'):files.add(resolved)
+ scope=dict(schemaVersion=1,packages=[status[n] for n in names],excludedUninstalledAlternatives=sorted(candidates-status.keys()))
+ save(work/'ubuntu-build-scope.json',scope)
+ return scope,files
+
+def notice_candidates(roots,scope,docbase=Path('/usr/share/doc'),commonbase=Path('/usr/share/common-licenses')):
+ for label,root in roots:
+  count=0
+  for p in sorted(root.rglob('*')):
+   if p.is_file() and not p.is_symlink() and any(x in p.name.lower() for x in ['license','licence','copyright','notice']):
+    yield label+'/'+p.relative_to(root).as_posix(),p,dict(component=label);count+=1
+  assert count>0
+ # Debian package copyright paths may alias another package's documentation.
+ # Follow only explicit package roots and notice-file aliases inside public docs;
+ # preserve each selected package's complete original notice under its own name.
+ base=docbase.resolve(strict=True)
+ for package in scope['packages']:
+  name=package['package'].split(':',1)[0];alias=docbase/name;root=alias.resolve(strict=True)
+  assert root.is_relative_to(base) and root.is_dir() and (root/'copyright').is_file(), 'Package copyright missing: '+name
+  count=0
+  for p in sorted(root.rglob('*')):
+   if p.is_file() and any(x in p.name.lower() for x in ['license','licence','copyright','notice']):
+    original=p.resolve(strict=True)
+    assert (original.is_relative_to(base) or original.is_relative_to(commonbase.resolve(strict=True))) and original.is_file()
+    yield 'ubuntu/'+name+'/'+p.relative_to(root).as_posix(),original,dict(component='ubuntu',package=package,packageDocRoot=str(alias),resolvedDocRoot=str(root));count+=1
+  assert count>0
+
+def collect_notices(notices,census,roots,scope,docbase=Path('/usr/share/doc'),commonbase=Path('/usr/share/common-licenses')):
+ # The native census of pinned Rust1.98.0 found exactly this15,380,909-byte
+ # original. Admit those exact bytes only; every other member retains4MiB.
+ large=('rust/share/doc/rust/COPYRIGHT.html',15380909,'5b0c93fc4e6d4b072eaa521b1762d1e746f4c368f65e81a0e5308e2772dac85e')
+ rows=[];sources=[];references={}
+ with census.open('x') as log,tarfile.open(notices/'dependency-notices.tar','x') as archive:
+  def record(name,p,origin):
+   r=dict(member=name,**origin,**row(p));r['admission']='original-4MiB' if r['size']<4<<20 else 'exact-pinned-Rust-COPYRIGHT'
+   accepted=r['size']<4<<20 or (name,r['size'],r['sha256'])==large
+   if not accepted:r['admission']='refused-original-size-bound'
+   log.write(json.dumps(r)+'\n');log.flush();print(json.dumps(dict(notice=r)),flush=True) if not accepted else None
+   assert accepted,'Notice input refused; exact path/size/hash retained in '+str(census)
+   archive.add(p,arcname=name,recursive=False);rows.append(r);sources.append(p)
+   assert archive.fileobj.tell()<60<<20,'Notice archive bound; originals/census retained'
+  for name,p,origin in notice_candidates(roots,scope,docbase,commonbase):
+   record(name,p,origin)
+   if origin['component']=='ubuntu':
+    # Ubuntu copyright notices refer to these public original license texts.
+    # Preserve only explicitly referenced members, with their referring notices.
+    for raw in re.findall(rb'/usr/share/common-licenses/([A-Za-z0-9.+_-]+)',p.read_bytes()):
+     license_name=raw.decode('ascii').rstrip('.')
+     references.setdefault(license_name,set()).add(name)
+  for license_name,referrers in sorted(references.items()):
+   alias=commonbase/license_name;p=alias.resolve(strict=True)
+   assert p.is_relative_to(commonbase.resolve(strict=True)) and p.is_file()
+   record('ubuntu-common-licenses/'+license_name,p,dict(component='ubuntu-common-licenses',referencedBy=sorted(referrers)))
+ assert (notices/'dependency-notices.tar').stat().st_size<60<<20
+ return rows,sources
+
 def prepare(work,commit,tree):
  assert platform.system()=='Linux' and platform.machine()=='x86_64' and os.getuid()!=0
  assert os.environ.get('GITHUB_ACTIONS')=='true' and os.environ.get('RUNNER_ENVIRONMENT')=='github-hosted'
@@ -54,6 +135,7 @@ def prepare(work,commit,tree):
  command('apt-install',['sudo','apt-get','install','-y','--no-install-recommends',*PACKAGES],work,e,env,900)
  command('dpkg-inventory',['dpkg-query','-W','-f=${binary:Package}\t${Version}\t${Architecture}\n'],work,e,env)
  command('runner-uname',['uname','-a'],work,e,env)
+ scope,package_files=ubuntu_inputs(work,e,env)
  save(work/'runner.json',{k:os.environ.get(k) for k in ['ImageOS','ImageVersion','GITHUB_RUN_ID','GITHUB_RUN_ATTEMPT','GITHUB_SHA','GITHUB_WORKFLOW_SHA']})
  pins=json.loads((SOURCE/'desktop/packaging/debian/ubuntu-execution-inputs.json').read_text())
  for name in ['rust','node']:
@@ -65,6 +147,14 @@ def prepare(work,commit,tree):
  env['PATH']=str(rust/'bin')+':'+str(node/'bin')+':/usr/bin:/bin'
  command('cargo-fetch',[rust/'bin/cargo','fetch','--locked','--target','x86_64-unknown-linux-gnu'],SOURCE/'desktop/src-tauri',e,env,900)
  command('npm-ci',[node/'bin/node',node/'lib/node_modules/npm/bin/npm-cli.js','ci','--ignore-scripts','--no-audit','--no-fund'],SOURCE/'desktop',e,env,900)
+ # Admit all selected notices before any source fetch or compiler work.
+ # Preserve notice bytes without unsafe package path names or expanding the
+ # immutable runtime's path/count budget. The tar is DATA documentation only.
+ notices=work/'desktop-notices';notices.mkdir();copy(SOURCE/'LICENSE',notices/'PROJECT-LICENSE')
+ roots=[('rust',rust),('cargo',work/'cargo-home/registry/src'),('npm',SOURCE/'desktop/node_modules')]
+ notice_rows,notice_sources=collect_notices(notices,e/'notice-census.jsonl',roots,scope)
+ save(notices/'notice-origins.json',notice_rows)
+ save(notices/'ubuntu-notice-scope.json',scope)
  source_lock=json.loads((SOURCE/'desktop/cpython-source-inputs/source-lock.json').read_text())
  builds={}
  for spec in source_lock['sources']:
@@ -112,30 +202,9 @@ def prepare(work,commit,tree):
  (notice/'SUCCESSOR-VERIFICATION-NOTE.txt').write_text('This newly compiled candidate has no historical artifact admission. Build and native test results are recorded separately for this exact commit and run. No publication or qualification is implied.\n')
  (notice/'REBUILD.md').write_text('Use the exact candidate commit and desktop-linux-installer-candidate.yml. recipe/prepare_ubuntu_execution.py records dependency acquisition, source compilation and composition. See recipe/source-lock.json for original input pins and effective environment.\n')
  save(kit/'components.json',dict(profile=PROFILE,sources=source_lock['sources'],configuration=config))
- # Preserve notice bytes without unsafe package path names or expanding the
- # immutable runtime's path/count budget. The tar is DATA documentation only.
- notices=work/'desktop-notices';notices.mkdir();copy(SOURCE/'LICENSE',notices/'PROJECT-LICENSE')
- roots=[('rust',rust),('cargo',work/'cargo-home/registry/src'),('npm',SOURCE/'desktop/node_modules'),('ubuntu',Path('/usr/share/doc'))]
- notice_rows=[]
- with tarfile.open(notices/'dependency-notices.tar','x') as archive:
-  for label,root in roots:
-   count=0
-   for p in sorted(root.rglob('*')):
-    if p.is_file() and not p.is_symlink() and any(x in p.name.lower() for x in ['license','licence','copyright','notice']):
-     assert p.stat().st_size<4<<20
-     name=label+'/'+p.relative_to(root).as_posix()
-     archive.add(p,arcname=name,recursive=False);notice_rows.append(dict(component=label,member=name,**row(p)));count+=1
-   assert count>0
- assert (notices/'dependency-notices.tar').stat().st_size<60<<20
- save(notices/'notice-origins.json',notice_rows)
- # Actual runner package census plus complete package-owned regular files replaces
- # a caller-invented universal system-library list. Mutable conffiles are recorded too.
- paths=set()
- for listing in Path('/var/lib/dpkg/info').glob('*.list'):
-  for line in listing.read_text().splitlines():
-   p=Path(line)
-   if p.is_file() and p.resolve().parts[1] in ('usr','etc'):
-    paths.add(p.resolve())
+ # Bind actual package-owned public inputs only from the declared build closure,
+ # plus the pinned toolchains/locked dependency trees and selected notice aliases.
+ paths=package_files|{p.resolve() for p in notice_sources}
  for root in [rust,node,work/'cargo-home/registry',SOURCE/'desktop/node_modules']:
   paths.update(p.resolve() for p in root.rglob('*') if p.is_file())
  dependency_files=[row(p) for p in sorted(paths)]

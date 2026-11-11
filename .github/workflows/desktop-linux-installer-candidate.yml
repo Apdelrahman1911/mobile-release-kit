@@ -44,6 +44,7 @@ jobs:
           path: |
             ${{ runner.temp }}/admission
             ${{ runner.temp }}/preparation/evidence
+            ${{ runner.temp }}/preparation/desktop-notices
             ${{ runner.temp }}/preparation/*.json
             ${{ runner.temp }}/preparation/failure.txt
             ${{ runner.temp }}/candidate/evidence

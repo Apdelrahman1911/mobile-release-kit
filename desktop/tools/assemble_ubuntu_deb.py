@@ -136,6 +136,19 @@ def assemble(config, receipt_path, receipt_sha, work):
     (work / 'dependency.stderr').write_text(run.stderr)
     S.D.need(run.returncode == 0, 'Dependency analysis failed; originals retained')
     args['depends'] = closure_output(run.stdout)
+    # Actual ELF runtime dependencies must have notice coverage in the same
+    # recorded package closure as the build inputs; never silently omit a new OS
+    # package discovered only after linking.
+    native_notices=S.D.records(S.pinned_json(args['desktop_notice_files'],args['desktop_notice_files_sha256']))
+    scope_name='ubuntu-notice-scope.json'
+    S.D.need(scope_name in native_notices,'Ubuntu notice scope missing')
+    S.D.bound(args['desktop_notices']/scope_name,native_notices[scope_name])
+    scope=S.pinned_json(args['desktop_notices']/scope_name,native_notices[scope_name]['sha256'])
+    covered={r['package'].split(':',1)[0] for r in scope['packages']}
+    required={clause.split(' ',1)[0] for clause in args['depends'].split(', ')}
+    coverage=dict(required=sorted(required),covered=sorted(covered),missing=sorted(required-covered))
+    (work/'dependency-notice-coverage.json').write_text(json.dumps(coverage,indent=2)+'\n')
+    S.D.need(not coverage['missing'],'Actual ELF dependency lacks scoped original notices')
     args['output'] = work / 'package'
     result = S.stage(argparse.Namespace(**args))
     S.D.need(before == {str(p): digest(p) for p in paths}, 'ELF inputs changed')
