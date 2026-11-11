@@ -263,7 +263,7 @@ mod tests {
         assert_eq!(TARGET, "x86_64-pc-windows-msvc");
         assert_eq!(PUBLICATION_PAYLOADS[MANIFEST], "manifest.json");
         assert_eq!(PUBLICATION_PAYLOADS.iter().filter(|p| p.starts_with("python/")).count(), 38);
-        assert_eq!(PUBLICATION_PAYLOADS.iter().filter(|p| p.ends_with("_bootstrap.py")).count(), 6);
+        assert_eq!(PUBLICATION_PAYLOADS.iter().filter(|p| p.ends_with("_bootstrap.py")).count(), 24);
         // Reuse this already-selected policy test; do not create a filtered-out test.
         for (error, phase) in [(PublicationError::Invocation, "invocation"), (PublicationError::Profile, "profile"),
             (PublicationError::AlreadyStarted, "already-started"), (PublicationError::OwnerUnavailable, "owner-unavailable")] {

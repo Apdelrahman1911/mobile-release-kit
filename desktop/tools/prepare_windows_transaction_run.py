@@ -57,7 +57,7 @@ def main():
  run('npm-ci',['npm.cmd','ci','--ignore-scripts'],source/'desktop',600)
  run('frontend-build',['npm.cmd','run','build'],source/'desktop',600)
  manifest=str(source/'desktop/src-tauri/Cargo.toml')
- run('shell-typecheck',['cargo','check','--locked','--release','--jobs','1','--target',msi.TARGET,'--manifest-path',manifest,'--no-default-features','--features','desktop-shell,custom-protocol','--bin',msi.SHELL.removesuffix('.exe')])
+ # Actual release builds below perform typechecking and linking; no duplicate check-only build.
  run('publisher-data-tests',['cargo','test','--locked','--release','--jobs','1','--target',msi.TARGET,'--manifest-path',manifest,'--no-default-features','--features','windows-runtime-publisher','--lib','--','--nocapture'])
  run('shell-metadata',['cargo','metadata','--locked','--format-version','1','--filter-platform',msi.TARGET,'--manifest-path',manifest,'--no-default-features','--features','desktop-shell,custom-protocol'])
  selected={}

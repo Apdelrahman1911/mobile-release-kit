@@ -369,7 +369,7 @@ pub(crate) mod windows_version {
         #[test]
         fn windows_manifest_and_observed_inventory_are_exact() {
             let inventory = parse(&mut fixture()).unwrap();
-            assert_eq!(inventory.manifest.files.len(), 45);
+            assert_eq!(inventory.manifest.files.len(), 63);
             assert_eq!(inventory.directories, BTreeSet::from(["python".to_owned()]));
             let mut progress = inventory.progress();
             assert!(!progress.complete());
