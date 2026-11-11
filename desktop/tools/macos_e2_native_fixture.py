@@ -3977,6 +3977,69 @@ class SourceInputs:
         return module
 
 
+def transport_budget_accounting():
+    """Fixed allowance projection, NOT a new enforced process/group deadline."""
+    phases = (("native-tests", 1, 480), ("client-build", 1, 480), ("resident-build", 1, 1200),
+              ("metadata-and-facade-compilers", 4, 30), ("sign-and-stage-verify", 10, 30),
+              ("absence-observations", 4, 15), ("package-analyze", 1, 30), ("package-build", 1, 90),
+              ("fixture-installer", 1, 120), ("installed-metadata-and-receipt", 2, 15),
+              ("installed-signature-verification", 5, 30), ("bootstrap-and-bootout", 2, 30),
+              ("native-observation", 1, 315))
+    commands = sum(count for _name, count, _seconds in phases)
+    work = sum(count * seconds for _name, count, seconds in phases)
+    return {"accountingOnly": True, "enforcedOuterDeadline": False,
+            "commandCount": commands, "commandWorkAllowanceSeconds": work,
+            "commandOwnerCleanupAllowanceSeconds": commands * 3,
+            "localPostReserveSeconds": 63, "projectedWorkAllowanceSeconds": work + commands * 3 + 63,
+            "projectedFinalCleanupAllowanceSeconds": 3, "projectedTotalAllowanceSeconds": work + commands * 3 + 66,
+            "workflowNativeStepLimitSeconds": 75 * 60, "residentCommandWorkSeconds": 1200,
+            "nativeObservationCommandWorkSeconds": 315,
+            "phases": [{"phase": name, "count": count, "workSecondsEach": seconds}
+                       for name, count, seconds in phases]}
+
+
+def image_build_configuration(role, transport):
+    # Same fixed release1 application/schema overrides and arm64 compiler
+    # allowance as macos_android_helper_package.py's successful resident graph.
+    if role == "resident" and transport is True:
+        return (("--config", "profile.release.package.mobile-release-kit-desktop.opt-level=1",
+                 "--config", "profile.release.package.mrk-android-catalogue-schema.opt-level=1"), 1200)
+    return ((), 480)
+
+
+def command_exception_diagnostic(error):
+    """Fixed cached DATA only; no output/result completeness or finality authority."""
+    fields = vars(error)
+    mask = fields.get("owner_failure_mask")
+    if type(mask) is not int or not 0 <= mask <= 63:
+        mask = None
+    finality = fields.get("owner_finality_diagnostic")
+    if not (type(finality) is tuple and len(finality) == 5
+            and type(finality[0]) is int and finality[0] == 1
+            and type(finality[1]) is int and finality[1] in (0, 1)
+            and type(finality[2]) is int and 0 <= finality[2] < (1 << (10 if finality[1] == 0 else 20))
+            and type(finality[3]) is int and 0 <= finality[3] <= 15
+            and (finality[4] is None or (type(finality[4]) is int
+                 and (finality[4] in (0, 32) or 48 <= finality[4] <= 63)))):
+        finality = None
+    # Exact source-owned constants only. Never store arbitrary exception text.
+    codes = {
+        "owned command exceeded its original deadline": "deadline",
+        "owned command output exceeds its bound": "output-bound",
+        "owned command protocol or original ownership is incomplete": "protocol-or-ownership",
+        "owned command failed, timed out, or produced incomplete output": "command-incomplete",
+        "owned command produced incomplete output": "output-incomplete",
+        "owned command original parent ended": "parent-ended",
+        "owned command original observer ended": "observer-ended",
+    }
+    args = error.args
+    reason = codes.get(args[0], "unavailable") if type(args) is tuple and len(args) == 1 and type(args[0]) is str else "unavailable"
+    # The original ProcessError API exposes no partial stdout/stderr. Do not
+    # inspect traceback frames or reconstruct a complete result from collectors.
+    return {"owner_failure_mask": mask, "owner_finality_diagnostic": finality,
+            "reason": reason, "capturedOutputAvailable": False, "capturedOutputComplete": False}
+
+
 def admit(environment):
     # These native/account calls occur only in main, never DATA imports/tests.
     import platform
@@ -4286,6 +4349,11 @@ class Operation:
             record["errorType"] = next((name for name in ("ProcessError", "ProcessCleanupError",
                                                         "ProcessOutcomeUnknown", "ProcessInterrupted")
                                         if type(error) is getattr(self.owner, name, None)), "other")
+            # Optional immutable observations cannot replace the original error.
+            try:
+                record["exceptionDiagnostic"] = command_exception_diagnostic(error)
+            except BaseException:
+                record["exceptionDiagnostic"] = None
             raise
         completed(result, argv, limit)
         record.update(returned=True, returncode=result.returncode,
@@ -5025,7 +5093,8 @@ class Operation:
                       "--locked", "--offline", "--release", "--jobs", "1", "--target", TARGET,
                       "--no-default-features", "--features",
                       "desktop-image,e2-native-fixture" if role == "client" else "e2-native-fixture"]
-            argv = [cargo, "rustc" if role == "client" else "build", *common]
+            configuration, build_seconds = image_build_configuration(role, self.transport_selected)
+            argv = [cargo, "rustc" if role == "client" else "build", *common, *configuration]
             argv += (["--example", "e2_maintenance_transport" if self.transport_selected else "e2_maintenance_client"] if role == "client" else ["--lib"])
             argv += ["--message-format=json-render-diagnostics"]
             if role == "client":
@@ -5040,7 +5109,7 @@ class Operation:
                                           timeout=480, limit=4 * 1024 * 1024)
                     self.native_rust_tests = native_rust_tests_result(result.stdout)
                 result = self.command(role + "-build", argv, environment, cwd=CHECKOUT,
-                                      timeout=480, limit=4 * 1024 * 1024)
+                                      timeout=build_seconds, limit=4 * 1024 * 1024)
                 binary = cargo_artifact(result.stdout, role, CHECKOUT, target, transport=self.transport_selected)
                 self.copy_image(role, binary, target)
                 self.artifacts[role]["cargoMessagesSha256"] = digest(result.stdout)
@@ -5706,6 +5775,7 @@ class Operation:
                            and self.native["outcome"] == "unavailable" else "failed",
                 "failure": failure, "phase": self.phase, "originalCalls": self.calls,
                 "workTimeoutSeconds": WORK_SECONDS, "hardTimeoutSeconds": HARD_SECONDS,
+                **({"transportBudgetAccounting": transport_budget_accounting()} if self.transport_selected else {}),
                 "auxiliaryBudgetNanoseconds": str(AUXILIARY_NS), "artifacts": self.artifacts,
                 "protectedMetadataObservations": self.metadata,
                 "package": self.package, "installedArtifactRoster": getattr(self, "stage_roster", None),
