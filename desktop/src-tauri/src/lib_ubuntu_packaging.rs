@@ -4,7 +4,7 @@ pub mod protocol {
     use serde_json::Value;
     use crate::error::BridgeError;
     include!("protocol_version.rs");
-    include!("protocol_json.rs");
+    include!("protocol_json_common.rs");
 }
 pub mod runtime {
     include!("runtime_publication_inputs.rs");
