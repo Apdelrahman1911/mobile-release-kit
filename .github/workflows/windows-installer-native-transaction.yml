@@ -78,6 +78,7 @@ jobs:
           path: |
             ${{ runner.temp }}/mrk-transaction-build/msi
             ${{ runner.temp }}/mrk-transaction-build/logs
+            ${{ runner.temp }}/mrk-transaction-build/consumer-evidence
             ${{ runner.temp }}/mrk-transaction-build/runtime-prepared.json
             ${{ runner.temp }}/mrk-transaction-build/binding.json
             ${{ runner.temp }}/mrk-transaction-build/source-run-binding.json

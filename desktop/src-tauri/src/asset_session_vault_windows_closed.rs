@@ -4,8 +4,8 @@
 use super::*;
 use crate::credential_setup::KeyReference;
 use crate::saved_command_owner::*;
-pub(super) mod profile_sources { pub(crate) enum AppleProfileSources {} }
-pub(super) mod key_sources { pub(crate) enum AppleKeySources {} }
+pub(super) mod profile_sources { pub(crate) enum AppleProfileSources {} impl AppleProfileSources {pub(in crate::asset_session) fn same_selection(&self, other:&Self)->bool {match *self {}}} }
+pub(super) mod key_sources { pub(crate) enum AppleKeySources {} impl AppleKeySources {pub(in crate::asset_session) fn same_selection(&self, other:&Self)->bool {match *self {}}} }
 pub(crate) enum AppleP12Loan {}
 pub(crate) enum AppleProfileDestination {}
 impl AppleProfileDestination {
@@ -119,4 +119,35 @@ pub(crate) fn published_reference_data(
     ) -> Option<KeyReference> { match *self {} }
 pub(crate) fn parent_retirement_ready(&self, owner: &Arc<OriginalWork>) -> bool { match *self {} }
 pub(crate) fn own_retained_bytes(&self) -> Option<usize> { match *self {} }
+}
+
+impl AppleProfileDestination {
+pub(crate) fn record_pending(
+        &self,
+        owner: &Arc<OriginalWork>,
+        ack: AppleProfilePendingAck,
+    ) -> Result<(), Reason> { match *self {} }
+}
+
+impl AppleDistributionKeyDestination {
+pub(crate) fn record_pending(
+        &self,
+        owner: &Arc<OriginalWork>,
+        ack: AppleKeyPendingAck,
+    ) -> Result<(), Reason> { match *self {} }
+}
+
+impl AppleP12Destination {
+pub(crate) fn record_pending(
+        &self,
+        owner: &Arc<OriginalWork>,
+        ack: AppleP12PendingAck,
+    ) -> Result<(), Reason> { match *self {} }
+}
+
+impl AppleP12Destination {
+pub(crate) fn password_original(
+        &self,
+        owner: &Arc<OriginalWork>,
+    ) -> Result<Arc<commands::AppleP12Password>, Reason> { match *self {} }
 }

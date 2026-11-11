@@ -112,6 +112,19 @@ SOURCE_REQUIRED |= {
     'tests/desktop/test_windows_native_transaction.py',
 }
 
+SOURCE_REQUIRED |= {
+    'desktop/src-tauri/src/apple_provisioning_windows_closed.rs',
+    'desktop/src-tauri/src/asset_session_vault_windows_closed.rs',
+    'desktop/src-tauri/src/credential_apple_distribution_key_fields.rs',
+    'desktop/src-tauri/src/credential_apple_p12_fields.rs',
+    'desktop/src-tauri/src/vault_crypto.rs',
+    'desktop/src-tauri/src/vault_crypto_error_data.rs',
+    'desktop/src-tauri/src/version_allocation_windows_data.rs',
+    'desktop/tools/prepare_windows_msi.py',
+    'desktop/tools/prepare_windows_transaction_run.py',
+    'desktop/tools/windows_compiler_evidence.py',
+}
+
 class Refused(ValueError): pass
 
 def need(ok, message):

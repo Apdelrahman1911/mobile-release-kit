@@ -14,6 +14,7 @@ import build_windows_transaction as native
 import prepare_windows_msi as msi
 import prepare_windows_embedded_payload as embedded
 from windows_build_command import run_owned
+import windows_compiler_evidence as compiler_evidence
 
 def source_asset_admission(source,logs):
  """Observe exact public source asset bytes; never normalize or repair them."""
@@ -39,7 +40,7 @@ def main():
  msi.need(not git('status','--porcelain','--untracked-files=no'),'tracked source must be clean')
  out.mkdir();logs=out/'logs';logs.mkdir()
  source_asset_admission(source,logs)
- env=os.environ.copy();msi.need(not any(env.get(key) for key in ('RUSTC_WRAPPER','RUSTC_WORKSPACE_WRAPPER','RUSTFLAGS','CARGO_ENCODED_RUSTFLAGS','CMAKE_GENERATOR','CXX','CC','CL','_CL_')),'ambient compiler injection refused');env.update(CARGO_BUILD_JOBS='1',CARGO_TARGET_DIR=str(out/'cargo-target'),MSBUILDDISABLENODEREUSE='1',DOTNET_CLI_USE_MSBUILD_SERVER='0',RUSTUP_TOOLCHAIN='1.98.0')
+ env=os.environ.copy();msi.need(not any(env.get(key) for key in ('RUSTC_WRAPPER','RUSTC_WORKSPACE_WRAPPER','RUSTFLAGS','CARGO_ENCODED_RUSTFLAGS','CMAKE_GENERATOR','CXX','CC','CL','_CL_')),'ambient compiler injection refused');env.update(CARGO_BUILD_JOBS='1',CARGO_HOME=str(out/'cargo'),CARGO_TARGET_DIR=str(out/'target'),MSBUILDDISABLENODEREUSE='1',DOTNET_CLI_USE_MSBUILD_SERVER='0',RUSTUP_TOOLCHAIN='1.98.0')
  def run(name,args,cwd=source,timeout=1800):
   return run_owned(name,args,cwd=cwd,env=env,logs=logs,timeout=timeout)
  archive=out/embedded.ZIP_NAME;request=urllib.request.Request(embedded.ZIP_URL,headers={'User-Agent':'MRK-disposable-native-validation/1'})
@@ -58,10 +59,15 @@ def main():
  manifest=str(source/'desktop/src-tauri/Cargo.toml')
  run('shell-typecheck',['cargo','check','--locked','--release','--jobs','1','--target',msi.TARGET,'--manifest-path',manifest,'--no-default-features','--features','desktop-shell,custom-protocol','--bin',msi.SHELL.removesuffix('.exe')])
  run('publisher-data-tests',['cargo','test','--locked','--release','--jobs','1','--target',msi.TARGET,'--manifest-path',manifest,'--no-default-features','--features','windows-runtime-publisher','--lib','--','--nocapture'])
+ run('shell-metadata',['cargo','metadata','--locked','--format-version','1','--filter-platform',msi.TARGET,'--manifest-path',manifest,'--no-default-features','--features','desktop-shell,custom-protocol'])
+ selected={}
  for role,binary,features in [('publisher',msi.PUBLISHER.removesuffix('.exe'),'windows-runtime-publisher'),('shell',msi.SHELL.removesuffix('.exe'),'desktop-shell,custom-protocol')]:
-  run(role+'-compile',['cargo','build','--locked','--release','--jobs','1','--target',msi.TARGET,'--manifest-path',manifest,'--no-default-features','--features',features,'--bin',binary])
+  run(role+'-compile',['cargo','build','--locked','--release','--jobs','1','--target',msi.TARGET,'--manifest-path',manifest,'--no-default-features','--features',features,'--bin',binary,'--message-format=json-render-diagnostics'])
+  selected[role]=compiler_evidence.selected_artifact((logs/(role+'-compile.stdout')).read_bytes(),role=role,source=source,output=out)
+ compiler_evidence.retain_normal(source,out,selected['shell'])
  inputs=out/'inputs';inputs.mkdir();shutil.copytree(runtime,inputs/'runtime')
- for name in (msi.SHELL,msi.PUBLISHER):shutil.copyfile(out/'cargo-target'/msi.TARGET/'release'/name,inputs/name)
+ for role,name in (('shell',msi.SHELL),('publisher',msi.PUBLISHER)):
+  original=Path(selected[role]['path']);msi.need(hashlib.sha256(original.read_bytes()).hexdigest()==selected[role]['sha256'],'compiler-selected original changed');shutil.copyfile(original,inputs/name)
  paths=msi.SOURCE_REQUIRED|native.REQUIRED|{'desktop/tools/prepare_windows_transaction_run.py'}
  files={p.relative_to(inputs).as_posix():{'size':p.stat().st_size,'sha256':hashlib.sha256(p.read_bytes()).hexdigest()} for p in inputs.rglob('*') if p.is_file()}
  b={'schema':1,'sourceCommit':a.source_commit,'sourceTree':a.source_tree,'version':json.loads((source/'desktop/src-tauri/tauri.conf.json').read_text())['version'],
