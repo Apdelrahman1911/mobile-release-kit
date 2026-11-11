@@ -1,0 +1,38 @@
+name: Linux hosted ABI observation (no publication)
+on:
+  push:
+    branches: [verify/desktop-linux-platform-abi-014]
+permissions:
+  contents: read
+concurrency:
+  group: linux-platform-abi-014
+  cancel-in-progress: false
+jobs:
+  observation:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 50
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Observe the exact current hosted ABI without admitting a new kernel
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          PYTHONDONTWRITEBYTECODE: '1'
+        run: |
+          candidate_tree=$(git rev-parse 'HEAD^{tree}')
+          python3 -B desktop/tools/observe_ubuntu_hosted_abi.py --work "$RUNNER_TEMP/abi-observation" --commit "$GITHUB_SHA" --tree "$candidate_tree"
+      - name: Retain original commands, native result, exact kernel headers and observer
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: linux-platform-abi-${{ github.run_id }}-attempt-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/abi-observation/evidence
+            ${{ runner.temp }}/abi-observation/kernel-headers
+            ${{ runner.temp }}/abi-observation/compiled
+            ${{ runner.temp }}/abi-observation/*.json
+            ${{ runner.temp }}/abi-observation/*failure.txt
+          if-no-files-found: error
+          retention-days: 14

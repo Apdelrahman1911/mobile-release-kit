@@ -4,13 +4,11 @@ use std::{collections::BTreeSet, fs::{self, File, Metadata}, io::Read, path::{Co
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use crate::{error::BridgeError, protocol::{strict_json, PROTOCOL}};
+include!("runtime_publication_inputs.rs");
 
-pub const CORE_VERSION: &str = "0.3.0";
-pub const COMPILED_TARGET: &str = env!("MRK_COMPILED_TARGET");
 const MANIFEST_ANCHOR: Option<&str> = option_env!("MRK_BUNDLED_RUNTIME_MANIFEST_SHA256");
 const PROTOCOL_ANCHOR: Option<&str> = option_env!("MRK_BUNDLED_PROTOCOL_SHA256");
 const MANIFEST_LIMIT: u64 = if cfg!(target_os = "macos") { crate::macos_install_record::MANIFEST_LIMIT as u64 } else { 1024 * 1024 };
-pub(crate) const GITHUB_CA_LIMIT: u64 = 512 * 1024;
 // Separate from the session gate and the passive development feature. A CA
 // inventory hash is not native socket/TLS, runtime-custody or host qualification.
 pub(crate) const GITHUB_TLS_PROFILE_QUALIFIED: bool = false;
@@ -29,20 +27,6 @@ fn manifest_json(bytes: &[u8]) -> Result<serde_json::Value, BridgeError> {
     if cfg!(target_os = "macos") { crate::protocol::strict_macos_runtime_manifest_json(bytes) }
     else { strict_json(bytes) }
 }
-#[cfg(windows)]
-const PYTHON_RESOURCE: &str = "python/python.exe";
-#[cfg(not(windows))]
-const PYTHON_RESOURCE: &str = "python/bin/python3";
-
-// Canonical fixed inventory shared by packaging and installed-data validation.
-// Presence is not runtime, TLS, XML, or native-custody qualification.
-pub(crate) const REQUIRED_RUNTIME_RESOURCES: [&str; 15] = [
-    "android_build_bootstrap.py", "artifact_inspection_bootstrap.py", "config_edit_bootstrap.py", "core.zip",
-    "engine_bootstrap.py", "environment_bootstrap.py", "github-ca.pem",
-    "github_connection_bootstrap.py", "github_preflight_bootstrap.py", "github_release_bootstrap.py", "github_setup_bootstrap.py", "ios_archive_bootstrap.py",
-    "offline_preflight_bootstrap.py", "project_recovery_bootstrap.py", PYTHON_RESOURCE,
-];
-
 #[derive(Clone, Debug, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub struct RuntimeStatus { pub state: &'static str, pub reason: Option<String>, pub mode: &'static str }

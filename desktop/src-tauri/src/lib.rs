@@ -122,6 +122,39 @@ compile_error!("windows-runtime-publisher requires the isolated Windows x64 MSVC
 #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
 const _: () = assert!(!mrk_macos_installed_native::VAULT_HELPER_BUILD, "the app must not unify the separate vault-helper Cargo role");
 
+#[cfg(all(feature = "ubuntu-runtime-publisher", not(all(
+    target_os = "linux", target_arch = "x86_64", target_env = "gnu",
+    feature = "ubuntu-runtime-publisher",
+    not(any(
+        feature = "default",
+        feature = "installed-cli",
+        feature = "desktop-shell",
+        feature = "custom-protocol",
+        feature = "development-runtime",
+        feature = "windows-runtime-publisher",
+        feature = "macos-installed-installer",
+        feature = "macos-xcode-setup",
+        feature = "macos-installed-restore-app-write-fixture",
+        feature = "macos-installed-restore-own-attempt-fixture",
+        feature = "macos-installed-restore-stage-move-fixture",
+        feature = "macos-installed-app-absence-fixture",
+        feature = "macos-installed-restore-chain-observer",
+        feature = "macos-installed-remover",
+        feature = "macos-package-producer",
+        feature = "macos-remove-producer",
+        feature = "macos-remove-observer-producer",
+        feature = "macos-android-registration-helper",
+        feature = "macos-installed-resident-image",
+        feature = "macos-installed-desktop-image",
+        feature = "macos-installed-installer-fixture",
+        feature = "macos-installed-removal-abrupt-fixture",
+        feature = "macos-installed-removal-observer",
+        feature = "macos-installed-observation",
+        feature = "windows-installed-observation"
+    ))
+))))]
+compile_error!("Ubuntu publisher requires its isolated Linux x86_64 GNU Cargo role");
+
 // Shared unchanged DATA modules remain at the same crate paths for both graphs.
 pub mod error;
 mod bounded_json_seed;
@@ -160,8 +193,72 @@ mod macos_install_producer_selection_data;
 ))]
 include!("lib_macos_packaging.rs");
 #[cfg(not(all(
+    target_os = "linux", target_arch = "x86_64", target_env = "gnu",
+    feature = "ubuntu-runtime-publisher",
+    not(any(
+        feature = "default",
+        feature = "installed-cli",
+        feature = "desktop-shell",
+        feature = "custom-protocol",
+        feature = "development-runtime",
+        feature = "windows-runtime-publisher",
+        feature = "macos-installed-installer",
+        feature = "macos-xcode-setup",
+        feature = "macos-installed-restore-app-write-fixture",
+        feature = "macos-installed-restore-own-attempt-fixture",
+        feature = "macos-installed-restore-stage-move-fixture",
+        feature = "macos-installed-app-absence-fixture",
+        feature = "macos-installed-restore-chain-observer",
+        feature = "macos-installed-remover",
+        feature = "macos-package-producer",
+        feature = "macos-remove-producer",
+        feature = "macos-remove-observer-producer",
+        feature = "macos-android-registration-helper",
+        feature = "macos-installed-resident-image",
+        feature = "macos-installed-desktop-image",
+        feature = "macos-installed-installer-fixture",
+        feature = "macos-installed-removal-abrupt-fixture",
+        feature = "macos-installed-removal-observer",
+        feature = "macos-installed-observation",
+        feature = "windows-installed-observation"
+    ))
+)))]
+#[cfg(not(all(
     target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),
     any(feature = "macos-installed-installer", feature = "macos-installed-remover", feature = "macos-installed-app-absence-fixture", feature = "macos-package-producer", feature = "macos-remove-producer"),
     not(any(feature = "desktop-shell", feature = "custom-protocol", feature = "development-runtime", feature = "installed-cli", feature = "ubuntu-runtime-publisher", feature = "windows-runtime-publisher", feature = "macos-xcode-setup", feature = "macos-android-registration-helper", feature = "macos-installed-resident-image", feature = "macos-installed-desktop-image", feature = "macos-installed-observation", feature = "windows-installed-observation"))
 )))]
 include!("lib_application.rs");
+
+#[cfg(all(
+    target_os = "linux", target_arch = "x86_64", target_env = "gnu",
+    feature = "ubuntu-runtime-publisher",
+    not(any(
+        feature = "default",
+        feature = "installed-cli",
+        feature = "desktop-shell",
+        feature = "custom-protocol",
+        feature = "development-runtime",
+        feature = "windows-runtime-publisher",
+        feature = "macos-installed-installer",
+        feature = "macos-xcode-setup",
+        feature = "macos-installed-restore-app-write-fixture",
+        feature = "macos-installed-restore-own-attempt-fixture",
+        feature = "macos-installed-restore-stage-move-fixture",
+        feature = "macos-installed-app-absence-fixture",
+        feature = "macos-installed-restore-chain-observer",
+        feature = "macos-installed-remover",
+        feature = "macos-package-producer",
+        feature = "macos-remove-producer",
+        feature = "macos-remove-observer-producer",
+        feature = "macos-android-registration-helper",
+        feature = "macos-installed-resident-image",
+        feature = "macos-installed-desktop-image",
+        feature = "macos-installed-installer-fixture",
+        feature = "macos-installed-removal-abrupt-fixture",
+        feature = "macos-installed-removal-observer",
+        feature = "macos-installed-observation",
+        feature = "windows-installed-observation"
+    ))
+))]
+include!("lib_ubuntu_packaging.rs");

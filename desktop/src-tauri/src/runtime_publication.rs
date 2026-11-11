@@ -338,6 +338,11 @@ impl Publisher {
         self.tick()?;
         let actual = rustix::system::uname();
         require(policy::supported_kernel(actual.sysname().to_bytes(), actual.machine().to_bytes(), actual.release().to_bytes()), PublicationError::Profile)?;
+        self.admin_namespace_context(root)
+    }
+    // Shared original read-only namespace observations; the production caller
+    // always performs its unchanged supported-kernel guard before entering.
+    fn admin_namespace_context(&mut self, root: Slot) -> Result<()> {
         let pid = u32::try_from(rustix::process::getpid().as_raw_pid()).map_err(|_| PublicationError::Profile)?;
         let tid = u32::try_from(rustix::thread::gettid().as_raw_pid()).map_err(|_| PublicationError::Profile)?;
         let proc_root = self.open(Some(root), "proc", read_flags(true),
@@ -1111,4 +1116,75 @@ mod platform_native_tests {
         let settled = publisher.originals.settle();
         assert_eq!((result, settled), (Ok(()), Ok(())), "root platform phase: {phase}");
     }
+
+    #[test]
+    #[ignore = "reviewed disposable root ABI observation; does not admit this kernel"]
+    fn root_current_hosted_abi_observation() {
+        assert_eq!(std::env::var("MRK_UBUNTU_ABI_OBSERVATION").as_deref(), Ok("1"));
+        assert_eq!(std::env::var("GITHUB_ACTIONS").as_deref(), Ok("true"));
+        assert_eq!(std::env::var("RUNNER_ENVIRONMENT").as_deref(), Ok("github-hosted"));
+        assert_eq!(admin_ids(), Ok(()));
+        let actual = rustix::system::uname();
+        let uname = serde_json::json!({
+            "sysname": actual.sysname().to_string_lossy(),
+            "machine": actual.machine().to_string_lossy(),
+            "release": actual.release().to_string_lossy(),
+            "version": actual.version().to_string_lossy(),
+            "productionKernelAccepted": policy::supported_kernel(actual.sysname().to_bytes(),
+                actual.machine().to_bytes(), actual.release().to_bytes()),
+            "qualification": false,
+        });
+        println!("ABI_OBSERVATION_UNAME={uname}");
+        assert_eq!(actual.sysname().to_bytes(), b"Linux");
+        assert_eq!(actual.machine().to_bytes(), b"x86_64");
+        assert_eq!(actual.release().to_bytes(), b"7.0.0-1017-azure");
+        assert!(!policy::supported_kernel(actual.sysname().to_bytes(), actual.machine().to_bytes(), actual.release().to_bytes()));
+        let mut publisher = Publisher::new();
+        let mut phase = "root-original";
+        let result = (|| -> Result<()> {
+            let root = publisher.open(None, "/", read_flags(true), ResolveFlags::empty())?;
+            phase = "protected-root-mount-ABI";
+            let query = mount::observe_mount(publisher.originals.fd(root)?);
+            println!("ABI_OBSERVATION_MOUNT_QUERY={query:?}");
+            let observed = query.map_err(|_| PublicationError::Profile)?;
+            publisher.protected(root, FileType::Directory, None)?;
+            publisher.root_mount = Some(observed);
+            println!("ABI_OBSERVATION_ROOT={}", serde_json::json!({
+                "uniqueMountId": observed.unique_id(), "oldMountId": observed.old_id(),
+                "device": observed.device(), "filesystemMagic": observed.filesystem_magic(),
+                "mountAttributes": observed.attributes(),
+            }));
+            let root_binding = publisher.binding(root, None, "/")?;
+            publisher.retained.push(root_binding);
+            phase = "original-namespace-map-status-current-and-PID1-mount-ABI";
+            // This is a diagnostic observation, not an alternate production
+            // admission route: supported_kernel above remains explicitly false.
+            publisher.admin_namespace_context(root)?;
+            phase = "protected-usr-lib-os-release";
+            let usr = publisher.keep_child(root, "usr")?;
+            let lib = publisher.keep_child(usr, "lib")?;
+            let os_release = publisher.open(Some(lib), "os-release", read_flags(false), beneath())?;
+            let os_stat = publisher.protected(os_release, FileType::RegularFile, None)?;
+            let size = u64::try_from(os_stat.st_size).map_err(|_| PublicationError::Bounds)?;
+            policy::ubuntu_2404(&publisher.read_bytes(os_release, STATUS_LIMIT, Some(size))?).map_err(|_| PublicationError::Profile)?;
+            publisher.originals.close(os_release)?;
+            phase = "protected-var-lib";
+            let var = publisher.keep_child(root, "var")?;
+            publisher.keep_child(var, "lib")?;
+            phase = "retained-recheck";
+            publisher.check_retained()?;
+            admin_ids()?;
+            publisher.tick()
+        })();
+        // No publication, prefix creation, permission change, namespace change,
+        // process signal or repair occurs. Settle originals once on every body exit.
+        let settled = publisher.originals.settle();
+        println!("ABI_OBSERVATION_RESULT={}", serde_json::json!({
+            "phase": phase, "observations": format!("{result:?}"),
+            "settlement": format!("{settled:?}"), "productionKernelAccepted": false,
+            "publicationPerformed": false, "qualification": false,
+        }));
+        assert_eq!((result, settled), (Ok(()), Ok(())), "ABI observation phase: {phase}");
+    }
+
 }
