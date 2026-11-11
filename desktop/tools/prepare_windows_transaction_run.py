@@ -15,6 +15,19 @@ import prepare_windows_msi as msi
 import prepare_windows_embedded_payload as embedded
 from windows_build_command import run_owned
 
+def source_asset_admission(source,logs):
+ """Observe exact public source asset bytes; never normalize or repair them."""
+ rows=[]
+ for name,size,pin in ((embedded.GITHUB_CA_SOURCE,embedded.GITHUB_CA_BYTES,embedded.GITHUB_CA_SHA256),
+                       (embedded.NOTICE_SOURCE,embedded.NOTICE_BYTES,embedded.NOTICE_SHA256)):
+  raw=embedded.runtime_preparation.read_checked(source/name,limit=256*1024)
+  actual=hashlib.sha256(raw).hexdigest()
+  rows.append({'path':name,'expectedBytes':size,'expectedSha256':pin,'actualBytes':len(raw),
+               'actualSha256':actual,'crlfCount':raw.count(b'\r\n'),'lfCount':raw.count(b'\n'),
+               'matched':len(raw)==size and actual==pin})
+ (logs/'source-asset-bytes.json').write_text(json.dumps({'schema':1,'assets':rows},indent=2)+'\n')
+ msi.need(all(row['matched'] for row in rows),'source asset bytes differ; original measurements retained in source-asset-bytes.json')
+
 def main():
  p=argparse.ArgumentParser(description=__doc__)
  for name in ('source','source-commit','source-tree','output'):p.add_argument('--'+name,required=True)
@@ -25,6 +38,7 @@ def main():
  msi.need(git('rev-parse','HEAD')==a.source_commit and git('rev-parse','HEAD^{tree}')==a.source_tree,'reviewed source identity')
  msi.need(not git('status','--porcelain','--untracked-files=no'),'tracked source must be clean')
  out.mkdir();logs=out/'logs';logs.mkdir()
+ source_asset_admission(source,logs)
  env=os.environ.copy();msi.need(not any(env.get(key) for key in ('RUSTC_WRAPPER','RUSTC_WORKSPACE_WRAPPER','RUSTFLAGS','CARGO_ENCODED_RUSTFLAGS','CMAKE_GENERATOR','CXX','CC','CL','_CL_')),'ambient compiler injection refused');env.update(CARGO_BUILD_JOBS='1',CARGO_TARGET_DIR=str(out/'cargo-target'),MSBUILDDISABLENODEREUSE='1',DOTNET_CLI_USE_MSBUILD_SERVER='0',RUSTUP_TOOLCHAIN='1.98.0')
  def run(name,args,cwd=source,timeout=1800):
   return run_owned(name,args,cwd=cwd,env=env,logs=logs,timeout=timeout)

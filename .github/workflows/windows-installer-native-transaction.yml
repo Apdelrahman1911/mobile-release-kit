@@ -24,6 +24,10 @@ jobs:
         run: |
           if($env:GITHUB_REPOSITORY -cne 'Apdelrahman1911/mobile-release-kit' -or $env:GITHUB_WORKFLOW_SHA -cne $env:GITHUB_SHA -or $env:RUNNER_ENVIRONMENT -cne 'github-hosted' -or $env:GITHUB_RUN_ATTEMPT -cne '1' -or $env:GITHUB_REF -cne 'refs/heads/verify/desktop-windows-installer-candidate-014'){throw 'Exact hosted source/workflow/run admission refused'}
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        env:
+          GIT_CONFIG_COUNT: '1'
+          GIT_CONFIG_KEY_0: core.autocrlf
+          GIT_CONFIG_VALUE_0: 'false'
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
@@ -96,6 +100,10 @@ jobs:
         run: |
           if($env:GITHUB_REPOSITORY -cne 'Apdelrahman1911/mobile-release-kit' -or $env:GITHUB_WORKFLOW_SHA -cne $env:GITHUB_SHA -or $env:RUNNER_ENVIRONMENT -cne 'github-hosted' -or $env:GITHUB_RUN_ATTEMPT -cne '1' -or $env:GITHUB_REF -cne 'refs/heads/verify/desktop-windows-installer-candidate-014'){throw 'Exact hosted source/workflow/run admission refused'}
       - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        env:
+          GIT_CONFIG_COUNT: '1'
+          GIT_CONFIG_KEY_0: core.autocrlf
+          GIT_CONFIG_VALUE_0: 'false'
         with:
           ref: ${{ github.sha }}
           persist-credentials: false
