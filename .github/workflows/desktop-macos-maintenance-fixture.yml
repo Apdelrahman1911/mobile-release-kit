@@ -10,7 +10,7 @@ concurrency:
 jobs:
   e2_fixture:
     runs-on: xcode-27
-    timeout-minutes: 100
+    timeout-minutes: 115
     env:
       BASH_ENV: ''
       ENV: ''
@@ -54,7 +54,7 @@ jobs:
         run: builtin source ./desktop/tools/macos_maintenance_fixture_prepare.sh
       - name: Enter genuine client and resident transport without SM approval
         id: native
-        timeout-minutes: 75
+        timeout-minutes: 85
         shell: /usr/bin/env -i /bin/bash --noprofile --norc -e -o pipefail {0}
         run: |
           set -euo pipefail

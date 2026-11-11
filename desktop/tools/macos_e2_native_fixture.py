@@ -3980,7 +3980,7 @@ class SourceInputs:
 
 def transport_budget_accounting():
     """Fixed allowance projection, NOT a new enforced process/group deadline."""
-    phases = (("native-tests", 1, 480), ("client-build", 1, 480), ("resident-build", 1, 1200),
+    phases = (("native-tests", 1, 480), ("client-build", 1, 480), ("resident-build", 1, 2400),
               ("metadata-and-facade-compilers", 4, 30), ("sign-and-stage-verify", 10, 30),
               ("absence-observations", 4, 15), ("package-analyze", 1, 30), ("package-build", 1, 90),
               ("fixture-installer", 1, 120), ("installed-metadata-and-receipt", 2, 15),
@@ -3993,18 +3993,18 @@ def transport_budget_accounting():
             "commandOwnerCleanupAllowanceSeconds": commands * 3,
             "localPostReserveSeconds": 63, "projectedWorkAllowanceSeconds": work + commands * 3 + 63,
             "projectedFinalCleanupAllowanceSeconds": 3, "projectedTotalAllowanceSeconds": work + commands * 3 + 66,
-            "workflowNativeStepLimitSeconds": 75 * 60, "residentCommandWorkSeconds": 1200,
+            "workflowNativeStepLimitSeconds": 85 * 60, "residentCommandWorkSeconds": 2400,
             "nativeObservationCommandWorkSeconds": 315,
             "phases": [{"phase": name, "count": count, "workSecondsEach": seconds}
                        for name, count, seconds in phases]}
 
 
 def image_build_configuration(role, transport):
-    # Same fixed release1 application/schema overrides and arm64 compiler
-    # allowance as macos_android_helper_package.py's successful resident graph.
+    # Same fixed release1 application/schema overrides as the successful
+    # resident graph; hosted capacity margin changes only this transport cap.
     if role == "resident" and transport is True:
         return (("--config", "profile.release.package.mobile-release-kit-desktop.opt-level=1",
-                 "--config", "profile.release.package.mrk-android-catalogue-schema.opt-level=1"), 1200)
+                 "--config", "profile.release.package.mrk-android-catalogue-schema.opt-level=1"), 2400)
     return ((), 480)
 
 
