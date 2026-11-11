@@ -1,4 +1,5 @@
 //! Actual Client/resident transport only; no ServiceManager/SM approval scope.
+use nix::libc;
 use std::{mem::ManuallyDrop,sync::Arc,time::Duration};
 use crate::{android_maintenance_client::{Client,Drain,Progress},android_registration::{Signal,Bounds},
     android_maintenance_wire as wire,e2_fixture_diagnostic::Buffer,vault_helper_wire::uptime};
