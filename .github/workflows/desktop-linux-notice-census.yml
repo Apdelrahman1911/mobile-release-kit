@@ -1,0 +1,39 @@
+name: Linux notice input census (no compilation)
+on:
+  push:
+    branches: [verify/desktop-linux-notice-census-014]
+permissions:
+  contents: read
+concurrency:
+  group: linux-notice-census-014
+  cancel-in-progress: false
+jobs:
+  census:
+    if: github.repository == 'Apdelrahman1911/mobile-release-kit' && github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-linux-notice-census-014' && github.run_attempt == 1
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Acquire the candidate dependency inputs and stop before source compilation
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          PYTHONDONTWRITEBYTECODE: '1'
+        run: |
+          test "$GITHUB_WORKFLOW_SHA" = "$GITHUB_SHA"
+          candidate_tree=$(git rev-parse 'HEAD^{tree}')
+          python3 -B desktop/tools/inspect_ubuntu_notice_inputs.py --work "$RUNNER_TEMP/census" --commit "$GITHUB_SHA" --tree "$candidate_tree"
+      - name: Preserve original dependency commands and exact notice census
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: linux-notice-census-${{ github.run_id }}-attempt-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/census/evidence
+            ${{ runner.temp }}/census/oversized-notices
+            ${{ runner.temp }}/census/*.json
+            ${{ runner.temp }}/census/*failure.txt
+          if-no-files-found: error
+          retention-days: 14
