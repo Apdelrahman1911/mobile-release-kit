@@ -726,6 +726,7 @@ pub(super) enum MaintenanceBranch { #[default] Unselected,ObservedAbsent,Unregis
 #[derive(Clone,Copy,Default)]
 pub(super) struct MaintenanceRun {
     pub(super) branch:MaintenanceBranch,
+    pub(super) diagnostic:installed_native::android_maintenance_diagnostic::Diagnostic,
     pub(super) known:bool,pub(super) checked:bool,pub(super) started_or_uncertain:bool,
     pub(super) tail_received:bool,pub(super) unregister_accepted:bool,pub(super) not_registered:bool,
     pub(super) callback_retired:bool,pub(super) peer_ended:bool,pub(super) retained:Option<usize>,
@@ -1020,8 +1021,14 @@ impl Preparation {
         let refused=|reason|{self.gate.control.propagated_refusal(reason,Instant::now());synchronize();};
         let stop=self.gate.control.stop.subscribe();
         synchronize();
-        let checked=self.gate.source_work().is_ok() && identity.check_once(self.gate.control.work,&stop).is_ok();
-        if checked && self.gate.source_work().is_ok() && signal.admitted(false){
+        let source_ok=self.gate.source_work().is_ok();
+        let checked=source_ok && identity.check_once(self.gate.control.work,&stop).is_ok();
+        use installed_native::android_maintenance_diagnostic::PreClientFailure;
+        if !source_ok{client.before_client_refusal(PreClientFailure::SourceWork);}
+        else if !checked{client.before_client_refusal(PreClientFailure::IdentityCheck);}
+        let ready=checked && self.gate.source_work().is_ok() && signal.admitted(false);
+        if checked && !ready{client.before_client_refusal(PreClientFailure::WorkCut);}
+        if ready{
             let entered=client.begin();let returned_at=Instant::now();
             synchronize();
             match entered{
@@ -1082,6 +1089,7 @@ impl Preparation {
             && (self.retirement.removal.is_none() || self.gate.publishable())
             && identity.recheck(self.gate.control.work,&stop).is_err(){refused(wire::Reason::SigningUnavailable);}
         let files_known=files_known.unwrap_or_else(||identity.settle());
+        let identity_diagnostic=identity.diagnostic();
         let identity_retained=identity.retained_bytes().and_then(|bytes|self.settled_storage(bytes));
         drop(identity);
         synchronize();
@@ -1106,11 +1114,11 @@ impl Preparation {
         let callback_retired=self.retirement.maintenance.as_ref().is_some_and(|tail|tail.retired.load(Ordering::SeqCst));
         let known=files_known && main.0 && callback_retired && client_known && retained.is_some()
             && !self.gate.control.unknown.load(Ordering::SeqCst) && Instant::now()<self.gate.control.endpoint();
-        let result=MaintenanceRun{branch:MaintenanceBranch::Unregistered,known,checked,started_or_uncertain,tail_received,unregister_accepted,not_registered,
+        let result=MaintenanceRun{branch:MaintenanceBranch::Unregistered,diagnostic:client.diagnostic(),known,checked,started_or_uncertain,tail_received,unregister_accepted,not_registered,
             callback_retired,peer_ended,retained};
         // A valid private native result is still not overall Prepared. Both
         // original worker/coordinator handles and the document cut remain owed.
-        let returned=PreparationReturn{known,checked,observation:None,identity_diagnostic:Default::default(),retained,maintenance:Some(result)};
+        let returned=PreparationReturn{known,checked,observation:None,identity_diagnostic,retained,maintenance:Some(result)};
         match self.returned.try_lock(){Ok(mut output) if output.is_none()=>*output=Some(returned),
             _=>{self.gate.control.poisoned();return MaintenanceRun{known:false,..result};}}
         result
@@ -1257,6 +1265,7 @@ impl MaintenancePreparation {
             result=self.enabled.run_maintenance(client,clock,signal);
             enabled_retained=self.enabled.retained_bytes();
         }else{
+            if !absent{client.before_client_refusal(installed_native::android_maintenance_diagnostic::PreClientFailure::ProbePrerequisite);}
             if !absent && control.failure().is_none(){control.propagated_refusal(wire::Reason::ServiceUnavailable,Instant::now());}
             // No native/resource entry in this successor; settle only its
             // genuinely empty identity book. Never fabricate a tail retirement.
@@ -1264,7 +1273,7 @@ impl MaintenancePreparation {
             let client_known=client.release() && client.settled();clock.synchronize(control,signal);
             let not_registered=observed.is_some_and(|value|value.state==wire::ServiceState::NotRegistered);
             result=MaintenanceRun{branch:if absent{MaintenanceBranch::ObservedAbsent}else{MaintenanceBranch::Unselected},
-                known:self.probe.known_return() && enabled_retained.is_some() && client_known,
+                diagnostic:client.diagnostic(),known:self.probe.known_return() && enabled_retained.is_some() && client_known,
                 checked,not_registered,callback_retired:self.probe.retirement.phase.load(Ordering::SeqCst)==CALLBACK_RETIRED,
                 ..MaintenanceRun::default()};
         }
@@ -1917,7 +1926,7 @@ mod callback_lifecycle_tests {
             // Even all other positive DATA cannot turn unsettled native custody
             // into Prepared; these flags do not authorize an actual operation.
             let facts=MaintenanceRun{branch:MaintenanceBranch::Unregistered,known:management_settled(custody),checked:true,started_or_uncertain:true,
-                tail_received:true,unregister_accepted,not_registered,callback_retired:true,peer_ended:true,retained:Some(1)};
+                tail_received:true,unregister_accepted,not_registered,callback_retired:true,peer_ended:true,retained:Some(1),diagnostic:Default::default()};
             assert!(!facts.prepared());
             for (observation,expected) in [
                 (management::Observation{status:management::Status::Enabled,..observed},(true,false)),

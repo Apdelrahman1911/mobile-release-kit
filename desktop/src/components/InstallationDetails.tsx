@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import type { ApiError, AppInfo, DesktopApi, HelpContent } from '../types.ts';
 import { installationError, installationLocationHelp, parseInstallationDescription, installationCheckActive, installationCheckHelp,
-  INSTALLATION_CHECK_GUIDANCE, installationPreparationActive, installationPreparationHelp, INSTALLATION_PREPARATION_GUIDANCE } from '../installation.ts';
+  INSTALLATION_CHECK_GUIDANCE, installationPreparationActive, installationPreparationHelp, installationPreparationDiagnosticLines, INSTALLATION_PREPARATION_GUIDANCE } from '../installation.ts';
 import { InstallationCheckController, type InstallationPreparationController, type InstallationCheckApi, type InstallationCheckView,
   type InstallationPreparationApi, type InstallationPreparationView } from '../installationController.ts';
 import { Badge, ErrorNotice, HelpButton, SectionHeading } from './Common.tsx';
@@ -138,6 +138,11 @@ function InstallationPreparationPanel({ controller, enabled, onHelp }: {
     {status && <div role="status" aria-live="polite">
       <Badge>{status.phase === 'prepared' ? 'Original preparation settled · exit unconfirmed' : status.phase.replaceAll('-', ' ')}</Badge>
       <p>{INSTALLATION_PREPARATION_GUIDANCE[status.reason]}</p>
+      <details>
+        <summary>Preparation failure diagnostic</summary>
+        <p>This records fixed facts from the original attempt. Unavailable facts do not establish success or known cleanup.</p>
+        {installationPreparationDiagnosticLines(status.diagnostic).map((line, index) => <p key={index}><bdi dir="ltr">{line}</bdi></p>)}
+      </details>
       {active && <p>Waiting for the original native helper operation and its cleanup. Changing screens does not cancel it or start another request.</p>}
       {status.phase === 'prepared' && <p>The native completion uses the normal Quit flow. If you cancel Quit, new work remains closed; the app does not automatically register the helper again.</p>}
       {status.phase === 'refused' && <p>{status.newWorkClosed

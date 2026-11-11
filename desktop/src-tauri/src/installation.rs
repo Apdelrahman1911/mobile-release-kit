@@ -236,6 +236,34 @@ pub(crate) enum PreparationPhase { NotStarted, Preparing, Unregistering, Settlin
 pub(crate) enum PreparationReason {
     None, UnavailableProfile, Busy, DocumentUnavailable, ContextChanged, Cancelled, Deadline, Native, CleanupUnknown,
 }
+/// Fixed allowlist; no native object, text, wire identity or admission crosses IPC.
+#[derive(Clone,Copy,Debug,Default,PartialEq,Eq,serde::Serialize)]
+#[serde(rename_all="camelCase")]
+pub(crate) struct PreparationDiagnostic {
+    first:Option<PreparationFailureDiagnostic>,cleanup:Option<PreparationFailureDiagnostic>,pre_client:Option<&'static str>,
+}
+#[derive(Clone,Copy,Debug,PartialEq,Eq,serde::Serialize)]
+#[serde(rename_all="camelCase")]
+struct PreparationFailureDiagnostic {
+    phase:&'static str,failure:&'static str,native:Option<PreparationNativeDiagnostic>,
+}
+#[derive(Clone,Copy,Debug,PartialEq,Eq,serde::Serialize)]
+#[serde(rename_all="camelCase")]
+struct PreparationNativeDiagnostic {
+    first_call:u32,first_code:i32,calls:u32,returns:u32,callbacks:u32,callback_returns:u32,
+    native_call:u32,unknown:u32,slots:[u32;8],
+}
+#[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"),not(feature="macos-android-registration-helper")))]
+impl From<mrk_macos_installed_native::android_maintenance_diagnostic::Diagnostic> for PreparationDiagnostic {
+    fn from(value:mrk_macos_installed_native::android_maintenance_diagnostic::Diagnostic)->Self {
+        use mrk_macos_installed_native::android_maintenance_diagnostic::Observation;
+        let observation=|v:Observation|PreparationFailureDiagnostic{phase:v.phase.name(),failure:v.failure_name(),
+            native:v.native.filter(|n|n.valid()).map(|n|PreparationNativeDiagnostic{first_call:n.first_call,first_code:n.first_code,
+                calls:n.calls,returns:n.returns,callbacks:n.callbacks,callback_returns:n.callback_returns,
+                native_call:n.native_call,unknown:n.unknown,slots:n.slots})};
+        Self{first:value.first.map(observation),cleanup:value.cleanup.map(observation),pre_client:value.pre_client.map(|value|value.name())}
+    }
+}
 #[derive(Clone, Debug, PartialEq, Eq, Serialize)]
 #[serde(rename_all = "camelCase")]
 pub(crate) struct PreparationStatus {
@@ -248,12 +276,13 @@ pub(crate) struct PreparationStatus {
     pub(crate) reason: PreparationReason,
     pub(crate) new_work_closed: bool,
     pub(crate) assurance: &'static str,
+    pub(crate) diagnostic:PreparationDiagnostic,
 }
 impl PreparationStatus {
     pub(crate) fn initial(available: bool, ready: bool, reason: PreparationReason) -> Self {
         Self { schema_version: 1, available, can_start: available && ready && reason == PreparationReason::None,
             operation_id: None, generation: None, phase: PreparationPhase::NotStarted,
-            reason, new_work_closed: false, assurance: "preparation-status-only" }
+            reason, new_work_closed: false, assurance: "preparation-status-only",diagnostic:PreparationDiagnostic::default() }
     }
 }
 pub(crate) fn preparation_reason(reason: crate::android_registration_app_protocol::Reason) -> PreparationReason {
@@ -287,7 +316,7 @@ fn preparation_wire_requires_exact_consent_and_never_conveys_installer_authority
     let value = serde_json::to_value(PreparationStatus::initial(true, true, PreparationReason::None)).unwrap();
     assert_eq!(value, json!({"schemaVersion": 1, "available": true, "canStart": true,
         "operationId": null, "generation": null, "phase": "not-started", "reason": "none",
-        "newWorkClosed": false, "assurance": "preparation-status-only"}));
+        "newWorkClosed": false, "assurance": "preparation-status-only", "diagnostic":{"first":null,"cleanup":null,"preClient":null}}));
     assert!(!preparation_profile_available() || NORMAL_MAC_PROFILE);
     use crate::android_registration_app_protocol::Reason as R;
     assert_eq!(preparation_reason(R::TimedOut), PreparationReason::Deadline);

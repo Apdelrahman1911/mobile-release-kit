@@ -129,6 +129,11 @@ pub mod android_registration;
 // nonhelper-only inside this fixed module.
 pub mod removal_coordinator;
 pub mod android_maintenance_wire;
+pub mod android_maintenance_diagnostic;
+#[cfg(feature="e2-native-fixture")]
+pub mod e2_fixture_diagnostic;
+#[cfg(all(feature="e2-native-fixture",feature="desktop-image"))]
+pub mod e2_transport_diagnostic;
 #[cfg(not(any(feature = "android-registration-helper", feature = "vault-helper")))]
 pub mod android_maintenance_client;
 #[cfg(feature = "android-registration-helper")]

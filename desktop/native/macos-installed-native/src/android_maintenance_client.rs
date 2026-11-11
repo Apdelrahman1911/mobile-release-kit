@@ -3,6 +3,7 @@
 use crate::{android_registration::{ClientBook,Signal,Failure,FrozenFailure},
     android_maintenance_wire::{self as wire,Binding,Frame,Kind,Code,Identity},
     android_service_client_data::TailCapture,vault_helper_wire::{ClockBridge,uptime}};
+use crate::android_maintenance_diagnostic::{Diagnostic,Phase};
 use std::{mem::ManuallyDrop,sync::Arc,time::Instant};
 /// Owning, non-Clone admission. Only the real no-F client path constructs it.
 /// Dropping an uncertain capture does not pretend same-DATA settlement.
@@ -30,6 +31,7 @@ pub(crate) struct FixtureClientObservation {
 pub struct Client {
     book:ClientBook,signal:ManuallyDrop<Arc<Signal>>,request:Binding,binding:Option<Binding>,
     tail:Option<wire::Tail>,buffer:[u8;wire::BYTES+1],used:usize,last:u64,
+    diagnostic:Diagnostic,diagnostic_phase:Phase,
     begun:bool,drain_entered:bool,receipt_sent:bool,admission_issued:bool,eof:bool,exited:bool,retired:bool,
     #[cfg(feature = "e2-native-fixture")]
     fixture:FixtureTrace,
@@ -41,7 +43,7 @@ impl Client {
         let identity=Identity::build()?;
         let request=Binding::request(identity,operation,wire::Bounds{origin:bounds.origin,work:bounds.work,hard:bounds.hard})?;
         Some(Self{book:ClientBook::new_maintenance(signal.clone()),signal:ManuallyDrop::new(signal),
-            request,binding:None,tail:None,buffer:[0;wire::BYTES+1],used:0,last:bounds.origin,begun:false,
+            request,binding:None,tail:None,buffer:[0;wire::BYTES+1],used:0,last:bounds.origin,diagnostic:Diagnostic::default(),diagnostic_phase:Phase::Begin,begun:false,
             drain_entered:false,receipt_sent:false,admission_issued:false,eof:false,exited:false,retired:false,
             #[cfg(feature = "e2-native-fixture")]
             fixture:FixtureTrace::default(),
@@ -83,7 +85,9 @@ impl Client {
     fn challenge_and_watch(&mut self)->Result<Frame,Failure>{
         if self.begun || self.retired{return Err(self.failed(Failure::Sequence));}
         self.removal_cut(false)?;self.begun=true;
+        self.diagnostic_phase=Phase::Begin;
         self.book.begin()?;
+        self.diagnostic_phase=Phase::ChallengeA;
         let a=self.call(3,Frame{kind:Kind::ChallengeA,code:Code::Accepted,binding:self.request,tail:None},Kind::ChallengeAReply)?;
         if a.code!=Code::Accepted || !a.binding.matches_request(self.request,self.book.maintenance_account()){
             return Err(self.failed(Failure::Binding));
@@ -92,16 +96,37 @@ impl Client {
         { self.fixture.challenge=Some(a.binding); }
         // Actual SAME connection's processIdentifier and original NOTE_EXIT
         // registration/noninheritance complete before B enters.
+        self.diagnostic_phase=Phase::Watch;
         self.book.maintenance_watch()?;
         self.removal_cut(false)?;
         #[cfg(feature = "e2-native-fixture")]
         { self.fixture.watch_registered=true; }
         Ok(a)
     }
+    pub fn diagnostic(&self)->Diagnostic{self.diagnostic}
+    #[cfg(feature="e2-native-fixture")]
+    pub(crate) fn fixture_cached_native_diagnostic(&self)->Option<crate::android_maintenance_diagnostic::NativeSnapshot>{
+        self.book.maintenance_diagnostic_native()
+    }
+    /// Already-returned app gate DATA only; never marks native entry or admission.
+    pub fn before_client_refusal(&mut self,reason:crate::android_maintenance_diagnostic::PreClientFailure){
+        if !self.begun{self.diagnostic.before_client(reason);}
+    }
+    fn record_failure(&mut self,failure:Failure){
+        self.diagnostic.record(self.diagnostic_phase,failure,self.book.maintenance_diagnostic_native());
+    }
     pub fn begin(&mut self)->Result<Drain,Failure>{
+        self.diagnostic_phase=Phase::Begin;
+        let outcome=self.begin_original();
+        if let Err(failure)=outcome{self.record_failure(failure);}
+        outcome
+    }
+    fn begin_original(&mut self)->Result<Drain,Failure>{
         let a=self.challenge_and_watch()?;
+        self.diagnostic_phase=Phase::ChallengeB;
         let b=self.call(4,Frame{kind:Kind::ChallengeB,code:Code::Accepted,binding:a.binding,tail:None},Kind::ChallengeBReply)?;
         if b.code!=Code::Accepted || b.binding!=a.binding{return Err(self.failed(Failure::Binding));}
+        self.diagnostic_phase=Phase::Drain;
         self.drain_entered=true; // possible entry remains latched even on reply loss
         let result=self.call(5,Frame{kind:Kind::BeginDrain,code:Code::Accepted,binding:b.binding,tail:None},Kind::BeginDrainReply)?;
         if !result.binding.same_challenge(b.binding){return Err(self.failed(Failure::Binding));}
@@ -119,7 +144,9 @@ impl Client {
         self.binding=Some(result.binding);
         let now=self.now()?;
         if !self.signal.narrow_maintenance(result.binding.cutoff,now){return Err(Failure::Stopped);}
+        self.diagnostic_phase=Phase::Receive;
         self.book.maintenance_receive()?;
+        self.diagnostic_phase=Phase::Receipt;
         let receipt=Frame{kind:Kind::TailReceived,code:Code::Accepted,binding:result.binding,tail:None}
             .encode().ok_or_else(||self.failed(Failure::Binding))?;
         self.receipt_sent=true; // exactly one possibly-entered send, never retry
@@ -132,9 +159,17 @@ impl Client {
     /// forged refusal or replacement connection exists on this path.
     #[cfg(feature = "e2-native-fixture")]
     pub(crate) fn fixture_begin_missing_b(&mut self)->Result<(),Failure> {
+        self.diagnostic_phase=Phase::Begin;
+        let outcome=self.fixture_begin_missing_b_original();
+        if let Err(failure)=outcome{self.record_failure(failure);}
+        outcome
+    }
+    #[cfg(feature = "e2-native-fixture")]
+    fn fixture_begin_missing_b_original(&mut self)->Result<(),Failure> {
         let a=self.challenge_and_watch()?;
         let input=Frame { kind:Kind::BeginDrain,code:Code::Accepted,binding:a.binding,tail:None }
             .encode().ok_or_else(||self.failed(Failure::Binding))?;
+        self.diagnostic_phase=Phase::Drain;
         self.drain_entered=true; // Possible entry only, never proof of selector/reply.
         let raw=self.book.fixture_missing_b(&input)?;
         let now=self.now()?;
@@ -180,6 +215,12 @@ impl Client {
         self.book.fixture_identity_facts()
     }
     pub fn step(&mut self)->Result<Progress,Failure>{
+        self.diagnostic_phase=Phase::Tail;
+        let outcome=self.step_original();
+        if let Err(failure)=outcome{self.record_failure(failure);}
+        outcome
+    }
+    fn step_original(&mut self)->Result<Progress,Failure>{
         if !self.receipt_sent || self.retired || self.used>wire::BYTES{return Err(self.failed(Failure::Sequence));}
         self.removal_cut(true)?;
         let (bytes,eof,exited)=self.book.maintenance_step(&mut self.buffer[self.used..])?;
@@ -208,6 +249,12 @@ impl Client {
         if self.eof && self.exited{Ok(Progress::Exited)}else{Ok(Progress::Pending)}
     }
     pub fn take_tail_admission(&mut self,clock:&ClockBridge)->Option<TailAdmission>{
+        self.diagnostic_phase=Phase::Tail;
+        let admission=self.take_tail_admission_original(clock);
+        if admission.is_none(){self.record_failure(Failure::Unknown);}
+        admission
+    }
+    fn take_tail_admission_original(&mut self,clock:&ClockBridge)->Option<TailAdmission>{
         if self.admission_issued || self.retired || self.eof || self.exited{return None;}
         let tail=self.tail?;let binding=self.binding?;let now=self.now().ok()?;
         if !self.signal.maintenance_tail(tail.first,tail.cutoff,now){return None;}
@@ -222,13 +269,21 @@ impl Client {
     pub fn final_observed(&self)->bool{self.admission_issued && self.eof && self.exited && self.tail.is_some()}
     pub fn release(&mut self)->bool{
         if self.retired{return true;}
-        if self.removal_cut(true).is_err(){return false;}
-        if !self.book.release(){return false;}
-        if self.removal_cut(true).is_err(){return false;}
+        self.diagnostic_phase=Phase::Cleanup;
+        let outcome=self.release_original();
+        if let Err(failure)=outcome{self.record_failure(failure);}
+        outcome.is_ok()
+    }
+    fn release_original(&mut self)->Result<(),Failure>{
+        if self.retired{return Ok(());}
+        self.removal_cut(true)?;
+        // ClientBook's original Boolean cannot identify a more specific error.
+        if !self.book.release(){return Err(Failure::Unknown);}
+        self.removal_cut(true)?;
         self.retired=true;
         // Actual book, handles, request backing AND owning tail capture have
         // all settled before the last local Signal handle is consumed.
-        unsafe{ManuallyDrop::drop(&mut self.signal);}true
+        unsafe{ManuallyDrop::drop(&mut self.signal);}Ok(())
     }
     pub fn settled(&self)->bool{self.retired && self.book.settled()}
 }

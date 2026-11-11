@@ -171,6 +171,13 @@ export class InstallationPreparationController {
         throw installationPreparationError(null);
       }
     }
+    // Preserve the first bounded diagnostic for THIS same original, including
+    // after a later missing/invalid diagnostic. This DATA never changes gates.
+    if (before?.generation != null && next.generation === before.generation && next.operationId === before.operationId) {
+      next.diagnostic = { first: before.diagnostic.first ?? next.diagnostic.first,
+        cleanup: before.diagnostic.cleanup ?? next.diagnostic.cleanup,
+        ...((before.diagnostic.preClient ?? next.diagnostic.preClient) ? { preClient: before.diagnostic.preClient ?? next.diagnostic.preClient } : {}) };
+    }
     // A failed Start followed by the unchanged pre-Start status does not
     // explain that attempt. Keep its error and replay veto until the native
     // Document identifies a newer original, including after explicit Refresh.

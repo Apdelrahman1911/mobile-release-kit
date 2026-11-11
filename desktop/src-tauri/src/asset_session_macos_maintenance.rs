@@ -305,7 +305,7 @@ impl DocumentBinding {
                 can_start:ready && phase==P::Refused && !state.maintenance.closed(),
                 operation_id:Some(id),
                 generation:Some(original.generation),phase,reason:crate::installation::preparation_reason(original.reason),
-                new_work_closed:state.maintenance.closed(),assurance:"preparation-status-only"})
+                new_work_closed:state.maintenance.closed(),assurance:"preparation-status-only",diagnostic:original.diagnostic.into()})
         }
         #[cfg(not(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"),feature="macos-installed-desktop-image",not(feature="macos-android-registration-helper"))))]
         {let _=expected;Err(unavailable())}

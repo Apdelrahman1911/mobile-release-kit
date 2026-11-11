@@ -62,6 +62,7 @@ mod selected{
     #[derive(Clone,Copy)]
     pub(crate) struct Status{
         pub(crate) operation:[u8;16],pub(crate) generation:u32,pub(crate) phase:Phase,pub(crate) reason:wire::Reason,
+        pub(crate) diagnostic:mrk_macos_installed_native::android_maintenance_diagnostic::Diagnostic,
         pub(crate) started_or_uncertain:bool,pub(crate) unregister_accepted:bool,pub(crate) not_registered:bool,
     }
     #[derive(Default)]
@@ -244,7 +245,11 @@ mod selected{
             let partial=self.preparation.maintenance_partial();
             let facts=self.preparation.maintenance_return();
             let unknown=self.control.unknown.load(Ordering::SeqCst);
-            Status{operation:self.operation,generation:self.generation,
+            // Read cached comparison DATA only. Contention means unavailable,
+            // never a reason to wait, run native IPC, or change admission.
+            let diagnostic=facts.map(|value|value.diagnostic).or_else(||self.client.try_lock().ok()
+                .and_then(|client|client.as_ref().map(|client|client.diagnostic()))).unwrap_or_default();
+            Status{operation:self.operation,generation:self.generation,diagnostic,
                 phase:if unknown{Phase::Unknown}else if self.worker_joined.load(Ordering::SeqCst){Phase::Settling}
                     else if partial.0{Phase::Unregistering}else{Phase::Preparing},
                 reason:if unknown{wire::Reason::CleanupUnknown}else{self.control.failure().map_or(wire::Reason::None,|(reason,_)|reason)},
@@ -609,7 +614,7 @@ mod selected{
         #[test]
         fn prepared_requires_all_original_facts_and_partial_unregister_never_reopens(){
             let yes=service_setup::MaintenanceRun{branch:service_setup::MaintenanceBranch::Unregistered,known:true,checked:true,started_or_uncertain:true,tail_received:true,
-                unregister_accepted:true,not_registered:true,callback_retired:true,peer_ended:true,retained:Some(1)};
+                unregister_accepted:true,not_registered:true,callback_retired:true,peer_ended:true,retained:Some(1),diagnostic:Default::default()};
             assert!(yes.prepared());
             for value in [service_setup::MaintenanceRun{known:false,..yes},service_setup::MaintenanceRun{checked:false,..yes},
                 service_setup::MaintenanceRun{started_or_uncertain:false,..yes},
@@ -628,7 +633,7 @@ mod selected{
                 service_setup::MaintenanceRun{callback_retired:false,..absent},service_setup::MaintenanceRun{not_registered:false,..absent},
                 service_setup::MaintenanceRun{retained:None,..absent}]{assert!(!bad.prepared());}
             let at=Instant::now();let status=Status{operation:[1;16],generation:1,phase:Phase::Refused,reason:wire::Reason::ServiceUnavailable,
-                started_or_uncertain:true,unregister_accepted:true,not_registered:true};
+                started_or_uncertain:true,unregister_accepted:true,not_registered:true,diagnostic:Default::default()};
             let completion=Completion{status,at,endpoint:at+Duration::from_secs(1),removal:None};
             assert!(!completion.may_reopen() && !completion.request_quit());
             let closed=Completion{status:Status{phase:Phase::Prepared,..status},at,endpoint:at,removal:None};

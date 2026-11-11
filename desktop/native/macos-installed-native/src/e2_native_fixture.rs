@@ -544,10 +544,30 @@ impl Worker {
         Some(WorkerReport::Settled { returned_ns:now,observation,identity,identity_custody })
     }
 }
+// One fixed private file per case, written before any unresolved worker parks.
+// It is comparison DATA only; neither write/close nor its presence grants finality.
+fn emit_worker_diagnostic(worker:&Worker)->bool {
+    let name:&[u8]=match worker.kind {
+        Case::MissingB=>b"maintenance-diagnostic-missing-b-refused.json\0",
+        Case::LocalF=>b"maintenance-diagnostic-local-f-before-admission.json\0",
+        Case::Genuine=>b"maintenance-diagnostic-genuine-tail-unregister.json\0",
+    };
+    let diagnostic=worker.client.as_ref().map(Client::diagnostic).unwrap_or_default();
+    let Some(output)=crate::e2_fixture_diagnostic::Buffer::encode(worker.kind.name(),worker.client.is_some(),diagnostic)else{return false;};
+    // CWD is the fixed empty, user-owned fixture output directory selected by
+    // the same original owner. No runtime path, existing file or root tree write.
+    let fd=unsafe{libc::open(name.as_ptr().cast(),libc::O_WRONLY|libc::O_CREAT|libc::O_EXCL|libc::O_NOFOLLOW|libc::O_CLOEXEC,0o600)};
+    if fd<0{return false;}
+    let count=unsafe{libc::write(fd,output.bytes.as_ptr().cast(),output.used)};
+    if unsafe{libc::close(fd)}!=0{retain_unknown();} // retain this original close frame
+    count>=0 && count as usize==output.used
+}
 fn worker_entry(worker:Worker)->WorkerReport {
     // The frame containing every original survives panic/unresolved work.
     let mut worker=ManuallyDrop::new(worker);
-    match catch_unwind(AssertUnwindSafe(||worker.run())) {
+    let returned=catch_unwind(AssertUnwindSafe(||worker.run()));
+    if !emit_worker_diagnostic(&worker){retain_unknown();}
+    match returned {
         Ok(Some(report)) if worker.offer.is_none() && worker.pending_admission.is_none()
             && worker.client.as_ref().is_none_or(Client::settled)=>{
             // Only settled Client fields and ordinary Rust DATA remain. This
@@ -1229,6 +1249,7 @@ fn project_census()->Option<ProjectCensus> {
         size_of::<ArcAllocation<ClockBridge>>(),size_of::<ArcAllocation<Signal>>(),
         size_of::<ArcAllocation<Shared>>(),size_of::<Gate<'static>>(),
         size_of::<WorkerReport>(),2_usize.checked_mul(size_of::<Row>())?,
+        size_of::<crate::e2_fixture_diagnostic::Buffer>(),
         crate::android_service_budget::maintenance_wire_high_water()?,
         // Bounded main scalar/formatter/checkpoint scratch, including the
         // fixed thirteen-entry (static key,bool) projection in ResultBuffer.

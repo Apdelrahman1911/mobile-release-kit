@@ -227,6 +227,9 @@ REGISTRATION_FACTS = (
 )
 LAYOUT_ARGUMENT = "--observe-service-layout"
 COCOA_ARGUMENT = "--observe-service-cocoa-startup"
+TRANSPORT_ARGUMENT = "--diagnose-maintenance-transport"
+TRANSPORT_OBSERVATION_SECONDS = 315
+TRANSPORT_PLIST = "transport-daemon.plist"
 COCOA_TYPE = "mrk-e2-service-cocoa-startup-observations-v1"
 COCOA_ROLE = "service-cocoa-startup"
 COCOA_SECONDS = 15
@@ -325,6 +328,46 @@ RESULT_KEYS = {"schemaVersion", "type", "fixtureProfile", "sourceCommit", "relea
                "target", "outcome", "nativeFinalityKnown", "auxiliaryNanoseconds",
                "syntheticIdentity", "productionIdentityQualified",
                "actualAppIntegrationQualified", "overlapObserved", "overlapEvidence", "cases"}
+
+
+DIAGNOSTIC_NAMES = tuple("maintenance-diagnostic-" + case + ".json" for case in CASES)
+TRANSPORT_DIAGNOSTIC = "maintenance-diagnostic-transport-only.json"
+def transport_plist_data():
+    return plistlib.dumps({"Label":SERVICE,"ProgramArguments":[str(ROOT / RESIDENT)],"MachServices":{SERVICE:True}},sort_keys=True)
+
+def maintenance_diagnostic(body, case):
+    """Strict fixture DATA only; never native finality or shipping acceptance."""
+    row = decode(body, 2048)
+    need(type(row) is dict and set(row) == {"schemaVersion", "type", "case", "clientCreated", "nativeFinalityQualified", "shippingQualified", "diagnostic", "checkpoint", "cachedNative"}
+         and type(row["schemaVersion"]) is int and row["schemaVersion"] == 1
+         and row["type"] == "mrk-fixture-maintenance-diagnostic-v1" and row["case"] == case and case in (*CASES,"transport-only")
+         and type(row["clientCreated"]) is bool and row["nativeFinalityQualified"] is False and row["shippingQualified"] is False,
+         "fixture-diagnostic-shape")
+    need(row["checkpoint"] in ("worker-returned","client-unavailable","tail-received","peer-exited","drain-refused","transport-error"), "fixture-diagnostic-checkpoint")
+    data = row["diagnostic"]
+    need(type(data) is dict and set(data) == {"first", "cleanup", "preClient"}
+         and data["preClient"] in (None,"source-work","identity-check","work-cut","probe-prerequisite"), "fixture-diagnostic-data")
+    for name in ("first", "cleanup", "cachedNative"):
+        value = ({"phase":"begin","failure":"unknown","native":row["cachedNative"]} if name == "cachedNative" else data[name])
+        if value is None: continue
+        need(type(value) is dict and set(value) == {"phase","failure","native"}
+             and value["phase"] in ("begin","A","watch","B","drain","receive","receipt","tail","cleanup")
+             and value["failure"] in ("unavailable","bounds","binding","sequence","busy","stopped","native","unknown"), "fixture-diagnostic-observation")
+        if name == "cleanup": need(value["phase"] == "cleanup", "fixture-diagnostic-cleanup")
+        native = value["native"]
+        if native is None: continue
+        need(type(native) is dict and set(native) == {"firstCall","firstCode","calls","returns","callbacks","callbackReturns","nativeCall","unknown","slots"}, "fixture-diagnostic-native")
+        need(all(type(native[k]) is int and 0 <= native[k] <= 400000 for k in ("firstCall","calls","returns","callbacks","callbackReturns"))
+             and type(native["firstCode"]) is int and 0 <= native["firstCode"] <= 4095
+             and (native["firstCode"] != 0 or native["firstCall"] == 0)
+             and 0 <= native["calls"]-native["returns"] <= 1 and native["firstCall"] <= native["calls"]
+             and 0 <= native["callbacks"]-native["callbackReturns"] <= 1
+             and type(native["nativeCall"]) is int and native["nativeCall"] in (0,1)
+             and type(native["unknown"]) is int and native["unknown"] in (0,1)
+             and type(native["slots"]) is list and len(native["slots"]) == 8
+             and all(type(n) is int and 0 <= n <= 5 for n in native["slots"]), "fixture-diagnostic-native-bounds")
+    need(data["cleanup"] is None or data["first"] is not None, "fixture-diagnostic-order")
+    return row
 
 
 class Refused(ValueError):
@@ -3253,7 +3296,8 @@ def removal_recovery_data_result(result, source, rows):
             "ordinaryUserEntryQualified": False, "fullE2Qualified": False}
 
 
-def cargo_artifact(messages, role, checkout, target):
+def cargo_artifact(messages, role, checkout, target, transport=False):
+    need(type(transport) is bool, "fixture-transport-selection")
     """Require the actual compiler roster, not an executable found by basename."""
     need(role in ("client", "resident") and type(messages) is bytes
          and 0 < len(messages) <= 4 * 1024 * 1024 and messages.endswith(b"\n"), "cargo-bound")
@@ -3275,12 +3319,12 @@ def cargo_artifact(messages, role, checkout, target):
     need(finished, "cargo-finished")
     package = "mrk-macos-installed-native" if role == "client" else "mrk-android-register"
     directory = NATIVE if role == "client" else HELPER
-    name = "e2_maintenance_client" if role == "client" else "mrk_resident_image"
-    entry = "examples/e2_maintenance_client.rs" if role == "client" else "src/lib.rs"
+    name = ("e2_maintenance_transport" if transport else "e2_maintenance_client") if role == "client" else "mrk_resident_image"
+    entry = ("examples/e2_maintenance_transport.rs" if transport else "examples/e2_maintenance_client.rs") if role == "client" else "src/lib.rs"
     kind = ["example"] if role == "client" else ["cdylib"]
     features = ["desktop-image", "e2-native-fixture"] if role == "client" else ["e2-native-fixture"]
     binary = target / TARGET / "release"
-    binary = binary / ("examples/libe2_maintenance_client.dylib" if role == "client" else "libmrk_resident_image.dylib")
+    binary = binary / (("examples/libe2_maintenance_transport.dylib" if transport else "examples/libe2_maintenance_client.dylib") if role == "client" else "libmrk_resident_image.dylib")
     selected = [row for row in records if row["target"].get("name") == name
                 or str(binary) in row["filenames"] or row.get("executable") == str(binary)]
     need(len(selected) == 1, "one-fixture-image")
@@ -3809,6 +3853,7 @@ def binding_data(environment, binding, inventory, rust, work_identity):
          and rust.get("runAttempt") == environment["GITHUB_RUN_ATTEMPT"]
          and rust.get("cwd") == "desktop/src-tauri" and rust.get("autoInstall") is False
          and rust.get("selectedMacToolchain") == TOOLCHAIN and rust.get("repositoryDefault") == "1.98.0"
+         and rust.get("toolDirectory") == "/Users/runner/.rustup/toolchains/" + TOOLCHAIN + "-" + TARGET + "/bin"
          and type(rust.get("tools")) is dict and set(rust["tools"]) == {"rustc", "cargo"},
          "effective-rust-binding")
     for name in ("rustc", "cargo"):
@@ -3829,7 +3874,9 @@ def source_names(rows):
     explicit = {
         ".github/workflows/desktop-macos-maintenance-fixture.yml",
         "desktop/tools/macos_maintenance_fixture_prepare.sh",
+        "desktop/tools/macos_maintenance_fixture_toolchain.sh",
         "desktop/tools/macos_maintenance_fixture_publish.sh",
+        "desktop/tools/macos_maintenance_live_publish.py",
         "desktop/rust-toolchain.toml", "desktop/packaging/macos-empty-entitlements.plist",
         "desktop/packaging/macos-android-service-signing.profile",
         "desktop/packaging/macos-install-producer-signing.profile",
@@ -3885,7 +3932,7 @@ class SourceInputs:
         # All actual Rust/native/helper/owner/build inputs are bound before
         # loading project modules. They stay held through compiler/native work.
         selected = source_names(self.rows)
-        need(len(selected) <= 512, "source-original-roster-bound")
+        need(len(selected) <= 1536, "source-original-roster-bound")
         # Admit actual capacity before accumulating the source originals. This
         # query is local to native main; DATA import does not probe a process.
         import resource
@@ -3935,11 +3982,11 @@ def admit(environment):
     import platform
     import threading
     need(sys.platform == "darwin" and platform.machine() == "arm64"
-         and platform.mac_ver()[0].split(".")[0] == "26"
+         and platform.mac_ver()[0].split(".")[0] == "27"
          and os.getuid() == os.geteuid() != 0 and os.getgid() == os.getegid()
          and threading.current_thread() is threading.main_thread() and sys.version_info >= (3, 11)
          and shutil.rmtree.avoids_symlink_attacks, "native-platform-account")
-    need(len(sys.argv) in (1, 2) and sys.argv[1:] in ([], [LAYOUT_ARGUMENT], [CONTEXT_RECEIPT_ARGUMENT], [COCOA_ARGUMENT], [REGISTRATION_ARGUMENT], [REMOVAL_ARGUMENT], [INTEGRATION_ARGUMENT], [PARENT_ARGUMENT], *([argument] for argument in PARENT_PART_ARGUMENTS), [CHANGES_ARGUMENT], [RECOVERY_ARGUMENT])
+    need(len(sys.argv) in (1, 2) and sys.argv[1:] in ([], [TRANSPORT_ARGUMENT], [LAYOUT_ARGUMENT], [CONTEXT_RECEIPT_ARGUMENT], [COCOA_ARGUMENT], [REGISTRATION_ARGUMENT], [REMOVAL_ARGUMENT], [INTEGRATION_ARGUMENT], [PARENT_ARGUMENT], *([argument] for argument in PARENT_PART_ARGUMENTS), [CHANGES_ARGUMENT], [RECOVERY_ARGUMENT])
          and Path(__file__).absolute() == CHECKOUT / "desktop/tools/macos_e2_native_fixture.py"
          and Path.cwd() == CHECKOUT and sys.flags.isolated and sys.flags.no_site and sys.dont_write_bytecode,
          "native-entry-route")
@@ -4133,6 +4180,7 @@ class Operation:
              and type(registration_reservation) is bool and type(removal_data) is bool and type(removal_integration) is bool and type(removal_parent) is bool and type(removal_changes) is bool and type(removal_recovery) is bool
              and sum((service_layout, context_receipts, service_cocoa, registration_reservation, removal_data, removal_integration, removal_parent, removal_changes, removal_recovery)) <= 1,
              "layout-operation-selector")
+        self.transport_selected = False
         self.registration_selected = registration_reservation
         self.removal_selected = removal_data or removal_integration or removal_parent or removal_changes or removal_recovery
         self.removal_integration_selected = removal_integration
@@ -4831,7 +4879,7 @@ class Operation:
                     pass
                 else:
                     raise Refused("ambient-cargo-configuration")
-        bin_directory = rustup_home / "toolchains" / "stable-aarch64-apple-darwin" / "bin"
+        bin_directory = rustup_home / "toolchains" / (TOOLCHAIN + "-aarch64-apple-darwin") / "bin"
         self.outputs.directory(bin_directory)
         cargo = bin_directory / "cargo"
         rustc = bin_directory / "rustc"
@@ -4899,7 +4947,7 @@ class Operation:
                 siblings = os.listdir(parent["fd"])
                 need(len(siblings) <= 8192, "compiler-alias-roster")
                 names = [binary.parent / name for name in siblings
-                         if re.fullmatch(r"libe2_maintenance_client-[0-9a-f]{16}\.dylib", name)]
+                         if re.fullmatch(r"libe2_maintenance_" + ("transport" if self.transport_selected else "client") + r"-[0-9a-f]{16}\.dylib", name)]
             aliases = []
             for name in names:
                 info = os.stat(name, follow_symlinks=False)
@@ -4978,7 +5026,7 @@ class Operation:
                       "--no-default-features", "--features",
                       "desktop-image,e2-native-fixture" if role == "client" else "e2-native-fixture"]
             argv = [cargo, "rustc" if role == "client" else "build", *common]
-            argv += (["--example", "e2_maintenance_client"] if role == "client" else ["--lib"])
+            argv += (["--example", "e2_maintenance_transport" if self.transport_selected else "e2_maintenance_client"] if role == "client" else ["--lib"])
             argv += ["--message-format=json-render-diagnostics"]
             if role == "client":
                 argv += ["--", "-C", "link-arg=-Wl,-install_name,@rpath/libmrk_e2_native_client.dylib",
@@ -4993,7 +5041,7 @@ class Operation:
                     self.native_rust_tests = native_rust_tests_result(result.stdout)
                 result = self.command(role + "-build", argv, environment, cwd=CHECKOUT,
                                       timeout=480, limit=4 * 1024 * 1024)
-                binary = cargo_artifact(result.stdout, role, CHECKOUT, target)
+                binary = cargo_artifact(result.stdout, role, CHECKOUT, target, transport=self.transport_selected)
                 self.copy_image(role, binary, target)
                 self.artifacts[role]["cargoMessagesSha256"] = digest(result.stdout)
             finally:
@@ -5091,6 +5139,8 @@ class Operation:
                                 (PLIST, {"Label": SERVICE, "BundleProgram": "Contents/Helpers/mrk-e2-native-resident",
                                          "MachServices": {SERVICE: True}})):
             self.write_payload(relative, plistlib.dumps(value, sort_keys=True), 0o444)
+        if self.transport_selected:
+            self.write_payload(TRANSPORT_PLIST, transport_plist_data(),0o444)
         self.write_payload(GATE, self.stager.MAINTENANCE_GATE_BYTES, 0o444)
         code = ((IMAGES["client"], IDENTIFIER + ".client.image"),
                 (IMAGES["resident"], SERVICE + ".image"), (RESIDENT, SERVICE),
@@ -5130,6 +5180,7 @@ class Operation:
         expected = {ENTRY, CLIENT, RESIDENT, IMAGES["client"], IMAGES["resident"], PLIST, GATE,
                     APP + "/Contents/Info.plist", CONTENTS + "Info.plist",
                     APP + "/Contents/_CodeSignature/CodeResources", CONTENTS + "_CodeSignature/CodeResources"}
+        if self.transport_selected: expected.add(TRANSPORT_PLIST)
         layout_files = service_layout_files(cocoa=self.service_cocoa_selected) if self.service_layout["selected"] else set()
         layout_roots = LAYOUT_CLIENTS[:1] if self.service_cocoa_selected else LAYOUT_CLIENTS
         layout_executables = ({root + suffix for root in layout_roots for suffix in (LAYOUT_EXECUTABLE, LAYOUT_TARGET)}
@@ -5478,16 +5529,35 @@ class Operation:
         self.protected.check()
         cwd = self.outputs.directory(self.scratch / "cwd")
         need(os.listdir(cwd["fd"]) == [], "native-empty-cwd")
+        allowed_cases = ("transport-only",) if self.transport_selected else CASES
+        allowed_names = (TRANSPORT_DIAGNOSTIC,) if self.transport_selected else DIAGNOSTIC_NAMES
         self.native_entered = True
         self.btm_started = btm_clock_sample()
-        result = self.call("native-run", [str(ROOT / ENTRY)], {}, cwd=self.scratch / "cwd",
-                            timeout=WORK_SECONDS, limit=CAPTURE_LIMIT)
+        try:
+            result = self.call("native-run", [str(ROOT / ENTRY)], {}, cwd=self.scratch / "cwd",
+                                timeout=TRANSPORT_OBSERVATION_SECONDS if self.transport_selected else WORK_SECONDS, limit=CAPTURE_LIMIT)
+        finally:
+            # Read only fixed private DATA even if original process custody is
+            # unknown. It never upgrades that original error or native finality.
+            try:
+                names = os.listdir(cwd["fd"])
+                need(set(names) <= set(allowed_names), "fixture-diagnostic-roster")
+                records = []
+                for case, name in zip(allowed_cases, allowed_names):
+                    if name not in names: continue
+                    _entry, body = self.outputs.file(self.scratch / "cwd" / name, 2048, modes=(0o600,))
+                    records.append(maintenance_diagnostic(body, case))
+                self.publish("maintenance-diagnostics.json", canonical({"schemaVersion":1,
+                    "type":"mrk-fixture-maintenance-diagnostics-v1","sourceCommit":self.environment["GITHUB_SHA"],
+                    "nativeFinalityQualified":False,"shippingQualified":False,"records":records}))
+            except BaseException:
+                pass # Publication failure cannot replace the original native outcome.
         self.native_returned = True
         self.btm_finished = btm_clock_sample()
         self.native = native_result(result.stdout, result.returncode, self.environment["GITHUB_SHA"], self.release)
         # Actual source, installed originals, capture custody and native finality
         # all participate. A native JSON assertion alone can never pass.
-        need(os.listdir(cwd["fd"]) == [] and self.payload_roster(ROOT, installed=True) == self.stage_roster,
+        need(set(os.listdir(cwd["fd"])) <= set(allowed_names) and self.payload_roster(ROOT, installed=True) == self.stage_roster,
              "native-filesystem-postcondition")
         self.protected.check()
         self.observe_metadata("after-native", present=True)
@@ -5628,7 +5698,7 @@ class Operation:
                 "source": self.environment["GITHUB_SHA"], "tree": self.source.binding["tree"],
                 "workflowSource": self.environment["GITHUB_WORKFLOW_SHA"], "workflow": WORKFLOW,
                 "runId": self.environment["GITHUB_RUN_ID"], "runAttempt": self.environment["GITHUB_RUN_ATTEMPT"],
-                "platform": "macos-26-arm64", "toolchain": TOOLCHAIN, "sourceInventorySha256": self.source.inventory_digest,
+                "platform": "macos-27-arm64", "toolchain": TOOLCHAIN, "sourceInventorySha256": self.source.inventory_digest,
                 "sourceOriginalHandleCount": self.source.source_handle_count,
                 "sourceOriginalHandleReserve": self.source.source_handle_reserve,
                 "bindingSha256": self.source.binding_digest, "sourceReleaseId": self.release,
@@ -5975,6 +6045,23 @@ class Operation:
         return value
 
 
+    def run_transport(self):
+        bootstrapped = False
+        primary = None
+        try:
+            self.command("transport-bootstrap",["/usr/bin/sudo","-n","--","/bin/launchctl","bootstrap","system",str(ROOT / TRANSPORT_PLIST)],self.native_environment(),cwd=self.scratch,timeout=30)
+            bootstrapped = True
+            self.run_native()
+        except BaseException as error:
+            primary = error
+            raise
+        finally:
+            if bootstrapped:
+                try:
+                    self.command("transport-bootout",["/usr/bin/sudo","-n","--","/bin/launchctl","bootout","system/"+SERVICE],self.native_environment(),cwd=self.scratch,timeout=30)
+                except BaseException:
+                    if primary is None: raise
+
     def execute(self):
         if getattr(self, "removal_selected", False):
             return self.execute_removal_data()
@@ -5989,12 +6076,12 @@ class Operation:
                 self.observe_installer_context()
             else:
                 if not self.service_layout["selected"]:
-                    self.build_installer_worker_tests()
+                    if not self.transport_selected: self.build_installer_worker_tests()
                     # Native DATA/client compilation is independent of Context.
                     # Keep this complete original graph/retirement before Context
                     # so a metadata refusal cannot hide a native compiler failure.
                     self.build_images()
-                    self.observe_installer_context()
+                    if not self.transport_selected: self.observe_installer_context()
                 self.compile_metadata_observer()
                 self.absence("initial")
                 if self.service_layout["selected"]:
@@ -6007,6 +6094,8 @@ class Operation:
                 self.install_fixture()
                 if self.service_layout["selected"]:
                     self.observe_service_layout()
+                elif self.transport_selected:
+                    self.run_transport()
                 else:
                     self.run_native()
         except BaseException as error:
@@ -6017,7 +6106,7 @@ class Operation:
         finally:
             original_phase = self.phase
             try:
-                if not self.context_receipts_selected:
+                if not self.context_receipts_selected and not self.transport_selected:
                     self.observe_btm_logs()
             except BaseException as error:
                 self.context_pure_audit_refused = False
@@ -6061,6 +6150,7 @@ def main():
                               removal_parent_part=PARENT_PART_ARGUMENTS.get(sys.argv[1]) if len(sys.argv) == 2 else None,
                               removal_changes=sys.argv[1:] == [CHANGES_ARGUMENT],
                               removal_recovery=sys.argv[1:] == [RECOVERY_ARGUMENT])
+        operation.transport_selected = sys.argv[1:] == [TRANSPORT_ARGUMENT]
         value = operation.execute()
     except BaseException:
         book.finish()

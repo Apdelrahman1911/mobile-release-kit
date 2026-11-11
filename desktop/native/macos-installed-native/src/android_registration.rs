@@ -775,7 +775,7 @@ pub(crate) struct FixtureClientCustody {
 /// callback context. Unknown stays retained by the enclosing original owner.
 pub struct ClientBook {
     pointer: Option<NonNull<c_void>>, signal: ManuallyDrop<Arc<Signal>>,
-    facts: NativeFacts, started: bool, retired: bool, poisoned: bool, in_call: bool, bytes: usize, account: u32,
+    facts: NativeFacts, diagnostic_cache_valid:bool, started: bool, retired: bool, poisoned: bool, in_call: bool, bytes: usize, account: u32,
     prepare: Option<prepare::ClientAttempt>, prepare_last: u64, data: Option<DataOwner>, maintenance:bool,
     // Last genuinely decoded native maintenance reply, retained before any
     // returned-time veto. Comparison DATA only; never a tail/retirement token.
@@ -788,7 +788,7 @@ unsafe impl Send for ClientBook {}
 impl ClientBook {
     pub fn new(signal: Arc<Signal>) -> Self {
         Self { pointer: None, signal: ManuallyDrop::new(signal), facts: NativeFacts { version: 1, ..NativeFacts::default() },
-            started: false, retired: false, poisoned: false, in_call: false, bytes: 0, account: 0,
+            diagnostic_cache_valid:false, started: false, retired: false, poisoned: false, in_call: false, bytes: 0, account: 0,
             prepare: None, prepare_last: 0, data: None, maintenance:false,
             maintenance_reply:None,
             #[cfg(feature="e2-native-fixture")] fixture_identity:FixtureIdentityFacts::inert(),
@@ -817,7 +817,17 @@ impl ClientBook {
     }
     pub fn identity_available() -> bool { unsafe { mrk_android_identity_available() == 1 } }
     fn ptr(&self) -> *mut c_void { self.pointer.map_or(std::ptr::null_mut(), NonNull::as_ptr) }
+    /// Cached DATA only; invalid/missing refresh never presents stale facts as current.
+    pub(crate) fn maintenance_diagnostic_native(&self)->Option<crate::android_maintenance_diagnostic::NativeSnapshot>{
+        if !self.maintenance || !self.diagnostic_cache_valid || !self.facts.valid(){return None;}
+        let f=self.facts;
+        let value=crate::android_maintenance_diagnostic::NativeSnapshot{first_call:f.first_call,first_code:f.first_code,
+            calls:f.calls,returns:f.returns,callbacks:f.callbacks,callback_returns:f.callback_returns,
+            native_call:f.native_call,unknown:f.unknown,slots:f.slots};
+        value.valid().then_some(value)
+    }
     fn refresh(&mut self) -> bool {
+        self.diagnostic_cache_valid=false;
         let mut next = NativeFacts::default();
         if self.pointer.is_none() || unsafe { mrk_android_client_facts(self.ptr(), &mut next) } != 1
             || !next.valid() || next.calls < self.facts.calls || next.returns < self.facts.returns
@@ -841,6 +851,7 @@ impl ClientBook {
             else if identity.failed!=0 { self.signal.failure_at(identity.first_ns,false); }
         }
         if next.unknown != 0 { self.signal.failure_now(true); }
+        self.diagnostic_cache_valid=true;
         true
     }
     pub fn begin(&mut self) -> Result<(), Failure> {

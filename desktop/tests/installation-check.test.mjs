@@ -9,7 +9,7 @@ import { InstallationPreparationController, InstallationPreparationConnection } 
 import { installationCheckActive, installationCheckError, installationCheckHelp, INSTALLATION_CHECK_GUIDANCE,
   parseInstallationCancel, parseInstallationStatus } from '../src/installation.ts';
 import { PREPARE_QUIT_CONFIRMATION, parseInstallationPreparationRequest, parseInstallationPreparationStatus,
-  installationPreparationHelp, installationPreparationError } from '../src/installation.ts';
+  installationPreparationHelp, installationPreparationError, parsePreparationDiagnostic, installationPreparationDiagnosticLines } from '../src/installation.ts';
 
 const initial = (revision = 1, patch = {}) => ({ schemaVersion: 1, statusRevision: revision,
   available: true, canStart: true, operationId: null, phase: 'not-checked', reason: 'none', settlement: 'not-started', assessment: null, ...patch });
@@ -241,7 +241,7 @@ test('contextual help explains where, limits, and non-maintenance recovery witho
 
 const prepInitial = (patch = {}) => ({ schemaVersion: 1, available: true, canStart: true,
   operationId: null, generation: null, phase: 'not-started', reason: 'none', newWorkClosed: false,
-  assurance: 'preparation-status-only', ...patch });
+  assurance: 'preparation-status-only', diagnostic: { first: null, cleanup: null }, ...patch });
 const prepRunning = (generation = 1, patch = {}) => prepInitial({ canStart: false, operationId: '12'.repeat(16),
   generation, phase: 'preparing', newWorkClosed: true, ...patch });
 const prepRefused = (generation = 1) => prepRunning(generation, { phase: 'refused', reason: 'native', newWorkClosed: false, canStart: true });
@@ -600,4 +600,74 @@ test('actual app connection teardown suppresses unissued Start and late replies 
     assert.equal(h.connection.connect(h.makeApi('after-teardown'), true), false);
     assert.equal(h.controller.start(true), false);
   }
+});
+
+
+test('fixed preparation diagnostics preserve first work failure through terminal unknown without changing authority', () => {
+  const native = { firstCall: 7, firstCode: 71, calls: 8, returns: 8, callbacks: 1, callbackReturns: 1, nativeCall: 0, unknown: 1, slots: [4,4,4,4,4,4,0,2] };
+  const first = { phase: 'B', failure: 'native', native };
+  const cleanup = { phase: 'cleanup', failure: 'unknown', native: null };
+  const input = prepRunning(1, { phase: 'unknown', reason: 'cleanup-unknown', diagnostic: { first, cleanup } });
+  const parsed = parseInstallationPreparationStatus(input);
+  assert(JSON.stringify(parsed.diagnostic).length < 2048);
+  assert.deepEqual(parsed, input); assert.equal(parsed.canStart, false); assert.equal(parsed.newWorkClosed, true);
+  assert.match(installationPreparationDiagnosticLines(parsed.diagnostic).join(' '), /phase B; Rust failure native/);
+  assert.match(installationPreparationDiagnosticLines(parsed.diagnostic).join(' '), /Cleanup failure: phase cleanup/);
+  assert.deepEqual(parseInstallationPreparationStatus({ ...input, diagnostic: undefined }).diagnostic, { first:null, cleanup:null });
+  const legacy = { ...input }; delete legacy.diagnostic;
+  assert.equal(parseInstallationPreparationStatus(legacy).canStart, false);
+  assert.deepEqual(parseInstallationPreparationStatus(legacy).diagnostic, { first:null, cleanup:null });
+  for (const bad of [{ ...native, pid: 123 }, { ...native, firstCode: -1 }, { ...native, slots: [6,4,4,4,4,4,0,2] }, { ...native, returns: 9 }]) {
+    const diagnostic = parsePreparationDiagnostic({ first: { ...first, native: bad }, cleanup });
+    assert.deepEqual(diagnostic.first, { ...first, native: null });
+    assert.match(installationPreparationDiagnosticLines(diagnostic).join(' '), /Cached native facts: unavailable/);
+  }
+  assert.deepEqual(parsePreparationDiagnostic({ first: { ...first, rawError: '/private/user-secret' }, cleanup }), { first:null, cleanup:null });
+  assert.deepEqual(parsePreparationDiagnostic({ first: null, cleanup }), { first:null, cleanup:null });
+  let reads = 0; const slots = [...native.slots]; Object.defineProperty(slots, '0', { get(){ reads++; return 4; } });
+  assert.equal(parsePreparationDiagnostic({ first: { ...first, native: { ...native, slots } }, cleanup }).first.native, null);
+  assert.equal(reads, 0);
+  for (const diagnostic of [{ first:null, cleanup:null }, { first, cleanup }, { first: { phase:'begin',failure:'unavailable',native:null },cleanup:null }]) {
+    const idle = parseInstallationPreparationStatus(prepInitial({ diagnostic }));
+    assert.equal(idle.canStart, true); assert.equal(idle.phase, 'not-started');
+    const unknown = parseInstallationPreparationStatus({ ...input, diagnostic });
+    assert.equal(unknown.canStart, false); assert.equal(unknown.phase, 'unknown');
+  }
+});
+
+
+test('same original refresh retains the first diagnostic while unknown keeps new work closed', async () => {
+  const h = prepConnectionHarness();
+  const first = { phase: 'watch', failure: 'native', native: null };
+  const cleanup = { phase: 'cleanup', failure: 'unknown', native: null };
+  const terminal = (diagnostic) => prepRunning(1, { phase: 'unknown', reason: 'cleanup-unknown', diagnostic });
+  try {
+    h.mount(); h.last('status').resolve(terminal({ first, cleanup: null })); await flush();
+    assert.equal(h.controller.start(true), false);
+    void h.controller.refresh(); h.last('status').resolve(terminal({ first: null, cleanup: null })); await flush();
+    assert.deepEqual(h.controller.snapshot().status.diagnostic, { first, cleanup: null });
+    void h.controller.refresh(); h.last('status').resolve(terminal({ first: { phase:'B', failure:'binding', native:null }, cleanup })); await flush();
+    assert.deepEqual(h.controller.snapshot().status.diagnostic, { first, cleanup });
+    assert.equal(h.controller.snapshot().status.newWorkClosed, true); assert.equal(h.controller.start(true), false);
+    assert.equal(h.by('start').length, 0);
+  } finally { h.connection.dispose(); }
+});
+
+
+test('native failure before first entry preserves code with ordinal zero', () => {
+  const native = { firstCall:0,firstCode:22,calls:0,returns:0,callbacks:0,callbackReturns:0,nativeCall:0,unknown:1,slots:[0,0,0,0,0,0,0,0] };
+  const first = { phase:'begin',failure:'native',native };
+  const parsed = parsePreparationDiagnostic({ first,cleanup:null });
+  assert.deepEqual(parsed.first,first);
+  assert.match(installationPreparationDiagnosticLines(parsed).join(' '), /first native call ordinal 0; code 22/);
+  assert.equal(parsePreparationDiagnostic({ first:{...first,native:{...native,firstCall:2,calls:1,returns:1}},cleanup:null }).first.native,null);
+});
+
+
+test('pre-client identity refusal remains distinct from later cleanup error', () => {
+  const cleanup = {phase:'cleanup',failure:'unknown',native:null};
+  const value = parsePreparationDiagnostic({preClient:'identity-check',first:cleanup,cleanup});
+  assert.equal(value.preClient,'identity-check');
+  assert.match(installationPreparationDiagnosticLines(value).join(' '), /Client.begin not entered: original identity-check refusal/);
+  assert.equal(value.first.phase,'cleanup');
 });

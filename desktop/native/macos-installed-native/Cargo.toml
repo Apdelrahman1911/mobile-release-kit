@@ -67,3 +67,11 @@ sha2 = { version = "=0.10.9", optional = true }
 plist = { version = "=1.10.1", default-features = false, features = ["enable_unstable_features_that_may_break_with_minor_version_bumps"], optional = true }
 quick_xml = { package = "quick-xml", version = "=0.42.0", default-features = false, optional = true }
 getrandom = { version = "=0.3.4", optional = true }
+
+[[example]]
+name = "e2_maintenance_transport"
+path = "examples/e2_maintenance_transport.rs"
+crate-type = ["cdylib"]
+test = false
+bench = false
+required-features = ["desktop-image", "e2-native-fixture"]

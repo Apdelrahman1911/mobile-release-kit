@@ -1,6 +1,6 @@
 set -euo pipefail
 umask 077
-ulimit -n 1024
+ulimit -n 4096
 cd /Users/runner/work/mobile-release-kit/mobile-release-kit
 exec /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME=/Users/runner LANG=C LC_ALL=C TZ=UTC \
   GITHUB_ACTIONS="$GITHUB_ACTIONS" RUNNER_ENVIRONMENT="$RUNNER_ENVIRONMENT" RUNNER_OS="$RUNNER_OS" RUNNER_ARCH="$RUNNER_ARCH" \
@@ -190,7 +190,7 @@ def output(name, value):
 try:
     need(sys.version_info >= (3, 11) and sys.flags.isolated and sys.flags.no_site
          and sys.dont_write_bytecode and sys.platform == "darwin"
-         and platform.machine() == "arm64" and platform.mac_ver()[0].split(".")[0] == "26"
+         and platform.machine() == "arm64" and platform.mac_ver()[0].split(".")[0] == "27"
          and os.getuid() == os.geteuid() != 0 and os.getgid() == os.getegid()
          and threading.current_thread() is threading.main_thread()
          and Path.cwd() == CHECKOUT, "preparation-platform-account")
@@ -367,7 +367,7 @@ try:
     tool_environment = dict(clean, CARGO_HOME=str(cargo_home), RUSTUP_HOME=str(rustup_home),
                             RUSTUP_TOOLCHAIN=TOOLCHAIN, RUSTUP_AUTO_INSTALL="0")
     phase = "rust-tool-admission"
-    bin_directory = rustup_home / "toolchains" / "stable-aarch64-apple-darwin" / "bin"
+    bin_directory = rustup_home / "toolchains" / (TOOLCHAIN + "-aarch64-apple-darwin") / "bin"
     book.directory(bin_directory)
     tool_environment["PATH"] = str(bin_directory) + ":/usr/bin:/bin:/usr/sbin:/sbin"
     tool_environment["RUSTC"] = str(bin_directory / "rustc")
@@ -420,7 +420,7 @@ try:
                    })
     inventory = {"source": SOURCE, "tree": tree, "files": rows}
     rust = dict(common, cwd="desktop/src-tauri", autoInstall=False,
-                selectedMacToolchain=TOOLCHAIN, repositoryDefault="1.98.0", tools=tools)
+                selectedMacToolchain=TOOLCHAIN, repositoryDefault="1.98.0", toolDirectory=str(bin_directory), tools=tools)
     fixture.binding_data(os.environ, binding, inventory, rust, sig(work_info))
     phase = "input-publication"
     for name, value, limit in (("source-binding.json", binding, 65536),

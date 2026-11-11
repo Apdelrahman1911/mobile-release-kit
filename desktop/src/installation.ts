@@ -182,10 +182,79 @@ export const PREPARE_QUIT_CONFIRMATION = 'Stop the installed Android helper and 
 export type InstallationPreparationPhase = 'not-started' | 'preparing' | 'unregistering' | 'settling' | 'prepared' | 'refused' | 'unknown';
 export type InstallationPreparationReason = 'none' | 'unavailable-profile' | 'busy' | 'document-unavailable'
   | 'context-changed' | 'cancelled' | 'deadline' | 'native' | 'cleanup-unknown';
+export type PreparationDiagnosticPhase = 'begin' | 'A' | 'watch' | 'B' | 'drain' | 'receive' | 'receipt' | 'tail' | 'cleanup';
+export type PreparationDiagnosticFailure = 'unavailable' | 'bounds' | 'binding' | 'sequence' | 'busy' | 'stopped' | 'native' | 'unknown';
+export interface PreparationNativeDiagnostic {
+  firstCall: number; firstCode: number; calls: number; returns: number; callbacks: number; callbackReturns: number;
+  nativeCall: number; unknown: number; slots: number[];
+}
+export interface PreparationFailureDiagnostic {
+  phase: PreparationDiagnosticPhase; failure: PreparationDiagnosticFailure; native: PreparationNativeDiagnostic | null;
+}
+export interface PreparationDiagnostic { first: PreparationFailureDiagnostic | null; cleanup: PreparationFailureDiagnostic | null;
+  preClient?: 'source-work' | 'identity-check' | 'work-cut' | 'probe-prerequisite' }
+const DIAGNOSTIC_PHASES = ['begin', 'A', 'watch', 'B', 'drain', 'receive', 'receipt', 'tail', 'cleanup'];
+const DIAGNOSTIC_FAILURES = ['unavailable', 'bounds', 'binding', 'sequence', 'busy', 'stopped', 'native', 'unknown'];
+function preparationNativeDiagnostic(value: unknown): PreparationNativeDiagnostic | null {
+  const row = record(value, ['firstCall', 'firstCode', 'calls', 'returns', 'callbacks', 'callbackReturns', 'nativeCall', 'unknown', 'slots']);
+  const bounded = (n: unknown, max: number): n is number => typeof n === 'number' && Number.isInteger(n) && n >= 0 && n <= max;
+  if (!row || !bounded(row.firstCall, 400000) || !bounded(row.firstCode, 4095) || !bounded(row.calls, 400000)
+    || !bounded(row.returns, 400000) || !bounded(row.callbacks, 400000) || !bounded(row.callbackReturns, 400000)
+    || !bounded(row.nativeCall, 1) || !bounded(row.unknown, 1) || row.returns > row.calls || row.calls - row.returns > 1
+    || row.callbackReturns > row.callbacks || row.callbacks - row.callbackReturns > 1 || row.firstCall > row.calls
+    || row.firstCode === 0 && row.firstCall !== 0) return null;
+  // Inspect array descriptors; accessors and extra properties never run or cross the boundary.
+  const slots = recordSlots(row.slots);
+  if (!slots) return null;
+  return { firstCall: row.firstCall, firstCode: row.firstCode, calls: row.calls, returns: row.returns,
+    callbacks: row.callbacks, callbackReturns: row.callbackReturns, nativeCall: row.nativeCall, unknown: row.unknown, slots };
+}
+function recordSlots(value: unknown): number[] | null {
+  try {
+    if (!Array.isArray(value) || Object.getPrototypeOf(value) !== Array.prototype) return null;
+    const descriptors = Object.getOwnPropertyDescriptors(value);
+    if (Reflect.ownKeys(descriptors).length !== 9 || Object.getOwnPropertyDescriptor(value, 'length')?.value !== 8) return null;
+    const slots: number[] = [];
+    for (let i = 0; i < 8; i += 1) {
+      const d = descriptors[String(i)];
+      if (!d || !('value' in d) || !Number.isInteger(d.value) || d.value < 0 || d.value > 5) return null;
+      slots.push(d.value);
+    }
+    return slots;
+  } catch { return null; }
+}
+function preparationFailureDiagnostic(value: unknown): PreparationFailureDiagnostic | null {
+  const row = record(value, ['phase', 'failure', 'native']);
+  if (!row || typeof row.phase !== 'string' || !DIAGNOSTIC_PHASES.includes(row.phase)
+    || typeof row.failure !== 'string' || !DIAGNOSTIC_FAILURES.includes(row.failure)) return null;
+  return { phase: row.phase as PreparationDiagnosticPhase, failure: row.failure as PreparationDiagnosticFailure,
+    native: preparationNativeDiagnostic(row.native) };
+}
+export function parsePreparationDiagnostic(value: unknown): PreparationDiagnostic {
+  const row = record(value, ['first', 'cleanup', 'preClient']) ?? record(value, ['first', 'cleanup']);
+  if (!row) return { first: null, cleanup: null };
+  const first = preparationFailureDiagnostic(row.first), cleanup = preparationFailureDiagnostic(row.cleanup);
+  // Cleanup may be the original first error, but cannot replace a prior work error.
+  if (cleanup && cleanup.phase !== 'cleanup' || !first && cleanup) return { first: null, cleanup: null };
+  const preClient = row.preClient;
+  return { first, cleanup, ...(preClient === 'source-work' || preClient === 'identity-check' || preClient === 'work-cut' || preClient === 'probe-prerequisite' ? { preClient } : {}) };
+}
+export function installationPreparationDiagnosticLines(value: PreparationDiagnostic): string[] {
+  const lines: string[] = [];
+  if (value.preClient) lines.push(`Client.begin not entered: original ${value.preClient} refusal.`);
+  for (const [label, observation] of [['First failure', value.first], ['Cleanup failure', value.cleanup]] as const) {
+    if (!observation) { lines.push(`${label}: unavailable.`); continue; }
+    lines.push(`${label}: phase ${observation.phase}; Rust failure ${observation.failure}.`);
+    const n = observation.native;
+    lines.push(n ? `Cached native facts: first native call ordinal ${n.firstCall}; code ${n.firstCode}; calls ${n.calls}/${n.returns}; callbacks ${n.callbacks}/${n.callbackReturns}; active ${n.nativeCall}; unknown ${n.unknown}; slots ${n.slots.join(',')}.`
+      : 'Cached native facts: unavailable.');
+  }
+  return lines;
+}
 export interface InstallationPreparationStatus {
   schemaVersion: 1; available: boolean; canStart: boolean; operationId: string | null; generation: number | null;
   phase: InstallationPreparationPhase; reason: InstallationPreparationReason; newWorkClosed: boolean;
-  assurance: 'preparation-status-only';
+  assurance: 'preparation-status-only'; diagnostic: PreparationDiagnostic;
 }
 const PREPARATION_PHASES: readonly InstallationPreparationPhase[] = ['not-started', 'preparing', 'unregistering', 'settling', 'prepared', 'refused', 'unknown'];
 const PREPARATION_REASONS: readonly InstallationPreparationReason[] = ['none', 'unavailable-profile', 'busy', 'document-unavailable', 'context-changed', 'cancelled', 'deadline', 'native', 'cleanup-unknown'];
@@ -194,7 +263,8 @@ export function parseInstallationPreparationRequest(value: unknown): { confirmat
   return row?.confirmation === PREPARE_QUIT_CONFIRMATION ? { confirmation: PREPARE_QUIT_CONFIRMATION } : null;
 }
 export function parseInstallationPreparationStatus(value: unknown): InstallationPreparationStatus | null {
-  const row = record(value, ['schemaVersion', 'available', 'canStart', 'operationId', 'generation', 'phase', 'reason', 'newWorkClosed', 'assurance']);
+  const keys = ['schemaVersion', 'available', 'canStart', 'operationId', 'generation', 'phase', 'reason', 'newWorkClosed', 'assurance'];
+  const row = record(value, [...keys, 'diagnostic']) ?? record(value, keys);
   if (!row || row.schemaVersion !== 1 || typeof row.available !== 'boolean' || typeof row.canStart !== 'boolean'
     || typeof row.newWorkClosed !== 'boolean' || row.assurance !== 'preparation-status-only'
     || typeof row.phase !== 'string' || !PREPARATION_PHASES.includes(row.phase as InstallationPreparationPhase)
@@ -211,7 +281,7 @@ export function parseInstallationPreparationStatus(value: unknown): Installation
     || row.phase === 'unknown' && row.reason !== 'cleanup-unknown') return null;
   return { schemaVersion: 1, available: row.available, canStart: row.canStart, operationId: row.operationId as string | null,
     generation: row.generation as number | null, phase: row.phase as InstallationPreparationPhase,
-    reason: row.reason as InstallationPreparationReason, newWorkClosed: row.newWorkClosed, assurance: 'preparation-status-only' };
+    reason: row.reason as InstallationPreparationReason, newWorkClosed: row.newWorkClosed, assurance: 'preparation-status-only', diagnostic: parsePreparationDiagnostic(row.diagnostic) };
 }
 export function installationPreparationActive(status: InstallationPreparationStatus | null): boolean {
   return status !== null && ['preparing', 'unregistering', 'settling'].includes(status.phase);
