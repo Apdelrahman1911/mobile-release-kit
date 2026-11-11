@@ -701,7 +701,8 @@ static int p_watch_poll(MRKRemovalPeer *b,PeerCall *s,int cleanup){
     int n=kevent(b->fd[P_WATCH],NULL,0,&event,1,&zero);
     if(n<0)p_fail(b,54,0);
     else if(n){
-        const uint16_t allowed=EV_ADD|EV_ENABLE|EV_ONESHOT|EV_EOF|EV_CLEAR;
+        // Darwin also retains the requested EV_RECEIPT bit on the later exit event.
+        const uint16_t allowed=EV_ADD|EV_ENABLE|EV_ONESHOT|EV_RECEIPT|EV_EOF|EV_CLEAR;
         if(n!=1||event.ident!=b->report.peer_pid||event.filter!=EVFILT_PROC||event.udata!=b
             ||(event.flags&~allowed)||!(event.flags&EV_EOF)||event.fflags!=NOTE_EXIT)p_fail(b,55,1);
         else b->report.exit_observed=1;
@@ -716,8 +717,10 @@ static int p_watch(MRKRemovalPeer *b,PeerCall *s){
     struct kevent change,receipt;memset(&receipt,0,sizeof(receipt));const struct timespec zero={0,0};
     EV_SET(&change,(uintptr_t)b->report.peer_pid,EVFILT_PROC,EV_ADD|EV_ENABLE|EV_RECEIPT,NOTE_EXIT,0,b);
     int n=kevent(fd,&change,1,&receipt,1,&zero);
+    // EV_RECEIPT preserves submitted flags and adds EV_ERROR even on success.
+    // Require success and reject flags that were neither requested nor EV_ERROR.
     if(n!=1||receipt.ident!=b->report.peer_pid||receipt.filter!=EVFILT_PROC
-        ||receipt.flags!=EV_ERROR||receipt.data!=0||receipt.udata!=b)p_fail(b,56,0);
+        ||!(receipt.flags&EV_ERROR)||(receipt.flags&~(EV_ERROR|change.flags))||receipt.data!=0||receipt.udata!=b)p_fail(b,56,0);
     else b->report.watch_ready=1;
     // The receipt echoes NOTE_EXIT! It is ONLY a registration acknowledgement.
     return p_return(b,s,MRK_RP_WATCH_REGISTER,P_WATCH,0);
