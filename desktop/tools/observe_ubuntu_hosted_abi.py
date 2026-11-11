@@ -40,7 +40,7 @@ def execute(work,commit,tree):
  missing=sorted({'mount.h','stat.h','proc_ns.h','nsfs.h','unistd_64.h','utsrelease.h'}-{Path(r['path']).name for r in rows})
  P.save(work/'kernel-header-inventory.json',dict(files=rows,missingRequired=missing))
  assert not missing,'Required installed kernel headers absent: '+repr(missing)
- P.command('kernel-header-package-owners',['/usr/bin/dpkg-query','-S',*originals],work,e,acquired)
+ P.command('kernel-header-package-owners',['/usr/bin/dpkg-query','-S',*sorted({r['resolved'] for r in rows})],work,e,acquired)
  env={**acquired,'CARGO_TARGET_DIR':str(work/'observer-target'),'CARGO_PROFILE_DEV_DEBUG':'0','CARGO_PROFILE_TEST_DEBUG':'0',
       'TMPDIR':str(work/'tmp'),'RAYON_NUM_THREADS':'1','CARGO_BUILD_JOBS':'1','CARGO_INCREMENTAL':'0'}
  Path(env['TMPDIR']).mkdir();cargo=work/'rust/bin/cargo';cwd=P.SOURCE/'desktop/src-tauri'
