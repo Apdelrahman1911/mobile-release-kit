@@ -33,6 +33,8 @@ jobs:
           RUNNER_ENVIRONMENT: ${{ runner.environment }}
         run: python3 -B desktop/tools/prepare_ubuntu_execution.py --work "$RUNNER_TEMP/preparation" --commit "$CANDIDATE_COMMIT" --tree "$CANDIDATE_TREE"
       - name: Build once under original bounded owner
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
         run: |
           plan_sha=$(sha256sum "$RUNNER_TEMP/preparation/plan.json" | cut -d' ' -f1)
           python3 -B desktop/tools/build_ubuntu_candidate.py --plan "$RUNNER_TEMP/preparation/plan.json" --plan-sha256 "$plan_sha" --work "$RUNNER_TEMP/candidate" --compiler-lock "$RUNNER_TEMP/preparation/compiler.lock"

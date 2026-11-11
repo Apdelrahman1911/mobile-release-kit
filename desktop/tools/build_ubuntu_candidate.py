@@ -72,14 +72,15 @@ def execute(plan, work, lock):
         # Preserve release cfg/panic/overflow settings and optimized dependencies.
         # Only the enormous application package's optimizer is disabled, matching
         # the existing no-debuginfo dev compilation's memory-oriented codegen.
-        # The original 3GiB process-group ceiling and jobs1 remain authoritative.
+        # Publisher/other phases keep 3GiB; only the hosted shell can admit a fixed
+        # 5GiB ceiling after recording actual native memory and headroom. Jobs1 stays fixed.
         root_override='profile.release.package.mobile-release-kit-desktop.opt-level=0'
         shared=['--offline','--locked','--jobs','1','--target','x86_64-unknown-linux-gnu','--no-default-features',
                 '--config',root_override]
         (evidence/'requested-build-settings.json').write_text(json.dumps(dict(
             rootReleaseOverride=root_override,devDebug=0,testDebug=0,
             releaseCfg='unchanged',dependencyReleaseOptimization='unchanged',
-            jobs=1,observedGroupRssLimitBytes=3*1024**3),indent=2)+'\n')
+            jobs=1,defaultGroupRssLimitBytes=3*1024**3,hostedShellGroupRssLimitBytes=5*1024**3),indent=2)+'\n')
         env['CARGO_TARGET_DIR']=str(work/'publisher-target')
         run([('publisher-build',[cargo,'build',*shared,'--release','--features','ubuntu-runtime-publisher','--bin','mrk-runtime-publish'],1800),
              ('publisher-tests',[cargo,'test',*shared,'--features','ubuntu-runtime-publisher','--lib','runtime_publication::','--','--test-threads=1'],1800),
@@ -93,7 +94,7 @@ def execute(plan, work, lock):
         assert 'helper_completion_same_bytes_replacement_refuses_identity ... ok' in native_log
         del env['MRK_RUNTIME_PUBLICATION_HELPER_TESTS']
         env['CARGO_TARGET_DIR']=str(work/'shell-target')
-        run([('shell-build',[cargo,'build',*shared,'--release','--features','desktop-shell,custom-protocol','--bin','mobile-release-kit-desktop'],1800)],source/'desktop/src-tauri',evidence,env)
+        run([('shell-build',[cargo,'build',*shared,'--release','--features','desktop-shell,custom-protocol','--bin','mobile-release-kit-desktop'],1800)],source/'desktop/src-tauri',evidence,env,hosted_shell=True)
     for target,name in [('publisher','mrk-runtime-publish'),('shell','mobile-release-kit-desktop')]:
         shutil.copyfile(work/(target+'-target')/'x86_64-unknown-linux-gnu/release'/name,work/'compiled'/name)
     binaries=[dict(path=p.name,size=p.stat().st_size,sha256=sha(p)) for p in sorted((work/'compiled').iterdir())]

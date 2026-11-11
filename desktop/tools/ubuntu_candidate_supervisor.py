@@ -1,11 +1,53 @@
 """Bounded original process-group owner; caller holds the compiler lock."""
 from pathlib import Path
-import hashlib, json, os, selectors, signal, subprocess, time
+import hashlib, json, os, platform, selectors, signal, subprocess, time
 CAP=4*1024**2
 RSS_LIMIT=3*1024**3
 FREE_FLOOR=2*1024**3
 def sha(p): return hashlib.sha256(p.read_bytes()).hexdigest()
-def run(commands,D,E,env):
+HOSTED_SHELL_RSS_LIMIT=5*1024**3
+HOSTED_TOTAL_FLOOR=7*1024**3
+HOSTED_START_FREE=6*1024**3
+HOSTED_FREE_RESERVE=1024**3
+
+def memory_facts(body):
+    facts={}
+    for line in body.splitlines():
+        fields=line.split()
+        if fields and fields[0] in ('MemTotal:', 'MemAvailable:'):
+            assert len(fields)==3 and fields[1].isdigit() and fields[2]=='kB'
+            name=fields[0][:-1]; assert name not in facts
+            facts[name]=int(fields[1])*1024
+    assert set(facts)=={'MemTotal','MemAvailable'} and 0 < facts['MemAvailable'] <= facts['MemTotal']
+    return facts
+
+def shell_memory_admitted(facts):
+    return facts['MemTotal'] >= HOSTED_TOTAL_FLOOR and facts['MemAvailable'] >= HOSTED_START_FREE
+
+def hosted_shell_memory(E):
+    # Source-selected CI control only. No environment value supplies a limit.
+    assert platform.system()=='Linux' and platform.machine()=='x86_64'
+    assert os.getuid()==os.geteuid()!=0
+    assert os.environ.get('GITHUB_ACTIONS')=='true' and os.environ.get('RUNNER_ENVIRONMENT')=='github-hosted'
+    body=Path('/proc/meminfo').read_text(); assert len(body)<=65536
+    facts=memory_facts(body)
+    receipt=dict(rawMeminfo=body, **facts, admitted=shell_memory_admitted(facts),
+        groupRssLimitBytes=HOSTED_SHELL_RSS_LIMIT, minTotalBytes=HOSTED_TOTAL_FLOOR,
+        minInitialAvailableBytes=HOSTED_START_FREE, minActiveAvailableBytes=HOSTED_FREE_RESERVE,
+        githubRunId=os.environ.get('GITHUB_RUN_ID'), githubSha=os.environ.get('GITHUB_SHA'))
+    (E/'hosted-shell-memory.json').write_text(json.dumps(receipt,indent=2)+'\n')
+    assert receipt['admitted'], 'hosted shell memory/headroom refused; original native facts retained'
+    return HOSTED_SHELL_RSS_LIMIT
+
+def run(commands,D,E,env,*,hosted_shell=False):
+    rss_limit=RSS_LIMIT
+    if hosted_shell:
+        assert len(commands)==1 and commands[0][0]=='shell-build'
+        argv=commands[0][1]
+        assert argv[1]=='build' and argv[-2:]==['--bin','mobile-release-kit-desktop']
+        assert '--release' in argv and 'desktop-shell,custom-protocol' in argv
+        assert '--jobs' in argv and argv[argv.index('--jobs')+1]=='1'
+        rss_limit=hosted_shell_memory(E)
     def clean(): pass
     def free():
         s=os.statvfs(E); return s.f_bavail*s.f_frsize
@@ -48,8 +90,15 @@ def run(commands,D,E,env):
                     assert probe.returncode in (0, 1) and not (probe.returncode == 1 and rows)
                     rss = sum(row[3] * 1024 for row in rows)
                     peak = max(peak, rss)
-                    observations.append(dict(elapsedSeconds=now-started, processes=rows, groupRssBytes=rss, freeDiskBytes=free()))
-                    if rss > RSS_LIMIT:
+                    available=None
+                    if hosted_shell:
+                        available=memory_facts(Path('/proc/meminfo').read_text())['MemAvailable']
+                    observations.append(dict(elapsedSeconds=now-started, processes=rows, groupRssBytes=rss, freeDiskBytes=free(),
+                        availableMemoryBytes=available))
+                    if available is not None and available < HOSTED_FREE_RESERVE:
+                        failure='hosted-memory-headroom-floor'
+                        break
+                    if rss > rss_limit:
                         failure = 'compiler-group-rss-limit'
                         break
                 for key, _ in selector.select(0.1):
@@ -88,7 +137,7 @@ def run(commands,D,E,env):
             selector.close()
             for stream in streams.values():
                 stream.close()
-            result = dict(role=role, argv=argv, timeoutSeconds=timeout, originalReturn=code, captureFailure=failure,
+            result = dict(role=role, argv=argv, timeoutSeconds=timeout, groupRssLimitBytes=rss_limit, originalReturn=code, captureFailure=failure,
                 capturedBytes=written, elapsedSeconds=time.monotonic()-started, peakObservedGroupRssBytes=peak,
                 finalFreeDiskBytes=free(), stdoutSha256=sha(part / 'stdout.log'), stderrSha256=sha(part / 'stderr.log'))
             results.append(result)
