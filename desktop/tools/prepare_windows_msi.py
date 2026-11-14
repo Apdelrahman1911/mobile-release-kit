@@ -169,6 +169,18 @@ def stable_metadata(value):
 def unchanged(before, after):
     return stable_metadata(before) == stable_metadata(after)
 
+# Windows by-name stat (GetFileInformationByName, Python 3.12+) can return the
+# directory entry's cached ChangeTime, ~1 ms older than the handle's live value
+# (hosted run 43642994473: only st_ctime_ns differed, path older, 11/76 files).
+# Path-vs-handle comparisons therefore omit that one field on Windows only.
+# Path-vs-path and handle-vs-handle comparisons keep every field, and file id,
+# volume, size, mtime, birth time, attributes and the SHA-256 stay bound.
+CROSS_SOURCE_UNSTABLE = frozenset({'st_ctime_ns'}) if os.name == 'nt' else frozenset()
+
+def cross_unchanged(by_path, by_handle):
+    return all(getattr(by_path, n, None) == getattr(by_handle, n, None)
+               for n in STABLE_FIELDS if n not in CROSS_SOURCE_UNSTABLE)
+
 STABLE_FIELDS = ('st_dev', 'st_ino', 'st_mode', 'st_nlink', 'st_uid', 'st_gid',
                  'st_size', 'st_mtime_ns', 'st_ctime_ns', 'st_birthtime_ns',
                  'st_birthtime', 'st_flags', 'st_gen', 'st_file_attributes',
@@ -180,8 +192,8 @@ def metadata_difference(before, after):
             for name in STABLE_FIELDS
             if getattr(before, name, None) != getattr(after, name, None)}
 
-def need_unchanged(before, after, message):
-    if not unchanged(before, after):
+def need_unchanged(before, after, message, cross=False):
+    if not (cross_unchanged(before, after) if cross else unchanged(before, after)):
         raise Refused(message + ': ' + json.dumps(metadata_difference(before, after), sort_keys=True, default=str))
 
 def read(path, limit):
@@ -189,11 +201,11 @@ def read(path, limit):
     need(0 < before.st_size <= limit, 'file size bound')
     with Path(path).open('rb') as f:
         opened = os.fstat(f.fileno())
-        need_unchanged(before, opened, 'input replaced')
+        need_unchanged(before, opened, 'input replaced', cross=True)
         data = f.read(limit + 1)
         after = os.fstat(f.fileno())
     need(len(data) == before.st_size, 'input changed')
-    need_unchanged(before, after, 'input changed')
+    need_unchanged(opened, after, 'input changed')
     need_unchanged(before, regular(path), 'input pathname changed')
     return data
 
@@ -267,15 +279,16 @@ def validate(source, inputs, binding, expected):
         need(s.st_size == row['size'], 'input size mismatch')
         h = hashlib.sha256()
         with path.open('rb') as f:
-            need(unchanged(s, os.fstat(f.fileno())), 'input replaced')
+            opened = os.fstat(f.fileno())
+            need_unchanged(s, opened, 'input replaced', cross=True)
             count = 0
             while True:
                 chunk = f.read(65536)
                 if not chunk: break
                 count += len(chunk); need(count <= row['size'], 'input grew')
                 h.update(chunk)
-            need(unchanged(s, os.fstat(f.fileno())), 'input changed')
-        need(unchanged(s, regular(path)), 'input pathname changed')
+            need_unchanged(opened, os.fstat(f.fileno()), 'input changed')
+        need_unchanged(s, regular(path), 'input pathname changed')
         need(count == row['size'] and h.hexdigest() == hex_value(row['sha256']), 'input hash mismatch: ' + name)
     need(b['files']['runtime/manifest.json']['sha256'] == b['manifestSha256'], 'manifest binding')
     manifest = decode(read(inputs / 'runtime/manifest.json', 1024 * 1024))
@@ -341,15 +354,16 @@ def prepare(source, inputs, binding, expected, output):
         dst.parent.mkdir(mode=0o700, parents=True, exist_ok=True)
         h = hashlib.sha256(); count = 0
         with src.open('rb') as reader, dst.open('xb') as writer:
-            need(unchanged(before, os.fstat(reader.fileno())), 'copy source replaced')
+            opened = os.fstat(reader.fileno())
+            need_unchanged(before, opened, 'copy source replaced', cross=True)
             while True:
                 chunk = reader.read(65536)
                 if not chunk: break
                 count += len(chunk); need(count <= row['size'], 'copy source grew')
                 need(writer.write(chunk) == len(chunk), 'short stage write')
                 h.update(chunk)
-            need(unchanged(before, os.fstat(reader.fileno())), 'copy source changed')
-        need(unchanged(before, regular(src)), 'copy pathname changed')
+            need_unchanged(opened, os.fstat(reader.fileno()), 'copy source changed')
+        need_unchanged(before, regular(src), 'copy pathname changed')
         need(count == row['size'] and h.hexdigest() == row['sha256'], 'copy digest mismatch')
     # Any failed copy leaves its exclusive output occupied for diagnosis; no cleanup.
     # Bytes are staged as DATA; signature/PE/ACL checks remain native gates.
