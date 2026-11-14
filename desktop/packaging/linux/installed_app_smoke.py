@@ -3,7 +3,7 @@
 Installs the exact built DEB, launches /usr/bin/mobile-release-kit-desktop as
 the ordinary runner account under Xvfb + a private D-Bus session, records the
 window, a screenshot and bounded logs, requests a normal close with
-WM_DELETE_WINDOW, reopens, closes again, then removes the package.
+WM_DELETE_WINDOW, answers the app's quit confirmation with OK, reopens, closes again, then removes the package.
 Observation only: never edits the DEB, never qualifies shipping.
 """
 import argparse, hashlib, json, os, subprocess, sys, time
@@ -52,6 +52,23 @@ def close_window(display, wid):
     w.send_event(ev, event_mask=X.NoEventMask); d.flush(); d.close()
 
 
+QUIT_TITLE = 'Quit and discard unsaved drafts?'
+
+
+def click_ok(display, wid):
+    """Click the dialog's right-hand OK button (GTK OK/Cancel, no WM on Xvfb)."""
+    from Xlib import display as xd, X
+    from Xlib.ext import xtest
+    d = xd.Display(display); root = d.screen().root
+    w = d.create_resource_object('window', wid); g = w.get_geometry()
+    pos = w.translate_coords(root, 0, 0)
+    x, y = -pos.x + int(g.width * 0.75), -pos.y + g.height - 17
+    xtest.fake_input(d, X.MotionNotify, x=x, y=y); d.sync(); time.sleep(0.3)
+    xtest.fake_input(d, X.ButtonPress, 1); d.sync(); time.sleep(0.1)
+    xtest.fake_input(d, X.ButtonRelease, 1); d.sync(); d.close()
+    return {'x': x, 'y': y, 'width': g.width, 'height': g.height}
+
+
 def session(label, user, home, display, evidence):
     log = open(evidence / f'{label}-app.log', 'wb')
     env = {'PATH': '/usr/bin:/bin', 'HOME': home, 'DISPLAY': display, 'LANG': 'C.UTF-8',
@@ -77,16 +94,30 @@ def session(label, user, home, display, evidence):
         step(f'{label}-after-start', exitCode=p.returncode); raise RuntimeError(f'{label}: app exited during startup')
     sh(['import', '-display', display, '-window', 'root', str(evidence / f'{label}-running.png')])
     step(f'{label}-running', windows=[{'id': w, 'title': t} for w, t in wins])
+    app_pid = int(sh(['pgrep', '-u', user, '-f', '-x', APP])[1].split()[0])
     close_window(display, wins[0][0])
+    # The shipped app always asks before quitting. Answer it like a user: OK.
+    dialog = None; deadline = time.time() + 15
+    while dialog is None and time.time() < deadline and p.poll() is None:
+        time.sleep(0.5)
+        dialog = next(((w, t) for w, t in windows_for(display, app_pid) if t == QUIT_TITLE), None)
+    clicked = None
+    if dialog:
+        time.sleep(1)
+        sh(['import', '-display', display, '-window', 'root', str(evidence / f'{label}-quit-confirmation.png')])
+        clicked = click_ok(display, dialog[0])
+    step(f'{label}-quit-confirmation', shown=dialog is not None, clickedOk=clicked)
     try:
-        p.wait(timeout=30); exited = True
+        p.wait(timeout=60); exited = True
     except subprocess.TimeoutExpired:
         exited = False
         sh(['import', '-display', display, '-window', 'root', str(evidence / f'{label}-close-pending.png')])
     rc, out, _ = sh(['pgrep', '-u', user, '-f', '-x', APP])
-    step(f'{label}-close', exitedWithin30s=exited, exitCode=p.returncode if exited else None, remainingAppProcesses=len(out.split()))
+    step(f'{label}-close', exitedWithin60s=exited, exitCode=p.returncode if exited else None, remainingAppProcesses=len(out.split()))
     if not exited:
-        os.killpg(p.pid, 9); raise RuntimeError(f'{label}: did not exit within 30 s after WM_DELETE_WINDOW')
+        os.killpg(p.pid, 9); raise RuntimeError(f'{label}: did not exit within 60 s after close and OK')
+    if p.returncode != 0:
+        raise RuntimeError(f'{label}: app exited with {p.returncode} after quit')
     log.close()
 
 
