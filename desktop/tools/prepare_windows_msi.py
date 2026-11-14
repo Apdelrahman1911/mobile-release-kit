@@ -169,16 +169,32 @@ def stable_metadata(value):
 def unchanged(before, after):
     return stable_metadata(before) == stable_metadata(after)
 
+STABLE_FIELDS = ('st_dev', 'st_ino', 'st_mode', 'st_nlink', 'st_uid', 'st_gid',
+                 'st_size', 'st_mtime_ns', 'st_ctime_ns', 'st_birthtime_ns',
+                 'st_birthtime', 'st_flags', 'st_gen', 'st_file_attributes',
+                 'st_reparse_tag')
+
+def metadata_difference(before, after):
+    """Names and values of differing stable fields, for refusal evidence only."""
+    return {name: [getattr(before, name, None), getattr(after, name, None)]
+            for name in STABLE_FIELDS
+            if getattr(before, name, None) != getattr(after, name, None)}
+
+def need_unchanged(before, after, message):
+    if not unchanged(before, after):
+        raise Refused(message + ': ' + json.dumps(metadata_difference(before, after), sort_keys=True, default=str))
+
 def read(path, limit):
     before = regular(path)
     need(0 < before.st_size <= limit, 'file size bound')
     with Path(path).open('rb') as f:
         opened = os.fstat(f.fileno())
-        need(unchanged(before, opened), 'input replaced')
+        need_unchanged(before, opened, 'input replaced')
         data = f.read(limit + 1)
         after = os.fstat(f.fileno())
-    need(len(data) == before.st_size and unchanged(before, after), 'input changed')
-    need(unchanged(before, regular(path)), 'input pathname changed')
+    need(len(data) == before.st_size, 'input changed')
+    need_unchanged(before, after, 'input changed')
+    need_unchanged(before, regular(path), 'input pathname changed')
     return data
 
 def unique(pairs):
@@ -215,7 +231,10 @@ def validate(source, inputs, binding, expected):
     need(isinstance(b['sourceFiles'], dict) and SOURCE_REQUIRED <= b['sourceFiles'].keys() and len(b['sourceFiles']) <= 128, 'source inventory')
     source_total = 0
     for name, sha in b['sourceFiles'].items():
-        data = read(source / relative(name), 4 * 1024 * 1024)
+        try:
+            data = read(source / relative(name), 4 * 1024 * 1024)
+        except Refused as error:
+            raise Refused(name + ': ' + str(error)) from None
         source_total += len(data)
         need(source_total <= 32 * 1024 * 1024, 'source aggregate bound')
         need(digest(data) == hex_value(sha), 'source digest mismatch: ' + name)

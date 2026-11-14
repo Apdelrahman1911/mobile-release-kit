@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 import shutil
 import subprocess
+import sys
 import urllib.request
 import build_windows_transaction as native
 import prepare_windows_msi as msi
@@ -40,6 +41,15 @@ def main():
  msi.need(not git('status','--porcelain','--untracked-files=no'),'tracked source must be clean')
  out.mkdir();logs=out/'logs';logs.mkdir()
  source_asset_admission(source,logs)
+ # Early, read-only check: the MSI step re-reads every bound source with the
+ # strict reader after the long compile. Refuse now, with field evidence.
+ probe={'python':sys.version,'files':{}}
+ for rel in sorted(msi.SOURCE_REQUIRED|native.REQUIRED|{'desktop/tools/prepare_windows_transaction_run.py'}):
+  try:msi.read(source/rel,4*1024*1024);probe['files'][rel]='ok'
+  except msi.Refused as error:probe['files'][rel]=str(error)
+ (logs/'source-reader-probe.json').write_text(json.dumps(probe,indent=2,sort_keys=True)+'\n')
+ refused=[k for k,v in probe['files'].items() if v!='ok']
+ msi.need(not refused,'strict source reader refused before compile: '+'; '.join(k+' '+probe['files'][k] for k in refused[:5]))
  env=os.environ.copy();msi.need(not any(env.get(key) for key in ('RUSTC_WRAPPER','RUSTC_WORKSPACE_WRAPPER','RUSTFLAGS','CARGO_ENCODED_RUSTFLAGS','CMAKE_GENERATOR','CXX','CC','CL','_CL_')),'ambient compiler injection refused');env.update(CARGO_BUILD_JOBS='1',CARGO_HOME=str(out/'cargo'),CARGO_TARGET_DIR=str(out/'target'),MSBUILDDISABLENODEREUSE='1',DOTNET_CLI_USE_MSBUILD_SERVER='0',RUSTUP_TOOLCHAIN='1.98.0')
  def run(name,args,cwd=source,timeout=1800):
   return run_owned(name,args,cwd=cwd,env=env,logs=logs,timeout=timeout)
