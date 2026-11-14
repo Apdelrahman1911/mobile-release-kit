@@ -97,8 +97,10 @@ def main():
     try:
         debs = list(a.download.rglob('mobile-release-kit-desktop_0.1.4-1_amd64.deb')); assert len(debs) == 1, 'exactly one DEB'
         deb = debs[0]; step('inputs', debSha256=hashlib.sha256(deb.read_bytes()).hexdigest(), bytes=deb.stat().st_size)
+        step('host', kernel=os.uname().release, machine=os.uname().machine, osRelease=Path('/etc/os-release').read_text()[:600])
         env = dict(os.environ, DEBIAN_FRONTEND='noninteractive')
         sh(['apt-get', 'update'], env=env)
+        env['PATH'] = '/usr/sbin:/usr/bin:/sbin:/bin'
         rc, out, err = sh(['apt-get', 'install', '-y', '--no-install-recommends', str(deb.resolve()), 'xvfb', 'python3-xlib', 'imagemagick', 'dbus'], timeout=900, env=env)
         (ev / 'install.log').write_text(out + '\n' + err); step('install', exitCode=rc)
         if rc: raise RuntimeError(f'apt-get install of the DEB returned {rc}')

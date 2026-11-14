@@ -49,7 +49,7 @@ def execute(download,case,work):
   (work/'RESULT.json').write_text(json.dumps(dict(case=case,expectedRefusal=True,qualified=False)))
   return
  before=S.snapshot(root);(work/'before.json').write_text(json.dumps(before,indent=2))
- try:run([('refusal',command,300)],Path('/'),work,dict(PATH='/usr/bin:/bin',HOME='/root',LANG='C',LC_ALL='C'))
+ try:run([('refusal',command,300)],Path('/'),work,dict(PATH='/usr/sbin:/usr/bin:/sbin:/bin',HOME='/root',LANG='C',LC_ALL='C'))
  except SystemExit:pass
  else:raise AssertionError('Expected postinst refusal')
  result=json.loads((work/'refusal/original-return.json').read_text())

@@ -791,16 +791,25 @@ impl PassiveInstalledProfile {
     fn bindings_match(target: &str, manifest: Option<&str>, protocol: Option<&str>) -> bool {
         target == Self::TARGET && manifest == Some(Self::MANIFEST) && protocol == Some(Self::PROTOCOL)
     }
+    // Read-only passive family ONLY: the current runtime this 0.1.4 DEB bundles
+    // (assembly of run 43631372422: manifest 5b5eac42…, protocol unchanged).
+    // MANIFEST/bindings_match above stay historical, so every other family that
+    // reuses them (configuration and workflow edits, GitHub, metadata/version
+    // writes, recovery, diagnostics, sessions) remains closed on this runtime.
+    pub(crate) const CURRENT_MANIFEST: &'static str = "5b5eac42aa2bffce668bd0cc828cdcd25de1de8fbf6fa1e3848eeb8e3440ef3f";
+    fn current_bindings_match(target: &str, manifest: Option<&str>, protocol: Option<&str>) -> bool {
+        target == Self::TARGET && manifest == Some(Self::CURRENT_MANIFEST) && protocol == Some(Self::PROTOCOL)
+    }
     pub(crate) fn selection(&self) -> Result<VerifiedRuntime, BridgeError> {
-        if !Self::bindings_match(COMPILED_TARGET, MANIFEST_ANCHOR, PROTOCOL_ANCHOR) {
+        if !Self::current_bindings_match(COMPILED_TARGET, MANIFEST_ANCHOR, PROTOCOL_ANCHOR) {
             return Err(unavailable().with_linux_passive_cause(Some(crate::error::LinuxPassiveCause::SelectionCompileBinding)));
         }
-        let cwd = PathBuf::from("/var/lib/mobile-release-kit/versions").join(Self::TARGET).join(Self::MANIFEST);
+        let cwd = PathBuf::from("/var/lib/mobile-release-kit/versions").join(Self::TARGET).join(Self::CURRENT_MANIFEST);
         Ok(VerifiedRuntime { python: cwd.join("python/bin/python3"), bootstrap: cwd.join("engine_bootstrap.py"),
             core: cwd.join("core.zip"), cwd })
     }
     pub(crate) fn accepts_platform(&self, sysname: &[u8], machine: &[u8], release: &[u8]) -> bool {
-        sysname == b"Linux" && machine == b"x86_64" && release == b"6.17.0-1022-azure"
+        crate::installed_runtime::supported_kernel(sysname, machine, release)
     }
 }
 
@@ -1550,6 +1559,10 @@ impl RuntimeConfig {
         {
             #[cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))]
             if self.windows_passive != windows_version::Selection::Normal || cfg!(feature = "windows-runtime-publisher") { return false; }
+            // Linux credential sessions stay on the historical binding: the current
+            // passive read binding never opens credentials.assess or session work.
+            #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+            if !PassiveInstalledProfile::bindings_match(COMPILED_TARGET, MANIFEST_ANCHOR, PROTOCOL_ANCHOR) { return false; }
             self.passive_installed_profile().is_ok() && self.installed_session.matches(identity)
         }
         #[cfg(not(all(feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"),
@@ -1698,7 +1711,7 @@ impl RuntimeConfig {
                 .with_linux_passive_cause(Some(crate::error::LinuxPassiveCause::SelectionProfileClosed))),
             #[cfg(all(not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), any(test, feature = "desktop-shell")))]
             PassiveInstalledSelection::CandidateA => {
-                if !PassiveInstalledProfile::bindings_match(COMPILED_TARGET, MANIFEST_ANCHOR, PROTOCOL_ANCHOR) {
+                if !PassiveInstalledProfile::current_bindings_match(COMPILED_TARGET, MANIFEST_ANCHOR, PROTOCOL_ANCHOR) {
                     return Err(unavailable().with_linux_passive_cause(Some(crate::error::LinuxPassiveCause::SelectionCompileBinding)));
                 }
                 Ok(PassiveInstalledProfile { _private: () })
@@ -2690,10 +2703,13 @@ impl RuntimeConfig {
 pub(crate) fn assert_packaged_shell_allowlist_contract() {
     let mut runtime = RuntimeConfig::packaged(PathBuf::from("/inert-shell-path-must-not-be-opened"));
     assert!(matches!(runtime.passive_installed, PassiveInstalledSelection::CandidateA));
-    let bindings = PassiveInstalledProfile::bindings_match(COMPILED_TARGET, MANIFEST_ANCHOR, PROTOCOL_ANCHOR);
+    // Passive reads follow the current bundled runtime; edit families stay on
+    // the historical binding and therefore remain closed on this runtime.
+    let bindings = PassiveInstalledProfile::current_bindings_match(COMPILED_TARGET, MANIFEST_ANCHOR, PROTOCOL_ANCHOR);
+    let historical = PassiveInstalledProfile::bindings_match(COMPILED_TARGET, MANIFEST_ANCHOR, PROTOCOL_ANCHOR);
     assert_eq!(runtime.project_selection_profile_available(), bindings);
-    assert_eq!(runtime.configuration_edit_profile_available(), bindings);
-    assert_eq!(runtime.github_workflow_edit_profile_available(), bindings);
+    assert_eq!(runtime.configuration_edit_profile_available(), historical);
+    assert_eq!(runtime.github_workflow_edit_profile_available(), historical);
     for name in ["capabilities", "catalog", "project.snapshot", "config.validate", "config.suggest", "config.preview",
         "environment.requirements", "github.setup.propose", "release.version.observe", "metadata.text.observe", "metadata.text.validate", "artifacts.candidate.observe", "release.evidence.observe"] {
         assert_eq!(runtime.passive_method_available(name), bindings);
@@ -2714,7 +2730,7 @@ pub(crate) fn assert_packaged_shell_allowlist_contract() {
     runtime.claim_original_supervisor();
     assert!(!runtime.passive_method_available("credentials.assess"));
     runtime.bind_original_session_document(&original);
-    let available = bindings && session_inputs_qualified()
+    let available = historical && session_inputs_qualified()
         && cfg!(all(feature = "custom-protocol", not(feature = "macos-installed-installer")));
     assert_eq!(runtime.installed_session_available(&original), available);
     assert_eq!(runtime.passive_method_available("credentials.assess"), available);

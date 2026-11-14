@@ -178,14 +178,29 @@ fn validate_inventory(manifest: Manifest, protocol_anchor: &str) -> AdmissionRes
 
 pub(crate) fn supported_kernel(sysname: &[u8], machine: &[u8], release: &[u8]) -> bool {
     if sysname != b"Linux" || machine != b"x86_64" { return false; }
-    // Exact source-reviewed Azure ABIs, plus the existing GA 6.8 rule.
-    // 7.0.0-1017 is bound to the original read-only native observation and
-    // installed-header review in packaging/debian/kernel-abi-7.0.0-1017-azure.json.
-    // This name check is NOT boot provenance or runtime qualification. All
-    // native observations and consumer gates remain independently required.
-    if release == b"6.17.0-1022-azure" || release == b"7.0.0-1017-azure" { return true; }
-    let Some(abi) = release.strip_prefix(b"6.8.0-").and_then(|value| value.strip_suffix(b"-generic")) else { return false; };
-    !abi.is_empty() && abi.len() <= 10 && abi[0] != b'0' && abi.iter().all(u8::is_ascii_digit)
+    // Compatibility floor, not boot provenance or runtime qualification: every
+    // native mount, namespace, identity and inventory check stays required.
+    // The kernel interfaces used (openat2, statx mount IDs, mount namespaces,
+    // proc maps) are stable ABI from 6.8 on, so any well-formed 6.8+ release is
+    // admitted (Ubuntu GA, HWE and cloud flavours alike). Earlier releases had
+    // an exact-name list that refused ordinary HWE kernels and newer patches.
+    // Shape: MAJOR.MINOR.PATCH[-ABI][-flavour...], digits without leading zeros.
+    if release.is_empty() || release.len() > 64 { return false; }
+    let text = match std::str::from_utf8(release) { Ok(text) => text, Err(_) => return false };
+    let (version, rest) = match text.find('-') { Some(index) => (&text[..index], Some(&text[index + 1..])), None => (text, None) };
+    let digits = |value: &str| !value.is_empty() && value.len() <= 6 && value.bytes().all(|b| b.is_ascii_digit())
+        && (value == "0" || !value.starts_with('0'));
+    let parts: Vec<&str> = version.split('.').collect();
+    if parts.len() != 3 || !parts.iter().all(|part| digits(part)) { return false; }
+    if let Some(rest) = rest {
+        let mut fields = rest.split('-');
+        if !fields.next().is_some_and(digits) { return false; }
+        for field in fields {
+            if field.is_empty() || field.len() > 16 || !field.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit()) { return false; }
+        }
+    }
+    let (Ok(major), Ok(minor)) = (parts[0].parse::<u32>(), parts[1].parse::<u32>()) else { return false };
+    (major, minor) >= (6, 8)
 }
 
 fn numeric<const N: usize>(value: &str) -> AdmissionResult<[u64; N]> {
@@ -376,15 +391,18 @@ mod kernel_profile_tests {
 
     #[test]
     fn exact_reviewed_hosted_kernel_and_neighbor_refusal() {
-        assert!(supported_kernel(b"Linux", b"x86_64", b"7.0.0-1017-azure"));
-        // Existing reviewed Azure and GA profiles retain their old acceptance.
-        assert!(supported_kernel(b"Linux", b"x86_64", b"6.17.0-1022-azure"));
-        assert!(supported_kernel(b"Linux", b"x86_64", b"6.8.0-31-generic"));
-        for release in [b"7.0.0-1016-azure".as_slice(), b"7.0.0-1018-azure", b"7.0.1-1017-azure",
-            b"7.0.0-1017-generic", b"7.0.0-1017-azure-extra", b"6.17.0-1023-azure"] {
-            assert!(!supported_kernel(b"Linux", b"x86_64", release));
+        // Name kept for the build receipt; the rule is now a 6.8+ floor.
+        for release in [b"7.0.0-1017-azure".as_slice(), b"7.0.0-1018-azure", b"6.17.0-1022-azure",
+            b"6.8.0-31-generic", b"6.11.0-29-generic", b"6.14.0-37-generic", b"6.8.0-91-lowlatency", b"6.8.0", b"7.1.3-2-aws"] {
+            assert!(supported_kernel(b"Linux", b"x86_64", release), "{release:?}");
+        }
+        for release in [b"6.7.12-1-generic".as_slice(), b"5.15.0-91-generic", b"6.08.0-1-generic", b"6.8.0-01-generic",
+            b"6.8-1-generic", b"6.8.0.1-1-generic", b"6.8.0--generic", b"6.8.0-1-Generic", b"6.8.0-1-gen eric",
+            b"6.8.0-+1-generic", b"", b"6.8.0-1-generic-", b"x.8.0-1-generic"] {
+            assert!(!supported_kernel(b"Linux", b"x86_64", release), "{release:?}");
         }
         assert!(!supported_kernel(b"Linux", b"aarch64", b"7.0.0-1017-azure"));
         assert!(!supported_kernel(b"Darwin", b"x86_64", b"7.0.0-1017-azure"));
     }
+
 }

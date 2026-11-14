@@ -2400,12 +2400,12 @@ mod pure_tests {
 
     #[test]
     fn kernel_scope_is_reviewed_ubuntu() {
-        assert!(supported_kernel(b"Linux", b"x86_64", b"6.8.0-91-generic"));
-        assert!(supported_kernel(b"Linux", b"x86_64", b"6.17.0-1022-azure"));
-        for release in [b"6.8.0-generic".as_slice(), b"6.8.0-0-generic", b"6.8.0-91-lowlatency",
-            b"6.8.0-91-generic-custom", b"6.11.0-29-generic", b"6.8.0-+91-generic",
-            b"6.17.0-1021-azure", b"6.17.0-1023-azure", b"6.17.0-1022-generic",
-            b"6.17.0-1022-azure-custom", b"6.17.0-01022-azure"] {
+        // 6.8+ compatibility floor; native platform checks remain separate.
+        for release in [b"6.8.0-91-generic".as_slice(), b"6.17.0-1022-azure", b"6.11.0-29-generic", b"6.8.0-91-lowlatency"] {
+            assert!(supported_kernel(b"Linux", b"x86_64", release));
+        }
+        for release in [b"6.8.0-91-generic custom".as_slice(), b"6.8.0-+91-generic",
+            b"6.17.0-01022-azure", b"6.7.0-1-generic", b"6.8.0-91-GENERIC"] {
             assert!(!supported_kernel(b"Linux", b"x86_64", release));
         }
         assert!(!supported_kernel(b"Linux", b"aarch64", b"6.8.0-91-generic"));
@@ -2413,6 +2413,7 @@ mod pure_tests {
         assert!(!supported_kernel(b"Linux", b"aarch64", b"6.17.0-1022-azure"));
         assert!(!supported_kernel(b"FreeBSD", b"x86_64", b"6.17.0-1022-azure"));
     }
+
 
     #[test]
     fn initial_maps_require_one_full_initial_mapping() {

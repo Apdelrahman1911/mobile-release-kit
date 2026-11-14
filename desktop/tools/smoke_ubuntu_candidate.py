@@ -39,7 +39,7 @@ def smoke(deb,digest,work):
     root=Path('/var/lib/mobile-release-kit')
     before=snapshot(root)
     (work/'before.json').write_text(json.dumps(before,indent=2)+'\n')
-    env=dict(PATH='/usr/bin:/bin',HOME='/root',LANG='C',LC_ALL='C',TZ='UTC',DEBIAN_FRONTEND='noninteractive')
+    env=dict(PATH='/usr/sbin:/usr/bin:/sbin:/bin',HOME='/root',LANG='C',LC_ALL='C',TZ='UTC',DEBIAN_FRONTEND='noninteractive')
     run([('dependencies-inspect',['/usr/bin/dpkg-deb','-f',str(deb),'Depends'],30)],Path('/'),work,env)
     depends=(work/'dependencies-inspect/stdout.log').read_text().strip()
     names=[]
