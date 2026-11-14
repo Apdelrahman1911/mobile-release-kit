@@ -4,7 +4,10 @@ DATA verification only. No installation, launch authority or native qualificatio
 from __future__ import annotations
 import hashlib
 import json
+import os
 from pathlib import Path
+import re
+import stat
 import shutil
 import tomllib
 import ci_foundation as foundation
@@ -14,6 +17,51 @@ TARGET = 'x86_64-pc-windows-msvc'
 
 def need(value, tag):
     if not value: raise ValueError('compiler-evidence:'+tag)
+
+def _output_facts(details):
+    return {'regular':stat.S_ISREG(details.st_mode),'links':details.st_nlink,'bytes':details.st_size,
+            'attributes':getattr(details,'st_file_attributes',0),'reparseTag':getattr(details,'st_reparse_tag',0),
+            'volume':details.st_dev,'fileId':details.st_ino}
+
+def _output_state(details):
+    return (details.st_dev,details.st_ino,stat.S_IFMT(details.st_mode),details.st_nlink,details.st_size,details.st_mtime_ns)
+
+def compiler_output_record(path,*,binary,limit,logs,role):
+    """Acquire one ACTUAL Cargo release output under the compiler-output role.
+
+    Cargo publishes ("uplifts") target/<triple>/release/<bin>.exe as a hard link
+    to its own target/<triple>/release/deps/<crate>-<metadata>.exe when the
+    filesystem permits. The installed-file reader correctly refuses any second
+    link, so it is not used for this role and is not relaxed. This reader admits
+    a regular, non-reparse output with either one link, or exactly two links
+    whose sole other name is the matching Cargo deps original (same volume and
+    file ID). Original metadata is retained before any decision.
+    """
+    before=path.lstat();facts={'role':role,'path':str(path),'original':_output_facts(before),'counterparts':[]}
+    deps=path.parent/'deps';pattern=re.compile(re.escape(binary.replace('-','_'))+r'-[0-9a-f]{16}\.exe')
+    partners=[]
+    if before.st_nlink==2 and deps.is_dir():
+        for entry in sorted(deps.iterdir()):
+            if not pattern.fullmatch(entry.name):continue
+            details=entry.lstat()
+            row={'name':entry.name,**_output_facts(details)};facts['counterparts'].append(row)
+            if (details.st_dev,details.st_ino)==(before.st_dev,before.st_ino):partners.append((entry,details))
+    logs.mkdir(exist_ok=True)
+    (logs/(role+'-compiler-output-metadata.json')).write_text(json.dumps(facts,indent=2,sort_keys=True)+'\n')
+    need(stat.S_ISREG(before.st_mode) and not getattr(before,'st_file_attributes',0)&0x400
+         and not getattr(before,'st_reparse_tag',0),'compiler-output-ordinary')
+    need(before.st_nlink==1 or (before.st_nlink==2 and len(partners)==1),'compiler-output-links')
+    need(0<before.st_size<=limit,'compiler-output-bound')
+    with path.open('rb') as stream:
+        opened=os.fstat(stream.fileno())
+        need((opened.st_dev,opened.st_ino,opened.st_size,opened.st_nlink)==(before.st_dev,before.st_ino,before.st_size,before.st_nlink),'compiler-output-open')
+        value=stream.read(before.st_size+1)
+        after=os.fstat(stream.fileno())
+        need((after.st_dev,after.st_ino,after.st_size,after.st_nlink,after.st_mtime_ns)==(opened.st_dev,opened.st_ino,opened.st_size,opened.st_nlink,opened.st_mtime_ns),'compiler-output-read')
+    need(len(value)==before.st_size and _output_state(path.lstat())==_output_state(before),'compiler-output-changed')
+    for entry,details in partners:need(_output_state(entry.lstat())==_output_state(details),'compiler-output-partner-changed')
+    return {'size':len(value),'sha256':hashlib.sha256(value).hexdigest(),'links':before.st_nlink,
+            'cargoDepsOriginal':partners[0][0].name if partners else None}
 
 def selected_artifact(raw, *, role, source, output):
     """Select only the actual final compiler event, never a predicted path alone."""
@@ -45,7 +93,7 @@ def selected_artifact(raw, *, role, source, output):
         selected=expected
     need(finished and selected is not None and units>0,'complete-original-stream')
     need(selected.is_file(),'original-artifact-missing')
-    original=foundation.windows_installed_record(selected,512<<20)
+    original=compiler_output_record(selected,binary=binary,limit=512<<20,logs=output/'logs',role=role)
     return {'path':str(selected),'bytes':original['size'],'sha256':original['sha256'],
             'compilerStreamBytes':len(raw),'compilerStreamSha256':hashlib.sha256(raw).hexdigest(),'compilerUnits':units,
             'role':role,'features':features,'profile':'release','debugAssertions':False}

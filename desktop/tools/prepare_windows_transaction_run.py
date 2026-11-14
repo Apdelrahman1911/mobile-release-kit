@@ -62,7 +62,10 @@ def main():
  run('shell-metadata',['cargo','metadata','--locked','--format-version','1','--filter-platform',msi.TARGET,'--manifest-path',manifest,'--no-default-features','--features','desktop-shell,custom-protocol'])
  selected={}
  for role,binary,features in [('publisher',msi.PUBLISHER.removesuffix('.exe'),'windows-runtime-publisher'),('shell',msi.SHELL.removesuffix('.exe'),'desktop-shell,custom-protocol')]:
-  run(role+'-compile',['cargo','build','--locked','--release','--jobs','1','--target',msi.TARGET,'--manifest-path',manifest,'--no-default-features','--features',features,'--bin',binary,'--message-format=json-render-diagnostics'])
+  # Hosted release compile allowance: publisher measured 909.8 s (43037225823);
+  # full shell check alone measured 1132.3 s (43030604535), so its optimized
+  # release build receives a larger bounded deadline. Output/job limits unchanged.
+  run(role+'-compile',['cargo','build','--locked','--release','--jobs','1','--target',msi.TARGET,'--manifest-path',manifest,'--no-default-features','--features',features,'--bin',binary,'--message-format=json-render-diagnostics'],timeout=1800 if role=='publisher' else 5400)
   selected[role]=compiler_evidence.selected_artifact((logs/(role+'-compile.stdout')).read_bytes(),role=role,source=source,output=out)
  compiler_evidence.retain_normal(source,out,selected['shell'])
  inputs=out/'inputs';inputs.mkdir();shutil.copytree(runtime,inputs/'runtime')
