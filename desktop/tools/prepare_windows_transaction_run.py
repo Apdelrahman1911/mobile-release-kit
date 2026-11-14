@@ -47,6 +47,11 @@ def main():
  for rel in sorted(msi.SOURCE_REQUIRED|native.REQUIRED|{'desktop/tools/prepare_windows_transaction_run.py'}):
   try:msi.read(source/rel,4*1024*1024);probe['files'][rel]='ok'
   except msi.Refused as error:probe['files'][rel]=str(error)
+ # Compiled inputs are .exe files; by-name stat treats that suffix specially.
+ sample=logs/'strict-reader-probe.exe';sample.write_bytes(b'MZ probe only, never executed\n')
+ try:msi.read(sample,64);probe['files']['<probe>.exe']='ok'
+ except msi.Refused as error:probe['files']['<probe>.exe']=str(error)
+ sample.unlink()
  (logs/'source-reader-probe.json').write_text(json.dumps(probe,indent=2,sort_keys=True)+'\n')
  refused=[k for k,v in probe['files'].items() if v!='ok']
  msi.need(not refused,'strict source reader refused before compile: '+'; '.join(k+' '+probe['files'][k] for k in refused[:5]))

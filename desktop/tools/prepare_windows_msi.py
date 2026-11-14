@@ -173,13 +173,20 @@ def unchanged(before, after):
 # directory entry's cached ChangeTime, ~1 ms older than the handle's live value
 # (hosted run 43642994473: only st_ctime_ns differed, path older, 11/76 files).
 # Path-vs-handle comparisons therefore omit that one field on Windows only.
+# By-name stat also synthesises 0o111 for .exe/.bat/.cmd/.com names, which a
+# handle cannot see (run 43643299751: st_mode 0o100777 vs 0o100666 on the
+# shell .exe), so those bits alone are masked for the same cross comparison.
 # Path-vs-path and handle-vs-handle comparisons keep every field, and file id,
 # volume, size, mtime, birth time, attributes and the SHA-256 stay bound.
 CROSS_SOURCE_UNSTABLE = frozenset({'st_ctime_ns'}) if os.name == 'nt' else frozenset()
 
+CROSS_SOURCE_MODE_MASK = ~0o111 if os.name == 'nt' else ~0
+
 def cross_unchanged(by_path, by_handle):
+    if (by_path.st_mode & CROSS_SOURCE_MODE_MASK) != (by_handle.st_mode & CROSS_SOURCE_MODE_MASK):
+        return False
     return all(getattr(by_path, n, None) == getattr(by_handle, n, None)
-               for n in STABLE_FIELDS if n not in CROSS_SOURCE_UNSTABLE)
+               for n in STABLE_FIELDS if n not in CROSS_SOURCE_UNSTABLE and n != 'st_mode')
 
 STABLE_FIELDS = ('st_dev', 'st_ino', 'st_mode', 'st_nlink', 'st_uid', 'st_gid',
                  'st_size', 'st_mtime_ns', 'st_ctime_ns', 'st_birthtime_ns',
@@ -280,15 +287,15 @@ def validate(source, inputs, binding, expected):
         h = hashlib.sha256()
         with path.open('rb') as f:
             opened = os.fstat(f.fileno())
-            need_unchanged(s, opened, 'input replaced', cross=True)
+            need_unchanged(s, opened, 'input replaced: ' + name, cross=True)
             count = 0
             while True:
                 chunk = f.read(65536)
                 if not chunk: break
                 count += len(chunk); need(count <= row['size'], 'input grew')
                 h.update(chunk)
-            need_unchanged(opened, os.fstat(f.fileno()), 'input changed')
-        need_unchanged(s, regular(path), 'input pathname changed')
+            need_unchanged(opened, os.fstat(f.fileno()), 'input changed: ' + name)
+        need_unchanged(s, regular(path), 'input pathname changed: ' + name)
         need(count == row['size'] and h.hexdigest() == hex_value(row['sha256']), 'input hash mismatch: ' + name)
     need(b['files']['runtime/manifest.json']['sha256'] == b['manifestSha256'], 'manifest binding')
     manifest = decode(read(inputs / 'runtime/manifest.json', 1024 * 1024))
