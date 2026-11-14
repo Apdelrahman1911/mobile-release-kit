@@ -34,18 +34,28 @@ def compiler_output_record(path,*,binary,limit,logs,role):
     filesystem permits. The installed-file reader correctly refuses any second
     link, so it is not used for this role and is not relaxed. This reader admits
     a regular, non-reparse output with either one link, or exactly two links
-    whose sole other name is the matching Cargo deps original (same volume and
-    file ID). Original metadata is retained before any decision.
+    whose sole other name is a regular file inside this build's own Cargo target
+    directory (same volume and file ID). A second name anywhere else is refused.
+    Original metadata is retained before any decision.
     """
     before=path.lstat();facts={'role':role,'path':str(path),'original':_output_facts(before),'counterparts':[]}
-    deps=path.parent/'deps';pattern=re.compile(re.escape(binary.replace('-','_'))+r'-[0-9a-f]{16}\.exe')
-    partners=[]
-    if before.st_nlink==2 and deps.is_dir():
-        for entry in sorted(deps.iterdir()):
-            if not pattern.fullmatch(entry.name):continue
-            details=entry.lstat()
-            row={'name':entry.name,**_output_facts(details)};facts['counterparts'].append(row)
-            if (details.st_dev,details.st_ino)==(before.st_dev,before.st_ino):partners.append((entry,details))
+    # Cargo's internal build directory layout varies by release (run 43631131903
+    # with Cargo 1.98 had no partner in release/deps). Search the bounded target
+    # tree for the other name of this same file (same volume and file ID).
+    target_root=path.parents[2]
+    partners=[];scanned=0
+    if before.st_nlink==2:
+        for root,dirs,files in os.walk(target_root):
+            dirs.sort()
+            for name in sorted(files):
+                scanned+=1;need(scanned<=400000,'compiler-output-scan-bound')
+                entry=Path(root)/name
+                if entry==path:continue
+                details=entry.lstat()
+                if details.st_size!=before.st_size or not stat.S_ISREG(details.st_mode):continue
+                row={'path':str(entry.relative_to(target_root)),**_output_facts(details)};facts['counterparts'].append(row)
+                if (details.st_dev,details.st_ino)==(before.st_dev,before.st_ino):partners.append((entry,details))
+    facts['scannedFiles']=scanned
     logs.mkdir(exist_ok=True)
     (logs/(role+'-compiler-output-metadata.json')).write_text(json.dumps(facts,indent=2,sort_keys=True)+'\n')
     need(stat.S_ISREG(before.st_mode) and not getattr(before,'st_file_attributes',0)&0x400
@@ -61,7 +71,7 @@ def compiler_output_record(path,*,binary,limit,logs,role):
     need(len(value)==before.st_size and _output_state(path.lstat())==_output_state(before),'compiler-output-changed')
     for entry,details in partners:need(_output_state(entry.lstat())==_output_state(details),'compiler-output-partner-changed')
     return {'size':len(value),'sha256':hashlib.sha256(value).hexdigest(),'links':before.st_nlink,
-            'cargoDepsOriginal':partners[0][0].name if partners else None}
+            'cargoOriginal':str(partners[0][0].relative_to(target_root)) if partners else None}
 
 def selected_artifact(raw, *, role, source, output):
     """Select only the actual final compiler event, never a predicted path alone."""
