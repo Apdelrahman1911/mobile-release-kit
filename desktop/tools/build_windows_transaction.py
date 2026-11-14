@@ -47,6 +47,14 @@ def assembly(b):
     for action,entry in [('GuardRuntime','MrkGuard'),('PublishRuntime','MrkPublish')]:
         ET.SubElement(package,ns+'CustomAction',Id=action,BinaryRef='MrkTransaction',DllEntry=entry,
                       Execute='deferred',Impersonate='no',Return='check')
+    # Start-menu entry for the installed Desktop app (per-machine; HKLM key path).
+    # Shortcut only: it launches the same installed executable, adds no rights.
+    menu=ET.SubElement(package,ns+'StandardDirectory',Id='ProgramMenuFolder')
+    shortcut=ET.SubElement(menu,ns+'Component',Id='CStartMenuShortcut',Guid=str(prep.uuid.uuid5(prep.NAMESPACE,'component:start-menu-shortcut')).upper(),Bitness='always64')
+    ET.SubElement(shortcut,ns+'Shortcut',Id='MRKStartMenuShortcut',Name='Mobile Release Kit',Description='Prepare and release mobile apps',
+                  Target='[MRKApp]'+prep.SHELL,WorkingDirectory='MRKApp')
+    ET.SubElement(shortcut,ns+'RegistryValue',Root='HKLM',Key='Software\\Mobile Release Kit',Name='StartMenuShortcut',Type='integer',Value='1',KeyPath='yes')
+    ET.SubElement(package.find(ns+'Feature'),ns+'ComponentRef',Id='CStartMenuShortcut')
     seq=ET.SubElement(package,ns+'InstallExecuteSequence')
     # Guard runs for install, uninstall, repair and RemoveExistingProducts child
     # sessions, before any MSI-managed file mutation. No rollback action ever

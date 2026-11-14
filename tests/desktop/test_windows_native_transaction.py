@@ -27,6 +27,14 @@ class NativeAssembly(unittest.TestCase):
   self.assertEqual(seq['PublishRuntime']['After'],'InstallFiles')
   self.assertEqual(seq['PublishRuntime']['Condition'],'NOT REMOVE~="ALL"')
   self.assertEqual(root.find('.//w:Launch',ns).get('Condition'),'0')
+ def test_start_menu_shortcut_targets_installed_shell(self):
+  root=ET.fromstring(n.assembly(self.binding())); ns={'w':p.NS}
+  shortcuts=root.findall('.//w:StandardDirectory[@Id="ProgramMenuFolder"]/w:Component/w:Shortcut',ns)
+  self.assertEqual(len(shortcuts),1)
+  self.assertEqual(shortcuts[0].get('Target'),'[MRKApp]'+p.SHELL)
+  key=root.find('.//w:Component[@Id="CStartMenuShortcut"]/w:RegistryValue',ns)
+  self.assertEqual((key.get('Root'),key.get('Key'),key.get('KeyPath')),('HKLM','Software\\Mobile Release Kit','yes'))
+  self.assertIn('CStartMenuShortcut',[r.get('Id') for r in root.findall('.//w:Feature/w:ComponentRef',ns)])
  def test_header_binds_package_source_and_runtime(self):
   b=self.binding();h=n.header(b)
   for value in (p.identity(b)['assemblyBindingSha256'],b['sourceCommit'],b['sourceTree'],b['manifestSha256']):self.assertIn(value,h)
