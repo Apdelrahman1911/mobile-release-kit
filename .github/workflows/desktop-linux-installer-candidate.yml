@@ -11,7 +11,7 @@ concurrency:
 jobs:
   build:
     runs-on: ubuntu-24.04
-    timeout-minutes: 150
+    timeout-minutes: 200
     env:
       PYTHONDONTWRITEBYTECODE: '1'
       CANDIDATE_COMMIT: ${{ github.sha }}
@@ -101,4 +101,28 @@ jobs:
           name: linux-install-${{ matrix.case }}-${{ github.run_id }}
           path: ${{ runner.temp }}/install-evidence
           if-no-files-found: error
+          retention-days: 14
+  installed-app:
+    needs: build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: linux-candidate-${{ github.run_id }}-attempt-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/download
+      - name: Install, launch, close, reopen and remove the actual installed app
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: sudo -n --preserve-env=GITHUB_ACTIONS,RUNNER_ENVIRONMENT /usr/bin/python3 -B desktop/packaging/linux/installed_app_smoke.py --download "$RUNNER_TEMP/download" --evidence "$RUNNER_TEMP/installed-app"
+      - if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: linux-installed-app-observation-${{ github.run_id }}
+          path: ${{ runner.temp }}/installed-app
+          if-no-files-found: warn
           retention-days: 14

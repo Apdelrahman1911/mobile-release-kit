@@ -94,7 +94,7 @@ def execute(plan, work, lock):
         assert 'helper_completion_same_bytes_replacement_refuses_identity ... ok' in native_log
         del env['MRK_RUNTIME_PUBLICATION_HELPER_TESTS']
         env['CARGO_TARGET_DIR']=str(work/'shell-target')
-        run([('shell-build',[cargo,'build',*shared,'--release','--features','desktop-shell,custom-protocol','--bin','mobile-release-kit-desktop'],1800)],source/'desktop/src-tauri',evidence,env,hosted_shell=True)
+        run([('shell-build',[cargo,'build',*shared,'--release','--features','desktop-shell,custom-protocol','--bin','mobile-release-kit-desktop'],3600)],source/'desktop/src-tauri',evidence,env,hosted_shell=True)
     for target,name in [('publisher','mrk-runtime-publish'),('shell','mobile-release-kit-desktop')]:
         shutil.copyfile(work/(target+'-target')/'x86_64-unknown-linux-gnu/release'/name,work/'compiled'/name)
     binaries=[dict(path=p.name,size=p.stat().st_size,sha256=sha(p)) for p in sorted((work/'compiled').iterdir())]

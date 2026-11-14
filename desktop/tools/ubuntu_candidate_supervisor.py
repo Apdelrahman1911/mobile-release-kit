@@ -5,9 +5,14 @@ CAP=4*1024**2
 RSS_LIMIT=3*1024**3
 FREE_FLOOR=2*1024**3
 def sha(p): return hashlib.sha256(p.read_bytes()).hexdigest()
-HOSTED_SHELL_RSS_LIMIT=5*1024**3
-HOSTED_TOTAL_FLOOR=7*1024**3
-HOSTED_START_FREE=6*1024**3
+# Hosted shell only. Run 43029424633 measured the single desktop-crate rustc
+# (past lint, warnings emitted) at 4.99 GiB and still growing when the 5 GiB
+# owner stopped it, with 10.5 GB host memory still available. The 16 GiB
+# hosted VM admits an 11 GiB group ceiling while keeping a 1 GiB active floor.
+# Local RSS_LIMIT (3 GiB) and every other role are unchanged.
+HOSTED_SHELL_RSS_LIMIT=11*1024**3
+HOSTED_TOTAL_FLOOR=14*1024**3
+HOSTED_START_FREE=12*1024**3
 HOSTED_FREE_RESERVE=1024**3
 
 def memory_facts(body):
