@@ -2504,11 +2504,13 @@ export function App() {
           onRecoveryReload={(projectId) => { if (!configEdit.getSnapshot().status?.active && !configEdit.getSnapshot().nativeBlocked) void loadSnapshot(projectId, true); }}
           onCheck={() => void configEdit.checkStatus()} onClose={() => configEdit.requestClose()} onApply={(binding) => { const projectId = configEdit.getSnapshot().attempt?.binding.projectId; if (projectId) dispatch({ type: 'config-save-intent', projectId }); releaseInputs.saveIntent(); releaseVersion.saveIntent(); return configEdit.apply(binding); }}
           onShowProject={(projectId) => { dispatch({ type: 'switch', projectId }); navigate('settings'); }} onHelp={setHelp} />
+        <section className="activity-region" aria-label="More activity">
         {page !== 'dashboard' && (initializationState.attempt || initializationState.nativeBlocked || initialization.agent.busyReason()) && <ProjectInitialization controller={initialization} state={initializationState} setup={githubSetup} setupState={githubState} compact/>}
         {page !== 'github' && workflowPanel(false)}
         {page !== 'metadata' && <MetadataTextSave state={metadataState} controller={metadataText} detailed={false} onShowProject={showMetadataProject} onHelp={setHelp} />}
         {page !== 'metadata' && <MetadataImagesOperation state={metadataImagesState} controller={metadataImages} detailed={false} onShowProject={showMetadataProject} onHelp={setHelp} />}
         {page !== 'dashboard' && <ReleaseVersionSave state={versionEditState} controller={versionEdit} onShowProject={showVersionProject} />}
+        </section>
         {page === 'dashboard' && <Dashboard resume={{ platform: environmentState.platform,
           android: androidBuildState, ios: iosArchiveState, toolPreparation: toolAcquisitionState,
           diagnostics: diagnosticsState, credentials: assetState, localChecks: offlinePreflightState,
