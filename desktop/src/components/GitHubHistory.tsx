@@ -67,7 +67,7 @@ export function GitHubHistory({ state, controller, onHelp, compact = false, onSh
     {op && <p className="save-note" role="status"><Badge tone={op.phase === 'cleanup-unknown' ? 'warning' : 'info'}>{op.phase}</Badge>{' '}
       Original <code>{op.id}</code> · run {op.selection.runId} · attempt {op.selection.attempt} · {op.selection.stage} · {op.selection.platform}.
       {op.reason !== 'none' && <> {GITHUB_HISTORY_REASON_HELP[op.reason]}</>}</p>}
-    {state.uncertain && <p className="review-caution" role="alert">Original acknowledgement or cleanup is unconfirmed. Keep the original local Status; do not start a replacement read.</p>}
+    {state.uncertain && <p className="review-caution" role="alert">Acknowledgement or cleanup is unconfirmed. Keep the original local Status; do not start a replacement read.</p>}
     {state.error && <p className="review-caution" role="alert">{GITHUB_HISTORY_REASON_HELP[state.error]}</p>}
     {compact ? <>{controls}<button type="button" className="button small secondary" onClick={onShow}>Show authenticated History</button></> : <>
       <p id={reasonId} className="save-note">{reason ?? 'Start performs one authenticated read. It never promotes a release or mutates GitHub or a Store.'}<HelpButton content={HELP.read} onHelp={onHelp} /></p>
@@ -96,7 +96,7 @@ export function GitHubHistory({ state, controller, onHelp, compact = false, onSh
         <h3>{current ? 'Current selection’s observation' : 'Previous / retained observation — not current'} · {result.verification}</h3>
         <p>Observed <time dateTime={result.observedAt}>{result.observedAt}</time>. {GITHUB_HISTORY_REASON_HELP[result.reason]}</p>
         <dl className="github-facts">
-          <div><dt>Original selection</dt><dd>{result.context.repository} · run {result.context.selection.runId} · attempt {result.context.selection.attempt} · {result.context.selection.stage} · {result.context.selection.platform}</dd></div>
+          <div><dt>Selection</dt><dd>{result.context.repository} · run {result.context.selection.runId} · attempt {result.context.selection.attempt} · {result.context.selection.stage} · {result.context.selection.platform}</dd></div>
           <div><dt>Saved context</dt><dd>Account <code>{result.context.accountId}</code> · repository ID <code>{result.context.repositoryId}</code><br />
             Project binding <code>{result.context.projectBinding}</code><br />Configuration SHA256 <code>{result.context.configSha256}</code></dd></div>
           {result.evidence && <>
@@ -104,7 +104,7 @@ export function GitHubHistory({ state, controller, onHelp, compact = false, onSh
             <div><dt>Application / version</dt><dd>{result.evidence.applicationId} · {result.evidence.version.name} · build {result.evidence.version.build}</dd></div>
             <div><dt>Candidate source</dt><dd>Commit <code>{result.evidence.candidateSource.commit}</code><br />Tree <code>{result.evidence.candidateSource.tree}</code></dd></div>
             <div><dt>Operation source</dt><dd>Commit <code>{result.evidence.operationSource.commit}</code><br />Tree <code>{result.evidence.operationSource.tree}</code></dd></div>
-            <Authority title="Evidence producer" value={result.evidence.producedBy} /><Authority title="Original authorization (may be older)" value={result.evidence.authorizedBy} />
+            <Authority title="Evidence producer" value={result.evidence.producedBy} /><Authority title="Authorization (may be older)" value={result.evidence.authorizedBy} />
             <div><dt>Retained evidence artifact</dt><dd>{result.evidence.artifactName} · ID <code>{result.evidence.artifactId}</code> · producer job <code>{result.evidence.producerJobId}</code></dd></div>
           </>}
         </dl>

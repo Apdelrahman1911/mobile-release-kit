@@ -128,7 +128,7 @@ export function AndroidBuild({ state, controller, projectName, operationProjectN
   </div>;
   if (compact) return <section className="notice notice-warning offline-global" aria-label="Android build status">
     <Icon name="shield" size={20} /><div><strong>Android tools / build · {operationProjectName ?? projectName ?? 'original application'}</strong>
-      <p>{androidToolServiceActive(state.toolService) ? 'Original service setup: ' + state.toolService?.phase + '.' : androidToolRegistrationActive(state.toolRegistration) || state.toolRegistration?.review ? 'Original inspection / registration: ' + state.toolRegistration?.phase + '.' : androidToolSourcesActive(state.toolSources) ? 'Original folder selection: ' + state.toolSources?.phase + '.' : androidCatalogActive(state.catalogStatus) ? 'Original protected-tool read: ' + state.catalogStatus?.phase + '.' : op ? phases[op.phase] : 'Waiting for confirmation of the original request.'} {owned}</p>{controls}
+      <p>{androidToolServiceActive(state.toolService) ? 'Service setup: ' + state.toolService?.phase + '.' : androidToolRegistrationActive(state.toolRegistration) || state.toolRegistration?.review ? 'Inspection / registration: ' + state.toolRegistration?.phase + '.' : androidToolSourcesActive(state.toolSources) ? 'Folder selection: ' + state.toolSources?.phase + '.' : androidCatalogActive(state.catalogStatus) ? 'Protected-tool read: ' + state.catalogStatus?.phase + '.' : op ? phases[op.phase] : 'Waiting for confirmation of the original request.'} {owned}</p>{controls}
       <p>Cancel is not rollback. Protected copies, project changes, network effects or signed outputs may already exist.</p>
     </div>
   </section>;
@@ -214,7 +214,7 @@ export function AndroidBuild({ state, controller, projectName, operationProjectN
     </div>}
     {state.error && <ErrorNotice error={state.error} title="No new Android-build outcome was confirmed" />}
     {state.originalUnconfirmed && <p className="review-caution" role="status">The original request acknowledgement is unconfirmed. Do not repeat Start. Original Status may help cancel or settle that operation, but cannot create new consent.</p>}
-    {op && <div className="session-progress" role="status" aria-live="polite" aria-label="Original Android build status">
+    {op && <div className="session-progress" role="status" aria-live="polite" aria-label="Android build status">
       <div className="inline-heading"><h3>Build status · {operationProjectName ?? op.context.projectId}</h3><Badge tone={op.phase === 'unknown' ? 'warning' : 'neutral'}>{phases[op.phase]}</Badge></div>
       <AndroidBuildDetails state={state} />
       {op.stage && <p>Reached stage: {stages[op.stage]}. A stage is not a progress percentage or native completion.</p>}
@@ -279,7 +279,7 @@ export function AndroidToolService({ state, controller, onHelp }: {
       onClick={() => void controller.requestAndroidToolServiceRegistration()}>Request system-service registration</button>
     {reason ? <p className="review-caution">{reason}</p> : registrationReason && <p className="save-note">{registrationReason}</p>}
     {status && <div role="status" aria-live="polite">
-      <p><strong>{servicePhases[status.phase]}.</strong> {status.operation && <>Original project: {status.operation.context.projectId}.</>}</p>
+      <p><strong>{servicePhases[status.phase]}.</strong> {status.operation && <>Project: {status.operation.context.projectId}.</>}</p>
       {status.observation && <p>{serviceStates[status.observation.state]}. {serviceOutcomes[status.observation.outcome]}.</p>}
       {status.reason !== 'none' && <p>{androidToolRegistrationReasonText[status.reason]}</p>}
       {status.observation?.mutationReturned && <p className="save-note">A system action actually returned. Cancellation cannot undo that action.</p>}
@@ -293,8 +293,8 @@ export function AndroidToolService({ state, controller, onHelp }: {
 const sourceRoles: AndroidToolSourceRole[] = ['jdk', 'sdk', 'gradle'];
 const sourcePhase: Record<AndroidToolSourcesStatus['phase'], string> = {
   idle: 'No folder selected yet', picking: 'Choose a folder in the native dialog', checking: 'Checking the selected directory',
-  selected: 'Original folder selection retained', refused: 'Folder selection could not be used', cancelled: 'Folder selection cancelled',
-  stopping: 'Stopping · waiting for the original folder selection to close', unknown: 'Original folder cleanup could not be confirmed',
+  selected: 'Folder selection retained', refused: 'Folder selection could not be used', cancelled: 'Folder selection cancelled',
+  stopping: 'Stopping · waiting for the original folder selection to close', unknown: 'Folder cleanup could not be confirmed',
 };
 const sourceReason: Record<AndroidToolSourcesStatus['reason'], string> = {
   none: '', 'not-inspected': 'Folder selection alone is not supplier inspection or a protected copy. Check the separate original registration Status.',
@@ -341,17 +341,17 @@ const registrationPhases: Record<AndroidToolRegistrationStatus['phase'], string>
   copying: 'Copying into protected storage', verifying: 'Verifying the protected copy',
   publishing: 'Publishing the registration', settling: 'Waiting for original cleanup',
   stopping: 'Stopping · waiting for original cleanup', complete: 'Protected copy published',
-  refused: 'Inspection or registration refused', cancelled: 'Original operation cancelled',
-  unknown: 'Original cleanup is unconfirmed',
+  refused: 'Inspection or registration refused', cancelled: 'Operation cancelled',
+  unknown: 'Cleanup is unconfirmed',
 };
 const registrationProblems: Record<AndroidToolRegistrationProblem, string> = {
   ...sourceInspectionProblemText,
-  binding: 'Original input binding changed', bounds: 'A fixed input or result limit was reached',
+  binding: 'Input binding changed', bounds: 'A fixed input or result limit was reached',
   'supplier-unavailable': 'Official supplier correspondence is unavailable', inventory: 'Content inventory was refused',
   ownership: 'Required file ownership was not established', collision: 'A protected destination already exists',
   native: 'Native operation failed', stopped: 'The original operation was stopped',
   unknown: 'An original native outcome is unconfirmed', transfer: 'Content transfer failed',
-  persist: 'Protected output persistence failed', admission: 'Original admission was refused',
+  persist: 'Protected output persistence failed', admission: 'Admission was refused',
   unavailable: 'A required original service or resource is unavailable',
 };
 const registrationHelp: HelpContent = {
@@ -383,12 +383,12 @@ export function AndroidToolRegistration({ state, controller, onHelp }: {
     {inspectReason && <p className="save-note">{inspectReason}</p>}
     {status && <div className="session-progress" role="status" aria-live="polite">
       <div className="inline-heading"><h4>{registrationPhases[status.phase]}</h4><Badge tone={status.phase === 'unknown' ? 'warning' : 'neutral'}>{status.operation?.kind ?? 'not started'}</Badge></div>
-      {status.operation && <p>Original project: <strong>{status.operation.context.projectId}</strong>. Saved version {status.operation.context.savedVersion.name} · build {status.operation.context.savedVersion.build}.</p>}
+      {status.operation && <p>Project: <strong>{status.operation.context.projectId}</strong>. Saved version {status.operation.context.savedVersion.name} · build {status.operation.context.savedVersion.build}.</p>}
       <p>{androidToolRegistrationReasonText[status.reason]}</p>
     </div>}
     {review && <div className="session-review" role="group" aria-label="Confirm this exact protected-copy review">
       <h4>Register these inspected sources once?</h4>
-      <p>Original source project: <strong>{review.context.projectId}</strong>. Saved configuration SHA-256: <code>{review.context.savedConfig.sha256}</code>. Saved version SHA-256: <code>{review.context.savedVersion.sha256}</code>.</p>
+      <p>Source project: <strong>{review.context.projectId}</strong>. Saved configuration SHA-256: <code>{review.context.savedConfig.sha256}</code>. Saved version SHA-256: <code>{review.context.savedVersion.sha256}</code>.</p>
       <ul>{review.sources.map((source) => <li key={source.role}><strong>{androidToolSourceHelp[source.role].label}</strong>: {source.version} · {source.logicalBytes} logical bytes · {source.files} files · {source.aliases} aliases · {source.entries} entries · complete compatible role observation.</li>)}</ul>
       <p className="save-note">These are picked-role subtotals, not whole-copy or disk-usage totals. The private review also includes the separate fixed app-provided support originals within the same native limits.</p>
       <p>This copy includes the reviewed JDK and Gradle distributions, selected SDK platform/build-tools contents and fixed support tools. It does not modify the selected source folders. No project build, signing or upload is authorized by registration.</p>

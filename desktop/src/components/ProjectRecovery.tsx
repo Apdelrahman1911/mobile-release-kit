@@ -8,8 +8,8 @@ import { Badge, ErrorNotice, HelpButton, SectionHeading } from './Common.tsx';
 import { Icon } from './Icon.tsx';
 
 const phases: Record<ProjectRecoveryPhase, string> = {
-  'awaiting-consent': 'Review prepared', starting: 'Starting original operation', running: 'Original operation running',
-  stopping: 'Stopping · cleanup pending', terminal: 'Original operation settled', unknown: 'Original cleanup unknown',
+  'awaiting-consent': 'Review prepared', starting: 'Starting original operation', running: 'Operation running',
+  stopping: 'Stopping · cleanup pending', terminal: 'Operation settled', unknown: 'Cleanup unknown',
 };
 const states: Record<ProjectRecoveryInspectionStatus, string> = {
   idle: 'No pending build-input record observed', busy: 'Another owner holds the project lock',
@@ -66,9 +66,9 @@ export function ProjectRecovery({ state, controller, projectName, operationProje
     {op && op.phase !== 'terminal' && <button type="button" className="button secondary small" disabled={!controller.canCancel()} onClick={() => controller.cancel()}>{cancelRequested ? 'Cancel requested · awaiting cleanup' : 'Cancel original operation'}</button>}
     {compact && onShow && <button type="button" className="button secondary small" onClick={onShow}>Show in Recovery</button>}
   </div>;
-  if (compact) return <section className="notice notice-warning offline-global" aria-label="Original project-recovery operation">
+  if (compact) return <section className="notice notice-warning offline-global" aria-label="Project-recovery operation">
     <Icon name="shield" /><div><strong>Project recovery · {operationProjectName ?? 'original selected project'}</strong>
-      <p>{op ? phases[op.phase] : 'Original request acknowledgement is pending.'} {owned}</p>{controls}
+      <p>{op ? phases[op.phase] : 'Request acknowledgement is pending.'} {owned}</p>{controls}
       <p>Cancelling does not undo cleanup already performed. Keep original files while settlement is unknown.</p>
     </div>
   </section>;

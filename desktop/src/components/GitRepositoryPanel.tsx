@@ -76,8 +76,8 @@ export function GitRepositoryPanel({ controller, projectName, onRecovery, localA
     {attempt && <div className="notice notice-info" role="status"><div>
       <strong>{attempt.phase === 'settled' ? result?.state === 'succeeded' ? attempt.review.plan.action === 'commit' ? 'Local commit created' :
         attempt.review.plan.action === 'stage' ? 'Selected files staged' : 'Selected files unstaged' : 'Git action settled without success' :
-        attempt.phase === 'sending' ? 'Waiting for the original Git action' : attempt.phase === 'awaiting-status' ? 'Original action needs a status check' :
-          attempt.phase === 'recovery-required' ? 'Git recovery is needed' : 'Original outcome or cleanup is unknown'}</strong>
+        attempt.phase === 'sending' ? 'Waiting for the original Git action' : attempt.phase === 'awaiting-status' ? 'Action needs a status check' :
+          attempt.phase === 'recovery-required' ? 'Git recovery is needed' : 'Outcome or cleanup is unknown'}</strong>
       <p>{attempt.phase === 'settled' ? 'This receipt describes the submitted review, not later edits. Your commit draft is kept.' :
         'The submitted review is retained. Do not send it again; refreshing files cannot settle this operation.'}</p>
       {attempt.phase !== 'settled' && <div className="button-row">
@@ -89,7 +89,7 @@ export function GitRepositoryPanel({ controller, projectName, onRecovery, localA
         <p>Action: {attempt.review.plan.action}. Core outcome: {result?.state ?? 'not received'}.
           {' '}Core settlement: {result?.settlement ?? 'not received'}. Native settlement: {attempt.receipt?.nativeFinality ?? 'not received'}.</p>
         <ul>{attempt.review.plan.paths.map((path) => <li key={path}><code><bdi>{path}</bdi></code></li>)}</ul>
-        {result && <p>Original operation: <code>{result.operationId}</code>.</p>}
+        {result && <p>Operation: <code>{result.operationId}</code>.</p>}
       </details>
     </div></div>}
     <div className="button-row"><button type="button" className={`button ${next === 'refresh' && !state.review ? 'primary' : 'secondary'}`}

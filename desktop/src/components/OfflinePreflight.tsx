@@ -11,8 +11,8 @@ import { Badge, ErrorNotice, SectionHeading } from './Common.tsx';
 import { Icon } from './Icon.tsx';
 
 const phases: Record<OfflinePreflightPhase, string> = {
-  'awaiting-consent': 'Awaiting explicit consent', starting: 'Starting original work', running: 'Original work running',
-  stopping: 'Stopping · cleanup pending', terminal: 'Original operation settled', unknown: 'Original cleanup unknown',
+  'awaiting-consent': 'Awaiting explicit consent', starting: 'Starting original work', running: 'Work running',
+  stopping: 'Stopping · cleanup pending', terminal: 'Operation settled', unknown: 'Cleanup unknown',
 };
 const negative = (status: OfflineCoreStatus) => ['FAIL', 'MISSING', 'BLOCKED', 'INVALID'].includes(status);
 function Report({ result, historical }: { result: OfflinePreflightResult; historical: boolean }) {
@@ -62,9 +62,9 @@ export function OfflinePreflight({ state, controller, projectName, operationProj
     {op && op.phase !== 'terminal' && <button type="button" className="button secondary small" disabled={!controller.canCancel()} onClick={() => controller.cancel()}>{cancelRequested ? 'Cancel requested · waiting for cleanup' : 'Cancel original offline checks'}</button>}
     {compact && onShow && <button type="button" className="button secondary small" onClick={onShow}>Show in Releases</button>}
   </div>;
-  if (compact) return <section className="notice notice-warning offline-global" aria-label="Original saved offline-check operation">
+  if (compact) return <section className="notice notice-warning offline-global" aria-label="Saved offline-check operation">
     <Icon name="shield" size={20} /><div><strong>{op ? offlineCheckOperationLabels[op.context.operation] : 'Saved offline checks'} · {operationProjectName ?? 'original selected project'}</strong>
-      <p>{op ? phases[op.phase] : 'Original request acknowledgement is pending.'} {owned}</p>{controls}
+      <p>{op ? phases[op.phase] : 'Request acknowledgement is pending.'} {owned}</p>{controls}
       <p>Cancel does not undo file changes, builds or network effects already performed by project code.</p>
     </div>
   </section>;
@@ -90,7 +90,7 @@ export function OfflinePreflight({ state, controller, projectName, operationProj
       {prepareReason && <p className="review-caution">{prepareReason}</p>}</>}
     {consent && <div className="session-review" role="group" aria-label="Confirm this saved offline-check intent">
       <h3>Run {offlineCheckOperationLabels[consent.binding.context.operation]}?</h3>
-      <p>Project: <strong>{projectName ?? 'Original selected project'}</strong>. This confirmation expires after five minutes.</p>
+      <p>Project: <strong>{projectName ?? 'Selected project'}</strong>. This confirmation expires after five minutes.</p>
       <label className="offline-ack"><input type="checkbox" checked={consent.acknowledged} onChange={(event) => controller.setAcknowledged(consent.operationId, consent.ownerGeneration, event.target.checked)} />
         <span>I trust this project and understand that its saved checks may modify files, run programs, build, read account files or use the network; my unsaved draft is not used.</span></label>
       <div className="button-row"><button type="button" className="button" disabled={runReason !== null} onClick={() => void controller.start(consent.operationId, consent.ownerGeneration)}>Run checks</button></div>

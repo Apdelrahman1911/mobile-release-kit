@@ -22,7 +22,7 @@ export function GitHubCandidateDownload({ controller, state }: { controller: Git
       onClick={() => { if (!review || consent !== review.scope) return; setConsent(null); controller.downloadCandidate(true, review.scope); }}>
       Download candidate binary</button></div>
     {reason && <p className="save-note">{reason}</p>}
-    {effect && <div role="status"><p>{exported ? 'Original download settled and the local publication was durable.' : 'Retained local-effect diagnostics — not successful export or permission to retry.'}</p>
+    {effect && <div role="status"><p>{exported ? 'Download settled and the local publication was durable.' : 'Retained local-effect diagnostics — not successful export or permission to retry.'}</p>
       <p>Publication: {effect.publication}; durability: {effect.durability}; original source closes: {effect.closed ? 'returned' : 'not confirmed'}.</p>
       <p>Final: <code>{effect.relativePath}</code><br />Pending: <code>{effect.pendingPath}</code>.</p>
       {!exported && <p>Use the same Status / Cancel controls. Do not infer success from a matching file or receipt.</p>}</div>}

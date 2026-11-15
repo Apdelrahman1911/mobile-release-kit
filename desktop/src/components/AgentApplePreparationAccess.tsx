@@ -24,7 +24,7 @@ export function AgentApplePreparationAccess({controller}:{controller:AgentAppleP
     {state.issue&&<p role="alert">{state.issue}</p>}
     {state.stale&&<p>These controls address the retained original selection, not the currently selected project.</p>}
     {applePreparationCommands(state.access).map(command=><pre key={command}><code>{command}</code></pre>)}
-    {state.status&&<p>Original preparation: {state.status.phase} · {state.status.settlement}. {state.status.usable?'Review the new intent above, then use its normal Start or the separate Start delegation.':''}</p>}
+    {state.status&&<p>Preparation: {state.status.phase} · {state.status.settlement}. {state.status.usable?'Review the new intent above, then use its normal Start or the separate Start delegation.':''}</p>}
     <p>Keep this Desktop session open. No credential paths, passwords, keys or provider options belong in these commands. Lost replies are checked using the original request ID, never by repeating Prepare. Account setup, assignment and backup remain explicit Desktop actions; key recovery supports only the original durably saved key.</p>
   </details>;
 }

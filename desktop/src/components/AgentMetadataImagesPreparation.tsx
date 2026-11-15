@@ -11,7 +11,7 @@ export function AgentMetadataImagesPreparation({controller,state}:{controller:Me
   <p>Keep all replacement choices untouched until the CLI prepares them. Then review the ordinary full preview and give the separate one-use Apply approval below.
    No automatic copy, recovery or Store upload.</p>
   {view.error&&<p className="review-caution" role="status">{view.error}</p>}
-  {q&&<><p>Original image preparation: {q.phase}. Prepared is not applied; unknown is not retry permission.</p>
+  {q&&<><p>Image preparation: {q.phase}. Prepared is not applied; unknown is not retry permission.</p>
    <pre><code>{`mrk metadata-images-status ${q.origin.projectId} ${q.origin.serviceInstance} ${q.origin.requestId} --json`}</code></pre></>}
   <div className="button-row"><button type="button" disabled={view.pending} onClick={()=>void child.check()}>Check image preparation request</button>
    <button type="button" disabled={!q||q.phase==='final'||q.phase==='transferred'} onClick={()=>child.cancel()}>Stop original preparation request</button></div>

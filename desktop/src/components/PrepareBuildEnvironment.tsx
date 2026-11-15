@@ -53,7 +53,7 @@ export function PrepareBuildEnvironment({ state, controller, compact = false, to
         op.reason === 'context-changed' || op.reason === 'stale-intent' || op.reason === 'intent-expired'
           ? 'The saved project or this review changed. Check the current tools again; the old approval cannot be reused.' :
           toolAcquisitionFailureGuidance(op.reason).body : null;
-  if (compact) return <section className={`notice ${attention ? 'notice-warning' : 'notice-info'}`} aria-label="Original tool preparation">
+  if (compact) return <section className={`notice ${attention ? 'notice-warning' : 'notice-info'}`} aria-label="Tool preparation">
     <div><strong>{title}</strong>{problem && <p role="status">{problem}</p>}
       {state.historical && <p>This request belongs to an earlier project or review. Its original status and cancel control are kept here.</p>}
       {originalControls}</div>

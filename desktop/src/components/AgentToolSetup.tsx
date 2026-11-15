@@ -22,7 +22,7 @@ export function AgentToolSetup({controller}:{controller:AgentToolSetupController
       {(s.selected==='inspect-picked-sources'||s.selected==='register-reviewed-sources')&&<p>First choose all three folders and check saved inputs in the existing controls. Protected copy also needs the current finalized inspection. Service registration, settings approval, catalogue recovery/selection and subsequent phases stay explicit Desktop actions.</p>}
       {r&&<p>{r.platform==='ios'?'iOS':'Android'} · Draft revision {r.draftRevision}, baseline {r.baselineGeneration}.
         {r.prepared&&<> Original review <code>{r.prepared.operationId}</code>.</>}{r.sources&&<> Chosen sources generation {r.sources.sourceGeneration}, registration {r.sources.registrationGeneration}.</>}</p>}
-      {r?.acquisition&&<p>Original inspection <code>{r.acquisition.operationId}</code>, generation <code>{r.acquisition.ownerGeneration}</code>; requirements <code>{r.acquisition.requirementsSha256}</code>. Download/cache-reuse only: {r.acquisition.missing.join(', ')}. Keep compatible: {r.acquisition.compatible.join(', ')||'none observed'}.</p>}
+      {r?.acquisition&&<p>Inspection <code>{r.acquisition.operationId}</code>, generation <code>{r.acquisition.ownerGeneration}</code>; requirements <code>{r.acquisition.requirementsSha256}</code>. Download/cache-reuse only: {r.acquisition.missing.join(', ')}. Keep compatible: {r.acquisition.compatible.join(', ')||'none observed'}.</p>}
       <label><input type="checkbox" checked={s.acknowledged} disabled={!!controller.consentReason()} onChange={e=>controller.acknowledge(e.target.checked)}/>
         {s.selected==='register-reviewed-sources'?' I acknowledge the vendor licenses and allow one local CLI to make this exact reviewed protected copy.':
           (s.selected==='acquire-missing'||s.selected==='acquire-reviewed-missing')?' I approve this reviewed missing-only public download for one local CLI submission.':
@@ -34,7 +34,7 @@ export function AgentToolSetup({controller}:{controller:AgentToolSetupController
       {s.pending&&<p role="status">The original {s.pending} call is still returning.</p>}
       {s.revoking&&<p role="status">Stop requested; neither that request nor a terminal event proves cleanup.</p>}
       {s.issue&&<p role="alert">{s.issue}</p>}
-      {a&&<p>{s.stale?'Earlier context · ':''}{a.status?`${a.status.state} · ${a.status.settlement}`:a.enabled?'One unused permission observed':a.pending?'Original permission retirement is pending':'No unused permission observed'}{remaining!==null?` · up to ${remaining}s remaining`:''}.</p>}
+      {a&&<p>{s.stale?'Earlier context · ':''}{a.status?`${a.status.state} · ${a.status.settlement}`:a.enabled?'One unused permission observed':a.pending?'Permission retirement is pending':'No unused permission observed'}{remaining!==null?` · up to ${remaining}s remaining`:''}.</p>}
       {commands.length>0&&<><p>Run manually. Keep the request ID printed before submission; after a lost response use that ID with Status/Cancel, not Submit again.</p><pre>{commands.join('\n')}</pre></>}
       {a?.status?.result&&<pre>{JSON.stringify(a.status.result,null,2)}</pre>}
       {a?.status?.state==='complete'&&<p>The original service caller, native operation and history writer returned. A failed doctor check can still be reported. Download means staged only; protected copy is not catalogue selection, compatibility or build readiness.</p>}

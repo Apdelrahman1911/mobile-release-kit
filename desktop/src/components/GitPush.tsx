@@ -39,7 +39,7 @@ export function GitPush({ controller, repository, connection, activity, original
     {prepareReason && !prepared && <p className="save-note">{gitLocalIssueHelp(prepareReason)}</p>}
     {review && prepared && <section className="version-review" aria-label="Review ordinary GitHub push">
       <h3>Send {prepared.commits.length} {prepared.commits.length === 1 ? 'commit' : 'commits'} to GitHub</h3>
-      <p>Original project: <strong>{originalProjectName ?? 'the previously selected project'}</strong>.</p>
+      <p>Project: <strong>{originalProjectName ?? 'the previously selected project'}</strong>.</p>
       <p>Account: <strong><bdi>{prepared.login}</bdi></strong> · Repository: <bdi>{prepared.repository}</bdi>.</p>
       <p>Local branch <strong><bdi>{prepared.branch.slice('refs/heads/'.length)}</bdi></strong> → GitHub branch <strong><bdi>{prepared.upstreamRef.slice('refs/heads/'.length)}</bdi></strong>.</p>
       <p><strong>People with access to this repository can read the uploaded commits.</strong> This includes commits made outside MRK. Check for private information before approving: messages, author emails and file contents are not shown or scanned for secrets here.</p>

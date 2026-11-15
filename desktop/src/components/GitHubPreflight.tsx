@@ -111,7 +111,7 @@ export function GitHubPreflight({ state, controller, onHelp, compact = false, on
         <details><summary>Advanced CLI observation</summary><button type="button" className="button small secondary" disabled={controller.recordReason(record)!==null||state.observing} onClick={()=>controller.selectRecordForAgent(record.prepared.target.marker)}>Select this original for one CLI Track/Reconcile</button><p>This only selects a genuinely returned record. Check and Allow the distinct observation permission in the GitHub Advanced panel; no read or dispatch is submitted here.</p></details>
         {controller.recordReason(record) && <p className="save-note">{controller.recordReason(record)}</p>}
       </article>)}
-      {status?.run && <article className="github-environment" aria-label="Original workflow run observation">
+      {status?.run && <article className="github-environment" aria-label="Workflow run observation">
         <h4>Run {status.run.id} · attempt 1</h4><p><Badge tone={status.run.conclusion === 'failure' ? 'danger' : 'info'}>{status.run.status} · {status.run.conclusion ?? 'not concluded'}</Badge></p>
         <p className="save-note">Observed <time dateTime={status.run.observedAt}>{status.run.observedAt}</time>. This is a GitHub workflow observation, not signed artifact evidence or release readiness.</p>
         <ul>{status.run.jobs.map((job) => <li key={job.id}>{job.kind}: {job.status} · {job.conclusion ?? 'not concluded'} · job {job.id}</li>)}</ul>

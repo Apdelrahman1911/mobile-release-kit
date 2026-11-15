@@ -26,7 +26,7 @@ export function GitFastForward({ reader, controller, repository, originalProject
     {prepareReason && !prepared && <p className="save-note">{gitLocalIssueHelp(prepareReason)}</p>}
     {review && prepared && <section className="version-review" aria-label="Review cached upstream update">
       <h3>Fast-forward <bdi>{prepared.branch.slice('refs/heads/'.length)}</bdi></h3>
-      <p>Original project: <strong>{originalProjectName ?? 'the previously selected project'}</strong>. The current branch stays the same.</p>
+      <p>Project: <strong>{originalProjectName ?? 'the previously selected project'}</strong>. The current branch stays the same.</p>
       <p>Target: <code><bdi>{prepared.targetRef}</bdi></code>, from the last fetched history. This is not a fresh remote check.</p>
       {prepared.files.length ? <><p>Only these {prepared.files.length} files change contents:</p>
         <ul>{prepared.files.map((f) => <li key={f.path}><code><bdi>{f.path}</bdi></code> · {f.targetSize} bytes after update</li>)}</ul></> :

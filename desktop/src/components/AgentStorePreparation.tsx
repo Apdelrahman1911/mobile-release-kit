@@ -39,7 +39,7 @@ export function AgentStorePreparation({controller}:{controller:StorePreparationC
   </>}
   {lifecycle&&selected?.release&&selected.candidate&&<>
    <p>{lifecycle.mode} · Candidate <code>{selected.candidate.operationId}</code> · SHA-256 <code>{selected.candidate.sha256}</code> · intent SHA-256 <code>{selected.release.intentSha256}</code>.</p>
-   {selected.release.stageOperationId&&<p>Original stage <code>{selected.release.stageOperationId}</code> · {lifecycle.mode==='external-readiness'?'execution receipt':'predecessor'} <code>{selected.release.basis?.operationId}</code> · SHA-256 <code>{selected.release.basis?.receiptSha256}</code>. Native preparation and Start must authenticate the same source and lineage again.</p>}
+   {selected.release.stageOperationId&&<p>Stage <code>{selected.release.stageOperationId}</code> · {lifecycle.mode==='external-readiness'?'execution receipt':'predecessor'} <code>{selected.release.basis?.operationId}</code> · SHA-256 <code>{selected.release.basis?.receiptSha256}</code>. Native preparation and Start must authenticate the same source and lineage again.</p>}
    {captured&&'recordId' in captured&&<p>Selected credential <code>{captured.recordId}</code> · revision {captured.recordRevision} · native context revision {captured.credentialContextRevision}.</p>}
    {supplemental&&<p>Current supplemental references: {(['reviewContact','commitment','reviewDemo'] as const).map(role=>{
     const record=supplemental[role];

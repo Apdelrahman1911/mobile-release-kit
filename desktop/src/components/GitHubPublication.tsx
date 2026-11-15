@@ -18,9 +18,9 @@ export function GitHubPublication({ state, controller, compact = false, onShow }
     {compact && <button type="button" className="button small secondary" onClick={onShow}>Show setup publication</button>}
   </div>;
   return <section className="panel" aria-label="Publish setup draft pull request">
-    <h3>{compact && !selected ? 'Original shared-counter publication' : 'Publish setup as a draft pull request'}</h3>
+    <h3>{compact && !selected ? 'Shared-counter publication' : 'Publish setup as a draft pull request'}</h3>
     {op && <p role="status">Original {op.kind}: {op.phase} · {op.effect}. {PUBLICATION_HELP[op.reason]}</p>}
-    {state.originalTarget && <p>Original repository: <strong>{state.originalTarget.repository}</strong> · account {state.originalTarget.accountId} · repository ID {state.originalTarget.repositoryId}</p>}
+    {state.originalTarget && <p>Repository: <strong>{state.originalTarget.repository}</strong> · account {state.originalTarget.accountId} · repository ID {state.originalTarget.repositoryId}</p>}
     {(state.error || status && !status.available) && <p role="status">{PUBLICATION_HELP[state.error ?? status!.reason]}</p>}
     {controls}
     {!compact && <>

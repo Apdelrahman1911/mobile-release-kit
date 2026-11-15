@@ -19,7 +19,7 @@ function ActionHelp({ state, id, onHelp }: { state: MetadataTextState; id: Metad
 }
 function RawText({ file, side }: { file: MetadataPreparedFile; side: 'before' | 'after' }) {
   const value = side === 'before' ? file.before.state === 'present' ? file.before : null : file.after;
-  return <section className="metadata-raw"><h4>{side === 'before' ? 'Original bytes' : 'Reviewed replacement bytes'}</h4>
+  return <section className="metadata-raw"><h4>{side === 'before' ? 'Bytes' : 'Reviewed replacement bytes'}</h4>
     {value ? <><p>{value.byteLength.toLocaleString()} UTF-8 bytes · {metadataLineEndings(value.text)} · {value.text.endsWith('\n') || value.text.endsWith('\r') ? 'Final line ending present' : 'No final line ending'}</p>
       <code className="metadata-digest">SHA256 {value.sha256}</code><pre tabIndex={0} aria-label={`${side === 'before' ? 'Complete original' : 'Complete reviewed'} public text for ${file.path}`}><code>{value.text}</code></pre></> : <p>Observed absent. No original text was fabricated.</p>}
   </section>;
@@ -56,7 +56,7 @@ function SaveConfirmation({ view, allowed, onCancel, onConfirm }: { view: Prepar
 // is a frozen original review; this panel never manufactures an Apply request.
 function RecoveryFileFacts({ view }: { view: SavedTextRecoveryView }) {
   return <div className="review-table-wrap"><table className="review-table"><caption>Inspected journal files — not your current draft</caption>
-    <thead><tr><th scope="col">Exact selected path</th><th scope="col">Authorized effect</th><th scope="col">Original file</th><th scope="col">Interrupted save’s file</th></tr></thead>
+    <thead><tr><th scope="col">Exact selected path</th><th scope="col">Authorized effect</th><th scope="col">File</th><th scope="col">Interrupted save’s file</th></tr></thead>
     <tbody>{view.files.map((file) => <tr key={file.path}><th scope="row"><code>{file.path}</code></th><td>{file.effect.replaceAll('_', ' ')}</td>
       {(['before', 'after'] as const).map((side) => { const facts = file[side]; return <td key={side}>{facts ? <>{facts.byteLength} bytes · mode {facts.mode.toString(8).padStart(4, '0')}
         <br /><code className="metadata-digest">SHA256 {facts.sha256}</code></> : 'Not recorded / absent for this side'}</td>; })}</tr>)}</tbody>
@@ -102,20 +102,20 @@ export function SavedTextRecoveryPanel<D extends SavedTextRecoveryDomain>({ doma
       <button type="button" className="button small secondary" disabled={readPending} onClick={onStatus}>Check recovery status</button>
       {attempt && !attempt.handled && !attempt.closeClaimed && !terminal && <button type="button" className="button secondary" onClick={onClose}>{attempt.applyClaimed ? 'Request recovery cancellation' : 'Close inspection, keep drafts'}</button>}</div>
     {inspectReason && <p className="save-note">{inspectReason}</p>}
-    {attempt && <p>Original recovery project: <code>{attempt.binding.projectId}</code>. {owner ? `Original phase: ${owner.phase}.` : 'Waiting for the original inspection; no result is assumed.'}</p>}
+    {attempt && <p>Recovery project: <code>{attempt.binding.projectId}</code>. {owner ? `Original phase: ${owner.phase}.` : 'Waiting for the original inspection; no result is assumed.'}</p>}
     {view && <><p className={view.state === 'conflict' ? 'review-caution' : 'save-note'} role={view.state === 'conflict' ? 'alert' : 'status'}>{savedTextRecoveryGuidance(view)}</p>
       {view.state === 'conflict' && <p>Conflict category: <code>{view.reason}</code>.</p>}
       {view.selection && <dl className="save-outcome-facts">{Object.entries(view.selection).map(([key, value]) => <div key={key}><dt>{key}</dt><dd><code>{String(value)}</code></dd></div>)}</dl>}
       {view.action && <><h3>{savedTextRecoveryActionLabel[view.action]}</h3><RecoveryFileFacts view={view} />
         <p>Private cleanup is limited to {view.privateCleanup.fileCount} inspected owned files and {view.privateCleanup.directoryCount} directories. No other domain, current draft, Store state or build-input recovery is included.</p></>}
     </>}
-    {attempt?.succeeded && <div className="notice notice-info" role="status"><p><strong>Original recovery action completed; current draft kept.</strong>
+    {attempt?.succeeded && <div className="notice notice-info" role="status"><p><strong>Recovery action completed; current draft kept.</strong>
       {' '}This clears only this editor’s own journal attention. An earlier committed cleanup is not a new Save. Explicitly Load/Refresh and reconcile public text, or Reload saved version values with its discard confirmation, before another normal save or build consent.</p></div>}
-    {owner?.coreOutcome && <p>Original effect: {owner.coreOutcome.effect}; journal: {owner.coreOutcome.journal}; core resources: {owner.coreOutcome.resources}; core reason: {owner.coreOutcome.reason}.
+    {owner?.coreOutcome && <p>Effect: {owner.coreOutcome.effect}; journal: {owner.coreOutcome.journal}; core resources: {owner.coreOutcome.resources}; core reason: {owner.coreOutcome.reason}.
       {' '}Native: {owner.nativeFinality}; reason: {owner.nativeReason}{owner.lateSettled ? '; late settlement (not success)' : ''}.</p>}
     {terminal && !attempt?.succeeded && <p className="review-caution" role="alert">No successful recovery is confirmed. Idle/conflict inspection, discard, failure and late settlement do not clear earlier attention or mark drafts Saved.</p>}
     {attempt?.invalidated && !terminal && <p className="review-caution">Project, navigation or service context changed. The original review is closing; no replacement plan or automatic retry is used.</p>}
-    {current && <><p>Original review expires in about {Math.ceil(remainingMs / 1000)} seconds; the native deadline remains authoritative.</p>
+    {current && <><p>Review expires in about {Math.ceil(remainingMs / 1000)} seconds; the native deadline remains authoritative.</p>
       <button type="button" className="button primary" disabled={!canApply(current)} onClick={() => { if (canApply(current)) setConfirmation(current); }}>Review recovery confirmation…</button></>}
     <p className="subtle-note">{savedTextRecoveryPreservationGuidance}</p>
     {confirmation && <RecoveryConfirmation key={confirmation.planToken} binding={confirmation} allowed={canApply(confirmation)} onCancel={() => setConfirmation(null)}
@@ -125,7 +125,7 @@ export function SavedTextRecoveryPanel<D extends SavedTextRecoveryDomain>({ doma
 
 function operationNotice(owner: MetadataTextEditProjection): { title: string; detail: string; technical?: string; danger: boolean } {
   const core = owner.coreOutcome;
-  if (owner.recovery) return { title: 'Original recovery inspection / action', danger: owner.phase === 'unknown' || core?.journal === 'recovery_required',
+  if (owner.recovery) return { title: 'Recovery inspection / action', danger: owner.phase === 'unknown' || core?.journal === 'recovery_required',
     detail: 'This is not a normal Save. Open the editor’s recovery inspection to review its exact original action and finality; current drafts remain separate.' };
   if (owner.phase === 'unknown' || owner.nativeFinality === 'unknown') return { title: core?.effect === 'committed' ? 'Text written; completion not confirmed' : 'Text save or cleanup is unconfirmed', danger: true,
     detail: `${core?.effect === 'committed' ? 'The reviewed text was written, but cleanup is not confirmed.' : owner.applySubmitted ? 'The save may already have happened.' : 'No save request is recorded, but cleanup is not confirmed.'} Keep recovery files and operation details. Do not save again, delete journals or assume changes were undone.`,
@@ -145,7 +145,7 @@ function operationNotice(owner: MetadataTextEditProjection): { title: string; de
       core?.effect === 'rolled_back' ? 'Only this save’s changes were undone, not unrelated changes. Your text draft remains in memory.' : 'No successful save is confirmed. Closing or refusing the review did not discard text or save configuration.' };
   if (owner.phase === 'reviewing') return { title: 'Review text changes', danger: false, detail: 'Nothing has been saved. Check every file below, then confirm the whole bundle—or close the review and keep your draft.' };
   if (owner.phase === 'applying') return { title: 'Saving text…', danger: false, detail: 'Wait for confirmation before assuming the save succeeded. Newer draft changes are kept. Do not save again.', technical: 'Apply admission is not finality. The original core outcome and native resource settlement are still pending.' };
-  if (owner.phase === 'finalizing') return { title: 'Finishing the text operation…', danger: false, detail: 'Cancellation may be too late to stop the save. Wait for the result; do not assume changes were undone or cleanup succeeded.', technical: 'Original core outcome and native resource settlement remain authoritative.' };
+  if (owner.phase === 'finalizing') return { title: 'Finishing the text operation…', danger: false, detail: 'Cancellation may be too late to stop the save. Wait for the result; do not assume changes were undone or cleanup succeeded.', technical: 'Core outcome and native resource settlement remain authoritative.' };
   return { title: owner.phase === 'opening' ? 'Checking the saved locale…' : 'Preparing text changes…', danger: false, detail: 'Checking the saved configuration, ignore rules and selected text files. No text or directories are written during review.', technical: 'The native owner captures the registered project and original config, ignore, ancestor and target bindings before Prepare.' };
 }
 
@@ -177,10 +177,10 @@ export function MetadataTextSave({ state, controller, detailed, onShowProject, o
       remainingMs={controller.remainingRecoveryReviewMs()} readPending={edit.readPending} current={controller.currentRecoveryApplyBinding()}
       onInspect={() => { controller.inspectRecovery(); }} onClose={() => controller.requestRecoveryClose()} onStatus={() => void controller.checkStatus()}
       canApply={(value) => controller.canApplyRecovery(value)} onApply={(value) => controller.applyRecovery(value)} />}
-    {!detailed && edit.recovery && <section className="card" aria-label="Retained metadata recovery"><p>Original metadata recovery: {edit.recovery.projection?.phase ?? 'opening'}; drafts kept.
+    {!detailed && edit.recovery && <section className="card" aria-label="Retained metadata recovery"><p>Metadata recovery: {edit.recovery.projection?.phase ?? 'opening'}; drafts kept.
       {' '}{edit.recovery.succeeded ? 'Matching recovery completed, not a new Save.' : 'No recovery success is assumed.'}</p>
       <button type="button" className="button small secondary" onClick={() => onShowProject(edit.recovery!.binding.projectId)}>View original recovery</button></section>}
-    {(notice || attempt || edit.observationIssue || edit.nativeBlocked) && <section className="card metadata-save-panel" aria-label="Original metadata file-save operation">
+    {(notice || attempt || edit.observationIssue || edit.nativeBlocked) && <section className="card metadata-save-panel" aria-label="Metadata file-save operation">
     <SectionHeading title={edit.integrityFailed ? 'Text status could not be verified' : notice?.title ?? 'Waiting for text review…'} description="Local text files only. This operation does not change configuration or Store listings.">
       <ActionHelp state={state} id="save" onHelp={onHelp} />
     </SectionHeading>
@@ -192,7 +192,7 @@ export function MetadataTextSave({ state, controller, detailed, onShowProject, o
     {attempt?.applyClaimed && owner?.phase === 'reviewing' && <p role="status">Save was requested once. Wait for confirmation; do not submit it again.</p>}
     {edit.nativeBlocked && <p className="review-caution" role="alert">Native cleanup uncertainty blocks all edit domains even if an earlier result was saved. Preserve evidence; no generic journal reset or recovery retry is available.</p>}
     {owner && <p className="save-note">{state.entries[attempt?.binding.key ?? '']?.projectName ?? owner.projectId} · {owner.platform} / {owner.locale}</p>}
-    {owner && <details className="metadata-outcome-details"><summary>Save and recovery details</summary>{notice?.technical && <p>{notice.technical}</p>}<dl className="save-outcome-facts"><div><dt>Original project / locale</dt><dd>{state.entries[attempt?.binding.key ?? '']?.projectName ?? owner.projectId} · {owner.platform} / {owner.locale}</dd></div>
+    {owner && <details className="metadata-outcome-details"><summary>Save and recovery details</summary>{notice?.technical && <p>{notice.technical}</p>}<dl className="save-outcome-facts"><div><dt>Project / locale</dt><dd>{state.entries[attempt?.binding.key ?? '']?.projectName ?? owner.projectId} · {owner.platform} / {owner.locale}</dd></div>
       <div><dt>Effect / journal</dt><dd>{owner.coreOutcome?.effect ?? 'Not reported'} / {owner.coreOutcome?.journal ?? 'Not reported'}</dd></div><div><dt>Core / native resources</dt><dd>{owner.coreOutcome?.resources ?? 'Not reported'} / {owner.nativeFinality}{owner.lateSettled ? ' · late settled' : ''}</dd></div>
       <div><dt>Reason</dt><dd>{owner.coreOutcome?.reason !== 'none' ? owner.coreOutcome?.reason ?? owner.nativeReason : owner.nativeReason}</dd></div></dl>
       <p>Only the original session and one-use plan token can authorize this operation. Known effect, journal state, core resource status and native finality are separate facts. Review lifetime uses a local estimate; the original native deadline remains authoritative.</p></details>}
