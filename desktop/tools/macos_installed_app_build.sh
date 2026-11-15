@@ -3,6 +3,8 @@ cd desktop/src-tauri
 set -o noclobber
 # GitHub-hosted CI only: CPU/RAM-aware compiler parallelism (max 4 jobs, one
 # per 2 GiB). Local Mac builds keep --jobs 1 under the local resource policy.
+# Measured (run 43730700810, 3 jobs on 3-core runners): CLI 22.7 -> 14.7-17.8 min,
+# resident 17.5 -> 11.7-13.6 min, remover 8.8 -> 6.8-7.6 min.
 mrk_cargo_jobs=1
 if [[ "${GITHUB_ACTIONS-}" == true && "${RUNNER_ENVIRONMENT-}" == github-hosted ]]; then
   mrk_ncpu=$(/usr/sbin/sysctl -n hw.ncpu)
