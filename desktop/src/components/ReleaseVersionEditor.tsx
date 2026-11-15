@@ -41,21 +41,18 @@ function VersionReview({ view }: { view: VersionPreparedView }) {
 function Confirmation({ view, allowed, onCancel, onConfirm }: {
   view: VersionPreparedView; allowed: boolean; onCancel: () => void; onConfirm: () => void;
 }) {
-  const dialog = useRef<HTMLDialogElement>(null), titleId = useId(), inputId = useId();
-  const [reviewed, setReviewed] = useState(false), [confirmation, setConfirmation] = useState('');
+  const dialog = useRef<HTMLDialogElement>(null), titleId = useId();
+  const [reviewed, setReviewed] = useState(false);
   useEffect(() => { const element = dialog.current; element?.showModal(); return () => { if (element?.open) element.close(); }; }, []);
   return <dialog ref={dialog} className="confirm-dialog" aria-labelledby={titleId} onCancel={onCancel}><div className="dialog-content">
-    <h2 id={titleId}>{versionNoOp(view) ? 'Confirm this unchanged version file?' : view.intent === 'create' ? 'Create this saved version source?' : 'Save these reviewed version values?'}</h2>
-    <p>Only <code>{view.source}</code>, with marketing version <strong>{view.values.name}</strong> and build <strong>{view.values.build}</strong>.
-      The original configuration, ignore proof, source and parents must still match.</p>
+    <h2 id={titleId}>{versionNoOp(view) ? 'Confirm unchanged version?' : view.intent === 'create' ? 'Create the version file?' : 'Save the new version?'}</h2>
+    <p>Version <strong>{view.values.name}</strong>, build <strong>{view.values.build}</strong> will be saved to your project. Nothing is built or released.</p>
+    <details><summary>Details</summary><p>Only <code>{view.source}</code>. The original configuration, ignore proof, source and parents must still match. No configuration Save, native-project rewrite, build, Git/index operation, Store request or release is included. A submitted save may finish after cancellation.</p></details>
     <label className="save-confirm-check"><input type="checkbox" checked={reviewed} onChange={(event) => setReviewed(event.target.checked)} />
-      I reviewed the full original/after text, exact destination, byte comparisons, mode and directory/line-ending facts.</label>
-    <label htmlFor={inputId}>Type <strong>SAVE</strong> to confirm this local operation</label>
-    <input id={inputId} value={confirmation} onChange={(event) => setConfirmation(event.target.value)} autoComplete="off" spellCheck={false} />
-    <p>No configuration Save, native-project rewrite, build, Git/index operation, Store request or release is included. A submitted save may finish after cancellation.</p>
+      I reviewed the change.</label>
     {!allowed && <p role="alert" className="review-caution">This review is no longer eligible. Keep your draft and check the original operation.</p>}
     <div className="button-row"><button autoFocus type="button" className="button secondary" onClick={onCancel}>Keep reviewing</button>
-      <button type="button" className="button primary" disabled={!allowed || !reviewed || confirmation !== 'SAVE'} onClick={onConfirm}>
+      <button type="button" className="button primary" disabled={!allowed || !reviewed} onClick={onConfirm}>
         {versionNoOp(view) ? 'Confirm unchanged values' : view.intent === 'create' ? 'Create version file' : 'Save version values'}</button></div>
   </div></dialog>;
 }

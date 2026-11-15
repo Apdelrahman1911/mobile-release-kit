@@ -1,3 +1,4 @@
+import { TechnicalDetails } from './TechnicalDetails.tsx';
 import { ServiceMetadataTextAccess } from './ServiceMetadataTextAccess.tsx';
 import { useEffect, useId, useRef, useState } from 'react';
 import { savedTextRecoveryActionLabel, savedTextRecoveryGuidance, savedTextRecoveryPreservationGuidance } from '../savedTextRecovery.ts';
@@ -38,19 +39,17 @@ function FileReview({ view }: { view: PreparedMetadataTextView }) {
   </div>;
 }
 function SaveConfirmation({ view, allowed, onCancel, onConfirm }: { view: PreparedMetadataTextView; allowed: boolean; onCancel: () => void; onConfirm: () => void }) {
-  const dialog = useRef<HTMLDialogElement>(null); const titleId = useId(); const inputId = useId();
-  const [confirmation, setConfirmation] = useState(''); const [reviewed, setReviewed] = useState(false);
+  const dialog = useRef<HTMLDialogElement>(null); const titleId = useId();
+  const [reviewed, setReviewed] = useState(false);
   useEffect(() => { const element = dialog.current; element?.showModal(); return () => { if (element?.open) element.close(); }; }, []);
   return <dialog ref={dialog} className="confirm-dialog metadata-confirm-dialog" aria-labelledby={titleId} onCancel={onCancel}><div className="dialog-content">
-    <h2 id={titleId}>{metadataNoOp(view) ? 'Confirm this unchanged bundle?' : 'Save this reviewed locale bundle?'}</h2>
-    <p>Save only the reviewed public text for <strong>{view.platform} / {view.locale}</strong>. Files are checked again before saving. Closing this dialog keeps your draft.</p>
-    <ul className="metadata-confirm-files">{view.files.map((file) => <li key={file.id}><code>{file.path}</code> — {file.action}</li>)}</ul>
-    <label className="save-confirm-check"><input type="checkbox" checked={reviewed} onChange={(event) => setReviewed(event.target.checked)} />I reviewed all exact paths, full original/replacement text, digests and line-ending changes.</label>
-    <label htmlFor={inputId}>Type <strong>SAVE</strong> to confirm only this local text operation</label><input id={inputId} value={confirmation} onChange={(event) => setConfirmation(event.target.value)} autoComplete="off" spellCheck={false} />
-    <p>No configuration, credentials, screenshots, Git/index changes, Store synchronization or release operation is included. A save already submitted may finish after cancellation.</p>
-    <details><summary>Save safeguards</summary><p>Only this original one-use native plan is submitted. There is no force, automatic rebase, replacement token or automatic retry. All original dependencies and targets must still match.</p></details>
+    <h2 id={titleId}>{metadataNoOp(view) ? 'Confirm unchanged text?' : 'Save your Store text?'}</h2>
+    <p>Saves the text you reviewed for <strong>{view.platform} / {view.locale}</strong> to your project. Nothing is sent to a Store. Closing this keeps your draft.</p>
+    <details><summary>Files that will change</summary><ul className="metadata-confirm-files">{view.files.map((file) => <li key={file.id}><code>{file.path}</code> — {file.action}</li>)}</ul></details>
+    <label className="save-confirm-check"><input type="checkbox" checked={reviewed} onChange={(event) => setReviewed(event.target.checked)} />I reviewed the changes.</label>
+    <details><summary>Save safeguards</summary><p>No configuration, credentials, screenshots, Git/index changes, Store synchronization or release operation is included. A save already submitted may finish after cancellation. Files are checked again before saving. Only this original one-use native plan is submitted. There is no force, automatic rebase, replacement token or automatic retry. All original dependencies and targets must still match.</p></details>
     {!allowed && <p className="review-caution" role="alert">This review is no longer current. Your draft is kept. Check this operation’s status before starting a new review.</p>}
-    <div className="button-row"><button autoFocus type="button" className="button secondary" onClick={onCancel}>Keep reviewing</button><button type="button" className="button primary" disabled={!allowed || !reviewed || confirmation !== 'SAVE'} onClick={onConfirm}>{metadataNoOp(view) ? 'Confirm unchanged text' : 'Save text'}</button></div>
+    <div className="button-row"><button autoFocus type="button" className="button secondary" onClick={onCancel}>Keep reviewing</button><button type="button" className="button primary" disabled={!allowed || !reviewed} onClick={onConfirm}>{metadataNoOp(view) ? 'Confirm unchanged text' : 'Save text'}</button></div>
   </div></dialog>;
 }
 // Pure presentation shared by the two existing editors. The supplied binding
@@ -268,14 +267,14 @@ export function MetadataTextEditor({ state, controller, session, onShowProject, 
   };
   return <>
     <section className="card metadata-text-editor" aria-labelledby={`${id}-title`}>
-      <SectionHeading title="2. Edit one locale’s public text" description="Load the required three Android or five iOS text files from the saved configuration. Text drafts are separate from the configuration form above."><Badge>{state.mode === 'preview' ? 'Browser preview · unavailable' : 'Selected text only'}</Badge></SectionHeading>
+      <SectionHeading title="Store text" description="Choose a language, load its text, edit it and save. Android has three text fields and iOS has five."><Badge>{state.mode === 'preview' ? 'Browser preview · unavailable' : 'Selected text only'}</Badge></SectionHeading>
       <h3 id={`${id}-title`} className="sr-only">Configured public locale text</h3>
-      <p className="metadata-public-note">Public Store copy only. Never paste credentials, private review contacts, demo accounts or TestFlight notes. Secret-pattern scanning is a heuristic, not proof that arbitrary prose is secret-free. Text stays in memory, never browser storage or telemetry.</p>
-      <div className="metadata-context-row"><label htmlFor={`${id}-context`}>Saved platform / locale</label><select id={`${id}-context`} value={state.selectedKey ?? ''} disabled={!session || !state.choices.length && !oldContexts.length} onChange={(event) => controller.selectContext(event.target.value)}>
-        <option value="" disabled>No enabled configured locale</option><optgroup label="Current saved configuration">{state.choices.map((choice) => <option key={choice.key} value={choice.key}>{choice.platform} / {choice.locale}</option>)}</optgroup>
-        {oldContexts.length > 0 && <optgroup label="Retained earlier contexts · not retargeted">{oldContexts.map((item) => <option key={item.context.key} value={item.context.key}>{item.context.platform} / {item.context.locale} · earlier configuration {item.context.configBaselineGeneration}</option>)}</optgroup>}
-      </select><button type="button" className="button secondary" disabled={loadReason !== null} aria-describedby={`${id}-load-reason`} onClick={() => void controller.load()}><Icon name="refresh" size={16} />{entry?.loadRequest ? 'Loading text…' : entry?.baseline ? 'Refresh text' : 'Load public text'}</button><ActionHelp state={state} id="load" onHelp={onHelp} /></div>
-      <p id={`${id}-load-reason`} className="save-note">{loadReason ?? 'Read only this locale’s required public text. Refresh shows a separate observation; it never replaces your draft or its original comparison copy.'}</p>
+      <p className="metadata-public-note">This text is public. Don’t paste passwords, private contacts or test accounts.</p>
+      <div className="metadata-context-row"><label htmlFor={`${id}-context`}>Language</label><select id={`${id}-context`} value={state.selectedKey ?? ''} disabled={!session || !state.choices.length && !oldContexts.length} onChange={(event) => controller.selectContext(event.target.value)}>
+        <option value="" disabled>No languages set up yet</option><optgroup label="Your languages">{state.choices.map((choice) => <option key={choice.key} value={choice.key}>{choice.platform} / {choice.locale}</option>)}</optgroup>
+        {oldContexts.length > 0 && <optgroup label="Earlier settings (kept drafts)">{oldContexts.map((item) => <option key={item.context.key} value={item.context.key}>{item.context.platform} / {item.context.locale} · earlier configuration {item.context.configBaselineGeneration}</option>)}</optgroup>}
+      </select><button type="button" className="button secondary" disabled={loadReason !== null} aria-describedby={`${id}-load-reason`} onClick={() => void controller.load()}><Icon name="refresh" size={16} />{entry?.loadRequest ? 'Loading text…' : entry?.baseline ? 'Refresh text' : 'Load text'}</button><ActionHelp state={state} id="load" onHelp={onHelp} /></div>
+      <p id={`${id}-load-reason`} className="save-note">{loadReason ?? 'Loading never overwrites text you are editing.'}</p>
       {!state.help && <p className="review-caution">The packaged text-field guide is unavailable. No fallback limits, validation, observation or save result has been invented.</p>}
       {retainedNotice && <p className="save-note" role="status">{retainedNotice}</p>}
       {state.cacheError && <ErrorNotice error={state.cacheError} title="Text cache full; existing drafts kept" />}
@@ -289,23 +288,23 @@ export function MetadataTextEditor({ state, controller, session, onShowProject, 
         const original = entry.baseline!.originals[index]; const assertion = entry.baseline!.assertion.fields[index]; const result = entry.validation?.result.fields[index];
         const changed = field.text !== (original?.text ?? ''); const fieldId = `${id}-field-${index}`;
         return <div className="metadata-text-field" key={field.id}><div className="inline-heading"><label htmlFor={fieldId}>{guide?.label ?? field.id}</label><Badge tone="info">Required</Badge>
-          <Badge tone={changed ? 'warning' : 'neutral'}>{changed ? 'Unsaved text' : entry.baseline!.source === 'saved' ? 'Saved baseline' : assertion?.state === 'absent' ? 'Missing · observed' : 'Observed original'}</Badge>{guide && <HelpButton content={guide} onHelp={onHelp} />}</div>
-          <code>{original?.path}</code><p id={`${fieldId}-guide`}>{guide?.what ?? 'Restore the core guide before editing.'}</p>
+          <Badge tone={changed ? 'warning' : 'neutral'}>{changed ? 'Unsaved changes' : entry.baseline!.source === 'saved' ? 'Saved' : assertion?.state === 'absent' ? 'Empty' : 'Saved'}</Badge>{guide && <HelpButton content={guide} onHelp={onHelp} />}</div>
+          <p id={`${fieldId}-guide`}>{guide?.what ?? 'Restore the core guide before editing.'}</p>
           <textarea id={fieldId} value={field.text} disabled={!guide} rows={field.id.includes('description') || field.id === 'release_notes.txt' ? 7 : 3}
             autoComplete="off" aria-describedby={`${fieldId}-guide ${fieldId}-count`} aria-invalid={currentValidation && result ? !result.valid : undefined}
             onChange={(event) => controller.editField(entry.context.key, field.id, event.target.value)} />
-          <p id={`${fieldId}-count`} className="metadata-count">{result ? `${currentValidation ? 'Core' : 'Earlier, stale core'} count: ${result.characterCount.toLocaleString()} / ${result.limit.toLocaleString()} Unicode characters` : 'No core character count yet — use Validate text.'} · {new TextEncoder().encode(field.text).byteLength.toLocaleString()} UTF-8 bytes of the 32 KiB editor budget. {original?.text !== null && original?.text !== undefined ? `Original line endings: ${metadataLineEndings(original.text)}.` : 'No original bytes.'}</p>
-          <p className="save-note">{guide?.format} Untouched originals retain raw bytes. After editing, browser newline normalization is part of the new draft and must be reviewed.</p>
+          <p id={`${fieldId}-count`} className="metadata-count">{result ? `${result.characterCount.toLocaleString()} of ${result.limit.toLocaleString()} characters${currentValidation ? '' : ' (check again after editing)'}` : 'Use “Check text” to count characters.'} {original?.text !== null && original?.text !== undefined ? `Original line endings: ${metadataLineEndings(original.text)}.` : 'No original bytes.'}</p>
+          <TechnicalDetails label="File and format details"><p><code>{original?.path}</code></p><p className="save-note">{guide?.format} Untouched originals retain raw bytes. After editing, browser newline normalization is part of the new draft and must be reviewed. {new TextEncoder().encode(field.text).byteLength.toLocaleString()} UTF-8 bytes of the 32 KiB editor budget.</p></TechnicalDetails>
           {result?.issues.length ? <ul className="issues">{result.issues.map((issue) => <li key={issue.code}><Badge tone={currentValidation ? 'danger' : 'warning'}>{currentValidation ? issue.status : 'Earlier result'}</Badge><div><strong>{issue.message}</strong><code>{issue.code}</code></div></li>)}</ul> : null}
         </div>;
       })}</div> : <EmptyState compact icon="metadata" title={entry?.loadRequest ? 'Reading only the selected public text…' : 'No public text has been loaded'} description="Nothing is read from another locale or inferred from an unsafe file. Missing known leaves are shown only after a successful bounded core observation." />}
-      <div className="button-row metadata-text-actions"><button type="button" className="button secondary" disabled={validateReason !== null} aria-describedby={`${id}-validate-reason`} onClick={() => void controller.validate()}>{entry?.validationRequest ? 'Validating text…' : 'Validate text'}</button><ActionHelp state={state} id="validate" onHelp={onHelp} />
+      <div className="button-row metadata-text-actions"><button type="button" className="button secondary" disabled={validateReason !== null} aria-describedby={`${id}-validate-reason`} onClick={() => void controller.validate()}>{entry?.validationRequest ? 'Checking text…' : 'Check text'}</button><ActionHelp state={state} id="validate" onHelp={onHelp} />
         <button type="button" className="button primary" disabled={reviewReason !== null} aria-describedby={`${id}-review-reason`} onClick={() => controller.start()}>Review changes<Icon name={reviewReason ? 'lock' : 'search'} size={16} /></button><ActionHelp state={state} id="review" onHelp={onHelp} />
         {entry && <><button type="button" className="text-button" disabled={!metadataTextDirty(entry) || controller.discardReason(entry.context.key) !== null} onClick={() => askDiscard(entry.context.key, 'reset', 'Discard text draft changes')}>Discard text changes</button><ActionHelp state={state} id="discard" onHelp={onHelp} /></>}
-      </div><p id={`${id}-validate-reason`} className="save-note">Validation: {validateReason ?? 'Pure core format checks only, using the shared Unicode/newline rules. No files, URLs or Store services are contacted.'}</p>
-      <p id={`${id}-review-reason`} className="save-note">Save review: {reviewReason ?? 'Check every destination and its full before/after text. Nothing is written before you type SAVE and confirm.'}</p>
+      </div><p id={`${id}-validate-reason`} className="save-note">{validateReason ?? 'Checks length and format. Nothing is saved or sent.'}</p>
+      <p id={`${id}-review-reason`} className="save-note">{reviewReason ?? 'You’ll see every change before anything is saved.'}</p>
       {entry?.validationError && <ErrorNotice error={entry.validationError} title="Text validation was not accepted" />}
-      {entry?.validation && <p role="status" className="metadata-validation-status"><Badge tone={!currentValidation ? 'warning' : entry.validation.result.valid ? 'info' : 'danger'}>{!currentValidation ? 'Stale validation' : entry.validation.result.valid ? 'Format-valid selected text' : 'Text corrections required'}</Badge> Not a saved file, whole-metadata validation, native asset check, Store approval or release-readiness result.</p>}
+      {entry?.validation && <p role="status" className="metadata-validation-status"><Badge tone={!currentValidation ? 'warning' : entry.validation.result.valid ? 'info' : 'danger'}>{!currentValidation ? 'Check again' : entry.validation.result.valid ? 'Text looks good' : 'Needs changes'}</Badge> {!currentValidation ? 'The text changed since the last check.' : entry.validation.result.valid ? 'Not saved yet.' : 'See the notes under each field.'}</p>}
       {entry?.stale && entry.observation && !entry.observationPredatesSave && <details className="metadata-latest-observation"><summary>Separate newer observation · original draft is still above</summary><code>Configuration SHA256 {entry.observation.baseline.config.sha256}</code>
         {entry.observation.fields.map((field) => <section key={field.id}><h4>{field.path}</h4>{field.state === 'present' ? <><code>{field.byteLength} bytes · SHA256 {field.sha256}</code><pre tabIndex={0}><code>{field.text}</code></pre></> : <p>Observed absent.</p>}</section>)}
         <button type="button" className="button secondary" disabled={controller.discardReason(entry.context.key) !== null || entry.loadRequest !== null || loadReason !== null} onClick={() => askDiscard(entry.context.key, 'latest', 'Discard draft and use latest observation')}>Discard draft & use this observation</button><ActionHelp state={state} id="discard" onHelp={onHelp} />
