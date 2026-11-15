@@ -20,7 +20,9 @@ Add-Type -AssemblyName System.Drawing, System.Windows.Forms, UIAutomationClient,
 # interactive session. stderr is captured as evidence. App checks unchanged.
 $script:ErrPaths = @{}
 $script:Mode = 'limited-task'
-# Fallback: a disposable STANDARD local user (not an administrator), started by
+# The hosted runner account is the built-in Administrator (RID 500), which is
+# exempt from UAC filtering: RunLevel Limited still yields a High token (run
+# 43735533769 whoami). Fallback: a disposable STANDARD local user, started by
 # the secondary-logon service on this same interactive desktop (as runas does).
 # Its random password is generated here, never printed, and the runner is
 # discarded after the job.
@@ -33,7 +35,10 @@ public static class MrkLogonLaunch {
   [StructLayout(LayoutKind.Sequential, CharSet=CharSet.Unicode)] struct STARTUPINFO { public int cb; public string lpReserved, lpDesktop, lpTitle; public int dwX, dwY, dwXSize, dwYSize, dwXCountChars, dwYCountChars, dwFillAttribute, dwFlags; public short wShowWindow, cbReserved2; public IntPtr lpReserved2, hStdInput, hStdOutput, hStdError; }
   [StructLayout(LayoutKind.Sequential)] struct PROCESS_INFORMATION { public IntPtr hProcess, hThread; public int dwProcessId, dwThreadId; }
   public static int Start(string user, string password, string exe, string dir, IntPtr stdio) {
-    var si = new STARTUPINFO(); si.cb = Marshal.SizeOf(si); si.lpDesktop = "winsta0\\default";
+    // lpDesktop stays NULL: only then does the secondary-logon service grant the
+    // new logon SID access to this interactive window station and desktop
+    // (an explicit desktop failed with 0xC0000142 in run 43735533769).
+    var si = new STARTUPINFO(); si.cb = Marshal.SizeOf(si);
     if (stdio != IntPtr.Zero) { SetHandleInformation(stdio, 1, 1); si.dwFlags = 0x100; si.hStdOutput = stdio; si.hStdError = stdio; }
     PROCESS_INFORMATION pi;
     if (!CreateProcessWithLogonW(user, ".", password, 1 /*LOGON_WITH_PROFILE*/, exe, new StringBuilder("\"" + exe + "\""), 0, IntPtr.Zero, dir, ref si, out pi))
