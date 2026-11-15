@@ -24,7 +24,7 @@ export function AgentStorePreparation({controller}:{controller:StorePreparationC
  const supplemental=supplementalForView(captured);
  const commands=storePreparationCommands(a),seconds=controller.remainingSeconds();
  return <section className="card" aria-label="CLI Store preparation and current inventory">
-  <h2>Let the CLI prepare a Store step</h2>
+  <h2>Store preparation step</h2>
   <p>Use saved inputs and currently assigned credentials. First allow native preparation; after it returns, separately review and allow Start. Nothing runs automatically. Keep this Desktop open.</p>
   <label>Step <select value={s.selected} disabled={!!controller.ownerReason()} onChange={e=>controller.choose(e.target.value as PreparationKind)}>{storePreparationKinds.map(k=><option key={k} value={k}>{labels[k]}</option>)}</select></label>
   <p>{start?'Start approval':'Preparation approval'} · {labels[k]}. {selected&&<>Version {selected.savedVersion.name} · build {selected.savedVersion.build}.</>}</p>

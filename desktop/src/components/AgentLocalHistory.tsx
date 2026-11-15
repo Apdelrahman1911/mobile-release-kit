@@ -4,7 +4,7 @@ import { localHistoryCommands } from '../agentLocalHistoryProtocol.ts';
 export function AgentLocalHistory({controller,onShow}:{controller:AgentLocalHistoryController;onShow:()=>void}) {
  const s=useSyncExternalStore(controller.subscribe,controller.getSnapshot,controller.getSnapshot),r=s.review,a=s.access,seconds=controller.remainingSeconds(),commands=localHistoryCommands(a);
  const label=r?.kind==='enroll'?'Enroll this project':r?.kind==='verify'?'Verify existing history':r?`${r.platform==='ios'?'iOS':'Android'} · ${r.kind.replaceAll('-',' ')}`:null;
- return <details className="card"><summary>Advanced: let a local CLI run one reviewed history step</summary>
+ return <details className="card"><summary>Release history step</summary>
   <p>Prepare a non-destructive review in Release history, or run local-history-prepare with the current CLI project/service IDs and Check it here. Then separately approve that exact step. No Store credentials, saved version or network access is required. Desktop must stay open.</p>
   <button onClick={onShow}>Show Release history</button>
   {r&&<><h3>{label}</h3>{r.kind==='enroll'?<p>Creates this project's local journal and private Mac Keychain items only if genuine enrollment is absent. Never deletes or replaces existing history to clear an error.</p>:<p>Reads the selected project's existing local history and Keychain. Candidate review checks current files only, not the earlier build's finality or any Store state.</p>}

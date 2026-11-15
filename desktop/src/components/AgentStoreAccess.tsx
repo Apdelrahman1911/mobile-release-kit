@@ -7,7 +7,7 @@ export function AgentStoreAccess({controller}:{controller:AgentStoreAccessContro
   const state=useSyncExternalStore(controller.subscribe,controller.getSnapshot,controller.getSnapshot);
   const r=state.review,access=state.access,commands=storeCommands(access),seconds=controller.remainingSeconds();
   return <section className="card" aria-label="Local CLI Store permission">
-    <h2>Let a local CLI run one reviewed Store step</h2>
+    <h2>Store step you have reviewed</h2>
     <p>Uses the same native Store review, credentials, original cleanup and history. Each exact mode needs its own one-use approval. An access/prepare grant cannot authorize an upload, promotion, submission or recovery check.</p>
     <label>Step <select value={state.selected} disabled={!!controller.ownerReason()} onChange={e=>controller.choose(e.target.value as StoreKind)}>
       {(['access-check','candidate-prepare','execute','reconcile'] as const).map(kind=><option key={kind} value={kind}>{storeStepLabel(kind)}</option>)}
