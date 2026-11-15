@@ -10,6 +10,7 @@ from pathlib import Path
 import shutil
 import subprocess
 import sys
+import time
 import urllib.request
 import build_windows_transaction as native
 import prepare_windows_msi as msi
@@ -64,6 +65,15 @@ def main():
  toolprobe=out/'native-toolchain-probe';toolprobe.mkdir()
  (toolprobe/'CMakeLists.txt').write_text('cmake_minimum_required(VERSION 3.24)\nproject(MrkToolchainProbe LANGUAGES CXX)\nadd_library(MrkToolchainProbe SHARED probe.cpp)\ntarget_compile_features(MrkToolchainProbe PRIVATE cxx_std_17)\ntarget_compile_options(MrkToolchainProbe PRIVATE /W4 /WX /guard:cf /sdl)\ntarget_link_options(MrkToolchainProbe PRIVATE /guard:cf /DYNAMICBASE /NXCOMPAT)\nset_property(TARGET MrkToolchainProbe PROPERTY MSVC_RUNTIME_LIBRARY MultiThreaded)\n')
  (toolprobe/'probe.cpp').write_text('#include <windows.h>\nextern "C" __declspec(dllexport) DWORD MrkProbe(void) { return GetCurrentProcessId() != 0 ? 0u : 1u; }\n')
+ # Evidence only: which processes a plain configure leaves running (outside
+ # the owned job), so a deadline caused by a lingering helper is named.
+ def processes():
+  raw=subprocess.run(['powershell','-NoProfile','-Command','Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId,Name,CommandLine | ConvertTo-Json -Compress'],capture_output=True,timeout=120).stdout
+  return {row['ProcessId']:row for row in json.loads(raw or b'[]')}
+ before=processes()
+ plain=subprocess.run(native.configure_args(vs,toolprobe,toolprobe/'plain-build'),cwd=out,env=env,capture_output=True,timeout=300)
+ time.sleep(5);after=processes()
+ (logs/'toolchain-probe-lingering.json').write_text(json.dumps({'plainExit':plain.returncode,'new':[after[k] for k in after if k not in before]},indent=2)+'\n')
  try:
   run('native-toolchain-configure',native.configure_args(vs,toolprobe,toolprobe/'build'),cwd=out,timeout=180)
   run('native-toolchain-build',['cmake','--build',str(toolprobe/'build'),'--config','Release','--parallel','1'],cwd=out,timeout=180)
