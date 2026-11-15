@@ -12,6 +12,62 @@ $ErrorActionPreference = 'Stop'
 if ($env:GITHUB_ACTIONS -cne 'true' -or $env:RUNNER_ENVIRONMENT -cne 'github-hosted') { throw 'Disposable hosted runner required' }
 New-Item -ItemType Directory -Path $Evidence | Out-Null
 Add-Type -AssemblyName System.Drawing, System.Windows.Forms, UIAutomationClient, UIAutomationTypes
+# Hosted runners execute every step as an ELEVATED administrator, but the app
+# (correctly) admits only an ordinary, non-elevated, medium-integrity token,
+# which is what Explorer gives a real user. Launch it like that: a SAFER
+# "Normal User" token (same as runas /trustlevel:0x20000) with an explicit
+# Medium label, on the interactive desktop, stderr captured as evidence.
+# The app's own admission checks are unchanged.
+Add-Type -TypeDefinition @'
+using System; using System.Runtime.InteropServices; using System.Text;
+public static class MrkOrdinaryLaunch {
+  [DllImport("advapi32", SetLastError=true)] static extern bool SaferCreateLevel(uint scope, uint level, uint flags, out IntPtr h, IntPtr r);
+  [DllImport("advapi32", SetLastError=true)] static extern bool SaferComputeTokenFromLevel(IntPtr level, IntPtr inTok, out IntPtr outTok, uint flags, IntPtr r);
+  [DllImport("advapi32", SetLastError=true)] static extern bool SaferCloseLevel(IntPtr h);
+  [DllImport("advapi32", SetLastError=true, CharSet=CharSet.Unicode)] static extern bool ConvertStringSidToSidW(string s, out IntPtr sid);
+  [DllImport("advapi32")] static extern int GetLengthSid(IntPtr sid);
+  [DllImport("advapi32", SetLastError=true)] static extern bool SetTokenInformation(IntPtr t, int cls, IntPtr info, int len);
+  [DllImport("advapi32", SetLastError=true)] static extern bool GetTokenInformation(IntPtr t, int cls, out int value, int len, out int ret);
+  [DllImport("advapi32", SetLastError=true, CharSet=CharSet.Unicode)] static extern bool CreateProcessAsUserW(IntPtr tok, string app, StringBuilder cmd, IntPtr pa, IntPtr ta, bool inherit, uint flags, IntPtr env, string dir, ref STARTUPINFO si, out PROCESS_INFORMATION pi);
+  [DllImport("kernel32", SetLastError=true)] static extern bool CloseHandle(IntPtr h);
+  [DllImport("kernel32", SetLastError=true)] static extern bool SetHandleInformation(IntPtr h, uint mask, uint flags);
+  [DllImport("kernel32")] static extern IntPtr LocalFree(IntPtr p);
+  [StructLayout(LayoutKind.Sequential, CharSet=CharSet.Unicode)] struct STARTUPINFO { public int cb; public string lpReserved, lpDesktop, lpTitle; public int dwX, dwY, dwXSize, dwYSize, dwXCountChars, dwYCountChars, dwFillAttribute, dwFlags; public short wShowWindow, cbReserved2; public IntPtr lpReserved2, hStdInput, hStdOutput, hStdError; }
+  [StructLayout(LayoutKind.Sequential)] struct PROCESS_INFORMATION { public IntPtr hProcess, hThread; public int dwProcessId, dwThreadId; }
+  public static int Elevated, ElevationType;
+  static void Need(bool ok, string what) { if (!ok) throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error(), what); }
+  public static int Start(string exe, string dir, IntPtr stdio) {
+    IntPtr level, tok, sid;
+    Need(SaferCreateLevel(2, 0x20000, 1, out level, IntPtr.Zero), "SaferCreateLevel");
+    try { Need(SaferComputeTokenFromLevel(level, IntPtr.Zero, out tok, 0, IntPtr.Zero), "SaferComputeTokenFromLevel"); } finally { SaferCloseLevel(level); }
+    try {
+      Need(ConvertStringSidToSidW("S-1-16-8192", out sid), "ConvertStringSidToSid");
+      IntPtr label = Marshal.AllocHGlobal(16);
+      try {
+        Marshal.WriteIntPtr(label, 0, sid); Marshal.WriteInt32(label, 8, 0x20); // SE_GROUP_INTEGRITY
+        Need(SetTokenInformation(tok, 25, label, 16 + GetLengthSid(sid)), "SetTokenInformation(IntegrityLevel)");
+      } finally { Marshal.FreeHGlobal(label); LocalFree(sid); }
+      int ret; GetTokenInformation(tok, 20, out Elevated, 4, out ret); GetTokenInformation(tok, 18, out ElevationType, 4, out ret);
+      Need(SetHandleInformation(stdio, 1, 1), "SetHandleInformation");
+      var si = new STARTUPINFO(); si.cb = Marshal.SizeOf(si); si.lpDesktop = "winsta0\\default";
+      si.dwFlags = 0x100; si.hStdOutput = stdio; si.hStdError = stdio; si.hStdInput = IntPtr.Zero;
+      PROCESS_INFORMATION pi;
+      Need(CreateProcessAsUserW(tok, exe, new StringBuilder("\"" + exe + "\""), IntPtr.Zero, IntPtr.Zero, true, 0, IntPtr.Zero, dir, ref si, out pi), "CreateProcessAsUser");
+      CloseHandle(pi.hThread); CloseHandle(pi.hProcess);
+      return pi.dwProcessId;
+    } finally { CloseHandle(tok); }
+  }
+}
+'@
+function StartOrdinary($exe, $label) {
+  $errPath = Join-Path $Evidence "$label-stderr.txt"
+  $fs = [System.IO.File]::Open($errPath, 'Create', 'Write', 'ReadWrite')
+  try { $id = [MrkOrdinaryLaunch]::Start($exe, (Split-Path $exe), $fs.SafeFileHandle.DangerousGetHandle()) } finally { $fs.Dispose() }
+  $p = [System.Diagnostics.Process]::GetProcessById($id); $null = $p.Handle  # keep a handle so ExitCode stays readable
+  Step "$label-token" @{ pid = $id; elevated = [MrkOrdinaryLaunch]::Elevated; elevationType = [MrkOrdinaryLaunch]::ElevationType; integrity = 'S-1-16-8192 (medium)'; saferLevel = 'NormalUser' }
+  return $p
+}
+function StderrText($label) { $f = Join-Path $Evidence "$label-stderr.txt"; if (Test-Path $f) { ((Get-Content $f -Raw -ErrorAction SilentlyContinue) + '').Trim() } else { '' } }
 
 $result = [ordered]@{ schema = 1; steps = @(); installedExecutable = $null; shippingQualified = $false; firstFailure = $null }
 function Step($name, $data) { $result.steps += [ordered]@{ name = $name; utc = [DateTime]::UtcNow.ToString('o'); data = $data } }
@@ -58,13 +114,13 @@ function AnswerQuit($proc, $label) {
 }
 function Session($label) {
   $exe = $result.installedExecutable
-  $p = Start-Process -FilePath $exe -PassThru
+  $p = StartOrdinary $exe $label
   $deadline = [DateTime]::UtcNow.AddSeconds(60)
   do { Start-Sleep -Milliseconds 500; $p.Refresh() } while (!$p.HasExited -and $p.MainWindowHandle -eq 0 -and [DateTime]::UtcNow -lt $deadline)
-  if ($p.HasExited) { Step "$label-launch" @{ exited = $true; exitCode = $p.ExitCode }; throw "$label exited before showing a window" }
+  if ($p.HasExited) { $e = StderrText $label; Step "$label-launch" @{ exited = $true; exitCode = $p.ExitCode; stderr = $e }; throw "$label exited before showing a window: $e" }
   if ($p.MainWindowHandle -eq 0) { Shot "$label-no-window"; throw "$label showed no window within 60 s" }
   Start-Sleep -Seconds 25; $p.Refresh()   # let the bundled runtime start and the UI render
-  if ($p.HasExited) { Step "$label-after-start" @{ exitCode = $p.ExitCode }; throw "$label exited during startup" }
+  if ($p.HasExited) { $e = StderrText $label; Step "$label-after-start" @{ exitCode = $p.ExitCode; stderr = $e }; throw "$label exited during startup: $e" }
   Shot "$label-running"
   $text = UiText $p
   $text | Set-Content (Join-Path $Evidence "$label-ui-text.txt") -Encoding utf8
@@ -82,7 +138,7 @@ function Session($label) {
 }
 try {
   $msi = Join-Path $Stage 'MobileReleaseKit-NONSHIPPING.msi'; $mst = Join-Path $Stage 'DISPOSABLE-VALIDATION-ONLY.mst'
-  Step 'inputs' @{ msiSha256 = (Get-FileHash $msi -Algorithm SHA256).Hash; mstSha256 = (Get-FileHash $mst -Algorithm SHA256).Hash }
+  Step 'inputs' @{ msiSha256 = (Get-FileHash $msi -Algorithm SHA256).Hash; mstSha256 = (Get-FileHash $mst -Algorithm SHA256).Hash; runnerEnableLua = (Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System' -ErrorAction SilentlyContinue).EnableLUA }
   $log = Join-Path $Evidence 'install.log'
   $i = Start-Process msiexec.exe -ArgumentList @('/i', "`"$msi`"", "TRANSFORMS=`"$mst`"", '/qn', '/norestart', '/l*v', "`"$log`"") -Wait -PassThru
   Step 'install' @{ exitCode = $i.ExitCode }
