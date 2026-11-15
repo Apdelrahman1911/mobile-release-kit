@@ -5,6 +5,7 @@ import { androidBuildObservation, ANDROID_BUILD_CORE_STATUSES, ANDROID_BUILD_SIG
 import type { AndroidBuildCoreStatus, AndroidBuildPhase, AndroidBuildStage } from '../androidBuildTypes.ts';
 import type { HelpContent } from '../types.ts';
 import { TechnicalDetails } from './TechnicalDetails.tsx';
+import { ProgressiveDisclosure } from './ProgressiveDisclosure.tsx';
 import { Badge, ErrorNotice, HelpButton, SectionHeading } from './Common.tsx';
 import { Icon } from './Icon.tsx';
 import { androidCatalogActive, sameAndroidCatalogSelection } from '../androidToolchainCatalogProtocol.ts';
@@ -137,10 +138,13 @@ export function AndroidBuild({ state, controller, projectName, operationProjectN
     <SectionHeading title="Build your Android app" description="Builds an Android App Bundle from your saved settings and checks it. Nothing is uploaded or published.">
       <Badge tone="warning">Project code executes</Badge>{onHelp && <HelpButton content={androidBuildHelp} onHelp={onHelp} />}
     </SectionHeading>
-    <AndroidToolService state={state} controller={controller} onHelp={onHelp} />
-    <AndroidToolSources state={state} controller={controller} onHelp={onHelp} />
-    <AndroidToolRegistration state={state} controller={controller} onHelp={onHelp} />
-    <AndroidToolchainCatalog state={state} controller={controller} onHelp={onHelp} />
+    <ProgressiveDisclosure title="Android build tools" description="Set up Java, the Android SDK and Gradle once. Skip this if your tools are already set up."
+      needsAttention={androidToolServiceActive(state.toolService) || androidToolRegistrationActive(state.toolRegistration) || androidToolSourcesActive(state.toolSources) || androidCatalogActive(state.catalogStatus) || !!state.sourcesUnconfirmed || !!state.toolRegistration?.review}>
+      <AndroidToolService state={state} controller={controller} onHelp={onHelp} />
+      <AndroidToolSources state={state} controller={controller} onHelp={onHelp} />
+      <AndroidToolRegistration state={state} controller={controller} onHelp={onHelp} />
+      <AndroidToolchainCatalog state={state} controller={controller} onHelp={onHelp} />
+    </ProgressiveDisclosure>
     <h3 id={label}>What will be built</h3>
     <p><strong>Project:</strong> {projectName ?? 'No project selected'}{project?.savedVersion ? <> · version <strong>{project.savedVersion.name}</strong> (build {project.savedVersion.build})</> : null}. {onHelp && <HelpButton content={androidBuildInputHelp} onHelp={onHelp} />}</p>
     <div className="notice notice-warning"><Icon name="shield" /><div><p><strong>Only build a project you trust.</strong> Building runs your project’s own code, which can change files, use the network or sign the output. Cancel stops the build but cannot undo what already happened.</p>
@@ -311,14 +315,14 @@ export function AndroidToolSources({ state, controller, onHelp }: {
   const sameProject = sources?.projectId === state.project?.projectId;
   return <section className="session-review" aria-label="Set up Android tools">
     <h3>Set up Android tools</h3>
-    <p>Choose the Java, Android SDK and Gradle folders already installed on this Mac. Use Browse; you do not need to copy, rename or move anything.</p>
-    <p className="save-note">This step only remembers the selected directories for this app session. It does not execute, install or change them. Browsing alone neither inspects supplier contents nor registers a copy; separate inspection and protected-copy approval stay disabled until their actual prerequisites are available.</p>
+    <p>Choose the Java, Android SDK and Gradle folders already installed on this computer. Nothing is copied or changed.</p>
+    <TechnicalDetails label="About folder selection"><p className="save-note">This step only remembers the selected directories for this app session. It does not execute, install or change them. Browsing alone neither inspects supplier contents nor registers a copy; separate inspection and protected-copy approval stay disabled until their actual prerequisites are available.</p></TechnicalDetails>
     {sourceRoles.map((role) => {
       const help = androidToolSourceHelp[role], selected = sameProject ? sources?.selections.find((item) => item.role === role) : null;
       return <div className="session-review" key={role} role="group" aria-label={`${help.label} source folder`}>
         <div className="inline-heading"><h4>{help.label}</h4>{onHelp && <HelpButton content={help} onHelp={onHelp} />}</div>
-        <p>{help.what}</p><p className="save-note">{help.where}</p>
-        <p className="save-note">Required before registering Android tools. {selected ? <>Selected folder: <strong>{selected.displayName}</strong> · folder selection only.</> : 'No folder selected for this project.'}</p>
+        <p>{help.what}</p><p className="save-note"><strong>Where to find it:</strong> {help.where}</p>
+        <p className="save-note">{selected ? <>Selected: <strong>{selected.displayName}</strong></> : 'Not selected yet.'}</p>
         <button type="button" className="button secondary small" disabled={reason !== null}
           onClick={() => void controller.chooseToolSource(role)}>{selected ? 'Choose a different folder' : 'Browse for folder'}</button>
       </div>;

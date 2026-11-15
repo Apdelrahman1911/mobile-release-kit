@@ -3,6 +3,7 @@ import type { HelpContent } from '../types.ts';
 import type { RetainedEditAttention } from '../drafts.ts';
 import { EmptyState, HelpButton, PageHeading, SectionHeading } from '../components/Common.tsx';
 import { Icon } from '../components/Icon.tsx';
+import { TechnicalDetails } from '../components/TechnicalDetails.tsx';
 import { revealTaskSection, TaskTabs } from '../components/TaskTabs.tsx';
 
 export type ReleaseTab = 'check' | 'android' | 'ios' | 'store' | 'github' | 'results';
@@ -51,14 +52,15 @@ export function Recovery({ projectRecovery, attention, choosingProject, onOpenPr
     <PageHeading eyebrow="RECOVER WORK" title="Check interrupted work safely" description="If a task stopped part-way, find out what actually happened before you try again. Nothing here repeats or undoes a step on its own." />
     {evidenceGuidance}
     {projectRecovery}
-    {onOpenReleases && <section className="card"><SectionHeading title="Protected workflow request recovery" description="Reconcile an exact release request or prepare the core’s existing evidence-based same-step recovery. This is separate from local project recovery and does not prove Store state." /><button type="button" className="button secondary" onClick={onOpenReleases}>Open original release requests</button></section>}
-    <div className="notice notice-warning"><Icon name="shield" /><div><strong>Other recovery remains unassessed</strong><p>The build-input action above does not recover file edits, signing accounts or Store operations. The retained alerts below are earlier file-edit observations, not a fresh journal inspection or an assessment of current local or remote operations. Use the public-text or saved-version editor’s explicit Inspect recovery only after original native settlement; complete matching journals may then offer one separately confirmed action. This screen does not establish that a project is clean or an operation can safely be retried.</p></div></div>
+    {onOpenReleases && <section className="card"><SectionHeading title="A GitHub release was interrupted" description="Check the release request on the Build & release page before running it again." /><button type="button" className="button secondary" onClick={onOpenReleases}>Open GitHub release</button></section>}
+    <div className="notice notice-warning"><Icon name="shield" /><div><strong>Before you retry anything</strong><p>Keep your project files, build files and release records as they are. A missing record doesn’t mean it’s safe to run a step again.</p>
+      <TechnicalDetails label="What this page can and can’t check"><p>The build-input action above does not recover file edits, signing accounts or Store operations. The retained alerts below are earlier file-edit observations, not a fresh journal inspection or an assessment of current local or remote operations. Use the public-text or saved-version editor’s explicit Inspect recovery only after original native settlement; complete matching journals may then offer one separately confirmed action. This screen does not establish that a project is clean or an operation can safely be retried.</p></TechnicalDetails></div></div>
     <section className="card">
-      <SectionHeading title="File-edit alerts from this session" description="Earlier alerts stay visible after unrelated edits. Only a matching successful same-domain recovery can clear that domain’s alert; original active or uncertain operations keep their status controls.">
+      <SectionHeading title="Interrupted file saves" description="Saves of settings, Store text or the version number that didn’t finish cleanly in this session.">
         <HelpButton content={editAttentionHelp} onHelp={onHelp} />
       </SectionHeading>
       {attention.length === 0
-        ? <EmptyState compact icon="recovery" title="No retained file-edit attention observed in this session" description="This is not a clean-state check. Earlier sessions, journals and remote operations have not been assessed." />
+        ? <EmptyState compact icon="recovery" title="No interrupted saves in this session" description="Earlier sessions aren’t checked here." />
         : <ul className="plain-list">{attention.map((item, index) => <li key={`${item.page}:${item.projectId}`}>
           <Icon name="shield" size={17} /><div>
             <strong>{item.projectName ?? 'Project not loaded in this window'}</strong>
@@ -70,12 +72,14 @@ export function Recovery({ projectRecovery, attention, choosingProject, onOpenPr
             <p id={`edit-attention-${index}`}>{item.projectName === null
               ? 'Navigation is unavailable because the original project is not loaded here. Its alert remains retained.'
               : choosingProject ? 'Finish choosing a project before navigating.'
-                : 'Opens the existing editor without discarding drafts. Text/version recovery requires a separate explicit inspection and confirmation; navigation never recovers files.'}</p>
+                : 'Opens the editor. Your drafts are kept, and nothing is recovered until you confirm.'}</p>
           </div>
         </li>)}</ul>}
     </section>
+    <TechnicalDetails label="More recovery guidance">
     <p className="review-caution">Text/version recovery cannot infer missing original context from legacy or incomplete journals. Keep public files, private journal names/contents, original operation details and unsaved drafts. Do not delete or rename controls, force an edit, use generic init --recover, or repeatedly retry a conflict; obtain manual reconciliation assistance.</p>
     <p className="review-caution">Cancelling saved checks or an Android build cannot undo effects already performed by project code. A retained work folder is not a successful artifact or a safe retry. Project admission refusal does not establish a recoverable signing session or distinguish busy ownership from recovery need. Keep the original operation and its status. The build-input flow does not inspect or clean retained artifact folders or signing accounts.</p>
+    </TechnicalDetails>
     <section className="card"><SectionHeading title="For other interrupted operations" /><ul className="plain-list"><li><Icon name="shield" size={17} /><span>Do not infer a safe retry from a missing desktop record.</span></li><li><Icon name="box" size={17} /><span>Keep original files, artifacts, and existing release evidence intact.</span></li><li><Icon name="github" size={17} /><span>Check the actual protected workflow or Store operation before considering another mutation.</span></li></ul></section>
   </>;
 }

@@ -2,6 +2,7 @@ import { useLayoutEffect, useRef, useState } from 'react';
 import type { ReactNode } from 'react';
 import type { Catalog, CredentialGuide, HelpContent } from '../types.ts';
 import { Badge, EmptyState, HelpButton, PageHeading, SectionHeading } from '../components/Common.tsx';
+import { TechnicalDetails } from '../components/TechnicalDetails.tsx';
 import { Icon } from '../components/Icon.tsx';
 import { CredentialSession } from '../components/CredentialSession.tsx';
 import type { AssetDisplayState } from '../assetSessionTypes.ts';
@@ -82,7 +83,7 @@ export function Credentials({ catalog, state, controller, project, inputState, i
     {delegation}
     <ReleaseInputGuidance state={inputState} controller={inputController} onSettings={onSettings} onHelp={onHelp} onGuide={openGuide} />
     <details className="card progressive-disclosure" ref={referenceRef}>
-      <summary>Reference: where to find files, supported formats &amp; privacy</summary>
+      <summary>Help: where to find your signing files</summary>
       <div ref={guideRef} tabIndex={-1}><AssetGuide guide={inputState.help.guide} selected={selectedGuide} onSelect={setSelectedGuide} sessionAvailable={state.mode === 'native' && state.status?.capability.available === true && !state.blocked && !state.observationFailed && nativeBusyReason === null} onHelp={currentHelp} /></div>
       <div className="privacy-hero card"><div className="privacy-illustration"><Icon name="lock" size={42} /></div><div><Badge tone="info">Private inputs are not project settings</Badge><h2>Your credentials stay out of this draft.</h2><p>Use only the explicitly available private-input controls on this page. Memory-only and encrypted storage require separate consent and native availability; neither signs in to a Store account. Do not paste tokens, passwords, private keys, or service-account JSON into project settings.</p></div></div>
       <div className="three-card-grid">{[{ icon: 'android' as const, title: 'Android signing', description: 'A keystore, signing policy, and the matching upload identity.' }, { icon: 'apple' as const, title: 'Apple signing', description: 'Certificates, provisioning, and protected App Store access.' }, { icon: 'github' as const, title: 'GitHub access', description: 'Reviewed repository access and protected release environments.' }].map((item) => <div className="card credential-summary" key={item.title}><span className="soft-icon"><Icon name={item.icon} size={23} /></span><h3>{item.title}</h3><p>{item.description}</p><Badge>Reference · not a verification result</Badge></div>)}</div>
@@ -90,25 +91,25 @@ export function Credentials({ catalog, state, controller, project, inputState, i
     </details>
 
     <details className="card progressive-disclosure">
-      <summary>Reference: complete credential requirement catalogue</summary>
+      <summary>Help: every file and key the app can use</summary>
       <section className="card"><SectionHeading title="Core requirement catalogue" description="Conditional requirements are guidance, not proof that credentials exist or work."><label className="search-field"><Icon name="search" size={16} /><span className="sr-only">Find a credential requirement</span><input type="search" value={filter} onChange={(event) => setFilter(event.target.value)} placeholder="Find a requirement…" /></label></SectionHeading>
         {credentials.length ? <div className="credential-list">{credentials.map((credential, index) => <article key={`${credential.name}-${index}`}><div className="credential-row-heading"><div className="inline-heading"><h3>{credential.name}</h3><HelpButton content={{ ...credential, label: credential.name }} onHelp={currentHelp} /></div><Badge>Not verified</Badge></div><p>{credential.what}</p><div className="credential-meta"><span>{credential.platform}</span><span>{credential.kind}</span><span>{credential.stages.join(' · ')}</span></div><p className="credential-when">{credential.requiredWhen}</p></article>)}</div> : <EmptyState compact icon="key" title={filter ? 'No matching requirement' : 'No native credential catalogue loaded'} description={filter ? 'Try a platform name or a different keyword.' : 'The connected core supplies exact credential names, conditional requiredness, formats, and recovery guidance. Browser examples never invent credential status.'} />}
       </section>
     </details>
-    <section className="card"><SectionHeading title="Native and service verification" description="Choose a specific check. Importing or assigning a file is not proof that it works." />
-      <h3>Saved offline checks · Android</h3>
-      <p>Review the existing saved-project preflight in Releases. Core builds and toolkit credential use are disabled, but configured project checks can run programs, change files or use the network. This does not verify signing or account access.</p>
-      <button type="button" className="button secondary" disabled={!project || nativeBusyReason !== null} onClick={onOfflineChecks}>Review saved offline checks</button>
-      <h3>Build and verify Android signing</h3>
-      <p>Review a local signed build using your current keystore assignment and saved upload-certificate policy. The existing Mac tool provider checks the key, signs a private AAB copy and verifies its signature. A completed format assessment alone cannot establish this.</p>
-      <p><strong>Project code executes; this is not a read-only check.</strong> Gradle and project code may access the network or modify files. The toolkit does not request a Store operation. Opening the review does not start a build; you must review the saved inputs and give separate consent in Releases.</p>
-      <button type="button" className="button secondary" disabled={!project || nativeBusyReason !== null} onClick={onAndroidSigning}>Review Android signing build</button>
-      {!project && <p className="save-note">Select a project first. The review will show the current runtime, tools, saved-input and assignment prerequisites.</p>}
-      <p className="save-note">Use the original build's status, Cancel and Recovery controls in Releases. Cancel is not rollback; an unknown cleanup state cannot be reset by reopening this page.</p>
-      <h3>Store account access · separate online check</h3>
-      <p>Review the saved settings, assigned credentials and runtime prerequisites in Releases. Opening the review makes no Store request; give separate consent there to start a check.</p>
-      <p>The Android check can create a temporary, uncommitted Google Play edit and attempts to delete it. It does not publish a release. Offline checks and signing do not verify Store account access.</p>
-      <button type="button" className="button secondary" disabled={!project || nativeBusyReason !== null} onClick={onStoreAccess}>Review Store account access</button>
+    <section className="card"><SectionHeading title="Test that your keys work" description="Adding a file doesn’t prove it works. Each test below opens on the Build & release page, where you confirm before it starts." />
+      <div className="test-row"><div><h3>Check your project</h3><p>Runs your project’s saved checks. Doesn’t use your keys.</p></div>
+        <button type="button" className="button secondary" disabled={!project || nativeBusyReason !== null} onClick={onOfflineChecks}>Open local checks</button></div>
+      <div className="test-row"><div><h3>Test Android signing</h3><p>Builds your app and signs a private copy with your upload key, then verifies it. Nothing is uploaded.</p></div>
+        <button type="button" className="button secondary" disabled={!project || nativeBusyReason !== null} onClick={onAndroidSigning}>Open signing test</button></div>
+      <div className="test-row"><div><h3>Test Store account access</h3><p>Checks that your Store account key can sign in. Nothing is published.</p></div>
+        <button type="button" className="button secondary" disabled={!project || nativeBusyReason !== null} onClick={onStoreAccess}>Open Store access test</button></div>
+      {!project && <p className="save-note">Choose a project first.</p>}
+      <TechnicalDetails label="What each test does">
+        <p>Saved offline checks: core builds and toolkit credential use are disabled, but configured project checks can run programs, change files or use the network. This does not verify signing or account access.</p>
+        <p>Android signing: the existing tool provider checks the key, signs a private AAB copy and verifies its signature. Project code executes; this is not a read-only check. Gradle and project code may access the network or modify files. The toolkit does not request a Store operation. Opening the review does not start a build.</p>
+        <p className="save-note">Use the build's status, Cancel and Recovery controls in Build &amp; release. Cancel is not rollback; an unknown cleanup state cannot be reset by reopening this page.</p>
+        <p>Store access: opening the review makes no Store request; you give separate consent there to start a check. The Android check can create a temporary, uncommitted Google Play edit and attempts to delete it. It does not publish a release. Offline checks and signing do not verify Store account access.</p>
+      </TechnicalDetails>
     </section>
   </>;
 }

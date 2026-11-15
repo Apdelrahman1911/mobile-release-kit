@@ -58,7 +58,7 @@ export function Environment({ info, api, preparationController, preview, session
     controller.setContext(platform, operation);
   };
   return <>
-    <PageHeading eyebrow="BUILD TOOLS" title="Check this computer for your project" description="Choose your app platform and activity, then run the tool check below. Nothing is built or installed automatically." />
+    <PageHeading eyebrow="BUILD TOOLS" title="Check your build tools" description="Pick what you want to do, then check that this computer has the right tools. Nothing is installed or changed automatically." />
     <section className="card">
       <SectionHeading title="What are you preparing?" description={session ? session.project.name : 'Choose a project in Home before checking its tools.'} />
       <div className="environment-controls">
@@ -109,7 +109,9 @@ export function Environment({ info, api, preparationController, preview, session
       <ul className="plain-list">{result.limitations.map((item, index) => <li key={index}><Icon name="shield" size={16} /><span>{item}</span></li>)}</ul>
     </section>}
     </ProgressiveDisclosure>
-    <InstallationDetails info={info} api={api} preparationController={preparationController} preview={preview} loading={loading} onHelp={onHelp} />
+    <ProgressiveDisclosure title="About this installation" description="Where the app is installed and whether its files are intact. Useful if something seems wrong.">
+      <InstallationDetails info={info} api={api} preparationController={preparationController} preview={preview} loading={loading} onHelp={onHelp} />
+    </ProgressiveDisclosure>
     <ProgressiveDisclosure title="Advanced · app connection details" description="App and engine information for troubleshooting."
       needsAttention={!preview && info !== null && runtime?.state !== 'available'}>
     <div className="button-row"><button type="button" className="button secondary" disabled={loading} onClick={onRetry}><Icon name="refresh" size={17} className={loading ? 'spin' : ''} />{loading ? 'Loading…' : 'Reload connection'}</button></div>
