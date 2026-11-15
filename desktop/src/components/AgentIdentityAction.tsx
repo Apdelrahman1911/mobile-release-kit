@@ -23,7 +23,7 @@ export function AgentIdentityAction({ controller }: { controller: AgentIdentityA
       <button type="button" className="button secondary" disabled={!state.canCheck} onClick={() => controller.check()}>Check agent edit status</button>
       <button type="button" className="button secondary" disabled={!state.canRevoke} onClick={() => controller.revoke()}>Revoke and request Stop</button>
     </div>
-    {status && <details><summary>Original CLI request</summary>
+    {status && <details><summary>CLI request</summary>
       <p>Prepare/start permission is separate from proposal permission. It expires with this original review and is never renewed by status checks.</p>
       <code>mrk identity-status {status.origin.projectId} {status.origin.serviceInstance} {status.origin.intentId} --json</code>
       <p>{status.observation?.state ?? 'No original operation update yet'} · {status.observation?.settlement ?? 'not observed'}</p>

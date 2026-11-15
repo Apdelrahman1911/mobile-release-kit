@@ -21,7 +21,7 @@ export function LocalGitReadControls({ controller, compact = false, originalProj
       state.status?.available ? 'Local Git reader available' : 'Check local Git access';
   return <section className={compact ? 'notice notice-info' : 'card'} aria-label="Local Git read status">
     <div><SectionHeading title={title} description="Read-only on this computer. No fetch, push, staging, commit, hooks or build is included." />
-      {operation && <p>Original project: <strong>{originalProjectName ?? 'a previously selected project'}</strong>.</p>}
+      {operation && <p>Project: <strong>{originalProjectName ?? 'a previously selected project'}</strong>.</p>}
       {state.uncertain && <p className="review-caution" role="alert">The original result or cleanup is unconfirmed. Keep the app and project files; do not repeat the read or reconnect to dismiss it.</p>}
       {state.issue && !state.uncertain && <p className="review-caution" role="status">{state.issue === 'stale-observation'
         ? 'The saved project or local Git files changed. Check local Git access, then refresh changes. Your draft is kept.' : GIT_ISSUE_HELP[state.issue]}</p>}
@@ -35,8 +35,8 @@ export function LocalGitReadControls({ controller, compact = false, originalProj
         {compact && onShow && <button type="button" className="button secondary" onClick={onShow}>Show local changes</button>}
       </div>
       {!state.status && !active && <p className="save-note">Check availability first, then use Refresh changes below. A GitHub connection is not required.</p>}
-      {operation && <details><summary>Original read details</summary><p>Task: {operation.action.kind}. Status: {operation.phase}.</p>
-        <p>Original operation: <code>{operation.operationId}</code>.</p></details>}
+      {operation && <details><summary>Read details</summary><p>Task: {operation.action.kind}. Status: {operation.phase}.</p>
+        <p>Operation: <code>{operation.operationId}</code>.</p></details>}
     </div>
   </section>;
 }

@@ -2475,7 +2475,7 @@ export function App() {
           onShow={() => navigate('github')} />}
         {page !== 'github' && (connectionState.busy || connectionState.uncertain || connectionState.blocked || connectionState.retirementPending) &&
           <div className={`notice ${connectionState.uncertain || connectionState.blocked ? 'notice-warning' : 'notice-info'}`} role="status">
-            <Icon name="github" /><div><strong>Original GitHub connection · {originalConnection?.session?.projectId ? workspace.projects[originalConnection.session.projectId]?.project.name ?? 'a previously selected project' : 'selected app'}</strong>
+            <Icon name="github" /><div><strong>GitHub connection · {originalConnection?.session?.projectId ? workspace.projects[originalConnection.session.projectId]?.project.name ?? 'a previously selected project' : 'selected app'}</strong>
               <p>{connectionState.uncertain || connectionState.blocked ? 'The original result needs attention. Do not connect again or switch accounts to bypass it.' : 'The original connection task is still finishing.'}</p>
               <div className="button-row">
                 <button type="button" className="button small secondary" disabled={!githubConnection.canCheckStatus() || connectionState.observing} onClick={() => void githubConnection.checkStatus()}>Check connection status</button>
@@ -2686,8 +2686,8 @@ export function App() {
           storeNeedsAttention={!!(localHistoryBusy() ?? storeBusy()) || [localHistoryState, localStoreState, localStorePrepareState, localStoreExecuteState, localStoreReconcileState].some((state) => state.error !== null || state.status?.operation?.phase === 'terminal' && state.status.operation.outcome !== 'complete')}
           workflowNeedsAttention={githubReleaseOwnerReason(githubReleaseState) !== null || githubReleaseState.error !== null || githubRelease.currentPrepared() !== null}
           storeOperations={<>
-            <section id="release-local-history" tabIndex={-1} aria-label="Original local release history controls"><LocalReleaseHistory state={localHistoryState} controller={localHistory} onShow={()=>navigate('releases')}/></section>
-            <section id="release-store-access" ref={storeAccessSection} tabIndex={-1} aria-label="Original Store access check controls"><LocalStorePreflight agentReason={agentStoreReason} state={localStoreState} controller={localStore} onCredentials={()=>navigate('credentials')} onShow={()=>navigate('releases')}/></section>
+            <section id="release-local-history" tabIndex={-1} aria-label="Local release history controls"><LocalReleaseHistory state={localHistoryState} controller={localHistory} onShow={()=>navigate('releases')}/></section>
+            <section id="release-store-access" ref={storeAccessSection} tabIndex={-1} aria-label="Store access check controls"><LocalStorePreflight agentReason={agentStoreReason} state={localStoreState} controller={localStore} onCredentials={()=>navigate('credentials')} onShow={()=>navigate('releases')}/></section>
             <LocalStorePrepare agentReason={agentStoreReason} state={localStorePrepareState} controller={localStorePrepare} onCredentials={()=>navigate('credentials')} onShow={()=>navigate('releases')}/>
             <LocalStoreExecute agentReason={agentStoreReason} state={localStoreExecuteState} controller={localStoreExecute} onCredentials={()=>navigate('credentials')} onShow={()=>navigate('releases')}/>
             <LocalStoreReconcile agentReason={agentStoreReason} state={localStoreReconcileState} controller={localStoreReconcile} onCredentials={()=>navigate('credentials')} onShow={()=>navigate('releases')}/>
@@ -2701,7 +2701,7 @@ export function App() {
             onReadVersion={() => { externalObserver.beforeWorkspaceAction(); toolAcquisition.versionIntent(); appleProvisioning.versionIntent(); githubPublication.versionIntent(); void releaseVersion.read(); }} versionReason={releaseVersion.startReason()} onHelp={setHelp}
             onCredentials={() => navigate('credentials')} onSettings={() => navigate('settings')} onRecovery={() => navigate('recovery')} />
             <AgentAndroidBuildAccess controller={agentAndroidBuild} /></div>}
-          iosArchive={<section id="release-ios-build" tabIndex={-1} aria-label="Original iOS archive controls"><IOSArchive state={iosArchiveState} controller={iosArchive}
+          iosArchive={<section id="release-ios-build" tabIndex={-1} aria-label="IOS archive controls"><IOSArchive state={iosArchiveState} controller={iosArchive}
             projectName={session?.project.name ?? null} operationProjectName={iosArchiveState.status?.operation ? workspace.projects[iosArchiveState.status.operation.context.projectId]?.project.name ?? null : null}
             onRefresh={() => { if (session) void loadSnapshot(session.project.id); }} refreshReason={loading ? 'Capabilities are loading.' : refreshReason}
             onReadVersion={() => { externalObserver.beforeWorkspaceAction(); toolAcquisition.versionIntent(); appleProvisioning.versionIntent(); githubPublication.versionIntent(); void releaseVersion.read(); }} versionReason={releaseVersion.startReason()} onHelp={setHelp}

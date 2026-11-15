@@ -41,7 +41,7 @@ export function GitUpstreamSetup({ controller, repository, originalProjectName }
       </form>
       {review && prepared && <section className="version-review" aria-label="Review local upstream settings">
         <h3>Upstream for <bdi>{prepared.branch.slice('refs/heads/'.length)}</bdi></h3>
-        <p>Original project: <strong>{originalProjectName ?? 'the previously selected project'}</strong>.</p>
+        <p>Project: <strong>{originalProjectName ?? 'the previously selected project'}</strong>.</p>
         <p>Remote <code><bdi>{prepared.remote}</bdi></code> → <code><bdi>https://github.com/{prepared.repository}.git</bdi></code>.</p>
         {prepared.additions.length ? <><p>Add only these currently absent settings:</p><ul>{prepared.additions.map(a =>
           <li key={a.key}><code><bdi>{a.key}</bdi></code>: <code><bdi>{a.value}</bdi></code></li>)}</ul></> : <p>The approved configuration is already present and stays unchanged.</p>}

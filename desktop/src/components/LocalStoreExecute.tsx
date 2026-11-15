@@ -12,7 +12,7 @@ export function LocalStoreExecute({ state, controller, compact = false, onCreden
   const stage=displayedRequest&&'stage' in displayedRequest?displayedRequest.stage:null;
   const target=stage?localStoreStageLabel(stage,ios?'ios':'android'):ios?'TestFlight internal testing':'Play internal testing';
   const stageEffect=stage==='production-submit'?(ios?'Submit the existing version for App Review with manual release; approval does not publish it.':'Create a production draft from the original uploaded bundle; it is not served to production users.'):(ios?'Assign the original TestFlight build to external testing. Apple may require Beta App Review before testers can use it.':'Promote the original uploaded bundle to the configured external testing track.');
-  const displayedApplication=retained&&state.historical?'Original retained candidate':state.applicationId;
+  const displayedApplication=retained&&state.historical?'Retained candidate':state.applicationId;
   if(compact&&!retained)return null;
   return <section className="card" aria-label={`Execute local ${target} release`}>
     <div className="inline-heading"><h2>{stage?'Promote to':'Upload to'} {target} · This computer</h2>{compact&&<button onClick={onShow}>Show original execution</button>}</div>

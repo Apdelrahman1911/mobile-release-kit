@@ -41,7 +41,7 @@ export function AppleDistributionKeySetup({ controller, state, onKeyCredentials,
     </div>}
     <details><summary>Recover a durably saved key after interrupted setup</summary>
       <p>Use this only when the original encrypted key is still present. It checks the same key and request against its durable-save record; it does not repair a missing key or adopt a backup restored as a new record. Uncertain generation or save remains unresolved.</p>
-      <label>Original saved signing key
+      <label>Saved signing key
         <select value={selected?.recordId ?? ''} disabled={state.retained || !state.ios} onChange={event => {
           const row = state.certificateKeyChoices.find(choice => choice.recordId === event.target.value);
           controller.selectCertificateKey(row?.recordId ?? null, row?.recordRevision ?? null);

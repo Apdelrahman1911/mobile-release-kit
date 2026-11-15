@@ -19,10 +19,10 @@ export function GitHubRepositoryCreate({ controller, state, compact = false, onS
     <SectionHeading title="Create a GitHub repository" description="Optional · Make an empty home for this app on GitHub. Uploading your files is a separate task.">
       <Icon name="github" size={24} />
     </SectionHeading>
-    {state.originalRepository && (busy || attention) && <p>Original repository: <strong>{state.originalRepository}</strong></p>}
+    {state.originalRepository && (busy || attention) && <p>Repository: <strong>{state.originalRepository}</strong></p>}
     {op && <p role="status">{op.phase === 'cleanup-unknown' ? 'Cleanup needs attention' : op.phase === 'stopping' ? 'Stopping the original request…' :
       !settled ? 'Waiting for the original task to finish…' : op.effect === 'created-observed' ? 'Repository created and checked' :
-      op.kind === 'prepare' && status?.consent ? 'Review ready — nothing created yet' : 'Original check finished'}</p>}
+      op.kind === 'prepare' && status?.consent ? 'Review ready — nothing created yet' : 'Check finished'}</p>}
     {state.uncertain && <p className="review-caution" role="alert">The original request is unconfirmed. Keep the app and its files. Check status; do not repeat Create or reconnect to dismiss this warning.</p>}
     {state.error && <p className="review-caution" role="status">{REPOSITORY_CREATE_HELP[state.error]}</p>}
     {op && op.reason !== 'none' && op.reason !== state.error && <p className="review-caution" role="status">{REPOSITORY_CREATE_HELP[op.reason]}</p>}

@@ -45,7 +45,7 @@ export function AppleBundleRegistration({ controller, state, onCredentials, onPr
   const op = state.status?.operation, result = state.result, copy = result ? resultCopy(result) : null;
   if (compact) {
     if (!state.retained && !state.issue && !cliRetained) return null;
-    return <section className="card" aria-label="Original Apple setup operation">
+    return <section className="card" aria-label="Apple setup operation">
       <h2>Apple setup · original operation retained</h2>
       <p>{op ? `${modeLabel[op.context.mode]} · ${op.phase} · project ${op.context.projectId}` : 'Waiting for the original operation reference.'}</p>
       <p>{state.issue ? 'The outcome or cleanup is unconfirmed. Do not repeat registration or reconnect to dismiss it.' : 'Keep the original controls available until its native cleanup is known. Navigating does not finish the operation.'}</p>
@@ -99,7 +99,7 @@ export function AppleBundleRegistration({ controller, state, onCredentials, onPr
     {state.issue && <p role="alert">The original operation is unconfirmed or its cleanup is unknown. Keep its status; do not repeat registration, switch accounts to bypass it, or dismiss the outcome by reconnecting.</p>}
     {op && <>
       <p>{state.historical ? 'Earlier or different saved/key context · ' : ''}{modeLabel[op.context.mode]} · {op.phase}{op.reason !== 'none' ? ` · ${op.reason.replaceAll('-', ' ')}` : ''}</p>
-      <details><summary>Original operation reference</summary><p>Project: <code>{op.context.projectId}</code><br />Operation: <code>{op.operationId}</code><br />Owner generation: <code>{op.ownerGeneration}</code></p><p>These references identify an operation. They are not account, retry or native-settlement authority.</p></details>
+      <details><summary>Operation reference</summary><p>Project: <code>{op.context.projectId}</code><br />Operation: <code>{op.operationId}</code><br />Owner generation: <code>{op.ownerGeneration}</code></p><p>These references identify an operation. They are not account, retry or native-settlement authority.</p></details>
     </>}
     {result && copy && <div role="status">
       <h3>{copy.title}</h3><p>{copy.detail}</p>

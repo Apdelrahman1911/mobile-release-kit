@@ -8,7 +8,7 @@ export function ServiceMetadataTextAccess({controller}: {controller: MetadataSer
   return <details className="card"><summary>Advanced: let the installed CLI edit this locale’s public text</summary>
     <p>Enable project READ access first. The CLI can Load and propose one complete Android or iOS text bundle for an already configured locale. Review every file in the native before/after preview above before granting Apply once.</p>
     <p>No locale creation, automatic translation, image picking, configuration changes or Store upload. This requires the running Desktop; it is not headless file access.</p>
-    {request && <p>Original request: <code>{request.origin.requestId}</code> · {request.platform} / {request.locale} · {request.phase}. A missing reply is not permission to submit again.</p>}
+    {request && <p>Request: <code>{request.origin.requestId}</code> · {request.platform} / {request.locale} · {request.phase}. A missing reply is not permission to submit again.</p>}
     <label><input type="checkbox" checked={state.acknowledged} disabled={reason !== null} onChange={event => controller.acknowledge(event.currentTarget.checked)} /> I reviewed all files in this exact native preview and allow one CLI Apply.</label>
     {reason && <p className="save-note">{reason}</p>}
     <div className="button-row">

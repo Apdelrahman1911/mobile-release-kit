@@ -22,7 +22,7 @@ export function GitInitialization({ controller, repository, projectName, origina
     {prepareReason && !prepared && <p className="save-note">{gitLocalIssueHelp(prepareReason)}</p>}
     {review && prepared && <section className="version-review" aria-label="Review local Git initialization">
       <h4>Create an empty local repository</h4>
-      <p>Original project: <strong>{originalProjectName ?? 'a previously selected project'}</strong>. Its folder passed the native absence check. Git will start on <code>{prepared.initialBranch}</code> with no commits, index or remote.</p>
+      <p>Project: <strong>{originalProjectName ?? 'a previously selected project'}</strong>. Its folder passed the native absence check. Git will start on <code>{prepared.initialBranch}</code> with no commits, index or remote.</p>
       <p>Only new Git metadata is added. Existing source files, unsaved changes and project settings are kept. Existing or newly appearing Git metadata is never replaced.</p>
       {reviewReason && <p className="review-caution" role="status">{gitLocalIssueHelp(reviewReason)}</p>}
       <label className="save-confirm-check"><input type="checkbox" checked={review.approved && reviewReason === null} disabled={reviewReason !== null}

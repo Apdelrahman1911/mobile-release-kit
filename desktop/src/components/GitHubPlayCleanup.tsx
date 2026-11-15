@@ -21,7 +21,7 @@ export function GitHubPlayCleanup({controller,state,compact=false,onShow}: {
   const original=op?.target.scope.repository??state.originalRepository;
   const prepareReason=controller.prepareReason(),dispatchReason=controller.dispatchReason();
   return <section className="card">
-    <SectionHeading title={compact?'Original hosted request':tag?'Bind an allocated future tag':'Clean up a previous Google Play draft'}
+    <SectionHeading title={compact?'Hosted request':tag?'Bind an allocated future tag':'Clean up a previous Google Play draft'}
       description={original?`Original repository: ${original}`:tag?'Create only the absent tag selected before reservation; candidate builds remain branch-triggered.':'For a draft left by a previous hosted candidate run. This does not publish a release.'}><Icon name="github" size={24}/></SectionHeading>
     {!state.native&&<p className="save-note">The native cleanup service is unavailable in this preview. No request will be sent.</p>}
     {state.uncertain&&<p className="review-caution" role="alert">The original request or permission response is unconfirmed. Keep this task and its records. Do not send it again. Check status, Stop the original request, or close its permission if available.</p>}
@@ -53,7 +53,7 @@ export function GitHubPlayCleanup({controller,state,compact=false,onShow}: {
         <h4>{shown.prepared.target.scope.repository}</h4>
         {isVersionTagCandidate(shown.prepared.candidate)&&<p>Future tag <code>{shown.prepared.candidate.futureTag}</code> → <code>{shown.prepared.sourceSha}</code>; reserved {shown.prepared.candidate.version.name} (build {shown.prepared.candidate.version.build}). The tag name is not a number parser and may trigger other automation.</p>}
         <p>Account: <strong>{shown.prepared.accountLogin}</strong> · Workflow branch: <strong>{shown.prepared.branch}</strong></p>
-        <p className="save-note">Original version {shown.prepared.candidate.baseVersion.name} · build {shown.prepared.candidate.baseVersion.build}. Review expires {shown.expiresAt}. Checking status does not extend it.</p>
+        <p className="save-note">Version {shown.prepared.candidate.baseVersion.name} · build {shown.prepared.candidate.baseVersion.build}. Review expires {shown.expiresAt}. Checking status does not extend it.</p>
         <p className="review-caution">{tag?'This sends one protected workflow request that may create the absent future tag. It does not build, sign, access a Store or move an existing tag.':'This sends one protected workflow request that may delete the retained Google Play draft. It does not reserve a version, build, sign or publish a release.'} <strong>Stopping cannot undo a sent request.</strong></p>
         <p className="review-caution">The workflow branch can change after this review. Repository writers can replace its workflow, and the actual run may use a different branch head. Only proceed if you trust this repository and its protected workflow.</p>
         {!consent&&!shown.agentAllowed&&<p className="review-caution">This is the retained original review, not current approval. Check the task or close the review; it cannot authorize another request.</p>}
@@ -78,7 +78,7 @@ export function GitHubPlayCleanup({controller,state,compact=false,onShow}: {
         <ProgressiveDisclosure title="Exact review details">
           <p>{shown.prepared.confirmation}</p>
           <dl className="summary-grid"><div><dt>Candidate</dt><dd><code>{shown.prepared.candidate.candidateId}</code></dd></div>
-            <div><dt>Original source</dt><dd><code>{shown.prepared.candidate.source.commit}</code></dd></div>
+            <div><dt>Source</dt><dd><code>{shown.prepared.candidate.source.commit}</code></dd></div>
             <div><dt>Reviewed workflow head</dt><dd><code>{shown.prepared.sourceSha}</code></dd></div>
             <div><dt>Account / repository IDs</dt><dd><code>{shown.prepared.target.scope.accountId} / {shown.prepared.target.scope.repositoryId}</code></dd></div></dl>
         </ProgressiveDisclosure>

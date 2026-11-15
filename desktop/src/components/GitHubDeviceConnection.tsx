@@ -1,7 +1,7 @@
 import { useId, useSyncExternalStore } from 'react';
 import type { GitHubDeviceConnectionController } from '../githubDeviceConnectionController.ts';
 import type { DevicePhase, DeviceReason } from '../githubDeviceConnectionProtocol.ts';
-const phases:Record<DevicePhase,string>={idle:'Browser sign-in',starting:'Requesting a device code',pending:'Waiting for your GitHub approval',checking:'Checking the same device code',connecting:'Verifying the GitHub account and repository',stopping:'Stopping the original login',settled:'Browser connection request finished',failed:'Browser connection request ended', 'cleanup-unknown':'Original login cleanup is unconfirmed'};
+const phases:Record<DevicePhase,string>={idle:'Browser sign-in',starting:'Requesting a device code',pending:'Waiting for your GitHub approval',checking:'Checking the same device code',connecting:'Verifying the GitHub account and repository',stopping:'Stopping the original login',settled:'Browser connection request finished',failed:'Browser connection request ended', 'cleanup-unknown':'Login cleanup is unconfirmed'};
 const reasons:Record<DeviceReason,string>={none:'', 'publisher-unconfigured':'The publisher has not configured its device-enabled GitHub OAuth App. Use the existing GitHub CLI account or token option.',
   'runtime-unavailable':'The installed device sign-in runtime is unavailable.',busy:'Finish the original request first.', 'target-changed':'The original app, repository or connection changed.',
   waiting:'Approval is still pending. Use the same code; wait for GitHub’s interval, then explicitly check again.', 'slow-down':'GitHub requested a longer interval. Keep the same code; do not start another login.',

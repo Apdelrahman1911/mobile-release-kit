@@ -58,7 +58,7 @@ export function ArtifactInspection({state,controller,projectName,onHelp,compact=
     {op&&op.phase!=='terminal'&&<button type="button" className="button secondary small" disabled={!controller.canCancel()} onClick={()=>controller.cancel()}>Cancel original inspection</button>}
     {compact&&onShow&&<button type="button" className="button secondary small" onClick={onShow}>Show in Artifacts</button>}
   </div>;
-  if(compact)return <section className="notice notice-warning" aria-label="Original artifact inspection owner"><div>
+  if(compact)return <section className="notice notice-warning" aria-label="Artifact inspection owner"><div>
     <strong>Artifact inspection owner retained</strong><p>{owner}</p>{controls}
     {state.pickerPending&&<p>Use Cancel in the original native file picker. Closing this view does not settle it.</p>}
   </div></section>;
@@ -80,7 +80,7 @@ export function ArtifactInspection({state,controller,projectName,onHelp,compact=
     <p className="save-note">IPA archives and debug symbols can be supported directories or packed ZIPs; symbols require the archive. No path is entered as text.</p>
     {selection&&<ul>{selection.items.map(item=><li key={item.selectionId}>{item.role}: <strong>{item.label}</strong> · {item.kind} · selected, not yet verified</li>)}</ul>}
     {state.pickerPending&&<p role="status">The original native picker or input probe is still active. Use the native panel’s Cancel; other actions stay disabled until original settlement.</p>}
-    <div role="group" aria-label="Original artifact inspection status">
+    <div role="group" aria-label="Artifact inspection status">
       <p>{state.status?artifactAvailabilityText[state.status.availability]:'Waiting for original native status.'}</p>
     </div>
     {!consent&&<><button type="button" className="button" disabled={prepareReason!==null} onClick={()=>void controller.prepare()}>Review artifact inspection</button>
@@ -96,7 +96,7 @@ export function ArtifactInspection({state,controller,projectName,onHelp,compact=
     </div>}
     {state.error&&<ErrorNotice error={state.error} title="No new artifact outcome confirmed"/>}
     {state.originalUnconfirmed&&<p role="status">The original action acknowledgement is unconfirmed. Check its status; do not repeat Start.</p>}
-    {op&&<div role="status"><strong>Original inspection: {op.phase}{op.outcome?` · ${op.outcome}`:''}</strong><p>{artifactReasonText[op.reason]}</p></div>}
+    {op&&<div role="status"><strong>Inspection: {op.phase}{op.outcome?` · ${op.outcome}`:''}</strong><p>{artifactReasonText[op.reason]}</p></div>}
     {owner&&<p className="review-caution">{owner}</p>}{controls}
     <button type="button" className="button secondary small" disabled={discardReason!==null||!selection||selection.phase==='idle'&&!op} onClick={()=>void controller.discard()}>Discard selection and review</button>
     <p className="save-note">Discard does not delete your files. It requires known original settlement. Unknown cleanup keeps the native owner and conflicting actions blocked.</p>

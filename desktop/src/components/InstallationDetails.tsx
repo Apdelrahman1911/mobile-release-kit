@@ -136,7 +136,7 @@ function InstallationPreparationPanel({ controller, enabled, onHelp }: {
     </div>
     {!enabled && <p className="save-note">Preparation is available only in a supported normal installed macOS app, not browser preview.</p>}
     {status && <div role="status" aria-live="polite">
-      <Badge>{status.phase === 'prepared' ? 'Original preparation settled · exit unconfirmed' : status.phase.replaceAll('-', ' ')}</Badge>
+      <Badge>{status.phase === 'prepared' ? 'Preparation settled · exit unconfirmed' : status.phase.replaceAll('-', ' ')}</Badge>
       <p>{INSTALLATION_PREPARATION_GUIDANCE[status.reason]}</p>
       {active && <p>Waiting for the original native helper operation and its cleanup. Changing screens does not cancel it or start another request.</p>}
       {status.phase === 'prepared' && <p>The native completion uses the normal Quit flow. If you cancel Quit, new work remains closed; the app does not automatically register the helper again.</p>}

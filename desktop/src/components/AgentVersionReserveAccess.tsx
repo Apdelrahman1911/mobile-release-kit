@@ -50,7 +50,7 @@ export function AgentVersionReserveAccess({ controller, check, compact = false }
         <dt>Running app service</dt><dd><code>{access.serviceInstance}</code></dd>
         <dt>Permission</dt><dd><code>{access.grantId}</code></dd>
         <dt>Reviewed choices</dt><dd><code>{access.reviewId}</code> · revision {access.reviewRevision}</dd>
-        {access.requestId && <><dt>Original request</dt><dd><code>{access.requestId}</code></dd></>}
+        {access.requestId && <><dt>Request</dt><dd><code>{access.requestId}</code></dd></>}
       </dl>}
       <p className="save-note">These are the original permission’s identifiers, not proof that another selected project is permitted or that a build or Store release is ready.</p>
     </details>}

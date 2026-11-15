@@ -12,7 +12,7 @@ export function AgentVersionEditAccess({controller}:{controller:ServiceVersionEd
       <button type="button" onClick={() => void controller.check()}>Check request</button></div>
     {a?.live && a.review && <><p>Only {a.review.name} · Build {a.review.build}, <code>{a.review.source}</code>. Use the installed CLI in this running Desktop session:</p>
       <pre><code>{`mrk version-edit-submit ${a.projectId} ${a.serviceInstance} ${a.grantId} ${a.review.original.sessionId} ${a.review.original.planToken} --reviewed --json`}</code></pre></>}
-    {a?.request && <p>Original request <code>{a.request.origin.requestId}</code>: {a.request.phase}; {a.request.settlement}. Cancel cannot undo a submitted Save. Never resend Apply after a lost response.</p>}
+    {a?.request && <p>Request <code>{a.request.origin.requestId}</code>: {a.request.phase}; {a.request.settlement}. Cancel cannot undo a submitted Save. Never resend Apply after a lost response.</p>}
     {state.issue && <p role="alert">{state.issue}</p>}
   </details>;
 }

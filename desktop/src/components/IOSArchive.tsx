@@ -64,7 +64,7 @@ export function IOSArchiveResultView({ state, operationProjectName = null }: { s
       <p>Candidate manifest SHA-256 <code>{candidate.candidateInputs.candidateSha256}</code>.</p>
       <p>Captured source commit <code>{candidate.candidateInputs.sourceCommit}</code> · tree <code>{candidate.candidateInputs.sourceTree}</code>.</p>
       <ul>{candidate.candidateInputs.files.map((file) => <li key={file.fileName}><code>{file.fileName}</code> · {file.bytes} bytes · SHA-256 <code>{file.sha256}</code></li>)}</ul>
-      <p>Original archive inventory SHA-256 <code>{candidate.candidateInputs.archive.sha256}</code>. The archive and IPA were not copied into a second candidate tree.</p>
+      <p>Archive inventory SHA-256 <code>{candidate.candidateInputs.archive.sha256}</code>. The archive and IPA were not copied into a second candidate tree.</p>
       <p>This original Create completed its required owner and checkpoint closes. The retained summary does not prove files remain unchanged or establish prior Create finality on restart. Review current inputs in Local release history before any later action. No Store readiness, symbol upload or publication is granted.</p>
     </div>}
     <UnsignedArchiveDetails state={state} />
@@ -166,7 +166,7 @@ export function IOSArchive({ state, controller, projectName, operationProjectNam
     </div>}
     {state.error && <ErrorNotice error={state.error} title="No new iOS archive outcome was confirmed" />}
     {state.originalUnconfirmed && <p className="review-caution" role="status">The original acknowledgement is unconfirmed. Do not repeat Start. Check original Status to cancel or settle that operation; it cannot create new consent.</p>}
-    {op && <div className="session-progress" role="status" aria-live="polite" aria-label="Original iOS archive status">
+    {op && <div className="session-progress" role="status" aria-live="polite" aria-label="IOS archive status">
       <UnsignedArchiveDetails state={state} />
       <div className="inline-heading"><h3>Archive status · {operationProjectName ?? op.context.projectId}</h3><Badge tone={op.phase === 'unknown' ? 'warning' : 'neutral'}>{phases[op.phase]}</Badge></div>
       {op.stage && <p>Reached stage: {stages[op.stage]}. A stage is not a completion percentage or proof that cleanup finished.</p>}
@@ -257,7 +257,7 @@ export function IOSRecovery({ state, controller, projectName, operationProjectNa
       {recovery.outcome && <p>Operation outcome: {recovery.outcome}. {recovery.context.recovery.action === 'inspect' && 'A complete inspection can still find pending state; it is not completed recovery.'}</p>}
       <p>{iosArchiveReasonText[recovery.reason]}</p>
     </div>}
-    {report && recovery && <div className="session-review" aria-label="Original native local recovery report">
+    {report && recovery && <div className="session-review" aria-label="Native local recovery report">
       {(['account', 'project'] as const).map((domain) => { const row = report[domain]; if (!row) return null;
         const actionReason = controller.recoveryReason(domain, recovery);
         return <div key={domain} role="group" aria-label={domain === 'account' ? 'Account signing recovery state' : 'Project build-input recovery state'}><h4>{domain === 'account' ? 'Account signing state' : 'Project build-input state'} · {row.status}</h4><p>{recoveryStates[row.status]}</p>

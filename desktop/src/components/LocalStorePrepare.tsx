@@ -11,7 +11,7 @@ export function LocalStorePrepare({ state, controller, compact = false, onCreden
   const ios = displayedRequest?.platform === 'ios';
   const stage = displayedRequest && 'stage' in displayedRequest && isLocalStoreStage(displayedRequest.stage) ? displayedRequest.stage : null;
   const target = stage ? localStoreStageLabel(stage,ios?'ios':'android') : ios ? 'TestFlight internal' : 'Play internal testing';
-  const displayedApplication = retained && state.historical ? 'Original retained candidate' : state.applicationId;
+  const displayedApplication = retained && state.historical ? 'Retained candidate' : state.applicationId;
   if (compact && !retained) return null;
   return <section className="card" aria-label="Prepare local Store release">
     <div className="inline-heading"><h2>Prepare Store release · This computer</h2>{compact && <button onClick={onShow}>Show preparation</button>}</div>

@@ -74,7 +74,7 @@ function Outcome({ owner }: { owner: VersionEditProjection }) {
   const result = normalVersionEditResult(owner);
   return <div className="notice notice-info" role={owner.phase === 'unknown' || owner.coreOutcome?.journal === 'recovery_required' ? 'alert' : 'status'}>
     <div><strong>{result === 'saved' ? 'Submitted version values saved' : result === 'unchanged' ? 'Submitted version values unchanged and rechecked' :
-      owner.phase === 'final' ? 'Original version operation settled — no success assumed' : owner.phase === 'unknown' ? 'Original version outcome or cleanup is unverified' : 'Original version operation: ' + owner.phase}</strong>
+      owner.phase === 'final' ? 'Version operation settled — no success assumed' : owner.phase === 'unknown' ? 'Version outcome or cleanup is unverified' : 'Version operation: ' + owner.phase}</strong>
       {owner.prepared && <p>Submitted review: {owner.prepared.view.values.name} · Build {owner.prepared.view.values.build} · <code>{owner.prepared.view.source}</code>.</p>}
       <p>Core effect: {owner.coreOutcome?.effect ?? 'not returned'}; journal: {owner.coreOutcome?.journal ?? 'not returned'}; native finality: {owner.nativeFinality}.
         {' '}Reason: {owner.coreOutcome?.reason ?? owner.nativeReason}.</p>
@@ -98,7 +98,7 @@ export function ReleaseVersionSave({ state, controller, onShowProject }: {
       <button type="button" className="button small secondary" disabled={!state.edit.attempt || state.edit.attempt.handled || state.edit.attempt.closeClaimed || owner?.phase === 'unknown'} onClick={() => controller.requestClose()}>
         {state.edit.attempt?.applyClaimed ? 'Request cancellation' : 'Close editor, keep draft'}</button>
       {projectId && <button type="button" className="button small secondary" onClick={() => onShowProject(projectId)}>View version draft / review</button>}</div>
-    {(state.edit.observationIssue || state.edit.integrityFailed || state.edit.generationLost) && <p role="alert">Original ownership is unverified. A later observer or missing reply cannot authorize another save.</p>}
+    {(state.edit.observationIssue || state.edit.integrityFailed || state.edit.generationLost) && <p role="alert">Ownership is unverified. A later observer or missing reply cannot authorize another save.</p>}
   </section>;
 }
 export function ReleaseVersionEditor({ state, controller, session, onSettings, onHelp, onShowProject, onGit }: {
@@ -132,7 +132,7 @@ export function ReleaseVersionEditor({ state, controller, session, onSettings, o
         <p>Saved keys: <code>{entry.original.nameKey}</code> and <code>{entry.original.buildKey}</code>.
           {entry.original.iosEnabled ? ' iOS marketing-version policy applies.' : ' iOS policy is disabled.'}</p>
         <p>{entry.original.values === null ? 'Observed absent: creation is explicit. The empty fields below are not detected values.' :
-          'Original values: ' + entry.original.values.name + ' · Build ' + entry.original.values.build + '. These may need policy correction.'}</p>
+          'Values: ' + entry.original.values.name + ' · Build ' + entry.original.values.build + '. These may need policy correction.'}</p>
         <code className="version-digest">Saved config: {entry.original.baseline.savedConfig.bytes} bytes · SHA256 {entry.original.baseline.savedConfig.sha256}</code>
         {entry.original.baseline.savedVersion.state === 'present' && <code className="version-digest">Saved source: {entry.original.baseline.savedVersion.bytes} bytes · SHA256 {entry.original.baseline.savedVersion.sha256}</code>}
       </div>
@@ -155,12 +155,12 @@ export function ReleaseVersionEditor({ state, controller, session, onSettings, o
       canApply={(value) => controller.canApplyRecovery(value)} onApply={(value) => controller.applyRecovery(value)} />
     <ReleaseVersionSave state={state} controller={controller} onShowProject={onShowProject} />
     {ownView && prepared && <><VersionReview view={prepared.view} />
-      <p>Original review time remaining: {Math.ceil(controller.remainingReviewMs() / 1000)} seconds. Later draft changes cannot retarget this review.</p>
+      <p>Review time remaining: {Math.ceil(controller.remainingReviewMs() / 1000)} seconds. Later draft changes cannot retarget this review.</p>
       <button type="button" className="button primary" disabled={!current || !controller.canApply(current)} onClick={() => { if (current) setConfirmation(current); }}>
         {versionNoOp(prepared.view) ? 'Confirm unchanged values…' : prepared.view.intent === 'create' ? 'Create version file…' : 'Save version values…'}</button></>}
     <details className="advanced-settings"><summary>Advanced: CLI version preparation</summary>
       <p>Use <code>mrk version-edit-prepare PROJECT_ID SERVICE_INSTANCE --manual NAME BUILD</code> or <code>--reserved RESERVATION_ID</code> for an existing saved version. Keep this project selected; missing or conflicting drafts are never discarded.</p>
-      {state.agentPreparation && <p>Original request <code>{state.agentPreparation.origin.requestId}</code>: {state.agentPreparation.phase}; {state.agentPreparation.settlement}. Preparation does not authorize Save.</p>}
+      {state.agentPreparation && <p>Request <code>{state.agentPreparation.origin.requestId}</code>: {state.agentPreparation.phase}; {state.agentPreparation.settlement}. Preparation does not authorize Save.</p>}
       {state.agentPreparationIssue && <p role="alert">{state.agentPreparationIssue}</p>}
       <button type="button" disabled={!state.agentPreparation || state.agentPreparation.settlement==='settled'} onClick={()=>controller.cancelPreparation()}>Cancel this preparation</button>
     </details>
