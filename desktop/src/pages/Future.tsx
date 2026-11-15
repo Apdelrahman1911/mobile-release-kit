@@ -98,7 +98,7 @@ export function Recovery({ projectRecovery, attention, choosingProject, onOpenPr
   onHelp: (help: HelpContent) => void;
 }) {
   return <>
-    <PageHeading eyebrow="RECOVERY" title="An interruption shouldn’t leave you guessing." description="Recovery must know what really happened, preserve original ownership, and never mistake partial success for a clean restart." />
+    <PageHeading eyebrow="RECOVER WORK" title="Check interrupted work safely" description="If a task stopped part-way, find out what actually happened before you try again. Nothing here repeats or undoes a step on its own." />
     {evidenceGuidance}
     {projectRecovery}
     {onOpenReleases && <section className="card"><SectionHeading title="Protected workflow request recovery" description="Reconcile an exact release request or prepare the core’s existing evidence-based same-step recovery. This is separate from local project recovery and does not prove Store state." /><button type="button" className="button secondary" onClick={onOpenReleases}>Open original release requests</button></section>}

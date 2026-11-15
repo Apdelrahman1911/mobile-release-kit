@@ -129,7 +129,7 @@ export function GitHub({ session, state, controller, loading, onReload, onNaviga
   const snapshotHelp = state.help?.inputs.find((entry) => entry.id === 'suppliedSnapshot');
   const attention = remoteTasks.filter((task) => task.needsAttention);
   return <>
-    <PageHeading eyebrow="GITHUB" title="Connect GitHub and prepare automation." description="Connect your account, review workflow files and choose which repository settings to apply. File changes and online actions have separate approvals. Nothing is published automatically." />
+    <PageHeading eyebrow="GITHUB" title="Connect GitHub" description="Connect your account, set up release workflows and see past runs. Each file change and online action asks for your approval. Nothing is published automatically." />
     {attention.length > 0 && <div className="notice notice-warning" role="status"><Icon name="info" /><div>
       <strong>GitHub tasks need your attention</strong><p>The original controls stay open below. Review their status before starting another task.</p>
       <ul>{attention.map((task) => <li key={task.id}><a href={`#github-task-${task.id}`}>{task.title}</a></li>)}</ul>

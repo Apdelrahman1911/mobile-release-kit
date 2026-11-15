@@ -70,7 +70,7 @@ export function Credentials({ catalog, state, controller, project, inputState, i
   };
   const credentials = inputState.help.credentials.filter((entry) => `${entry.name} ${entry.platform} ${entry.what}`.toLocaleLowerCase().includes(filter.toLocaleLowerCase()));
   return <>
-    <PageHeading eyebrow="CREDENTIALS & SIGNING" title="Use your existing signing files." description="Start with the files you already use. Importing, keeping a copy and assigning it to a release each need their own review." />
+    <PageHeading eyebrow="SIGNING & ACCOUNTS" title="Signing and Store accounts" description="Add the signing files and Store account keys you already use. Importing a file, keeping a copy and using it for a release each ask for your review." />
     <div className="notice notice-info"><Icon name="lock" /><div>
       <strong>Keep the key your app already uses</strong>
       <p>For an Android app update, use your existing upload key. Replacing it can prevent updates. Private files and passwords belong only in the supported controls below, never in project settings.</p>
