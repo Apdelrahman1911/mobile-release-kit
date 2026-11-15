@@ -10,6 +10,8 @@ from pathlib import Path
 import shutil
 import subprocess
 import sys
+import threading
+import time
 import urllib.request
 import build_windows_transaction as native
 import prepare_windows_msi as msi
@@ -69,6 +71,21 @@ def main():
   raw=subprocess.run(['powershell','-NoProfile','-Command','Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId,Name,CommandLine | ConvertTo-Json -Compress'],capture_output=True,timeout=120).stdout
   return {row['ProcessId']:row for row in json.loads(raw or b'[]')}
  before=processes()
+ # Runs 43661519964/43674399134: the MSVC compiler starts VCTIP.EXE (telemetry)
+ # and it outlives the compiler, holding the owned job until its deadline. The
+ # compiler reuses an already running instance, so start one OUTSIDE every
+ # owned job immediately before native C++ work and record it. The owned-job
+ # rule itself is unchanged.
+ def prestart_vctip(stage):
+  candidates=sorted(Path(vs['installationPath']).glob('VC/Tools/MSVC/*/bin/HostX64/x64/vctip.exe'))
+  chosen=[c for c in candidates if c.parent.parent.parent.parent.name.startswith(('14.3','14.4'))] or candidates
+  record={'stage':stage,'candidates':[str(c) for c in candidates],'started':None}
+  if chosen:
+   proc=subprocess.Popen([str(chosen[-1])],stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,creationflags=0x00000008|0x00000200)
+   time.sleep(2);record['started']={'path':str(chosen[-1]),'pid':proc.pid,'running':proc.poll() is None}
+  with (logs/'vctip-prestart.jsonl').open('a') as f:f.write(json.dumps(record)+'\n')
+ prestart_vctip('probe')
+ snapshot=threading.Timer(60,lambda:(logs/'toolchain-probe-during.json').write_text(json.dumps({'all':list(processes().values())},indent=1)+'\n'));snapshot.daemon=True;snapshot.start()
  try:
   run('native-toolchain-configure',native.configure_args(vs,toolprobe,toolprobe/'build'),cwd=out,timeout=180)
   run('native-toolchain-build',['cmake','--build',str(toolprobe/'build'),'--config','Release','--parallel','1'],cwd=out,timeout=180)
@@ -112,6 +129,7 @@ def main():
     'target':msi.TARGET,'manifestSha256':prepared['manifestSha256'],'protocolSha256':prepared['protocolSha256'],
     'sourceFiles':{p:hashlib.sha256((source/p).read_bytes()).hexdigest() for p in sorted(paths)},'files':files}
  binding=out/'binding.json';raw=(json.dumps(b,sort_keys=True,indent=2)+'\n').encode();binding.write_bytes(raw)
+ prestart_vctip('native-and-msi')
  run('native-and-msi',['python',str(source/'desktop/tools/build_windows_transaction.py'),'--source',str(source),'--inputs',str(inputs),'--binding',str(binding),'--binding-sha256',hashlib.sha256(raw).hexdigest(),'--output',str(out/'msi'),'--compile'],timeout=1200)
  # Builds may create ignored outputs, but cannot change any tracked source.
  msi.need(not git('status','--porcelain','--untracked-files=no'),'tracked source changed while building')
