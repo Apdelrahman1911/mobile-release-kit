@@ -54,6 +54,11 @@ jobs:
           if($same.Count -ne 1 -or [string]$same[0].id -cne $env:GITHUB_RUN_ID){throw 'Duplicate or ambiguous source run refused'}
           "REVIEWED_TREE=$tree" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           [ordered]@{schema=1;repository=$env:GITHUB_REPOSITORY;workflowSha=$env:GITHUB_WORKFLOW_SHA;runnerEnvironment=$env:RUNNER_ENVIRONMENT;sourceCommit=$env:GITHUB_SHA;sourceTree=$tree;runId=$env:GITHUB_RUN_ID;attempt=1;ref=$env:GITHUB_REF;event='push';workflow=$env:GITHUB_WORKFLOW_REF;duplicateGuard='PASS'} | ConvertTo-Json | Set-Content "$env:RUNNER_TEMP\mrk-source-run-binding.json"
+          # Disposable runner only: opt out of Visual Studio telemetry so the
+          # compiler does not leave VCTIP.EXE inside the owned build job
+          # (run 43661519964). Recorded, never applied to an owner machine.
+          foreach($key in 'HKLM:\SOFTWARE\Policies\Microsoft\VisualStudio\SQM','HKLM:\SOFTWARE\WOW6432Node\Microsoft\VSCommon\17.0\SQM','HKLM:\SOFTWARE\WOW6432Node\Microsoft\VSCommon\18.0\SQM'){New-Item -Path $key -Force | Out-Null;Set-ItemProperty -Path $key -Name OptIn -Value 0 -Type DWord}
+          Get-Process vctip -ErrorAction SilentlyContinue | Stop-Process -Force
           python -m pip install --disable-pip-version-check cmake==4.3.4
           if($LASTEXITCODE){throw 'Pinned CMake unavailable'}
           rustup toolchain install 1.98.0 --profile minimal --target x86_64-pc-windows-msvc
