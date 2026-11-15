@@ -434,6 +434,7 @@ impl AppleProfileSavePermit {
                         .is_ok_and(|binding| Arc::ptr_eq(&binding, &self.binding))
             })
     }
+    #[cfg(any(target_os="linux",target_os="macos"))]
     pub(crate) fn seal_profile(
         &mut self,
         reserved: &mut crate::vault_crypto::ReservedAppleProfile,
@@ -458,6 +459,7 @@ impl AppleProfileSavePermit {
             .receive
             .seal_profile(reserved, key, allowance, self.header)
     }
+    #[cfg(any(target_os="linux",target_os="macos"))]
     pub(crate) fn matches_authenticated_readback(
         &mut self,
         record: &crate::vault_crypto::AuthenticatedRecord,

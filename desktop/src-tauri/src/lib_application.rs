@@ -82,15 +82,15 @@ mod agent_candidate_build;
 mod agent_android_build;
 mod agent_build_requests;
 mod agent_ios_archive;
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg_attr(not(any(target_os="linux",target_os="macos")),path="version_allocation_windows_data.rs")]
 mod version_allocation_state_native;
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg_attr(not(any(target_os = "linux", target_os = "macos")), path="application_state_windows_closed.rs") ]
 mod application_state_store;
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg_attr(not(any(target_os = "linux", target_os = "macos")), path="apple_provisioning_windows_closed.rs") ]
 mod apple_provisioning_journal;
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg_attr(not(any(target_os = "linux", target_os = "macos")), path="application_service_windows_closed.rs") ]
 mod application_service;
-#[cfg(any(target_os = "linux", target_os = "macos"))]
+#[cfg_attr(not(any(target_os = "linux", target_os = "macos")), path="application_service_host_windows_closed.rs") ]
 mod application_service_host;
 #[cfg(any(target_os = "linux", target_os = "macos"))]
 mod installed_cli_ipc;
@@ -196,11 +196,9 @@ mod asset_session;
 mod vault_keyring_linux;
 #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
 mod vault_keyring_macos;
-#[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
 mod vault_format;
 #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
 mod vault_crypto;
-#[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
 pub(crate) mod credential_setup;
 #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
 mod vault_store;

@@ -1,7 +1,10 @@
 //! Fixed password/private-output codec for one original P12 packaging attempt.
 //! No native binding, trust, assignment, store writer or public byte getter.
 use super::{Fields, Kind};
+#[cfg(any(all(target_os="linux",target_arch="x86_64",target_env="gnu"),all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"))))]
 use crate::vault_crypto as crypto;
+#[cfg(not(any(all(target_os="linux",target_arch="x86_64",target_env="gnu"),all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64")))))]
+mod crypto { include!("vault_crypto_error_data.rs"); }
 use sha2::{Digest, Sha256};
 use zeroize::Zeroizing;
 
@@ -135,6 +138,7 @@ impl AppleP12Password {
 
     /// Cryptographic DATA only. The real native P12SavePermit lends the SAME
     /// original private frame after joined producer/policy/source validation.
+#[cfg(any(all(target_os="linux",target_arch="x86_64",target_env="gnu"),all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"))))]
     pub(crate) fn seal_new(
         &self,
         reserved: &mut crypto::ReservedAppleP12,
@@ -146,6 +150,7 @@ impl AppleP12Password {
         // by correcting a failed/private output argument after an attempt.
         reserved.seal_p12(key, &self.fields, private_body(frame), allowance)
     }
+#[cfg(any(all(target_os="linux",target_arch="x86_64",target_env="gnu"),all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"))))]
     pub(crate) fn matches_authenticated_readback(
         &self,
         record: &crypto::AuthenticatedRecord,

@@ -1848,6 +1848,9 @@ WINDOWS_RUNTIME_PUBLICATION_NATIVE_INERT = tuple("publication::tests::" + name f
     "original_unknown_retains_mutation_storage_without_close_retry",
     "even_the_first_descendant_grant_is_possibly_exposed_on_failure",
 ))
+WINDOWS_RUNTIME_PUBLICATION_NATIVE_INERT += (
+    "publication_exclusion::tests::exclusion_return_classification_is_not_wait_or_content_adoption",
+)
 WINDOWS_RUNTIME_PUBLICATION_APP_INERT = tuple("runtime_publication_windows::tests::" + name for name in (
     "no_argument_entry_and_literal_release_shape",
     "roster_refuses_extras_omissions_case_aliases_and_extra_directories",
@@ -1878,7 +1881,7 @@ WINDOWS_INSTALLED_SOURCES = tuple(sorted((
     *(WINDOWS_INSTALLED_CRATE + "/" + name for name in (
         "Cargo.toml", "Cargo.lock", "README.md", "src/lib.rs", "src/decode.rs",
         "src/security.rs", "src/tests.rs", "src/loader.rs", "src/hosted_tests.rs", "src/ordinary_owner.rs",
-        "src/qualification_result.rs", "src/qualification_fixture.rs", "src/publication.rs")),
+        "src/qualification_result.rs", "src/qualification_fixture.rs", "src/publication.rs", "src/publication_exclusion.rs")),
 )))
 WINDOWS_INSTALLED_NOT_VERIFIED = (
     "rust-1.88-minimum", "parent-application-cargo-graph-or-build", "production-resources-worker-joins",
@@ -16266,7 +16269,7 @@ def windows_installed_native_test_total(context: dict) -> int:
     require(not windows_normal_ui_profile(context), "UI prerequisite does not use the historical inert selector roster")
     names = ("tests.rs", "hosted_tests.rs", "ordinary_owner.rs", "qualification_fixture.rs")
     if windows_runtime_publication_profile(context):
-        names += ("publication.rs",)
+        names += ("publication.rs", "publication_exclusion.rs")
     total = 0
     for name in names:
         raw = windows_installed_bytes(Path(context["source"]) / WINDOWS_INSTALLED_CRATE / "src" / name, 512 << 10)

@@ -19,16 +19,7 @@ pub(crate) mod ipc_response_memory;
 mod history_policy;
 pub(crate) use history_policy::{HistoryLease, HISTORY_STARTUP_WORK};
 
-/// PRIVATE native preference binding, never accepted by the service protocol.
-/// Actual RegisteredRoot/held native descriptors remain operation authority.
-#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "camelCase", deny_unknown_fields)]
-pub(crate) struct ProjectBinding {
-    pub(crate) project_id: Id,
-    pub(crate) canonical_root: String,
-    pub(crate) device: u64,
-    pub(crate) inode: u64,
-}
+include!("application_project_binding_data.rs");
 #[derive(Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", deny_unknown_fields)]
 struct ProjectRecord { binding: ProjectBinding, observation: Option<p::SavedObservation> }

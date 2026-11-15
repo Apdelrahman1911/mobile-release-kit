@@ -6,7 +6,10 @@
 //! this bounded decoder. Its NEW/save/readback and durable journal ACK must
 //! succeed before a separate native handoff can disclose the public CSR.
 use super::{AssetError, Fields, Kind, Reason};
+#[cfg(any(all(target_os="linux",target_arch="x86_64",target_env="gnu"),all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"))))]
 use crate::vault_crypto as crypto;
+#[cfg(not(any(all(target_os="linux",target_arch="x86_64",target_env="gnu"),all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64")))))]
+mod crypto { include!("vault_crypto_error_data.rs"); }
 use der_07::pem::{Base64Decoder, Base64Encoder, Decoder, LineEnding};
 use serde_json::Value;
 use sha2::{Digest, Sha256};
@@ -268,6 +271,7 @@ impl AppleDistributionKeyFields {
             .checked_add(std::mem::size_of::<Self>())
     }
 
+#[cfg(any(all(target_os="linux",target_arch="x86_64",target_env="gnu"),all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"))))]
     pub(crate) fn matches_authenticated_readback(
         &self,
         record: &crypto::AuthenticatedRecord,
@@ -286,6 +290,7 @@ impl AppleDistributionKeyFields {
 
     /// Only the typed NEW reservation can select this fixed record/revision.
     /// This helper produces encrypted bytes, not a native save receipt.
+#[cfg(any(all(target_os="linux",target_arch="x86_64",target_env="gnu"),all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"))))]
     pub(crate) fn seal_new(
         &self,
         reserved: &mut crypto::ReservedAppleDistributionKey,
@@ -430,6 +435,7 @@ mod tests {
     }
 
     #[test]
+#[cfg(any(all(target_os="linux",target_arch="x86_64",target_env="gnu"),all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"))))]
     fn full_scalar_readback_comparison_is_not_hash_only() {
         let expected =
             AppleDistributionKeyFields::from_private_frame(&frame(&[0x30, 0], &[0x30, 0])).unwrap();

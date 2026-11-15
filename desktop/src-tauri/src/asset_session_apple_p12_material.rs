@@ -11,6 +11,8 @@ pub(crate) struct P12Material<'a> {
 }
 impl P12Material<'_> {
     pub(crate) fn parts(&self) -> Result<Vec<(&'static str, &[u8])>, BridgeError> {
+#[cfg(any(all(target_os="linux",target_arch="x86_64",target_env="gnu"),all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"))))]
+{
         let sources = self.material.key_sources.as_ref().ok_or_else(refused)?;
         let (p8, key, issuer) = apple_parts(&self.material.payload).ok_or_else(refused)?;
         let key_parts = sources
@@ -38,7 +40,12 @@ impl P12Material<'_> {
         }
         Ok(parts)
     }
+#[cfg(not(any(all(target_os="linux",target_arch="x86_64",target_env="gnu"),all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64")))))]
+{Err(refused())}
+}
     pub(crate) fn header(&self) -> Result<Vec<u8>, BridgeError> {
+#[cfg(any(all(target_os="linux",target_arch="x86_64",target_env="gnu"),all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"))))]
+{
         let parts = self.parts()?;
         #[derive(serde::Serialize)]
         struct Row {
@@ -81,12 +88,22 @@ impl P12Material<'_> {
         }
         Ok(header)
     }
+#[cfg(not(any(all(target_os="linux",target_arch="x86_64",target_env="gnu"),all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64")))))]
+{Err(refused())}
+}
 }
 impl SelectedStoreMaterial {
     pub(in crate::asset_session::store_material) fn p12_material(&self) -> bool {
+#[cfg(any(all(target_os="linux",target_arch="x86_64",target_env="gnu"),all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"))))]
+{
         matches!(&self.command,Some(StoreCommand::Provisioning(context)) if context.mode.p12())
     }
+#[cfg(not(any(all(target_os="linux",target_arch="x86_64",target_env="gnu"),all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64")))))]
+{false}
+}
     pub(crate) fn p12_input(&self) -> Result<Option<P12Material<'_>>, BridgeError> {
+#[cfg(any(all(target_os="linux",target_arch="x86_64",target_env="gnu"),all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"))))]
+{
         let Some(StoreCommand::Provisioning(context)) = &self.command else {
             return Ok(None);
         };
@@ -109,4 +126,7 @@ impl SelectedStoreMaterial {
             save: context.mode == provisioning::Mode::P12Save,
         }))
     }
+#[cfg(not(any(all(target_os="linux",target_arch="x86_64",target_env="gnu"),all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64")))))]
+{Err(refused())}
+}
 }

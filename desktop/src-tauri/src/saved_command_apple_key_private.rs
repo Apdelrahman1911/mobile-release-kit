@@ -205,6 +205,7 @@ impl ReceiveBook {
                         || b.state == ReaderState::Returned && b.eof && b.closed && b.terminal)
             })
     }
+    #[cfg(any(target_os="linux",target_os="macos"))]
     pub(super) fn seal_key(
         &self,
         reserved: &mut crate::vault_crypto::ReservedAppleDistributionKey,
@@ -225,6 +226,7 @@ impl ReceiveBook {
             .ok_or(Error::Authentication)?
             .seal_new(reserved, key, allowance)
     }
+    #[cfg(any(target_os="linux",target_os="macos"))]
     pub(super) fn matches_readback(
         &self,
         record: &crate::vault_crypto::AuthenticatedRecord,

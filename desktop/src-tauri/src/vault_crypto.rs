@@ -33,8 +33,7 @@ type WrappingKeyCandidate = crate::vault_keyring_macos::WrappingKeyCandidate;
 #[cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))]
 type WrappingKeyCandidate = mrk_windows_installed_native::vault_dpapi::KeyCandidate;
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum Error { Format, Authentication, Random, Bounds, Allocation }
+include!("vault_crypto_error_data.rs");
 type Result<T> = std::result::Result<T, Error>;
 impl From<format::Error> for Error {
     fn from(error: format::Error) -> Self {

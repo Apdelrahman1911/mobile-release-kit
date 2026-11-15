@@ -375,6 +375,7 @@ impl AppleP12SavePermit {
             && self.reservation.intent().destination == destination.descriptor()
             && self.reservation.intent().source_key == destination.source_reference()
     }
+    #[cfg(any(target_os="linux",target_os="macos"))]
     pub(crate) fn seal_p12(
         &mut self,
         reserved: &mut crate::vault_crypto::ReservedAppleP12,
@@ -403,6 +404,7 @@ impl AppleP12SavePermit {
             .ok_or(Error::Authentication)?
             .seal_p12(reserved, key, password, allowance, &self.output)
     }
+    #[cfg(any(target_os="linux",target_os="macos"))]
     pub(crate) fn matches_authenticated_readback(
         &mut self,
         record: &crate::vault_crypto::AuthenticatedRecord,

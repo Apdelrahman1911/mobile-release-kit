@@ -14,6 +14,8 @@ pub(super) fn borrow(
     registration: u32,
     root: &asset_source::RegisteredRoot,
 ) -> Result<Arc<SelectedStoreMaterial>, BridgeError> {
+#[cfg(any(all(target_os="linux",target_arch="x86_64",target_env="gnu"),all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"))))]
+{
     if !(context.mode.local_key() || context.mode == provisioning::Mode::KeyRecover || context.mode.certificate() || context.mode.p12()) || !context.valid() {
         return Err(refused());
     }
@@ -69,6 +71,9 @@ pub(super) fn borrow(
     if context.mode == provisioning::Mode::KeyRecover || context.mode.certificate() || context.mode.p12() { apple_parts(&result.payload).ok_or_else(refused)?; } else { result.parts()?; }
     Ok(result)
 }
+#[cfg(not(any(all(target_os="linux",target_arch="x86_64",target_env="gnu"),all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64")))))]
+{Err(refused())}
+}
 
 // This is a fixed borrow on the SAME original stdin writer, not another owner
 // or a reusable credential. Its sole strong key-payload reference is held
@@ -79,6 +84,8 @@ pub(crate) struct CertificateMaterial<'a> {
 }
 impl CertificateMaterial<'_> {
     pub(crate) fn parts(&self) -> Result<Vec<(&'static str, &[u8])>, BridgeError> {
+#[cfg(any(all(target_os="linux",target_arch="x86_64",target_env="gnu"),all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"))))]
+{
         let sources = self.material.key_sources.as_ref().ok_or_else(refused)?;
         let (p8,key,issuer) = apple_parts(&self.material.payload).ok_or_else(refused)?;
         let selected = sources.certificate_parts(&self.payload).map_err(|_| refused())?;
@@ -86,7 +93,12 @@ impl CertificateMaterial<'_> {
         values.extend([("asc-p8",p8),("asc-key-id",key),("asc-issuer-id",issuer)]);
         values.extend(selected); Ok(values)
     }
+#[cfg(not(any(all(target_os="linux",target_arch="x86_64",target_env="gnu"),all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64")))))]
+{Err(refused())}
+}
     pub(crate) fn header(&self) -> Result<Vec<u8>, BridgeError> {
+#[cfg(any(all(target_os="linux",target_arch="x86_64",target_env="gnu"),all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"))))]
+{
         let parts=self.parts()?;
         #[derive(Clone,Copy,serde::Serialize)] struct Row<'a>{bytes:usize,role:&'a str}
         #[derive(serde::Serialize)] struct Header<'a>{files:&'a [Row<'a>],#[serde(rename="schemaVersion")] schema_version:u8}
@@ -96,23 +108,43 @@ impl CertificateMaterial<'_> {
         serde_json::to_writer(&mut header,&Header{files:&rows,schema_version:1}).map_err(|_|refused())?;
         header.push(b'\n');if header.len()>1024{return Err(refused());}Ok(header)
     }
+#[cfg(not(any(all(target_os="linux",target_arch="x86_64",target_env="gnu"),all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64")))))]
+{Err(refused())}
+}
 }
 impl SelectedStoreMaterial {
-    pub(super) fn certificate_material(&self) -> bool { matches!(&self.command, Some(StoreCommand::Provisioning(context)) if context.mode == provisioning::Mode::KeyRecover || context.mode.certificate()) }
+    pub(super) fn certificate_material(&self) -> bool {
+#[cfg(any(all(target_os="linux",target_arch="x86_64",target_env="gnu"),all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"))))]
+{ matches!(&self.command, Some(StoreCommand::Provisioning(context)) if context.mode == provisioning::Mode::KeyRecover || context.mode.certificate()) }
+#[cfg(not(any(all(target_os="linux",target_arch="x86_64",target_env="gnu"),all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64")))))]
+{false}
+}
     pub(crate) fn certificate_input(&self) -> Result<Option<CertificateMaterial<'_>>, BridgeError> {
+#[cfg(any(all(target_os="linux",target_arch="x86_64",target_env="gnu"),all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"))))]
+{
         if !self.certificate_material() { return Ok(None); }
         let payload=self.key_sources.as_ref().and_then(|sources|sources.certificate_payload()).ok_or_else(refused)?;
         Ok(Some(CertificateMaterial { material:self,payload }))
     }
+#[cfg(not(any(all(target_os="linux",target_arch="x86_64",target_env="gnu"),all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64")))))]
+{Err(refused())}
+}
     pub(crate) fn key_sources(&self) -> Option<&Arc<AppleKeySources>> {
+#[cfg(any(all(target_os="linux",target_arch="x86_64",target_env="gnu"),all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"))))]
+{
         self.key_sources.as_ref()
     }
+#[cfg(not(any(all(target_os="linux",target_arch="x86_64",target_env="gnu"),all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64")))))]
+{None}
+}
     pub(super) fn key_current(
         &self,
         state: &DocumentState,
         registration: u32,
         root: &asset_source::RegisteredRoot,
     ) -> bool {
+#[cfg(any(all(target_os="linux",target_arch="x86_64",target_env="gnu"),all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"))))]
+{
         let Some(StoreCommand::Provisioning(context)) = &self.command else {
             return false;
         };
@@ -130,6 +162,9 @@ impl SelectedStoreMaterial {
             && Arc::ptr_eq(&self.native, sources.native())
             && apple_parts(&self.payload).is_some()
     }
+#[cfg(not(any(all(target_os="linux",target_arch="x86_64",target_env="gnu"),all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64")))))]
+{false}
+}
     pub(in crate::asset_session) fn key_preservation_current(
         &self,
         document: &DocumentBinding,
@@ -140,6 +175,8 @@ impl SelectedStoreMaterial {
         registration: u32,
         root: &asset_source::RegisteredRoot,
     ) -> bool {
+#[cfg(any(all(target_os="linux",target_arch="x86_64",target_env="gnu"),all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"))))]
+{
         context.mode == provisioning::Mode::KeyPrepare
             && self.provisioning_matches(context, registration, root)
             && self
@@ -154,6 +191,9 @@ impl SelectedStoreMaterial {
             })
             && apple_parts(&self.payload).is_some()
     }
+#[cfg(not(any(all(target_os="linux",target_arch="x86_64",target_env="gnu"),all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64")))))]
+{false}
+}
 }
 
 #[cfg(all(test, debug_assertions))]
