@@ -23,7 +23,9 @@ namespace {
 // Closed first-failure DATA only. Capture before unwinding/cleanup changes GLE.
 struct Failure {const char* phase="exception";unsigned predicate=0;const char* domain="exception";DWORD code=0;bool present=false;};
 thread_local Failure firstFailure;
-void clear_failure(){firstFailure=Failure{};}
+// Bounded printable copy of a failed publisher's own diagnostic output (DATA only).
+thread_local std::string childDiagnostic;
+void clear_failure(){firstFailure=Failure{};childDiagnostic.clear();}
 void 
 remember_failure(const char* phase,unsigned predicate,const char* domain,DWORD code){if(!firstFailure.present)firstFailure={phase,predicate,domain,code,true};}
 void 
@@ -42,6 +44,9 @@ void emit_failure(MSIHANDLE session) noexcept {
  if(length<0)return;DWORD bytes=static_cast<DWORD>(std::min<size_t>(static_cast<size_t>(length),sizeof(line)-2));line[bytes++]='\n';
  if(session){MSIHANDLE record=MsiCreateRecord(0);if(record){MsiRecordSetStringA(record,0,line);MsiProcessMessage(session,INSTALLMESSAGE_INFO,record);MsiCloseHandle(record);}}
  else{DWORD written=0;WriteFile(GetStdHandle(STD_ERROR_HANDLE),line,bytes,&written,nullptr);}
+ if(!childDiagnostic.empty())try{std::string extra="MRK_PUBLISHER_OUTPUT "+childDiagnostic+"\n";
+  if(session){MSIHANDLE record=MsiCreateRecord(0);if(record){MsiRecordSetStringA(record,0,extra.c_str());MsiProcessMessage(session,INSTALLMESSAGE_INFO,record);MsiCloseHandle(record);}}
+  else{DWORD written=0;WriteFile(GetStdHandle(STD_ERROR_HANDLE),extra.data(),DWORD(extra.size()),&written,nullptr);}}catch(...){}
 }
 struct Handle {
  HANDLE h=INVALID_HANDLE_VALUE;
@@ -242,15 +247,16 @@ need(previous==1);
  
 wait_need(WaitForSingleObject(process.h,120000),WAIT_OBJECT_0);DWORD exit=STILL_ACTIVE;
 win32_need(GetExitCodeProcess(process.h,&exit));
-need(exit==0);
- JOBOBJECT_BASIC_ACCOUNTING_INFORMATION account{};
+  JOBOBJECT_BASIC_ACCOUNTING_INFORMATION account{};
 win32_need(QueryInformationJobObject(job.h,JobObjectBasicAccountingInformation,&account,sizeof(account),nullptr));
 need(account.ActiveProcesses==0);
- std::string originalIdentities;std::array<char,4096> output{};
- while(true){DWORD count=0;if(!ReadFile(pipeRead.h,output.data(),DWORD(output.size()),&count,nullptr)){
+  std::string originalIdentities;std::array<char,4096> output{};
+  while(true){DWORD count=0;if(!ReadFile(pipeRead.h,output.data(),DWORD(output.size()),&count,nullptr)){
 last_error_need(ERROR_BROKEN_PIPE);break;}
 need(count>0 && originalIdentities.size()+count<4096);originalIdentities.append(output.data(),count);}
- pipeRead.settled();thread.settled();process.settled();job.settled();image.settled();settle(ancestors);return originalIdentities;
+  if(exit!=0){for(char ch:originalIdentities){if(childDiagnostic.size()>=480)break;childDiagnostic+=(ch>=0x20&&ch<0x7f)?ch:' ';}}
+checked(exit==0,__func__,__LINE__,"exit",exit);
+  pipeRead.settled();thread.settled();process.settled();job.settled();image.settled();settle(ancestors);return originalIdentities;
 }
 void stage_publication(Paths& p,std::vector<Handle>& roots,Lock& lock){
  unsigned char nonce[32];
