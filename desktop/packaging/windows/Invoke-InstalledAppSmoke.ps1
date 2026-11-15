@@ -31,6 +31,31 @@ function UiText($proc) {
   } catch { $names.Add('UIA-UNAVAILABLE: ' + $_.Exception.GetType().Name) }
   return ,$names.ToArray()
 }
+function AnswerQuit($proc, $label) {
+  # The shipped app always asks before quitting. Answer it like a user: OK.
+  $A = [System.Windows.Automation.AutomationElement]; $T = [System.Windows.Automation.TreeScope]
+  $byPid = New-Object System.Windows.Automation.PropertyCondition($A::ProcessIdProperty, $proc.Id)
+  $okCond = New-Object System.Windows.Automation.AndCondition(
+    (New-Object System.Windows.Automation.PropertyCondition($A::ControlTypeProperty, [System.Windows.Automation.ControlType]::Button)),
+    (New-Object System.Windows.Automation.PropertyCondition($A::NameProperty, 'OK')))
+  $deadline = [DateTime]::UtcNow.AddSeconds(20)
+  while (!$proc.HasExited -and [DateTime]::UtcNow -lt $deadline) {
+    try {
+      foreach ($w in $A::RootElement.FindAll($T::Children, $byPid)) {
+        $quit = $w.FindFirst($T::Subtree, (New-Object System.Windows.Automation.PropertyCondition($A::NameProperty, 'Quit and discard unsaved drafts?')))
+        if (!$quit) { continue }
+        $ok = $w.FindFirst($T::Descendants, $okCond)
+        if ($ok) {
+          Shot "$label-quit-confirmation"
+          $ok.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
+          return $true
+        }
+      }
+    } catch { }
+    Start-Sleep -Milliseconds 500; $proc.Refresh()
+  }
+  return $false
+}
 function Session($label) {
   $exe = $result.installedExecutable
   $p = Start-Process -FilePath $exe -PassThru
@@ -45,10 +70,13 @@ function Session($label) {
   $text | Set-Content (Join-Path $Evidence "$label-ui-text.txt") -Encoding utf8
   Step "$label-running" @{ pid = $p.Id; title = $p.MainWindowTitle; uiTextCount = $text.Count; workingSetBytes = $p.WorkingSet64 }
   $closed = $p.CloseMainWindow()
-  $exited = $p.WaitForExit(30000)
+  $answered = AnswerQuit $p $label
+  Step "$label-quit-confirmation" @{ shown = $answered; clickedOk = $answered }
+  $exited = $p.WaitForExit(60000)
   if (!$exited) { Shot "$label-close-pending"; $text2 = UiText $p; $text2 | Set-Content (Join-Path $Evidence "$label-close-ui-text.txt") -Encoding utf8 }
-  Step "$label-close" @{ closeMessageSent = $closed; exitedWithin30s = $exited; exitCode = $(if ($exited) { $p.ExitCode } else { $null }) }
-  if (!$exited) { $p.Kill(); throw "$label did not exit within 30 s after a normal close request" }
+  Step "$label-close" @{ closeMessageSent = $closed; exitedWithin60s = $exited; exitCode = $(if ($exited) { $p.ExitCode } else { $null }) }
+  if (!$exited) { $p.Kill(); throw "$label did not exit within 60 s after close and OK" }
+  if ($p.ExitCode -ne 0) { throw "$label exited with $($p.ExitCode) after quit" }
   $left = @(Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.Path -and $_.Path.StartsWith((Split-Path $exe), [StringComparison]::OrdinalIgnoreCase) })
   Step "$label-after-exit" @{ remainingProductProcesses = $left.Count }
 }
