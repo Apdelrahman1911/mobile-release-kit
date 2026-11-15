@@ -143,7 +143,11 @@ function AnswerQuit($proc, $label) {
   $deadline = [DateTime]::UtcNow.AddSeconds(20)
   while (!$proc.HasExited -and [DateTime]::UtcNow -lt $deadline) {
     try {
-      foreach ($w in $A::RootElement.FindAll($T::Children, $byPid)) {
+      # The owned quit dialog is exposed either as a top-level window of the
+      # process or under the main window (run 43737995092): search both.
+      $roots = @($A::RootElement.FindAll($T::Children, $byPid))
+      if ($proc.MainWindowHandle -ne 0) { try { $roots += $A::FromHandle($proc.MainWindowHandle) } catch { } }
+      foreach ($w in $roots) {
         $quit = $w.FindFirst($T::Subtree, (New-Object System.Windows.Automation.PropertyCondition($A::NameProperty, 'Quit and discard unsaved drafts?')))
         if (!$quit) { continue }
         $ok = $w.FindFirst($T::Descendants, $okCond)
