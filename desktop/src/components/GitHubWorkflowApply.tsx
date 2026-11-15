@@ -113,7 +113,10 @@ export function GitHubWorkflowApply({ state, controller, setup, projects, select
   useEffect(() => {
     if (recoveryConfirmation && (linked || !detailed || selectedId !== projectId || !canRecoverWorkflows(state, selected, recoveryConfirmation))) setRecoveryConfirmation(null);
   }, [state, selected, selectedId, projectId, detailed, recoveryConfirmation, linked]);
-  if (!detailed && !notice) return null;
+  // Outside the GitHub page, a bridge read problem with no workflow operation
+  // ever started (e.g. a closed platform at startup) is not activity. The
+  // GitHub page still shows it in full.
+  if (!detailed && (!notice || !owner && state.observationIssue === 'bridge' && !state.integrityFailed && !state.recoveryProjects.length)) return null;
   return <section className="card native-workflow-panel" aria-label="Local GitHub workflow files">
     <SectionHeading title={notice?.title ?? 'Local workflow files · separate native review'} description={project ? `Original local operation for ${project.project.name}. Configuration drafts remain separate and unsaved.` : 'Create absent, update canonical or preserve identical callers. Passive previews never supply Apply authority.'}>
       <HelpButton content={workflowApplyHelp} onHelp={onHelp} />
