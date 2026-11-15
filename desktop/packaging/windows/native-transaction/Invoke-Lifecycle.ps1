@@ -55,8 +55,13 @@ try {
  # SYSTEM/Admin write authority and ordinary consumer read/execute only.
  & icacls.exe $app /setowner '*S-1-5-18' /T /C
  if($LASTEXITCODE){throw 'owner setup failed'}
- & icacls.exe $app /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' '*S-1-5-32-545:(OI)(CI)RX' /T /C
+ # Protect only the root with inheritable SYSTEM/Admin full and Users RX, then let
+ # every child inherit. Per-file /inheritance:r with (OI)(CI) grants left files
+ # with an EMPTY DACL (no access even for SYSTEM).
+ & icacls.exe $app /inheritance:r /grant:r '*S-1-5-18:(OI)(CI)F' '*S-1-5-32-544:(OI)(CI)F' '*S-1-5-32-545:(OI)(CI)RX' /C
  if($LASTEXITCODE){throw 'ACL setup failed'}
+ & icacls.exe (Join-Path $app '*') /reset /T /C
+ if($LASTEXITCODE){throw 'ACL inheritance setup failed'}
  $test=Join-Path $Stage 'native-build\Release\MrkTransactionNativeTests.exe'
  function Invoke-Native([string]$Action,[int]$Expected=0){
   $previousPreference=$ErrorActionPreference;$ErrorActionPreference='Continue'

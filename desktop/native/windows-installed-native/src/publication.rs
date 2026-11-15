@@ -294,7 +294,10 @@ fn installer_facts(self, identity: TokenIdentity, token_type: u32, elevated: u32
     self.0.need(elevated == 1, C::Elevated)?;
     self.0.need(ui_access == 0, C::UiAccess)?;
     self.0.need(virtualization == 0, C::Virtualization)?;
-    self.0.need(restricted == 0, C::Restricted)?;
+    // Windows Installer starts deferred SYSTEM custom actions (and so this helper)
+    // with a filtered token. A filtered token can only do less, so a canonical
+    // TokenHasRestrictions value (0 or 1) is accepted; noncanonical values refuse.
+    self.0.need(restricted <= 1, C::Restricted)?;
     self.0.need(app_container == 0, C::AppContainer)?;
     self.0.need(user.len() <= BUFFER, C::UserBuffer)?;
     self.0.need(integrity.len() <= BUFFER, C::IntegrityBuffer)?;
@@ -1642,7 +1645,6 @@ mod tests {
                     if local_system { C::SystemElevation } else { C::AccountElevation }),
                 (S::TokenPrimary as u32, 1, elevation_type, 1, 0, 0, 0, C::UiAccess),
                 (S::TokenPrimary as u32, 1, elevation_type, 0, 1, 0, 0, C::Virtualization),
-                (S::TokenPrimary as u32, 1, elevation_type, 0, 0, 1, 0, C::Restricted),
                 (S::TokenPrimary as u32, 1, elevation_type, 0, 0, 0x100, 0, C::Restricted),
                 (S::TokenPrimary as u32, 1, elevation_type, 0, 0, 0x01000000, 0, C::Restricted),
                 (S::TokenPrimary as u32, 1, elevation_type, 0, 0, 0, 1, C::AppContainer),

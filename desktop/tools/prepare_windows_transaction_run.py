@@ -109,15 +109,18 @@ def main():
  run('npm-ci',['npm.cmd','ci','--ignore-scripts'],source/'desktop',600)
  run('frontend-build',['npm.cmd','run','build'],source/'desktop',600)
  manifest=str(source/'desktop/src-tauri/Cargo.toml')
+ # Hosted windows-2025 runners have 4 cores and 16 GiB; the jobs=1 limit applies
+ # to local Mac compiles only. Parallel rustc cuts the release compiles ~3x.
+ CARGO_JOBS=str(max(1,min(4,os.cpu_count() or 1)))
  # Actual release builds below perform typechecking and linking; no duplicate check-only build.
- run('publisher-data-tests',['cargo','test','--locked','--release','--jobs','1','--target',msi.TARGET,'--manifest-path',manifest,'--no-default-features','--features','windows-runtime-publisher','--lib','--','--nocapture'])
+ run('publisher-data-tests',['cargo','test','--locked','--release','--jobs',CARGO_JOBS,'--target',msi.TARGET,'--manifest-path',manifest,'--no-default-features','--features','windows-runtime-publisher','--lib','--','--nocapture'])
  run('shell-metadata',['cargo','metadata','--locked','--format-version','1','--filter-platform',msi.TARGET,'--manifest-path',manifest,'--no-default-features','--features','desktop-shell,custom-protocol'])
  selected={}
  for role,binary,features in [('publisher',msi.PUBLISHER.removesuffix('.exe'),'windows-runtime-publisher'),('shell',msi.SHELL.removesuffix('.exe'),'desktop-shell,custom-protocol')]:
   # Hosted release compile allowance: publisher measured 909.8 s (43037225823);
   # full shell check alone measured 1132.3 s (43030604535), so its optimized
   # release build receives a larger bounded deadline. Output/job limits unchanged.
-  run(role+'-compile',['cargo','build','--locked','--release','--jobs','1','--target',msi.TARGET,'--manifest-path',manifest,'--no-default-features','--features',features,'--bin',binary,'--message-format=json-render-diagnostics'],timeout=1800 if role=='publisher' else 5400)
+  run(role+'-compile',['cargo','build','--locked','--release','--jobs',CARGO_JOBS,'--target',msi.TARGET,'--manifest-path',manifest,'--no-default-features','--features',features,'--bin',binary,'--message-format=json-render-diagnostics'],timeout=1800 if role=='publisher' else 5400)
   selected[role]=compiler_evidence.selected_artifact((logs/(role+'-compile.stdout')).read_bytes(),role=role,source=source,output=out)
  compiler_evidence.retain_normal(source,out,selected['shell'])
  inputs=out/'inputs';inputs.mkdir();shutil.copytree(runtime,inputs/'runtime')
