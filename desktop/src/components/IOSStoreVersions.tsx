@@ -24,7 +24,7 @@ export function IOSStoreVersions({ state, controller, compact = false, onCredent
   const result = op.result?.scope === IOS_VERSIONS_SCOPE ? op.result : null;
   const summary = result?.currentVersions && 'coverage' in result.currentVersions && result.currentVersions.coverage === IOS_VERSIONS_COVERAGE ? result.currentVersions : null, copy = summary ? iosVersionDescriptions[summary.observation] : null;
   return <section className="card" aria-label="Current App Store versions">
-    <div className="inline-heading"><h2>Current App Store versions · This Mac</h2>{compact && <button onClick={onShow}>Show check</button>}</div>
+    <div className="inline-heading"><h2>Current App Store versions · This computer</h2>{compact && <button onClick={onShow}>Show check</button>}</div>
     {!compact && <>
       <p>Read the current iOS records for your saved App Store app with the API key assigned in Credentials. No GitHub connection is needed for this check.</p>
       <p><strong>Read only:</strong> no upload, version-file edit, signing, testing-group change or release. Checking does not reserve a number or turn on version automation.</p>

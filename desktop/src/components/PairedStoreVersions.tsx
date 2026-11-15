@@ -13,7 +13,7 @@ export function PairedStoreVersions({ state, controller, compact = false, onCred
   const historical = state.historical || state.platform !== 'both';
   if (compact && (!op || !retained)) return null;
   return <section className="card" aria-label="Shared Android and iOS current versions">
-    <div className="inline-heading"><h2>Shared Android + iOS versions · This Mac</h2>{compact && <button onClick={onShow}>Show original check</button>}</div>
+    <div className="inline-heading"><h2>Shared Android + iOS versions · This computer</h2>{compact && <button onClick={onShow}>Show original check</button>}</div>
     {!compact && <>
       <p>For one saved version source used by both apps, check their current visible versions together. Apple is read first; Google is contacted only if that inventory is complete and supported.</p>
       <p>In Credentials choose <strong>Use shared-version credentials</strong>, then assess and assign both the Google service-account JSON and the App Store Connect P8 with its Key ID and Issuer ID. Both assignments must remain in that same context.</p>

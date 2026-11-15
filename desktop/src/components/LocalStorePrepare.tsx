@@ -14,12 +14,12 @@ export function LocalStorePrepare({ state, controller, compact = false, onCreden
   const displayedApplication = retained && state.historical ? 'Original retained candidate' : state.applicationId;
   if (compact && !retained) return null;
   return <section className="card" aria-label="Prepare local Store release">
-    <div className="inline-heading"><h2>Prepare Store release · This Mac</h2>{compact && <button onClick={onShow}>Show preparation</button>}</div>
+    <div className="inline-heading"><h2>Prepare Store release · This computer</h2>{compact && <button onClick={onShow}>Show preparation</button>}</div>
     {!compact && <>
       <p>Check your already-built Android or iOS candidate against its Store and save a local release plan. Preparation does not upload the app or publish a release.</p>
       <details><summary>Help: what do I need before preparing?</summary>
         <p>Enroll this project, create candidate inputs, then choose the matching platform and Review inputs in Release history. Use the same saved version and unchanged project. The application keeps the bundle in your project; you do not need to copy or register its files.</p>
-        <p>In Credentials choose This Mac → the matching platform → Candidate → Store (or Full), then keep and assign the Store credential. Android requires a Google service-account JSON with app access in Play Console. iOS requires an App Store Connect P8, Key ID and Issuer ID with access to the configured app.</p>
+        <p>In Credentials choose This computer → the matching platform → Candidate → Store (or Full), then keep and assign the Store credential. Android requires a Google service-account JSON with app access in Play Console. iOS requires an App Store Connect P8, Key ID and Issuer ID with access to the configured app.</p>
         <p>Get Google JSON from Google Cloud Console → IAM &amp; Admin → Service Accounts → Keys. Get the App Store Connect API key from Users and Access → Integrations → App Store Connect API. Keep these private files and identifiers out of Git and GitHub.</p>
         <p>To move an uploaded build forward, review the latest successful execution receipt in Release history and select External testing or Production in Credentials. Assign credentials for that exact stage. iOS also needs an Apple review contact, an operation commitment key, and a demo login if the saved configuration requires it. These are managed in Credentials with field help; none belong in Git. Production reuses an external release available to testers and never enables public release automatically.</p>
         <p>Incorrect credentials, permissions, version or candidate files cause preparation to refuse; they never trigger an automatic release.</p>

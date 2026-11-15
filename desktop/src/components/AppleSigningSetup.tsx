@@ -57,7 +57,7 @@ export function AppleSigningSetup({ controller, state, onSigningCredentials, onC
       {state.profileReconcileReason && <p className="save-note">{state.profileReconcileReason}</p>}
     </div>}
     <details><summary>What is checked and saved</summary>
-      <p>The check uses the current encrypted P12/password and API key in the dedicated This Mac · iOS · Candidate · Set up Apple signing context. A previous Store or Signing assignment is not reused as permission.</p>
+      <p>The check uses the current encrypted P12/password and API key in the dedicated This computer · iOS · Candidate · Set up Apple signing context. A previous Store or Signing assignment is not reused as permission.</p>
       <p>Complete Apple records, the exact certificate and private-key public key, offline certificate policy, and the authenticated profile must agree. Profile saving is separate from account requests and requires its own confirmed encrypted write and readback. A returned download alone is not a saved or assigned credential.</p>
       <p>The same original operation retains its deadlines, private inputs, journal and cleanup. A cancelled or uncertain result stays recorded; this view cannot clear it. New-key/CSR generation and certificate issuance are not part of this operation.</p>
       {state.savedProfile && <p>Saved record: <code>{state.savedProfile.recordId}</code> · revision {state.savedProfile.revisionCounter}. This historical reference is not a current assignment or signing approval.</p>}

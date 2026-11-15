@@ -74,7 +74,7 @@ export function AppleBundleRegistration({ controller, state, onCredentials, onPr
       <button onClick={onCredentials}>Open local credentials</button>
     </div>
     {state.reviewReason && <p className="save-note">{state.reviewReason}</p>}
-    {!state.ios && <p className="save-note">Select This Mac → iOS. Earlier operation status and cancellation remain available below.</p>}
+    {!state.ios && <p className="save-note">Select This computer → iOS. Earlier operation status and cancellation remain available below.</p>}
     <details open={!!state.reviewReference || state.consent?.mode === 'register'}>
       <summary>Register only a new application</summary>
       <p>Existing apps keep their store identity. A not-returned result is not permission to change or replace it. The native owner also checks retained release continuity and the issuer-wide unresolved-attempt journal.</p>

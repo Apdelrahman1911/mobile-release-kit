@@ -40,7 +40,7 @@ export function AppleProvisioningProfiles({ state, controller, compact = false, 
   const result = op.result?.scope === APPLE_PROFILE_SCOPE ? op.result : null;
   const summary = result?.profileReuse, copy = summary ? descriptions[summary.observation] : null;
   return <section className="card" aria-label="Existing App Store profile metadata check">
-    <div className="inline-heading"><h2>Existing profile metadata · This Mac</h2>{compact && <button onClick={onShow}>Show check</button>}</div>
+    <div className="inline-heading"><h2>Existing profile metadata · This computer</h2>{compact && <button onClick={onShow}>Show check</button>}</div>
     {!compact && <>
       <p>Reuse first: look for App Store profile metadata related to the saved iOS Bundle ID. Uses the assigned App Store Connect team key and the existing local Store check owner.</p>
       <p><strong>Metadata only:</strong> no profile/certificate content or private signing key is read; no creation, replacement, revocation, assignment, build or release. This is not the account’s complete certificate inventory.</p>

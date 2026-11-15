@@ -78,7 +78,7 @@ function storeStep(c: RehearsalContext): RehearsalStep {
   const platform = c.resume.platform, s = c.store, op = s.status?.operation;
   const title = platform === 'ios' ? 'App Store Connect' : 'Google Play';
   const result: RehearsalStep = { id: 'store', title: `Check ${title} access (optional)`, status: 'not-checked',
-    summary: `Only needed for later Store work. Use your existing ${platform === 'ios' ? 'App Store Connect P8 and matching Key ID / Issuer ID' : 'Google service-account JSON'} in Credentials → This Mac → ${platform === 'ios' ? 'iOS' : 'Android'} → Store. This is separate from your signing key.`,
+    summary: `Only needed for later Store work. Use your existing ${platform === 'ios' ? 'App Store Connect P8 and matching Key ID / Issuer ID' : 'Google service-account JSON'} in Credentials → This computer → ${platform === 'ios' ? 'iOS' : 'Android'} → Store. This is separate from your signing key.`,
     label: c.storeReason ? 'Review Store check requirements' : 'Open the separate access check', action: show('store-access'), reason: c.storeReason };
   // Only the existing ordinary access query counts here. Bundle/profile and
   // single/paired version inventories are different observations on this owner.
