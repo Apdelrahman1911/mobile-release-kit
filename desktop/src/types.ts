@@ -490,4 +490,4 @@ export interface DesktopApi extends LocalStoreReconcileApi, LocalStoreExecuteApi
   subscribeConfigEdit(onStatus: (status: unknown) => void): Promise<() => void>;
 }
 
-export type Page = 'dashboard' | 'settings' | 'environment' | 'credentials' | 'metadata' | 'github' | 'releases' | 'artifacts' | 'recovery';
+export type Page = 'dashboard' | 'settings' | 'environment' | 'credentials' | 'metadata' | 'github' | 'releases' | 'artifacts' | 'recovery' | 'automation';
