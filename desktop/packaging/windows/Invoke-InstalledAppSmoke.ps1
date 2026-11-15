@@ -133,33 +133,53 @@ function UiText($proc) {
   } catch { $names.Add('UIA-UNAVAILABLE: ' + $_.Exception.GetType().Name) }
   return ,$names.ToArray()
 }
+Add-Type -TypeDefinition @'
+using System; using System.Runtime.InteropServices; using System.Text;
+public static class MrkQuitDialog {
+  delegate bool EnumProc(IntPtr h, IntPtr l);
+  [DllImport("user32")] static extern bool EnumWindows(EnumProc f, IntPtr l);
+  [DllImport("user32")] static extern uint GetWindowThreadProcessId(IntPtr h, out uint pid);
+  [DllImport("user32")] static extern bool IsWindowVisible(IntPtr h);
+  [DllImport("user32", CharSet=CharSet.Unicode)] static extern int GetWindowTextW(IntPtr h, StringBuilder s, int n);
+  [DllImport("user32")] static extern IntPtr SendMessageTimeoutW(IntPtr h, uint msg, IntPtr w, IntPtr l, uint flags, uint ms, out IntPtr r);
+  [DllImport("user32")] static extern bool PostMessageW(IntPtr h, uint msg, IntPtr w, IntPtr l);
+  public static IntPtr Find(int pid, string title) {
+    IntPtr found = IntPtr.Zero;
+    EnumWindows((h, l) => { uint p; GetWindowThreadProcessId(h, out p);
+      if (p == (uint)pid && IsWindowVisible(h)) { var sb = new StringBuilder(256); GetWindowTextW(h, sb, 256);
+        if (sb.ToString() == title) { found = h; return false; } }
+      return true; }, IntPtr.Zero);
+    return found;
+  }
+  // TDM_CLICK_BUTTON (WM_USER+102) with IDOK, as a user pressing OK.
+  public static void ClickOk(IntPtr dialog) { IntPtr r; SendMessageTimeoutW(dialog, 0x0466, (IntPtr)1, IntPtr.Zero, 2, 5000, out r); }
+  // Fallback: WM_COMMAND IDOK.
+  public static void CommandOk(IntPtr dialog) { PostMessageW(dialog, 0x0111, (IntPtr)1, IntPtr.Zero); }
+}
+'@
 function AnswerQuit($proc, $label) {
   # The shipped app always asks before quitting. Answer it like a user: OK.
-  $A = [System.Windows.Automation.AutomationElement]; $T = [System.Windows.Automation.TreeScope]
-  $byPid = New-Object System.Windows.Automation.PropertyCondition($A::ProcessIdProperty, $proc.Id)
-  $okCond = New-Object System.Windows.Automation.AndCondition(
-    (New-Object System.Windows.Automation.PropertyCondition($A::ControlTypeProperty, [System.Windows.Automation.ControlType]::Button)),
-    (New-Object System.Windows.Automation.PropertyCondition($A::NameProperty, 'OK')))
-  $deadline = [DateTime]::UtcNow.AddSeconds(20)
+  # Found by its exact title and owning process (UI Automation did not
+  # expose it reliably across the user boundary: runs 43737995092/43740437976).
+  $notes = New-Object System.Collections.Generic.List[string]
+  $deadline = [DateTime]::UtcNow.AddSeconds(30)
   while (!$proc.HasExited -and [DateTime]::UtcNow -lt $deadline) {
     try {
-      # The owned quit dialog is exposed either as a top-level window of the
-      # process or under the main window (run 43737995092): search both.
-      $roots = @($A::RootElement.FindAll($T::Children, $byPid))
-      if ($proc.MainWindowHandle -ne 0) { try { $roots += $A::FromHandle($proc.MainWindowHandle) } catch { } }
-      foreach ($w in $roots) {
-        $quit = $w.FindFirst($T::Subtree, (New-Object System.Windows.Automation.PropertyCondition($A::NameProperty, 'Quit and discard unsaved drafts?')))
-        if (!$quit) { continue }
-        $ok = $w.FindFirst($T::Descendants, $okCond)
-        if ($ok) {
-          Shot "$label-quit-confirmation"
-          $ok.GetCurrentPattern([System.Windows.Automation.InvokePattern]::Pattern).Invoke()
-          return $true
+      $h = [MrkQuitDialog]::Find($proc.Id, 'Quit Mobile Release Kit?')
+      if ($h -ne [IntPtr]::Zero) {
+        Shot "$label-quit-confirmation"
+        [MrkQuitDialog]::ClickOk($h); $notes.Add('TDM_CLICK_BUTTON IDOK')
+        Start-Sleep -Seconds 2
+        if (!$proc.HasExited -and [MrkQuitDialog]::Find($proc.Id, 'Quit Mobile Release Kit?') -ne [IntPtr]::Zero) {
+          [MrkQuitDialog]::CommandOk($h); $notes.Add('WM_COMMAND IDOK')
         }
+        $script:QuitNotes = $notes -join '; '
+        return $true
       }
-    } catch { }
+    } catch { $notes.Add('error: ' + $_.Exception.Message) }
     Start-Sleep -Milliseconds 500; $proc.Refresh()
   }
+  $script:QuitNotes = $notes -join '; '
   return $false
 }
 function Session($label) {
@@ -177,7 +197,7 @@ function Session($label) {
   Step "$label-running" @{ pid = $p.Id; title = $p.MainWindowTitle; uiTextCount = $text.Count; workingSetBytes = $p.WorkingSet64 }
   $closed = $p.CloseMainWindow()
   $answered = AnswerQuit $p $label
-  Step "$label-quit-confirmation" @{ shown = $answered; clickedOk = $answered }
+  Step "$label-quit-confirmation" @{ shown = $answered; clickedOk = $answered; method = $script:QuitNotes }
   $exited = $p.WaitForExit(60000)
   if (!$exited) { Shot "$label-close-pending"; $text2 = UiText $p; $text2 | Set-Content (Join-Path $Evidence "$label-close-ui-text.txt") -Encoding utf8 }
   Step "$label-close" @{ closeMessageSent = $closed; exitedWithin60s = $exited; exitCode = $(if ($exited) { $p.ExitCode } else { $null }) }
