@@ -25,7 +25,7 @@ export function AndroidStoreVersions({ state, controller, compact = false, onCre
   const summary = result?.currentVersions && 'coverage' in result.currentVersions && result.currentVersions.coverage === ANDROID_VERSIONS_COVERAGE ? result.currentVersions : null;
   const copy = summary ? androidVersionDescriptions[summary.observation] : null;
   return <section className="card" aria-label="Current Google Play versions">
-    <div className="inline-heading"><h2>Current Play versions · This Mac</h2>{compact && <button onClick={onShow}>Show check</button>}</div>
+    <div className="inline-heading"><h2>Current Play versions · This computer</h2>{compact && <button onClick={onShow}>Show check</button>}</div>
     {!compact && <>
       <p>Read current version codes for your saved Android app using the Google service account assigned in Credentials.</p>
       <p><strong>No publishing, but not read-only:</strong> this creates one temporary Play edit, reads tracks, bundles and APKs, then attempts to delete that edit. No upload, track update, edit commit, signing or version-file change is made.</p>

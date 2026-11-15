@@ -182,7 +182,7 @@ export class AppleProvisioningController {
     if (family === 'certificate' && !witness) return 'Choose the current encrypted signing key and assign the App Store Connect P8 in Set up Apple signing. Unlock storage and save the app settings/version first. A previous saved-key result is not a current selection.';
     if (family === 'p12' && !witness) return 'Choose a current saved signing key above, unlock encrypted storage and assign the App Store Connect P8 in Set up Apple signing. To reuse a P12, assess and assign it in that same context first. Save the app settings and read its version.';
     if (family === 'profile' && !witness?.base.p12RecordId) return 'Choose Set up Apple signing, unlock encrypted storage, then assess and assign the existing P12/password and App Store Connect P8 in that context. Save the app settings and read its saved version first.';
-    if (!witness) return 'Select This Mac → iOS → Store (or Full), save the configuration, read its saved version and assign the original App Store Connect P8 with its Key ID and Issuer ID.';
+    if (!witness) return 'Select This computer → iOS → Store (or Full), save the configuration, read its saved version and assign the original App Store Connect P8 with its Key ID and Issuer ID.';
     if (!appleDisplayName(this.displayName)) return 'Enter an explicit Bundle ID display name (1–128 characters, no control characters).';
     return this.source.otherOperationReason();
   }

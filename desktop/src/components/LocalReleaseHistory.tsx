@@ -41,7 +41,7 @@ export function LocalReleaseHistory({ state, controller, compact = false, onShow
   const originalId = op?.context && 'stageOperationId' in op.context ? op.context.stageOperationId : op?.context.candidateOperationId;
   if (compact && !retained) return null;
   return <section className="card" aria-label="Local release history">
-    <div className="inline-heading"><h2>Release history · This Mac</h2>{compact && <button onClick={onShow}>Show history</button>}</div>
+    <div className="inline-heading"><h2>Release history · This computer</h2>{compact && <button onClick={onShow}>Show history</button>}</div>
     {!compact && <>
       <p>Keep a verifiable record of local release operations for the selected project. This is separate from GitHub history and never authorizes a build or Store release.</p>
       <details><summary>Help: what is enrollment, and where does the key come from?</summary>

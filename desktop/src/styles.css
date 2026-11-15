@@ -921,3 +921,9 @@ main details.card[open] > summary { margin-bottom: 12px; }
 .test-row:first-of-type { border-top: none; }
 .test-row h3 { margin-bottom: 2px; }
 @media (max-width: 720px) { .test-row { flex-direction: column; align-items: flex-start; } }
+/* Global activity: running work and alerts from any page, grouped and labelled. */
+.activity-region:empty { display: none; }
+.activity-region { margin-bottom: 18px; }
+.activity-region:not(:empty)::before { content: "Activity"; display: block; margin: 0 0 8px; font-size: 12px; font-weight: 650; letter-spacing: 1.2px; text-transform: uppercase; color: var(--muted); }
+.activity-region:not(:empty) { padding: 14px 16px 4px; border: 1px solid var(--line); border-radius: 10px; background: var(--subtle); }
+.activity-region > .card { box-shadow: none; }
