@@ -15,6 +15,23 @@ HOSTED_TOTAL_FLOOR=14*1024**3
 HOSTED_START_FREE=12*1024**3
 HOSTED_FREE_RESERVE=1024**3
 
+# Hosted CI parallelism (resource-aware). The 1-job/3 GiB limits are the local
+# Mac/workstation policy and stay the default everywhere else. On a GitHub-hosted
+# runner, jobs follow the real CPU count and memory (one job per 3 GiB, max 4),
+# and the non-shell group ceiling scales with them while a 1 GiB headroom floor
+# still stops any compiler group before the VM runs short of memory.
+HOSTED_MAX_JOBS=4
+HOSTED_GIB_PER_JOB=3
+def hosted_ci():
+    return (os.environ.get('GITHUB_ACTIONS')=='true' and os.environ.get('RUNNER_ENVIRONMENT')=='github-hosted'
+            and platform.system()=='Linux')
+def build_jobs():
+    if not hosted_ci(): return 1
+    total=memory_facts(Path('/proc/meminfo').read_text())['MemTotal']
+    return max(1,min(HOSTED_MAX_JOBS,os.cpu_count() or 1,total//(HOSTED_GIB_PER_JOB*1024**3)))
+def group_rss_limit():
+    return RSS_LIMIT if build_jobs()==1 else min(HOSTED_SHELL_RSS_LIMIT, RSS_LIMIT*build_jobs())
+
 def memory_facts(body):
     facts={}
     for line in body.splitlines():
@@ -45,13 +62,14 @@ def hosted_shell_memory(E):
     return HOSTED_SHELL_RSS_LIMIT
 
 def run(commands,D,E,env,*,hosted_shell=False):
-    rss_limit=RSS_LIMIT
+    rss_limit=group_rss_limit()
+    headroom=hosted_ci()
     if hosted_shell:
         assert len(commands)==1 and commands[0][0]=='shell-build'
         argv=commands[0][1]
         assert argv[1]=='build' and argv[-2:]==['--bin','mobile-release-kit-desktop']
         assert '--release' in argv and 'desktop-shell,custom-protocol' in argv
-        assert '--jobs' in argv and argv[argv.index('--jobs')+1]=='1'
+        assert '--jobs' in argv and argv[argv.index('--jobs')+1]==str(build_jobs())
         rss_limit=hosted_shell_memory(E)
     def clean(): pass
     def free():
@@ -96,7 +114,7 @@ def run(commands,D,E,env,*,hosted_shell=False):
                     rss = sum(row[3] * 1024 for row in rows)
                     peak = max(peak, rss)
                     available=None
-                    if hosted_shell:
+                    if hosted_shell or headroom:
                         available=memory_facts(Path('/proc/meminfo').read_text())['MemAvailable']
                     observations.append(dict(elapsedSeconds=now-started, processes=rows, groupRssBytes=rss, freeDiskBytes=free(),
                         availableMemoryBytes=available))

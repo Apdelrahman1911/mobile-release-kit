@@ -3,7 +3,7 @@ Pinned source inputs, original bounded commands, actual dependency census.
 """
 import argparse, fcntl, hashlib, json, os, platform, re, shutil, subprocess, tarfile, time
 from pathlib import Path
-from ubuntu_candidate_supervisor import run
+from ubuntu_candidate_supervisor import run, build_jobs
 import assemble_ubuntu_deb as A
 import cpython_static_inputs as I
 
@@ -168,16 +168,16 @@ def prepare(work,commit,tree):
   for name,key,program in [('zlib','zlibConfigure','sh'),('libffi','libffiConfigure','sh'),('openssl','opensslConfigure','perl')]:
    root=builds[name];command(name+'-configure',[program,'./Configure' if name=='openssl' else './configure',*flags(key)],root,e,cenv)
    extra=[config['opensslMakeAssignment']] if name=='openssl' else []
-   command(name+'-build',['make','-j1',*extra,*(['build_libs'] if name=='openssl' else [])],root,e,cenv,1800)
-   command(name+'-install',['make','-j1',*extra,'install_dev' if name=='openssl' else 'install'],root,e,cenv)
+   command(name+'-build',['make','-j'+str(build_jobs()),*extra,*(['build_libs'] if name=='openssl' else [])],root,e,cenv,1800)
+   command(name+'-install',['make','-j'+str(build_jobs()),*extra,'install_dev' if name=='openssl' else 'install'],root,e,cenv)
   py=builds['cpython'];copy(SOURCE/'desktop/tools/cpython_source_setup.local',py/'Modules/Setup.local')
   cenv.update(CPPFLAGS='-I'+str(deps/'include'),LDFLAGS='-L'+str(deps/'lib'),ZLIB_CFLAGS='-I'+str(deps/'include'),ZLIB_LIBS=str(deps/'lib/libz.a'),LIBFFI_CFLAGS='-I'+str(deps/'include'),LIBFFI_LIBS=str(deps/'lib/libffi.a'))
   for root in [py/'lib',py.parent/'lib']:
    root.mkdir(exist_ok=True)
    for name in I.SOURCE_LIBRARIES:copy(deps/'lib'/name,root/name)
   command('python-configure',['sh','./configure',*flags('pythonConfigure')],py,e,cenv)
-  command('builtin-archives',['make','-j1',*config['pythonMakeAssignments'],*I.SOURCE_ARCHIVE_TARGETS],py,e,cenv,900)
-  command('python-build',['make','-j1',*config['pythonMakeAssignments'],'python','platform','checksharedmods','build-details.json'],py,e,cenv,1800)
+  command('builtin-archives',['make','-j'+str(build_jobs()),*config['pythonMakeAssignments'],*I.SOURCE_ARCHIVE_TARGETS],py,e,cenv,900)
+  command('python-build',['make','-j'+str(build_jobs()),*config['pythonMakeAssignments'],'python','platform','checksharedmods','build-details.json'],py,e,cenv,1800)
  runtime=work/'runtime';runtime.mkdir()
  copy(py/'python',runtime/'python/bin/python3');os.chmod(runtime/'python/bin/python3',0o755)
  for name in I.SOURCE_LIBRARIES:copy(deps/'lib'/name,runtime/'python/lib'/name)

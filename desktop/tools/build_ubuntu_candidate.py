@@ -14,7 +14,7 @@ import shutil
 import subprocess
 import tomllib
 import assemble_ubuntu_deb as A
-from ubuntu_candidate_supervisor import run
+from ubuntu_candidate_supervisor import run, build_jobs, group_rss_limit
 
 
 def sha(p):
@@ -50,8 +50,8 @@ def execute(plan, work, lock):
     evidence = work/'evidence'; evidence.mkdir(mode=0o700)
     for n in ('home','tmp','compiled'): (work/n).mkdir(mode=0o700)
     env = dict(PATH='/usr/bin:/bin', HOME=str(work/'home'), TMPDIR=str(work/'tmp'),
-               LANG='C', LC_ALL='C', TZ='UTC', CI='true', CARGO_BUILD_JOBS='1',
-               RAYON_NUM_THREADS='1', CARGO_INCREMENTAL='0', RUSTC=tools['rustc']['path'],
+               LANG='C', LC_ALL='C', TZ='UTC', CI='true', CARGO_BUILD_JOBS=str(build_jobs()),
+               RAYON_NUM_THREADS=str(build_jobs()), CARGO_INCREMENTAL='0', RUSTC=tools['rustc']['path'],
                CARGO_PROFILE_DEV_DEBUG='0', CARGO_PROFILE_TEST_DEBUG='0',
                CARGO_HOME=plan['cargoHome'],
                MRK_BUNDLED_RUNTIME_MANIFEST_SHA256=config['manifest_sha256'],
@@ -73,14 +73,16 @@ def execute(plan, work, lock):
         # Only the enormous application package's optimizer is disabled, matching
         # the existing no-debuginfo dev compilation's memory-oriented codegen.
         # Publisher/other phases keep 3GiB; only the hosted shell can admit a fixed
-        # 5GiB ceiling after recording actual native memory and headroom. Jobs1 stays fixed.
+        # 5GiB ceiling after recording actual native memory and headroom. Jobs are 1
+        # locally; GitHub-hosted runners use build_jobs() (CPU/RAM-aware, max 4).
+        jobs=build_jobs()
         root_override='profile.release.package.mobile-release-kit-desktop.opt-level=0'
-        shared=['--offline','--locked','--jobs','1','--target','x86_64-unknown-linux-gnu','--no-default-features',
+        shared=['--offline','--locked','--jobs',str(jobs),'--target','x86_64-unknown-linux-gnu','--no-default-features',
                 '--config',root_override]
         (evidence/'requested-build-settings.json').write_text(json.dumps(dict(
             rootReleaseOverride=root_override,devDebug=0,testDebug=0,
             releaseCfg='unchanged',dependencyReleaseOptimization='unchanged',
-            jobs=1,defaultGroupRssLimitBytes=3*1024**3,hostedShellGroupRssLimitBytes=5*1024**3),indent=2)+'\n')
+            jobs=jobs,defaultGroupRssLimitBytes=group_rss_limit(),hostedShellGroupRssLimitBytes=5*1024**3),indent=2)+'\n')
         env['CARGO_TARGET_DIR']=str(work/'publisher-target')
         run([('publisher-build',[cargo,'build',*shared,'--release','--features','ubuntu-runtime-publisher','--bin','mrk-runtime-publish'],1800),
              ('publisher-tests',[cargo,'test',*shared,'--features','ubuntu-runtime-publisher','--lib','runtime_publication::','--','--test-threads=1'],1800),
