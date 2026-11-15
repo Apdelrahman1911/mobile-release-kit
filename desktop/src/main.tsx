@@ -2,6 +2,7 @@ import { Component } from 'react';
 import type { ErrorInfo, ReactNode } from 'react';
 import { createRoot } from 'react-dom/client';
 import { App } from './App.tsx';
+import './theme.css';
 import './styles.css';
 
 class Boundary extends Component<{ children: ReactNode }, { failed: boolean }> {
