@@ -197,7 +197,7 @@ import { Dashboard } from './pages/Dashboard.tsx';
 import { Environment } from './pages/Environment.tsx';
 import { Credentials } from './pages/Credentials.tsx';
 import { Metadata } from './pages/Metadata.tsx';
-import { Recovery, Releases } from './pages/Future.tsx';
+import { Recovery, Releases, revealReleaseSection } from './pages/Future.tsx';
 import { Artifacts } from './pages/Artifacts.tsx';
 import { GitHub } from './pages/GitHub.tsx';
 
@@ -1634,8 +1634,7 @@ export function App() {
     if (page !== 'releases' || releaseCheckFocus === null) return;
     const section = releaseCheckFocus === 'offline' ? offlineCheckSection.current
       : releaseCheckFocus === 'android-signing' ? androidSigningSection.current : storeAccessSection.current;
-    section?.focus({ preventScroll: true });
-    section?.scrollIntoView({ block: 'start' });
+    revealReleaseSection(section);
     setReleaseCheckFocus(null);
   }, [page, releaseCheckFocus]);
   const mode = api?.mode ?? 'unavailable';
@@ -2253,8 +2252,7 @@ export function App() {
     if (target === 'original-controls') { main.current?.focus({ preventScroll: true }); main.current?.scrollTo({ top: 0 }); return; }
     const ids = { 'local-checks': 'release-local-checks', 'android-build': 'release-android-build',
       'ios-build': 'release-ios-build', history: 'release-local-history', 'store-access': 'release-store-access' } as const;
-    const section = document.getElementById(ids[target]);
-    section?.focus({ preventScroll: true }); section?.scrollIntoView({ block: 'start' });
+    revealReleaseSection(document.getElementById(ids[target]));
   };
   const rehearsalAction = (action: RehearsalAction) => {
     if (action.kind === 'select-candidate') { selectRehearsalCandidate(action, rehearsalContext, showRehearsalTarget); return; }
@@ -2678,6 +2676,7 @@ export function App() {
                 <VersionEnrollmentPanel controller={versionEnrollment} /></> },
           ]} />}
         {page === 'releases' && <Releases onOpenGitHub={() => navigate('github')}
+          running={{ check: !!preflightBusy(), android: !!androidBusy(), ios: !!iosBusy(), store: !!(localHistoryBusy() ?? storeBusy()) }}
           rehearsal={<ReleaseRehearsal context={rehearsalContext()} onAction={rehearsalAction} />}
           storeNeedsAttention={!!(localHistoryBusy() ?? storeBusy()) || [localHistoryState, localStoreState, localStorePrepareState, localStoreExecuteState, localStoreReconcileState].some((state) => state.error !== null || state.status?.operation?.phase === 'terminal' && state.status.operation.outcome !== 'complete')}
           workflowNeedsAttention={githubReleaseOwnerReason(githubReleaseState) !== null || githubReleaseState.error !== null || githubRelease.currentPrepared() !== null}

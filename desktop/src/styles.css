@@ -890,3 +890,16 @@ main:focus { outline: none; }
 .version-raw pre code { var(--c-ffffff)-space: inherit; }
 .version-status .notice { margin-block: .5rem; }
 @media (max-width: 900px) { .version-values, .version-raw-grid { grid-template-columns: minmax(0, 1fr); } }
+
+/* Redesign: task tabs, navigation attention and Automation page. */
+.nav-attention { width: 8px; height: 8px; border-radius: 50%; background: var(--c-977135); flex-shrink: 0; }
+.task-tabs { display: flex; flex-wrap: wrap; gap: 6px; padding: 5px; margin: 4px 0 12px; border: 1px solid var(--line); border-radius: 10px; background: var(--c-ffffff); }
+.task-tab { display: inline-flex; align-items: center; gap: 8px; min-height: 38px; padding: 8px 14px; border: none; border-radius: 7px; background: transparent; color: var(--muted); font-size: 14.5px; font-weight: 550; }
+.task-tab:hover { color: var(--ink); background: var(--subtle); }
+.task-tab.active { color: var(--on-accent); background: var(--primary); }
+.task-tab-flag { font-size: 12px; font-weight: 600; padding: 2px 7px; border-radius: 999px; background: var(--c-eaf4f0); color: var(--primary); }
+.task-tab-flag.warning { background: var(--c-fffbf2); color: var(--c-977135); }
+.task-tab.active .task-tab-flag { background: var(--on-accent); color: var(--primary); }
+.task-summary { margin: 0 0 20px; font-size: 15px; color: var(--ink); }
+.release-panel[hidden] { display: none; }
+.automation-stack > * { margin-bottom: 22px; }
