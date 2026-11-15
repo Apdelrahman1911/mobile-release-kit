@@ -55,7 +55,7 @@ def main():
  (logs/'source-reader-probe.json').write_text(json.dumps(probe,indent=2,sort_keys=True)+'\n')
  refused=[k for k,v in probe['files'].items() if v!='ok']
  msi.need(not refused,'strict source reader refused before compile: '+'; '.join(k+' '+probe['files'][k] for k in refused[:5]))
- env=os.environ.copy();msi.need(not any(env.get(key) for key in ('RUSTC_WRAPPER','RUSTC_WORKSPACE_WRAPPER','RUSTFLAGS','CARGO_ENCODED_RUSTFLAGS','CMAKE_GENERATOR','CXX','CC','CL','_CL_')),'ambient compiler injection refused');env.update(CARGO_BUILD_JOBS='1',CARGO_HOME=str(out/'cargo'),CARGO_TARGET_DIR=str(out/'target'),MSBUILDDISABLENODEREUSE='1',DOTNET_CLI_USE_MSBUILD_SERVER='0',RUSTUP_TOOLCHAIN='1.98.0')
+ env=os.environ.copy();msi.need(not any(env.get(key) for key in ('RUSTC_WRAPPER','RUSTC_WORKSPACE_WRAPPER','RUSTFLAGS','CARGO_ENCODED_RUSTFLAGS','CMAKE_GENERATOR','CXX','CC','CL','_CL_')),'ambient compiler injection refused');env.update(CARGO_BUILD_JOBS='1',CARGO_HOME=str(out/'cargo'),CARGO_TARGET_DIR=str(out/'target'),MSBUILDDISABLENODEREUSE='1',VSCMD_SKIP_SENDTELEMETRY='1',DOTNET_CLI_USE_MSBUILD_SERVER='0',RUSTUP_TOOLCHAIN='1.98.0')
  def run(name,args,cwd=source,timeout=1800):
   return run_owned(name,args,cwd=cwd,env=env,logs=logs,timeout=timeout)
  # Early native toolchain check: same generator, toolset, SDK and strict flags
@@ -64,8 +64,13 @@ def main():
  toolprobe=out/'native-toolchain-probe';toolprobe.mkdir()
  (toolprobe/'CMakeLists.txt').write_text('cmake_minimum_required(VERSION 3.24)\nproject(MrkToolchainProbe LANGUAGES CXX)\nadd_library(MrkToolchainProbe SHARED probe.cpp)\ntarget_compile_features(MrkToolchainProbe PRIVATE cxx_std_17)\ntarget_compile_options(MrkToolchainProbe PRIVATE /W4 /WX /guard:cf /sdl)\ntarget_link_options(MrkToolchainProbe PRIVATE /guard:cf /DYNAMICBASE /NXCOMPAT)\nset_property(TARGET MrkToolchainProbe PROPERTY MSVC_RUNTIME_LIBRARY MultiThreaded)\n')
  (toolprobe/'probe.cpp').write_text('#include <windows.h>\nextern "C" __declspec(dllexport) DWORD MrkProbe(void) { return GetCurrentProcessId() != 0 ? 0u : 1u; }\n')
- run('native-toolchain-configure',native.configure_args(vs,toolprobe,toolprobe/'build'),cwd=out,timeout=600)
- run('native-toolchain-build',['cmake','--build',str(toolprobe/'build'),'--config','Release','--parallel','1'],cwd=out,timeout=600)
+ try:
+  run('native-toolchain-configure',native.configure_args(vs,toolprobe,toolprobe/'build'),cwd=out,timeout=180)
+  run('native-toolchain-build',['cmake','--build',str(toolprobe/'build'),'--config','Release','--parallel','1'],cwd=out,timeout=180)
+ except RuntimeError:
+  # Evidence only: which processes outlived the probe's owned command.
+  (logs/'toolchain-probe-processes.txt').write_bytes(subprocess.run(['tasklist','/v'],capture_output=True,timeout=60).stdout)
+  raise
  msi.need((toolprobe/'build/Release/MrkToolchainProbe.dll').is_file(),'native toolchain probe produced no DLL')
  archive=out/embedded.ZIP_NAME;request=urllib.request.Request(embedded.ZIP_URL,headers={'User-Agent':'MRK-disposable-native-validation/1'})
  with urllib.request.urlopen(request,timeout=60) as incoming,archive.open('xb') as target:

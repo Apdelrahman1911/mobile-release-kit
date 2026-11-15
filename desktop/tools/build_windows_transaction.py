@@ -95,6 +95,11 @@ def configure_args(vs, source, build, binding_directory=None):
     args = ['cmake', '-S', str(source), '-B', str(build), '-G', vs['generator'], '-A', 'x64']
     if vs['toolset']: args += ['-T', vs['toolset']]
     args.append('-DCMAKE_SYSTEM_VERSION=10.0.26100.0')
+    # Run 43659904217: configure finished in 10 s but its Debug try-compile
+    # (/Zi) started mspdbsrv.exe, which idles 600 s and kept the owned process
+    # tree alive past the deadline. Embedded (/Z7) debug info needs no PDB
+    # server. Release builds of the custom-action DLL use no debug-info flag.
+    args += ['-DCMAKE_POLICY_DEFAULT_CMP0141=NEW', '-DCMAKE_MSVC_DEBUG_INFORMATION_FORMAT=Embedded']
     if binding_directory is not None: args.append('-DMRK_BINDING_DIRECTORY=' + str(binding_directory))
     return args
 
