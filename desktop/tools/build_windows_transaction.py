@@ -64,6 +64,40 @@ def assembly(b):
     ET.indent(root)
     return ET.tostring(root,encoding='unicode',xml_declaration=True)+'\n'
 
+VS_GENERATORS = {17: 'Visual Studio 17 2022', 18: 'Visual Studio 18 2026'}
+
+def visual_studio():
+    """Select the hosted Visual Studio C++ installation (2022 or 2026 only).
+
+    Hosted windows-2025 images moved from Visual Studio 2022 to 2026 (run
+    43651087120). Keep the v143 toolset when it is installed; otherwise use
+    that installation's default toolset. The choice is recorded as evidence.
+    """
+    import os, re, subprocess
+    vswhere = Path(os.environ.get('ProgramFiles(x86)', r'C:\Program Files (x86)'))/'Microsoft Visual Studio/Installer/vswhere.exe'
+    prep.need(vswhere.is_file(), 'vswhere missing')
+    found = subprocess.run([str(vswhere), '-latest', '-products', '*', '-requires',
+                            'Microsoft.VisualStudio.Component.VC.Tools.x86.x64', '-format', 'json', '-utf8'],
+                           capture_output=True, timeout=60, check=True).stdout
+    rows = json.loads(found)
+    prep.need(isinstance(rows, list) and len(rows) == 1, 'exactly one Visual Studio C++ installation required')
+    version = str(rows[0].get('installationVersion', ''))
+    prep.need(re.fullmatch(r'\d+\.\d+\.\d+(\.\d+)?', version) is not None, 'Visual Studio version unreadable')
+    major = int(version.split('.')[0])
+    prep.need(major in VS_GENERATORS, 'unsupported Visual Studio major version: ' + version)
+    tools = Path(rows[0]['installationPath'])/'VC/Tools/MSVC'
+    msvc = sorted(p.name for p in tools.iterdir() if p.is_dir())
+    v143 = any(re.fullmatch(r'14\.(3\d|4\d)\.\d+', name) for name in msvc)
+    return {'generator': VS_GENERATORS[major], 'installationVersion': version,
+            'installationPath': rows[0]['installationPath'], 'msvc': msvc, 'toolset': 'v143' if v143 else None}
+
+def configure_args(vs, source, build, binding_directory=None):
+    args = ['cmake', '-S', str(source), '-B', str(build), '-G', vs['generator'], '-A', 'x64']
+    if vs['toolset']: args += ['-T', vs['toolset']]
+    args.append('-DCMAKE_SYSTEM_VERSION=10.0.26100.0')
+    if binding_directory is not None: args.append('-DMRK_BINDING_DIRECTORY=' + str(binding_directory))
+    return args
+
 def generate(source, inputs, binding, expected, output):
     b = prep.validate(source, inputs, binding, expected)
     prep.need(REQUIRED <= b['sourceFiles'].keys(), 'native source binding incomplete')
@@ -81,7 +115,8 @@ def main():
     if a.compile:
         import os
         def run(name,args,timeout=600,limit=32*1024*1024): return run_owned(name,args,cwd=out,env=os.environ.copy(),logs=out/'command-logs',timeout=timeout,limit=limit)
-        run('cmake-configure',['cmake','-S',str(src/NATIVE_SOURCE),'-B','native-build','-G','Visual Studio 17 2022','-A','x64','-T','v143','-DCMAKE_SYSTEM_VERSION=10.0.26100.0','-DMRK_BINDING_DIRECTORY='+str(out)])
+        vs=visual_studio(); (out/'visual-studio.json').write_text(json.dumps(vs,indent=2)+'\n')
+        run('cmake-configure',configure_args(vs,src/NATIVE_SOURCE,'native-build',out))
         run('cmake-build',['cmake','--build','native-build','--config','Release','--parallel','1'])
         import shutil
         shutil.copyfile(out/'native-build/Release/MrkInstallerTransaction.dll',out/'MrkInstallerTransaction.dll')
@@ -95,7 +130,7 @@ def main():
             version=(out/'command-logs'/('version-'+tool+'.stdout')).read_text()
             prep.need(len(version)<16384,'tool version output bound')
             toolchain[tool]['version']=version
-            expected={'cmake':'cmake version 3.31.6','wix':'4.0.6','python':'Python 3.14.7','cargo':'cargo 1.98.0','rustc':'rustc 1.98.0','node':'v24.20.0'}.get(tool)
+            expected={'cmake':'cmake version 4.3.4','wix':'4.0.6','python':'Python 3.14.7','cargo':'cargo 1.98.0','rustc':'rustc 1.98.0','node':'v24.20.0'}.get(tool)
             prep.need(expected is None or version.startswith(expected),'selected tool version differs: '+tool)
         compiler=list((out/'native-build/CMakeFiles').glob('*/CMakeCXXCompiler.cmake'))
         prep.need(len(compiler)==1,'unique native compiler receipt required')
