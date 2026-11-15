@@ -104,6 +104,7 @@ need(privileged || (!privateOnly && !(a->Mask&writes)));
  }
 }
 Handle open(const std::wstring& p,bool dir,bool priv=false,DWORD access=GENERIC_READ,bool ancestor=false){
+ if(!firstFailure.present){childDiagnostic="path=";for(wchar_t ch:p){if(childDiagnostic.size()>=480)break;childDiagnostic+=(ch>=0x20&&ch<0x7f)?char(ch):'?';}}
  Handle h(CreateFileW(p.c_str(),access|READ_CONTROL,FILE_SHARE_READ,nullptr,OPEN_EXISTING,FILE_FLAG_OPEN_REPARSE_POINT|(dir?FILE_FLAG_BACKUP_SEMANTICS:FILE_FLAG_SEQUENTIAL_SCAN),nullptr));
  
 win32_need(h.h!=INVALID_HANDLE_VALUE);BY_HANDLE_FILE_INFORMATION i{};
@@ -113,7 +114,7 @@ win32_need(GetFileInformationByHandle(h.h,&i));
 need(GetFileType(h.h)==FILE_TYPE_DISK && (i.dwFileAttributes&~allowed)==0);
 need(bool(i.dwFileAttributes&FILE_ATTRIBUTE_DIRECTORY)==dir);if(!dir)
 need(i.nNumberOfLinks==1);
- security(h.h,priv,dir,ancestor);return h;
+ security(h.h,priv,dir,ancestor);if(!firstFailure.present)childDiagnostic.clear();return h;
 }
 // Every ancestor remains held without write/delete sharing during the operation.
 void chain(const std::wstring& p,std::vector<Handle>& keep){
