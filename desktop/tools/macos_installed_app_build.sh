@@ -1,6 +1,18 @@
 set -euo pipefail
 cd desktop/src-tauri
 set -o noclobber
+# GitHub-hosted CI only: CPU/RAM-aware compiler parallelism (max 4 jobs, one
+# per 2 GiB). Local Mac builds keep --jobs 1 under the local resource policy.
+mrk_cargo_jobs=1
+if [[ "${GITHUB_ACTIONS-}" == true && "${RUNNER_ENVIRONMENT-}" == github-hosted ]]; then
+  mrk_ncpu=$(/usr/sbin/sysctl -n hw.ncpu)
+  mrk_mem_jobs=$(( $(/usr/sbin/sysctl -n hw.memsize) / (2 * 1024 * 1024 * 1024) ))
+  mrk_cargo_jobs=4
+  if (( mrk_ncpu < mrk_cargo_jobs )); then mrk_cargo_jobs=$mrk_ncpu; fi
+  if (( mrk_mem_jobs < mrk_cargo_jobs )); then mrk_cargo_jobs=$mrk_mem_jobs; fi
+  if (( mrk_cargo_jobs < 1 )); then mrk_cargo_jobs=1; fi
+fi
+printf 'MRK_MACOS_CARGO_JOBS=%s\n' "$mrk_cargo_jobs" >&2 2>/dev/null || :
 report_compiler_failure() {
   # Optional closed DATA only; raw compiler text and reporter failures stay local.
   local report
@@ -129,7 +141,7 @@ fi
 printf 'MRK_MACOS_BUILD_PHASE=remover-compile-begin\n' >&2 2>/dev/null || :
 set +e
 PATH="/Users/runner/.rustup/toolchains/${RUSTUP_TOOLCHAIN}-$MRK_MACOS_TARGET/bin:/usr/bin:/bin:/usr/sbin:/sbin" RUSTC="/Users/runner/.rustup/toolchains/${RUSTUP_TOOLCHAIN}-$MRK_MACOS_TARGET/bin/rustc" RUSTUP_TOOLCHAIN="$RUSTUP_TOOLCHAIN" RUSTUP_AUTO_INSTALL=0 CARGO_HOME=/Users/runner/.cargo RUSTUP_HOME=/Users/runner/.rustup CARGO_TARGET_DIR="$MRK_MACOS_WORK/remover-target" /usr/bin/env -u MRK_MACOS_INSTALL_INVENTORY_SHA256 DYLD_FALLBACK_LIBRARY_PATH="/Users/runner/.rustup/toolchains/${RUSTUP_TOOLCHAIN}-$MRK_MACOS_TARGET/lib" "/Users/runner/.rustup/toolchains/${RUSTUP_TOOLCHAIN}-$MRK_MACOS_TARGET/bin/cargo" build \
-  --locked --offline --release --jobs 1 --no-default-features --features "$remover_features" --bin mrk-macos-remove \
+  --locked --offline --release --jobs "$mrk_cargo_jobs" --no-default-features --features "$remover_features" --bin mrk-macos-remove \
   --target "$MRK_MACOS_TARGET" --message-format=json-render-diagnostics \
   > "$MRK_MACOS_WORK/remover-build.jsonl" 2> "$MRK_MACOS_WORK/remover-build.stderr"
 remover_status=$?
@@ -150,7 +162,7 @@ if [[ "$GITHUB_REF" == refs/heads/verify/desktop-macos-removal-lifecycle ]]; the
   # No key/signature/Installer execution and no target inventory substitution.
   set +e
   PATH="/Users/runner/.rustup/toolchains/${RUSTUP_TOOLCHAIN}-$MRK_MACOS_TARGET/bin:/usr/bin:/bin:/usr/sbin:/sbin" RUSTC="/Users/runner/.rustup/toolchains/${RUSTUP_TOOLCHAIN}-$MRK_MACOS_TARGET/bin/rustc" RUSTUP_TOOLCHAIN="$RUSTUP_TOOLCHAIN" RUSTUP_AUTO_INSTALL=0 CARGO_HOME=/Users/runner/.cargo RUSTUP_HOME=/Users/runner/.rustup CARGO_TARGET_DIR="$MRK_MACOS_WORK/removal-observer-target" /usr/bin/env -u MRK_MACOS_INSTALL_INVENTORY_SHA256 DYLD_FALLBACK_LIBRARY_PATH="/Users/runner/.rustup/toolchains/${RUSTUP_TOOLCHAIN}-$MRK_MACOS_TARGET/lib" "/Users/runner/.rustup/toolchains/${RUSTUP_TOOLCHAIN}-$MRK_MACOS_TARGET/bin/cargo" build \
-    --locked --offline --release --jobs 1 --no-default-features --features macos-installed-removal-observer --bin mrk-macos-remove \
+    --locked --offline --release --jobs "$mrk_cargo_jobs" --no-default-features --features macos-installed-removal-observer --bin mrk-macos-remove \
     --target "$MRK_MACOS_TARGET" --message-format=json-render-diagnostics \
     > "$MRK_MACOS_WORK/removal-observer-build.jsonl" 2> "$MRK_MACOS_WORK/removal-observer-build.stderr"
   observer_status=$?
@@ -170,7 +182,7 @@ fi
 printf 'MRK_MACOS_BUILD_PHASE=installed-cli-compile-begin\n' >&2 2>/dev/null || :
 set +e
 PATH="/Users/runner/.rustup/toolchains/${RUSTUP_TOOLCHAIN}-$MRK_MACOS_TARGET/bin:/usr/bin:/bin:/usr/sbin:/sbin" RUSTC="/Users/runner/.rustup/toolchains/${RUSTUP_TOOLCHAIN}-$MRK_MACOS_TARGET/bin/rustc" RUSTUP_TOOLCHAIN="$RUSTUP_TOOLCHAIN" RUSTUP_AUTO_INSTALL=0 CARGO_HOME=/Users/runner/.cargo RUSTUP_HOME=/Users/runner/.rustup CARGO_TARGET_DIR="$MRK_MACOS_WORK/installed-cli-target" DYLD_FALLBACK_LIBRARY_PATH="/Users/runner/.rustup/toolchains/${RUSTUP_TOOLCHAIN}-$MRK_MACOS_TARGET/lib" "/Users/runner/.rustup/toolchains/${RUSTUP_TOOLCHAIN}-$MRK_MACOS_TARGET/bin/cargo" build \
-  --locked --offline --release --jobs 1 --no-default-features --features installed-cli --bin mrk \
+  --locked --offline --release --jobs "$mrk_cargo_jobs" --no-default-features --features installed-cli --bin mrk \
   --target "$MRK_MACOS_TARGET" --message-format=json-render-diagnostics \
   > "$MRK_MACOS_WORK/installed-cli-build.jsonl" 2> "$MRK_MACOS_WORK/installed-cli-build.stderr"
 cli_status=$?

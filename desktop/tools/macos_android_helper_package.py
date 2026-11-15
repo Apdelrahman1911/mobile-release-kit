@@ -128,6 +128,20 @@ TOOL_FIXED = {
 TOOL_RECEIPT_LIMIT = 16384
 
 
+
+def ci_cargo_jobs():
+    """GitHub-hosted CI only: CPU/RAM-aware cargo jobs (max 4, one per 2 GiB).
+
+    Local Mac runs keep "1" under the local resource policy."""
+    if os.environ.get("GITHUB_ACTIONS") != "true" or os.environ.get("RUNNER_ENVIRONMENT") != "github-hosted":
+        return "1"
+    try:
+        memory = int(subprocess.run(["/usr/sbin/sysctl", "-n", "hw.memsize"], capture_output=True, text=True,
+            timeout=5, check=True).stdout.strip())
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return "1"
+    return str(max(1, min(4, os.cpu_count() or 1, memory // (2 * 1024 ** 3))))
+
 def tool_hex(value, size=64):
     return type(value) is str and re.fullmatch(r"[0-9a-f]{%d}" % size, value) is not None and value != "0" * size
 
@@ -7075,7 +7089,7 @@ class Operation:
         self.stage = "separate-resident-image-compiler"
         result = self.call("build", [direct_rust_tools(self.target)[0], "build", "--manifest-path", str(self.checkout / WORKSPACE / "Cargo.toml"),
                            "--locked", "--offline", "--release", "--config", RESIDENT_CARGO_OVERRIDE,
-                           "--config", RESIDENT_SCHEMA_CARGO_OVERRIDE, "--jobs", "1", "--target", self.target,
+                           "--config", RESIDENT_SCHEMA_CARGO_OVERRIDE, "--jobs", ci_cargo_jobs(), "--target", self.target,
                            "--lib", "--message-format=json-render-diagnostics"],
                            build_environment(self.environment, self.work, self.image_release, target=self.target),
                            cwd=self.checkout / WORKSPACE, timeout=720 if self.target == INTEL_TARGET else 1200, limit=4 * 1024 * 1024)
@@ -7470,7 +7484,7 @@ class Operation:
         environment.update(CARGO_TARGET_DIR=str(self.work / self.target_name), TMPDIR=str(self.work / self.target_name / "tmp"),
                            MRK_BUNDLED_RUNTIME_MANIFEST_SHA256=self.environment["MRK_BUNDLED_RUNTIME_MANIFEST_SHA256"])
         compiled = self.removal_prepare_call("producer-build", [direct_rust_tools(self.target)[0], "build", "--manifest-path",
-            str(self.checkout / "desktop/src-tauri/Cargo.toml"), "--locked", "--offline", "--release", "--config", PRODUCER_CARGO_OVERRIDE, "--jobs", "1",
+            str(self.checkout / "desktop/src-tauri/Cargo.toml"), "--locked", "--offline", "--release", "--config", PRODUCER_CARGO_OVERRIDE, "--jobs", ci_cargo_jobs(),
             "--target", self.target, "--no-default-features", "--features", "macos-remove-observer-producer",
             "--example", "macos_remove_producer", "--message-format=json-render-diagnostics"],
             maximum=480, limit=4 * 1024 * 1024, cwd=self.checkout / "desktop/src-tauri", environment=environment)
@@ -8743,7 +8757,7 @@ class Operation:
         self.stage = "package-producer-tests"
         tested = self.package_call("producer-tests", [direct_rust_tools(self.target)[0], "test", "--manifest-path",
             str(self.checkout / "desktop/src-tauri/Cargo.toml"), "--locked", "--offline", "--release", "--config",
-            PRODUCER_CARGO_OVERRIDE, "--jobs", "1", "--target", self.target, "--no-default-features", "--features",
+            PRODUCER_CARGO_OVERRIDE, "--jobs", ci_cargo_jobs(), "--target", self.target, "--no-default-features", "--features",
             "macos-package-producer", "--example", "macos_package_producer", "--message-format=short", "--color", "never",
             "--", "--exact", "emitter::tests::fixed_cli_and_original_state_data_refuse_ambient_or_partial_routes",
             "--test-threads=1", "--format", "pretty", "--color", "never"], environment=environment,
@@ -8755,7 +8769,7 @@ class Operation:
         self.stage = "package-explicit-producer-compiler"
         compiled = self.package_call("producer-build", [direct_rust_tools(self.target)[0], "build", "--manifest-path",
             str(self.checkout / "desktop/src-tauri/Cargo.toml"), "--locked", "--offline", "--release", "--config",
-            PRODUCER_CARGO_OVERRIDE, "--jobs", "1", "--target", self.target, "--no-default-features", "--features",
+            PRODUCER_CARGO_OVERRIDE, "--jobs", ci_cargo_jobs(), "--target", self.target, "--no-default-features", "--features",
             "macos-package-producer", "--example", "macos_package_producer", "--message-format=json-render-diagnostics"],
             environment=environment, cwd=self.checkout / "desktop/src-tauri", timeout=build_seconds, limit=4 * 1024 * 1024)
         binary = producer_artifact(compiled.stdout, self.checkout, self.work / self.target_name, self.target,
@@ -9957,7 +9971,7 @@ class Operation:
         compiler_root = self.checkout / ".candidate-consumer-helper" if candidate else self.checkout
         compiled = self.package_call("producer-build", [direct_rust_tools(self.target)[0], "build", "--manifest-path", str(compiler_root / "desktop/src-tauri/Cargo.toml"),
             "--locked", "--offline", "--release", "--config", PRODUCER_CARGO_OVERRIDE,
-            *(["--config", "profile.release.opt-level=0"] if candidate else []), "--jobs", "1", "--target", self.target, "--no-default-features",
+            *(["--config", "profile.release.opt-level=0"] if candidate else []), "--jobs", ci_cargo_jobs(), "--target", self.target, "--no-default-features",
             "--features", "macos-remove-producer", "--example", "macos_remove_producer", "--message-format=json-render-diagnostics"],
             environment=environment, cwd=compiler_root / "desktop/src-tauri", timeout=480, limit=4 * 1024 * 1024)
         binary = producer_artifact(compiled.stdout, compiler_root, self.work / self.target_name, self.target,
