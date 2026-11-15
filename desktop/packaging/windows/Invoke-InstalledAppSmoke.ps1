@@ -19,10 +19,63 @@ Add-Type -AssemblyName System.Drawing, System.Windows.Forms, UIAutomationClient,
 # account with RunLevel Limited: the account's own filtered (UAC) token, in its
 # interactive session. stderr is captured as evidence. App checks unchanged.
 $script:ErrPaths = @{}
+$script:Mode = 'limited-task'
+# Fallback: a disposable STANDARD local user (not an administrator), started by
+# the secondary-logon service on this same interactive desktop (as runas does).
+# Its random password is generated here, never printed, and the runner is
+# discarded after the job.
+Add-Type -TypeDefinition @'
+using System; using System.Runtime.InteropServices; using System.Text;
+public static class MrkLogonLaunch {
+  [DllImport("advapi32", SetLastError=true, CharSet=CharSet.Unicode)] static extern bool CreateProcessWithLogonW(string user, string domain, string password, uint logonFlags, string app, StringBuilder cmd, uint flags, IntPtr env, string dir, ref STARTUPINFO si, out PROCESS_INFORMATION pi);
+  [DllImport("kernel32", SetLastError=true)] static extern bool CloseHandle(IntPtr h);
+  [DllImport("kernel32", SetLastError=true)] static extern bool SetHandleInformation(IntPtr h, uint mask, uint flags);
+  [StructLayout(LayoutKind.Sequential, CharSet=CharSet.Unicode)] struct STARTUPINFO { public int cb; public string lpReserved, lpDesktop, lpTitle; public int dwX, dwY, dwXSize, dwYSize, dwXCountChars, dwYCountChars, dwFillAttribute, dwFlags; public short wShowWindow, cbReserved2; public IntPtr lpReserved2, hStdInput, hStdOutput, hStdError; }
+  [StructLayout(LayoutKind.Sequential)] struct PROCESS_INFORMATION { public IntPtr hProcess, hThread; public int dwProcessId, dwThreadId; }
+  public static int Start(string user, string password, string exe, string dir, IntPtr stdio) {
+    var si = new STARTUPINFO(); si.cb = Marshal.SizeOf(si); si.lpDesktop = "winsta0\\default";
+    if (stdio != IntPtr.Zero) { SetHandleInformation(stdio, 1, 1); si.dwFlags = 0x100; si.hStdOutput = stdio; si.hStdError = stdio; }
+    PROCESS_INFORMATION pi;
+    if (!CreateProcessWithLogonW(user, ".", password, 1 /*LOGON_WITH_PROFILE*/, exe, new StringBuilder("\"" + exe + "\""), 0, IntPtr.Zero, dir, ref si, out pi))
+      throw new System.ComponentModel.Win32Exception(Marshal.GetLastWin32Error(), "CreateProcessWithLogonW");
+    CloseHandle(pi.hThread); CloseHandle(pi.hProcess); return pi.dwProcessId;
+  }
+}
+'@
+$script:StdUser = 'mrksmoke'; $script:StdPassword = $null
+function EnsureStandardUser {
+  if ($script:StdPassword) { return }
+  $chars = [char[]]'ABCDEFGHJKLMNPQRSTUVWXYZabcdefghijkmnpqrstuvwxyz23456789'
+  $script:StdPassword = (-join (1..24 | ForEach-Object { $chars[[System.Security.Cryptography.RandomNumberGenerator]::GetInt32($chars.Length)] })) + 'a7#Q'
+  $null = & net.exe user $script:StdUser $script:StdPassword /add /y 2>&1
+  if ($LASTEXITCODE) { throw 'standard test user could not be created' }
+  $groups = (& net.exe user $script:StdUser) -join ' '
+  Step 'standard-user' @{ user = $script:StdUser; administrator = ($groups -match '\*Administrators') }
+}
+function RunLimitedCapture($label, $cmdline, $out) {
+  $task = "MRK-smoke-$label"
+  $action = New-ScheduledTaskAction -Execute "$env:SystemRoot\System32\cmd.exe" -Argument "/d /c $cmdline > `"$out`" 2>&1"
+  $principal = New-ScheduledTaskPrincipal -UserId "$env:USERDOMAIN\$env:USERNAME" -LogonType Interactive -RunLevel Limited
+  Register-ScheduledTask -TaskName $task -Action $action -Principal $principal -Force | Out-Null
+  Start-ScheduledTask -TaskName $task
+  $deadline = [DateTime]::UtcNow.AddSeconds(30)
+  do { Start-Sleep -Milliseconds 500 } while ((Get-ScheduledTask -TaskName $task).State -eq 'Running' -and [DateTime]::UtcNow -lt $deadline)
+  Start-Sleep -Seconds 1
+}
 function StartOrdinary($exe, $label) {
   $dir = Join-Path $env:TEMP 'mrk-smoke'; New-Item -ItemType Directory -Force -Path $dir | Out-Null
   $err = Join-Path $dir "$label-stderr.txt"; Remove-Item $err -ErrorAction SilentlyContinue; $script:ErrPaths[$label] = $err
   $before = @(Get-Process -ErrorAction SilentlyContinue | Where-Object { $_.Path -eq $exe } | ForEach-Object Id)
+  if ($script:Mode -eq 'standard-user') {
+    EnsureStandardUser
+    $fs = [System.IO.File]::Open($err, 'Create', 'Write', 'ReadWrite')
+    try { $id = [MrkLogonLaunch]::Start($script:StdUser, $script:StdPassword, $exe, (Split-Path $exe), $fs.SafeFileHandle.DangerousGetHandle()) } finally { $fs.Dispose() }
+    $p = Get-Process -Id $id -ErrorAction SilentlyContinue
+    if (!$p) { Start-Sleep -Milliseconds 300; $e = StderrText $label; Step "$label-launch" @{ exited = $true; stderr = $e; launcher = 'standard user via secondary logon' }; throw "$label exited before showing a window: $e" }
+    $null = $p.Handle
+    Step "$label-token" @{ pid = $id; launcher = 'standard user via secondary logon'; account = $script:StdUser }
+    return $p
+  }
   $task = "MRK-smoke-$label"
   $action = New-ScheduledTaskAction -Execute "$env:SystemRoot\System32\cmd.exe" -Argument "/d /c `"`"$exe`" 2>`"$err`"`"" -WorkingDirectory (Split-Path $exe)
   $principal = New-ScheduledTaskPrincipal -UserId "$env:USERDOMAIN\$env:USERNAME" -LogonType Interactive -RunLevel Limited
@@ -40,6 +93,12 @@ function StartOrdinary($exe, $label) {
     Start-Sleep -Seconds 1
     $info = Get-ScheduledTaskInfo -TaskName $task; $e = StderrText $label
     Step "$label-launch" @{ exited = $true; exitCode = $info.LastTaskResult; stderr = $e; launcher = 'TaskScheduler RunLevel Limited' }
+    if ($e -match 'non-elevated') {
+      # Evidence of the token Task Scheduler actually gave, then fall back.
+      RunLimitedCapture 'whoami' 'whoami /all' (Join-Path $Evidence 'limited-task-whoami.txt')
+      $script:Mode = 'standard-user'
+      return StartOrdinary $exe "$label-standard-user"
+    }
     throw "$label exited before showing a window (task result $($info.LastTaskResult)): $e"
   }
   $null = $p.Handle  # keep a handle so ExitCode stays readable
