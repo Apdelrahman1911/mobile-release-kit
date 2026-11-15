@@ -82,7 +82,7 @@ export function GitRepositoryPanel({ controller, projectName, onRecovery, localA
         'The submitted review is retained. Do not send it again; refreshing files cannot settle this operation.'}</p>
       {attempt.phase !== 'settled' && <div className="button-row">
         <button type="button" className="button secondary" disabled={!controller.canCheckOriginalStatus()}
-          onClick={() => void controller.checkOriginalStatus()}>Check original action</button>
+          onClick={() => void controller.checkOriginalStatus()}>Check action</button>
         {onRecovery && <button type="button" className="text-button" onClick={onRecovery}>View retained recovery</button>}
       </div>}
       <details><summary>Submitted action details</summary>

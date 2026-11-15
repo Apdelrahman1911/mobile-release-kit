@@ -51,7 +51,7 @@ export function AgentStorePreparation({controller}:{controller:StorePreparationC
   <label><input type="checkbox" checked={s.acknowledged} disabled={!!controller.consentReason()} onChange={e=>controller.acknowledge(e.target.checked)}/> I approve this one phase and these effects.</label>
   <button disabled={!!controller.allowReason()} onClick={()=>void controller.allow()}>{start?'Allow this Start once':'Allow native Prepare once'}</button>
   {controller.allowReason()&&<p className="save-note">{controller.allowReason()}</p>}
-  <button disabled={!!controller.statusReason()} onClick={()=>void controller.status()}>Check original permission/request</button>
+  <button disabled={!!controller.statusReason()} onClick={()=>void controller.status()}>Check permission</button>
   <button disabled={!!controller.revokeReason()} onClick={()=>void controller.revoke()}>Revoke / request Stop</button>
   {(s.pending||s.revoking)&&<p role="status">An original permission caller is still returning. A native event cannot finish it.</p>}
   {s.issue&&<p role="alert">{s.issue}</p>}

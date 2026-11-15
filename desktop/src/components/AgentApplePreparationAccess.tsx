@@ -16,7 +16,7 @@ export function AgentApplePreparationAccess({controller}:{controller:AgentAppleP
       onChange={e=>controller.acknowledge(e.target.checked)}/> Allow one CLI Prepare of this exact selected step. I will review and approve Start separately.</label>
     <div className="actions">
       <button type="button" disabled={!!controller.allowReason()} onClick={()=>void controller.allow()}>Allow Prepare once</button>
-      <button type="button" disabled={!!controller.checkReason()} onClick={()=>void controller.check()}>Check original preparation</button>
+      <button type="button" disabled={!!controller.checkReason()} onClick={()=>void controller.check()}>Check preparation</button>
       <button type="button" disabled={!!controller.revokeReason()} onClick={()=>void controller.revoke()}>Withdraw preparation permission</button>
     </div>
     {controller.allowReason()&&<p className="save-note">{controller.allowReason()}</p>}

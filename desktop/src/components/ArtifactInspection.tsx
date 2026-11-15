@@ -54,7 +54,7 @@ export function ArtifactInspection({state,controller,projectName,onHelp,compact=
   const field=useId(),owner=artifactInspectionOwnerReason(state),op=state.status?.operation,selection=state.status?.selection,consent=state.consent;
   if(compact&&!owner)return null;
   const controls=<div className="button-row">
-    <button type="button" className="button secondary small" disabled={!controller.canCheckStatus()} onClick={()=>void controller.checkStatus()}>{state.readPending?'Reading original status…':'Check original artifact status'}</button>
+    <button type="button" className="button secondary small" disabled={!controller.canCheckStatus()} onClick={()=>void controller.checkStatus()}>{state.readPending?'Reading original status…':'Check artifact status'}</button>
     {op&&op.phase!=='terminal'&&<button type="button" className="button secondary small" disabled={!controller.canCancel()} onClick={()=>controller.cancel()}>Cancel original inspection</button>}
     {compact&&onShow&&<button type="button" className="button secondary small" onClick={onShow}>Show in Artifacts</button>}
   </div>;

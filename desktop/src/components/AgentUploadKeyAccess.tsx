@@ -67,7 +67,7 @@ export function AgentUploadKeyAccess({ controller }: { controller: AgentUploadKe
       {state.issue && <p className="review-caution" role="alert">{state.issue}</p>}
       <div className="button-row">
         <button type="button" className="button secondary" disabled={controller.allowReason() !== null} onClick={() => void controller.allow()}>Allow one CLI action</button>
-        <button type="button" className="button secondary" disabled={controller.statusReason() !== null} onClick={() => void controller.check()}>Check original permission</button>
+        <button type="button" className="button secondary" disabled={controller.statusReason() !== null} onClick={() => void controller.check()}>Check permission</button>
         <button type="button" className="button secondary" disabled={controller.revokeReason() !== null} onClick={() => void controller.revoke()}>Withdraw / request Stop</button>
       </div>
       <p className="toolbar-reason">{controller.allowReason() ?? 'Only this exact reviewed action can be submitted. Desktop checks its original source again.'}</p>

@@ -21,7 +21,7 @@ export function ServiceConfigurationAccess({controller, detailed, onShow}: {cont
       <button className="button primary" type="button" disabled={reason !== null || !state.acknowledged} onClick={() => void controller.allow()}>Allow this Apply once</button>
     </>}
     <div className="button-row">
-      <button className="button secondary" type="button" disabled={state.pending !== null || state.revokePending} onClick={() => void controller.check()}>Check original request</button>
+      <button className="button secondary" type="button" disabled={state.pending !== null || state.revokePending} onClick={() => void controller.check()}>Check request</button>
       <button className="button secondary" type="button" disabled={!request || state.revokePending} onClick={() => void controller.revoke()}>Stop original request</button>
       {!detailed && <button className="button secondary" type="button" onClick={onShow}>Show configuration review</button>}
     </div>

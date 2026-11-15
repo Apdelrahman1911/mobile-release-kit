@@ -19,7 +19,7 @@ export function AgentStoreAccess({controller}:{controller:AgentStoreAccessContro
     <label><input type="checkbox" checked={state.acknowledged} disabled={!!controller.consentReason()} onChange={e=>controller.acknowledge(e.target.checked)}/> I allow one local CLI submission of this exact Store mode and its displayed effects.</label>
     <button disabled={!!controller.allowReason()} onClick={()=>void controller.allow()}>Allow this Store step once</button>
     {controller.allowReason()&&<p className="save-note">{controller.allowReason()}</p>}
-    <button disabled={!!controller.statusReason()} onClick={()=>void controller.status()}>Check original CLI permission/status</button>
+    <button disabled={!!controller.statusReason()} onClick={()=>void controller.status()}>Check permission/status</button>
     <button disabled={!!controller.revokeReason()} onClick={()=>void controller.revoke()}>Revoke permission / request Stop</button>
     {state.pending&&<p role="status">The original permission caller is still returning.</p>}
     {state.revoking&&<p role="status">Waiting for original revocation. This does not prove the Store operation stopped.</p>}

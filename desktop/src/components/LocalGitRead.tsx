@@ -29,7 +29,7 @@ export function LocalGitReadControls({ controller, compact = false, originalProj
       {!active && state.status && !state.status.available && <p className="save-note">This installed session cannot use the protected local Git reader. Use your Git client; no alternate executable is selected.</p>}
       <div className="button-row">
         <button type="button" className={`button ${state.status ? 'secondary' : 'primary'}`} disabled={!controller.canCheck()}
-          onClick={() => void controller.checkStatus()}>{state.checking ? 'Checking…' : active ? 'Check original read' : 'Check local Git access'}</button>
+          onClick={() => void controller.checkStatus()}>{state.checking ? 'Checking…' : active ? 'Check read' : 'Check local Git access'}</button>
         {active && <button type="button" className="button secondary" disabled={!controller.canCancel()}
           onClick={() => void controller.cancel()}>Stop original read</button>}
         {compact && onShow && <button type="button" className="button secondary" onClick={onShow}>Show local changes</button>}

@@ -2392,7 +2392,7 @@ export function App() {
             {identityBinding.rebindFailed && <p>The previous connection’s controls are no longer available. No replacement connection was opened for this task, and your local drafts are kept.</p>}
             {identityState.issue && <p>Keep the app open and preserve its project files. Your drafts are kept; reconnecting or repeating the change cannot clear an unconfirmed result.</p>}
             <div className="button-row">
-              <button type="button" className="button small secondary" disabled={identityBinding.rebindFailed || identityState.reading} onClick={() => identityBinding.native.checkStatus()}>Check original status</button>
+              <button type="button" className="button small secondary" disabled={identityBinding.rebindFailed || identityState.reading} onClick={() => identityBinding.native.checkStatus()}>Check status</button>
               <button type="button" className="button small secondary" disabled={identityBinding.rebindFailed || !identityBinding.native.canRequestClose() || identityState.issue === 'generation-changed' || identityState.issue === 'cleanup-unknown'}
                 onClick={() => identityBinding.native.requestClose()}>{identityState.closeRequested ? 'Close requested — wait for status' : 'Request close'}</button>
               <button type="button" className="button small secondary" onClick={showIdentity}>Show app ID review</button>
@@ -2401,7 +2401,7 @@ export function App() {
         {page !== 'github' && <LocalGitReadControls controller={gitRead} compact
           originalProjectName={gitReadState.original ? workspace.projects[gitReadState.original.context.projectId]?.project.name : undefined}
           onShow={() => navigate('github')} />}
-        {(page !== 'github' || !gitRepository) && <GitLocalControls controller={gitLocal} compact={page !== 'github'}
+        {page !== 'github' && <GitLocalControls controller={gitLocal} compact
           originalProjectName={gitLocalProjectName} onShow={() => navigate('github')} />}
         {catalogError && <ErrorNotice error={catalogError} title="The field catalogue could not be loaded" />}
         {chooseError && <ErrorNotice error={chooseError} title="The project could not be selected" />}
@@ -2477,7 +2477,7 @@ export function App() {
             <Icon name="github" /><div><strong>Original GitHub connection · {originalConnection?.session?.projectId ? workspace.projects[originalConnection.session.projectId]?.project.name ?? 'a previously selected project' : 'selected app'}</strong>
               <p>{connectionState.uncertain || connectionState.blocked ? 'The original result needs attention. Do not connect again or switch accounts to bypass it.' : 'The original connection task is still finishing.'}</p>
               <div className="button-row">
-                <button type="button" className="button small secondary" disabled={!githubConnection.canCheckStatus() || connectionState.observing} onClick={() => void githubConnection.checkStatus()}>Check original connection status</button>
+                <button type="button" className="button small secondary" disabled={!githubConnection.canCheckStatus() || connectionState.observing} onClick={() => void githubConnection.checkStatus()}>Check connection status</button>
                 <button type="button" className="button small secondary" disabled={!githubConnection.canDisconnect()} onClick={() => githubConnection.disconnect()}>Disconnect original connection</button>
                 <button type="button" className="button small secondary" onClick={() => navigate('github')}>Show GitHub connection</button>
               </div>
@@ -2494,7 +2494,7 @@ export function App() {
         {page !== 'github' && <GitHubPreflight state={githubPreflightState} controller={githubPreflight} compact onShow={() => navigate('github')} onHelp={setHelp} />}
         {page !== 'github' && <GitHubHistory state={githubHistoryState} controller={githubHistory} compact onShow={() => navigate('github')} onHelp={setHelp} />}
         {page !== 'releases' && <GitHubRelease state={githubReleaseState} controller={githubRelease} compact onShow={() => navigate('releases')} onHelp={setHelp} />}
-        <ServiceConfigurationAccess controller={configEdit.agent} detailed={page === 'settings'} onShow={() => navigate('settings')} />
+        <ServiceConfigurationAccess controller={configEdit.agent} detailed={false} onShow={() => navigate('settings')} />
         <ConfigSave state={saveState} projects={workspace.projects} catalog={catalog} selectedId={workspace.selectedId} detailed={page === 'settings' || page === 'metadata'} onReviewVersion={showVersionProject}
           onInspectRecovery={(projectId) => configEdit.inspectRecovery(projectId)} onRecoveryApply={(binding) => configEdit.applyRecovery(binding)}
           recoveryReason={workspace.selectedId ? configEdit.inspectRecoveryReason(workspace.selectedId) : 'Select an original registered project first.'}
@@ -2566,6 +2566,7 @@ export function App() {
             </> : <p>App ID editing needs the connected native Desktop app. No app ID files are changed here; your local drafts are kept.</p>}
           </ProgressiveDisclosure>
           <ProgressiveDisclosure title="Advanced · CLI / AI access" needsAttention={cliReadNeedsAttention || !!agentRequestMessage || !!agentRequests?.pending} reveal={cliAccessReveal}>
+            <ServiceConfigurationAccess controller={configEdit.agent} detailed onShow={() => navigate('settings')} />
             <CliReadAccessPanel controller={cliReadAccess} />
             <AgentLocalCheckAccess controller={agentLocalChecks} blocked={loading || choosing || !session || savedCommandBusy() !== null} />
             {cliService.current.api?.mode === 'native' && cliService.current.api.agentIdentity && <section className="card"><h3>Let an agent propose an app ID</h3>
@@ -2619,6 +2620,7 @@ export function App() {
               <ServiceGitIndexAccess controller={agentGitIndex} />
               <ServiceGitCommitAccess controller={agentGitCommit} repository={gitRepository} /></> : undefined}
             originalProjectName={gitReadState.original ? workspace.projects[gitReadState.original.context.projectId]?.project.name : undefined} />
+            {!gitRepository && <GitLocalControls controller={gitLocal} compact={false} originalProjectName={gitLocalProjectName} onShow={() => navigate('github')} />}
             <ServiceGitRemoteAccess controller={agentGitRemote} repository={gitRepository} reader={gitRead} local={gitLocal}
               connection={githubConnection} projectName={session?.project.name ?? 'No project selected'} />
             <ServiceGitRepositoryAccess controller={agentGitRepository} repository={gitRepository} reader={gitRead} local={gitLocal}

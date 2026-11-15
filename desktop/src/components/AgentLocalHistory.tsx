@@ -15,7 +15,7 @@ export function AgentLocalHistory({controller,onShow}:{controller:AgentLocalHist
   <label><input type="checkbox" checked={s.acknowledged} disabled={!!controller.consentReason()} onChange={e=>controller.acknowledge(e.target.checked)}/> I allow this one reviewed local-history step.</label>
   <button disabled={!!controller.allowReason()} onClick={()=>void controller.allow()}>Allow once</button>
   {controller.allowReason()&&<p className="save-note">{controller.allowReason()}</p>}
-  <button disabled={!!controller.statusReason()} onClick={()=>void controller.status()}>Check original preparation / permission / result</button>
+  <button disabled={!!controller.statusReason()} onClick={()=>void controller.status()}>Check status</button>
   <button disabled={!!controller.revokeReason()} onClick={()=>void controller.revoke()}>Revoke permission / request Stop</button>
   {s.pending&&<p role="status">Waiting for the original permission reply.</p>}{s.revoking&&<p role="status">Revocation requested. Keep Desktop open until the original calls and cleanup return.</p>}
   {s.issue&&<p role="alert">{s.issue}</p>}

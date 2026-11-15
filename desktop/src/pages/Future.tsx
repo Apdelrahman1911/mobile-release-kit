@@ -1,80 +1,30 @@
-import { useEffect, useId, useState } from 'react';
 import type { ReactNode } from 'react';
-import { flushSync } from 'react-dom';
 import type { HelpContent } from '../types.ts';
 import type { RetainedEditAttention } from '../drafts.ts';
 import { EmptyState, HelpButton, PageHeading, SectionHeading } from '../components/Common.tsx';
 import { Icon } from '../components/Icon.tsx';
+import { revealTaskSection, TaskTabs } from '../components/TaskTabs.tsx';
 
 export type ReleaseTab = 'check' | 'android' | 'ios' | 'store' | 'github' | 'results';
 
-const releaseTabs: { id: ReleaseTab; label: string; summary: string }[] = [
-  { id: 'check', label: 'Local checks', summary: 'Run your project’s saved checks on this computer. Nothing is built or published.' },
-  { id: 'android', label: 'Android build', summary: 'Build an Android App Bundle from your saved settings, then inspect it. Nothing is published.' },
-  { id: 'ios', label: 'iOS build', summary: 'Archive your iOS app with Xcode, then check it. Signing and export are separate choices.' },
-  { id: 'store', label: 'Store delivery', summary: 'Check Store access, then prepare, upload or promote a build. Every Store step asks for its own approval.' },
-  { id: 'github', label: 'GitHub release', summary: 'Run a release through your repository’s GitHub workflows instead of this computer.' },
-  { id: 'results', label: 'Results', summary: 'Review saved build results, or continue from an earlier result instead of starting again.' },
-];
+/** Kept for existing callers: reveal a section inside any task tab. */
+export const revealReleaseSection = revealTaskSection;
 
-const REVEAL_EVENT = 'mrk-release-reveal';
-
-/** Switch to the tab holding `element`, then focus and scroll to it. */
-export function revealReleaseSection(element: HTMLElement | null) {
-  const tab = element?.closest<HTMLElement>('[data-release-tab]')?.dataset.releaseTab;
-  if (tab) window.dispatchEvent(new CustomEvent(REVEAL_EVENT, { detail: tab }));
-  element?.focus({ preventScroll: true }); element?.scrollIntoView({ block: 'start' });
-}
-
-/** Task tabs. Every panel stays mounted, so status and controls are never lost. */
 export function Releases({ rehearsal, offlineChecks, androidBuild, iosArchive, evidence, storeOperations, storeNeedsAttention = false, protectedWorkflows, workflowNeedsAttention = false, running = {}, onOpenGitHub }: { rehearsal?: ReactNode; offlineChecks: ReactNode; androidBuild: ReactNode; iosArchive: ReactNode; evidence: ReactNode; storeOperations?: ReactNode; storeNeedsAttention?: boolean; protectedWorkflows?: ReactNode; workflowNeedsAttention?: boolean; running?: Partial<Record<ReleaseTab, boolean>>; onOpenGitHub: () => void }) {
-  const [tab, setTab] = useState<ReleaseTab>(() => storeNeedsAttention ? 'store' : workflowNeedsAttention ? 'github' : 'check');
-  const id = useId();
-  useEffect(() => {
-    const reveal = (event: Event) => {
-      const next = (event as CustomEvent<string>).detail;
-      if (releaseTabs.some((t) => t.id === next)) flushSync(() => setTab(next as ReleaseTab));
-    };
-    window.addEventListener(REVEAL_EVENT, reveal);
-    return () => window.removeEventListener(REVEAL_EVENT, reveal);
-  }, []);
-  const attention: Partial<Record<ReleaseTab, boolean>> = { store: storeNeedsAttention, github: workflowNeedsAttention };
-  const current = releaseTabs.find((t) => t.id === tab)!;
-  const panel = (target: ReleaseTab, children: ReactNode) => <div role="tabpanel" id={`${id}-${target}`} aria-labelledby={`${id}-${target}-tab`}
-    data-release-tab={target} hidden={tab !== target} className="release-panel">{children}</div>;
   return <>
     <PageHeading eyebrow="BUILD & RELEASE" title="Build and release your app" description="Choose what you want to do. Building happens on this computer; anything that reaches a Store or GitHub asks for your approval first." />
-    {storeNeedsAttention && tab !== 'store' && <div className="notice notice-warning" role="status"><Icon name="shield" /><div><strong>A Store task needs your attention</strong><p>Review its status before starting another task.</p>
-      <div className="button-row"><button type="button" className="button small secondary" onClick={() => setTab('store')}>Open Store delivery</button></div></div></div>}
-    {workflowNeedsAttention && tab !== 'github' && <div className="notice notice-warning" role="status"><Icon name="github" /><div><strong>A GitHub release request needs your review</strong>
-      <div className="button-row"><button type="button" className="button small secondary" onClick={() => setTab('github')}>Open GitHub release</button></div></div></div>}
-    <div className="task-tabs" role="tablist" aria-label="Release tasks">
-      {releaseTabs.map((t) => <button key={t.id} type="button" role="tab" id={`${id}-${t.id}-tab`} aria-controls={`${id}-${t.id}`}
-        aria-selected={tab === t.id} tabIndex={tab === t.id ? 0 : -1} className={`task-tab${tab === t.id ? ' active' : ''}`}
-        onClick={() => setTab(t.id)}
-        onKeyDown={(event) => {
-          const index = releaseTabs.findIndex((x) => x.id === tab);
-          const step = event.key === 'ArrowRight' ? 1 : event.key === 'ArrowLeft' ? -1 : 0;
-          if (!step) return;
-          event.preventDefault();
-          const next = releaseTabs[(index + step + releaseTabs.length) % releaseTabs.length];
-          if (!next) return;
-          setTab(next.id); document.getElementById(`${id}-${next.id}-tab`)?.focus();
-        }}>
-        <span>{t.label}</span>
-        {attention[t.id] ? <span className="task-tab-flag warning">Needs attention</span> : running[t.id] ? <span className="task-tab-flag">Running</span> : null}
-      </button>)}
-    </div>
-    <p className="task-summary">{current.summary}</p>
-    {panel('check', offlineChecks)}
-    {panel('android', androidBuild)}
-    {panel('ios', iosArchive)}
-    {panel('store', <section id="release-store-operations" tabIndex={-1}>{storeOperations}</section>)}
-    {panel('github', <>
-      <section id="release-github-operations" tabIndex={-1}>{protectedWorkflows}</section>
-      <section className="card"><EmptyState icon="github" title="See past GitHub releases" description="Open GitHub to connect your project and pick a release run to read. Missing results do not prove that no release happened, and past results do not show what is in the Store now."><button type="button" className="button secondary" onClick={onOpenGitHub}>Open GitHub history</button></EmptyState></section>
-    </>)}
-    {panel('results', <>{evidence}{rehearsal}</>)}
+    <TaskTabs label="Release tasks" tabs={[
+      { id: 'check', label: 'Local checks', running: running.check, summary: 'Run your project’s saved checks on this computer. Nothing is built or published.', content: offlineChecks },
+      { id: 'android', label: 'Android build', running: running.android, summary: 'Build an Android App Bundle from your saved settings, then inspect it. Nothing is published.', content: androidBuild },
+      { id: 'ios', label: 'iOS build', running: running.ios, summary: 'Archive your iOS app with Xcode, then check it. Signing and export are separate choices.', content: iosArchive },
+      { id: 'store', label: 'Store delivery', running: running.store, attention: storeNeedsAttention, summary: 'Check Store access, then prepare, upload or promote a build. Every Store step asks for its own approval.',
+        content: <section id="release-store-operations" tabIndex={-1}>{storeOperations}</section> },
+      { id: 'github', label: 'GitHub release', attention: workflowNeedsAttention, summary: 'Run a release through your repository’s GitHub workflows instead of this computer.', content: <>
+        <section id="release-github-operations" tabIndex={-1}>{protectedWorkflows}</section>
+        <section className="card"><EmptyState icon="github" title="See past GitHub releases" description="Open GitHub to connect your project and pick a release run to read. Missing results do not prove that no release happened, and past results do not show what is in the Store now."><button type="button" className="button secondary" onClick={onOpenGitHub}>Open GitHub history</button></EmptyState></section>
+      </> },
+      { id: 'results', label: 'Results', summary: 'Review saved build results, or continue from an earlier result instead of starting again.', content: <>{evidence}{rehearsal}</> },
+    ]} />
   </>;
 }
 

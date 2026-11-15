@@ -19,7 +19,7 @@ export function AgentAppleProvisioningAccess({ controller }: { controller: Agent
       onChange={event => controller.acknowledge(event.target.checked)} /> Allow the installed CLI to Start this exact prepared Apple step once, with its existing credentials and limits.</label>
     <div className="actions">
       <button type="button" disabled={!!controller.allowReason()} onClick={() => void controller.allow()}>Allow this step once</button>
-      <button type="button" disabled={!!controller.checkReason()} onClick={() => void controller.check()}>Check original CLI step</button>
+      <button type="button" disabled={!!controller.checkReason()} onClick={() => void controller.check()}>Check step</button>
       <button type="button" disabled={!!controller.revokeReason()} onClick={() => void controller.revoke()}>Withdraw exact permission</button>
     </div>
     {controller.allowReason() && <p className="save-note">{controller.allowReason()}</p>}
