@@ -49,8 +49,18 @@ def main():
   if m.MsiViewFetch(verify,c.byref(missing))!=259:raise RuntimeError('refusal row was not removed')
   check(m.MsiViewClose(verify))
   check(m.MsiDatabaseGenerateTransformW(changed,reference,str(transform),0,0))
-  # Validate language/product/platform and every product version field.
-  check(m.MsiCreateTransformSummaryInfoW(changed,reference,str(transform),0,0x3f))
+  # Validate language (0x1), product code (0x2), platform (0x4) and all three
+  # product version fields (UPDATEVERSION 0x20), requiring an equal version
+  # (NEWEQUALBASEVERSION 0x100). MAJOR/MINOR/UPDATEVERSION are alternative
+  # granularities; combining them (0x3f) is ERROR_INVALID_PARAMETER (87),
+  # observed in run 43677143095.
+  check(m.MsiCreateTransformSummaryInfoW(changed,reference,str(transform),0,0x1|0x2|0x4|0x20|0x100))
+ except BaseException:
+  # Never leave an installable copy with the shipping refusal removed.
+  for h in reversed(handles):m.MsiCloseHandle(h)
+  handles.clear()
+  if working.exists():working.unlink()
+  raise
  finally:
   for h in reversed(handles):m.MsiCloseHandle(h)
  if digest(original)!=before:raise RuntimeError('original MSI changed')
