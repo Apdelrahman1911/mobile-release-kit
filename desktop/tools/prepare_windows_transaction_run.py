@@ -76,13 +76,19 @@ def main():
  # compiler reuses an already running instance, so start one OUTSIDE every
  # owned job immediately before native C++ work and record it. The owned-job
  # rule itself is unchanged.
- def prestart_vctip(stage):
+ def prestart_vctip(stage,every=False):
+  # link.exe spawns VCTIP.EXE telemetry, which idles ~900 s; inside an owned
+  # command it holds the job open (measured: +900 s on each cargo stage of
+  # run 43723424305). A detached instance started first is reused instead.
+  # rustc may pick a newer toolset than CMake, so cargo stages start each one.
   candidates=sorted(Path(vs['installationPath']).glob('VC/Tools/MSVC/*/bin/HostX64/x64/vctip.exe'))
   chosen=[c for c in candidates if c.parent.parent.parent.parent.name.startswith(('14.3','14.4'))] or candidates
-  record={'stage':stage,'candidates':[str(c) for c in candidates],'started':None}
-  if chosen:
-   proc=subprocess.Popen([str(chosen[-1])],stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,creationflags=0x00000008|0x00000200)
-   time.sleep(2);record['started']={'path':str(chosen[-1]),'pid':proc.pid,'running':proc.poll() is None}
+  picks=candidates if every else chosen[-1:]
+  record={'stage':stage,'candidates':[str(c) for c in candidates],'started':None,'all':[]}
+  for pick in picks:
+   proc=subprocess.Popen([str(pick)],stdin=subprocess.DEVNULL,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL,creationflags=0x00000008|0x00000200)
+   time.sleep(2);started={'path':str(pick),'pid':proc.pid,'running':proc.poll() is None}
+   record['all'].append(started);record['started']=record['started'] or started
   with (logs/'vctip-prestart.jsonl').open('a') as f:f.write(json.dumps(record)+'\n')
  prestart_vctip('probe')
  snapshot=threading.Timer(60,lambda:(logs/'toolchain-probe-during.json').write_text(json.dumps({'all':list(processes().values())},indent=1)+'\n'));snapshot.daemon=True;snapshot.start()
@@ -113,6 +119,7 @@ def main():
  # to local Mac compiles only. Parallel rustc cuts the release compiles ~3x.
  CARGO_JOBS=str(max(1,min(4,os.cpu_count() or 1)))
  # Actual release builds below perform typechecking and linking; no duplicate check-only build.
+ prestart_vctip('publisher-data-tests',every=True)
  run('publisher-data-tests',['cargo','test','--locked','--release','--jobs',CARGO_JOBS,'--target',msi.TARGET,'--manifest-path',manifest,'--no-default-features','--features','windows-runtime-publisher','--lib','--','--nocapture'])
  run('shell-metadata',['cargo','metadata','--locked','--format-version','1','--filter-platform',msi.TARGET,'--manifest-path',manifest,'--no-default-features','--features','desktop-shell,custom-protocol'])
  selected={}
@@ -120,6 +127,7 @@ def main():
   # Hosted release compile allowance: publisher measured 909.8 s (43037225823);
   # full shell check alone measured 1132.3 s (43030604535), so its optimized
   # release build receives a larger bounded deadline. Output/job limits unchanged.
+  prestart_vctip(role+'-compile',every=True)
   run(role+'-compile',['cargo','build','--locked','--release','--jobs',CARGO_JOBS,'--target',msi.TARGET,'--manifest-path',manifest,'--no-default-features','--features',features,'--bin',binary,'--message-format=json-render-diagnostics'],timeout=1800 if role=='publisher' else 5400)
   selected[role]=compiler_evidence.selected_artifact((logs/(role+'-compile.stdout')).read_bytes(),role=role,source=source,output=out)
  compiler_evidence.retain_normal(source,out,selected['shell'])
