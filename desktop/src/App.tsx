@@ -2353,6 +2353,10 @@ export function App() {
     setIdentityReveal((value) => value + 1); navigate('settings');
   };
 
+  // Command-line permissions live on the Automation page. Any retained or
+  // uncertain grant is surfaced on every other page until it is resolved.
+  const automationAttention = agentLocalHistory.ownerReason() ?? agentStoreReason;
+
   const toolPreparationView: PrepareBuildEnvironmentProps = {
     state: toolAcquisitionState, controller: toolAcquisition,
     toolsBusy: loading || choosing || savedCommandBusy() !== null || diagnosticsOwnerReason(diagnosticsState) !== null,
@@ -2369,16 +2373,18 @@ export function App() {
     <aside className="sidebar">
       <div className="brand"><span className="brand-mark"><Icon name="box" size={25} /></span><div>Mobile Release Kit<span>THE KIT FOR A CAREFUL LAUNCH</span></div></div>
       <div className="project-switcher"><label htmlFor="project-switch">CURRENT PROJECT</label><div className="project-switcher-control"><span className="project-switch-icon"><Icon name="folder" size={18} /></span><select id="project-switch" aria-label="Switch project; unsaved configuration, text and version drafts are retained" value={workspace.selectedId ?? ''} onChange={(event) => dispatch({ type: 'switch', projectId: event.target.value })}><option value="" disabled>{choosing ? 'Opening project…' : 'Choose a project'}</option>{Object.values(workspace.projects).map((entry) => <option key={entry.project.id} value={entry.project.id}>{entry.project.name}{isDirty(entry) ? ' • unsaved config' : ''}{metadataProjectDirty(metadataState.entries, entry.project.id) ? ' • unsaved text' : ''}{versionProjectDirty(versionEditState, entry.project.id) ? ' • unsaved version' : ''}</option>)}</select><button type="button" className="icon-button" disabled={chooseDisabled} aria-label={preview ? 'Load example project' : 'Open another project folder'} onClick={() => void chooseProject()}><Icon name="plus" size={16} /></button></div></div>
-      <WorkspaceNavigation page={page} onNavigate={navigate} />
+      <WorkspaceNavigation page={page} onNavigate={navigate} attention={{ automation: !!automationAttention }} />
       <div className="sidebar-footer"><div className="foundation-label"><span className="local-dot" />{localEditingLabel}</div><p>Thoughtful preparation.<br />No accidental releases.</p><div className="sidebar-version"><span>{`DESKTOP ${info?.appVersion ?? 'Not loaded'}`}</span><Icon name="shield" size={14} /></div></div>
     </aside>
     <div className="workspace">
       <header className="topbar"><div className="breadcrumbs"><Icon name="folder" size={16} /><span>{session?.project.name ?? 'Workspace'}</span><Icon name="chevron" size={13} /><strong>{currentNavigation?.label}</strong></div><div className="topbar-status"><span className="no-write-note"><Icon name="lock" size={13} />No automatic publishing</span><Badge tone={preview || appleProvisioningState.issue !== null || toolAcquisitionState.issue !== null || artifactInspectionState.nativeBlocked || initializationState.nativeBlocked || metadataImagesState.nativeBlocked || metadataImagesState.integrityFailed || metadataImagesState.generationLost || metadataImagesState.selectionIssue || metadataImagesState.editIssue || saveState.nativeBlocked || workflowState.nativeBlocked || metadataState.edit.nativeBlocked || versionEditState.edit.nativeBlocked || diagnosticsState.nativeBlocked || localHistoryState.blocked || localStoreState.blocked || localStorePrepareState.blocked || localStoreExecuteState.blocked || localStoreReconcileState.blocked || offlinePreflightState.nativeBlocked || androidBuildState.nativeBlocked || projectRecoveryState.nativeBlocked || iosArchiveState.nativeBlocked ? 'warning' : 'neutral'}>{preview ? 'Browser preview' : initializationState.status?.active ? 'Project setup · see status below' : recoveryBusy() ? 'Recovery · see status below' : androidBusy() ? 'Android build · see status below' : iosBusy() ? 'iOS build · see status below' : artifactBusy() ? 'Build files · see status below' : localHistoryBusy() ? 'Release history · see status below' : storeBusy() ? 'Store operation · see status below' : preflightBusy() ? 'Local checks · see status below' : toolPreparationBusy() ? 'Tool preparation · see status below' : diagnosticsState.status?.active ? 'Build tools · see status below' : saveState.status?.active ? 'Project settings task · see status below' : workflowState.status?.active ? 'GitHub files task · see status below' : metadataImagesOwnerReason(metadataImagesState) ? 'Store images · see status below' : metadataState.edit.status?.active ? 'Store listing task · see status below' : versionEditState.edit.status?.active ? 'Version task · see status below' : localEditingLabel}</Badge></div></header>
       {preview && <div className="preview-banner" role="status"><Icon name="environment" size={19} /><div><strong>BROWSER PREVIEW — EXAMPLE DATA ONLY</strong><span>No native bridge, project files, core validation, credentials, or release operations. Never use this view as evidence.</span></div></div>}
       <main id="main-content" tabIndex={-1} ref={main}>
-        <AgentLocalHistory controller={agentLocalHistory} onShow={()=>navigate('releases')}/>
-        <AgentStoreAccess controller={agentStoreAccess}/>
-        <AgentStorePreparation controller={storePreparationAccess}/>
+        {page !== 'automation' && automationAttention && <div className="notice notice-warning" role="status">
+          <Icon name="terminal" /><div><strong>A command-line request needs your attention</strong>
+            <p>{automationAttention}</p>
+            <div className="button-row"><button type="button" className="button small secondary" onClick={() => navigate('automation')}>Open Automation</button></div>
+          </div></div>}
         {loading && <div className="notice notice-info" role="status"><Icon name="refresh" className="spin" size={19} /><span>Connecting to the app and loading project settings…</span></div>}
         {bootError && <><ErrorNotice error={bootError} title="The native service is unavailable" /><div className="bridge-retry"><button className="button small secondary" disabled={loading || savedCommandBusy() !== null} onClick={() => void bootstrap()}><Icon name="refresh" size={15} />Retry connection</button><span>No browser fallback or mock engine has been enabled.</span></div></>}
         {identityBinding && identityState && identityBusy() && <div className={`notice ${identityBinding.rebindFailed || identityState.issue ? 'notice-warning' : 'notice-info'}`} role={identityBinding.rebindFailed || identityState.issue ? 'alert' : 'status'}>
@@ -2699,6 +2705,15 @@ export function App() {
         {page === 'artifacts' && <><Artifacts state={evidenceState} controller={releaseEvidence} inspectionState={artifactInspectionState} inspectionController={artifactInspection} projectName={session?.project.name ?? null} onHelp={setHelp} />
           <AndroidBuildResultView state={androidBuildState} operationProjectName={androidBuildState.status?.operation ? workspace.projects[androidBuildState.status.operation.context.projectId]?.project.name ?? null : null} />
           <IOSArchiveResultView state={iosArchiveState} operationProjectName={iosArchiveState.status?.operation ? workspace.projects[iosArchiveState.status.operation.context.projectId]?.project.name ?? null : null} /></>}
+        {page === 'automation' && <>
+          <PageHeading eyebrow="AUTOMATION" title="Let a command-line tool help"
+            description="Optional. A command-line tool on this computer can ask to run one release step you have reviewed. Each permission covers one step, is used once, and can be revoked. Nothing here runs on its own." />
+          <section className="automation-stack" aria-label="Command-line permissions">
+            <AgentStorePreparation controller={storePreparationAccess}/>
+            <AgentStoreAccess controller={agentStoreAccess}/>
+            <AgentLocalHistory controller={agentLocalHistory} onShow={()=>navigate('releases')}/>
+          </section>
+        </>}
         {page === 'recovery' && <><Recovery onOpenReleases={() => navigate('releases')} evidenceGuidance={<ReleaseEvidenceGuidance state={evidenceState} onOpenEvidence={() => navigate('releases')} />}
           projectRecovery={<ProjectRecovery state={projectRecoveryState} controller={projectRecovery}
           projectName={session?.project.name ?? null} operationProjectName={projectRecoveryState.status?.operation ? workspace.projects[projectRecoveryState.status.operation.context.projectId]?.project.name ?? null : null}
