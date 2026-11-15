@@ -104,6 +104,12 @@ try {
   Invoke-Native 'publish' 1603
  } else {
   Invoke-Native 'guard'
+  # Read-only diagnostics for the publisher image the native publish opens first.
+  $publisherImage=Join-Path $app 'mrk-windows-runtime-publish.exe'
+  & icacls.exe $publisherImage
+  (Get-Item $publisherImage -Force).Attributes.ToString()
+  try{$probe=[IO.File]::Open($publisherImage,'Open','Read','Read');$probe.Dispose();'publisher image read-open: ok'}catch{'publisher image read-open: '+$_.Exception.Message}
+  Get-Process | Where-Object {$_.Path -eq $publisherImage} | ForEach-Object {'publisher image running pid '+$_.Id}
   Invoke-Native 'publish'
   Invoke-Native 'fullwalk'
   $receipt=Get-Content (Join-Path $control "$manifest.complete") -Raw

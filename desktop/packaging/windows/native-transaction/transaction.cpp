@@ -248,15 +248,18 @@ need(previous==1);
  
 wait_need(WaitForSingleObject(process.h,120000),WAIT_OBJECT_0);DWORD exit=STILL_ACTIVE;
 win32_need(GetExitCodeProcess(process.h,&exit));
-  JOBOBJECT_BASIC_ACCOUNTING_INFORMATION account{};
-win32_need(QueryInformationJobObject(job.h,JobObjectBasicAccountingInformation,&account,sizeof(account),nullptr));
-need(account.ActiveProcesses==0);
   std::string originalIdentities;std::array<char,4096> output{};
   while(true){DWORD count=0;if(!ReadFile(pipeRead.h,output.data(),DWORD(output.size()),&count,nullptr)){
 last_error_need(ERROR_BROKEN_PIPE);break;}
 need(count>0 && originalIdentities.size()+count<4096);originalIdentities.append(output.data(),count);}
   if(exit!=0){for(char ch:originalIdentities){if(childDiagnostic.size()>=480)break;childDiagnostic+=(ch>=0x20&&ch<0x7f)?ch:' ';}}
 checked(exit==0,__func__,__LINE__,"exit",exit);
+  // Job accounting may lag the signalled process handle; allow a bounded settle.
+  JOBOBJECT_BASIC_ACCOUNTING_INFORMATION account{};
+  for(int attempt=0;;++attempt){
+win32_need(QueryInformationJobObject(job.h,JobObjectBasicAccountingInformation,&account,sizeof(account),nullptr));
+   if(account.ActiveProcesses==0||attempt>=100)break;Sleep(50);}
+need(account.ActiveProcesses==0);
   pipeRead.settled();thread.settled();process.settled();job.settled();image.settled();settle(ancestors);return originalIdentities;
 }
 void stage_publication(Paths& p,std::vector<Handle>& roots,Lock& lock){
