@@ -62,7 +62,7 @@ export function ProjectRecovery({ state, controller, projectName, operationProje
   const inspectReason = controller.prepareReason('inspect'), recoverReason = controller.prepareReason('recover'), runReason = controller.runReason();
   const cancelRequested = !!op && state.cancelClaimed?.operationId === op.operationId && state.cancelClaimed.ownerGeneration === op.ownerGeneration;
   const controls = <div className="button-row">
-    <button type="button" className="button secondary small" disabled={!controller.canCheckStatus()} onClick={() => void controller.checkStatus()}><Icon name="refresh" size={15} />{state.readPending ? 'Reading original status…' : 'Check original status'}</button>
+    <button type="button" className="button secondary small" disabled={!controller.canCheckStatus()} onClick={() => void controller.checkStatus()}><Icon name="refresh" size={15} />{state.readPending ? 'Reading original status…' : 'Check status'}</button>
     {op && op.phase !== 'terminal' && <button type="button" className="button secondary small" disabled={!controller.canCancel()} onClick={() => controller.cancel()}>{cancelRequested ? 'Cancel requested · awaiting cleanup' : 'Cancel original operation'}</button>}
     {compact && onShow && <button type="button" className="button secondary small" onClick={onShow}>Show in Recovery</button>}
   </div>;

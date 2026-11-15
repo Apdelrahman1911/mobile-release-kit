@@ -34,7 +34,7 @@ export function GitHubDeviceConnection({controller,compact=false,onShow}:{contro
       <p className="save-note">{check??'Checks once. If GitHub is still waiting, keep the same code and check again after its interval.'}</p>
       {s.browserRequested&&<p>Browser opening was requested, not verified. You can type the fixed address above yourself.</p>}
     </>}
-    <div className="button-row"><button type="button" className="button secondary small" disabled={!controller.canRead()} onClick={()=>controller.read()}>{busy?'Check original login status':'Check browser sign-in availability'}</button>
+    <div className="button-row"><button type="button" className="button secondary small" disabled={!controller.canRead()} onClick={()=>controller.read()}>{busy?'Check login status':'Check browser sign-in availability'}</button>
       {(busy||s.cancelRequested)&&<button type="button" className="button secondary small" disabled={!controller.canCancel()} onClick={()=>controller.cancel()}>Stop original login</button>}
       {compact&&onShow&&<button type="button" className="button secondary small" onClick={onShow}>Show GitHub connection</button>}</div>
     {!compact&&<p className="save-note">Status never polls GitHub automatically. Stopping or closing this session does not revoke authorization in GitHub; review Authorized OAuth Apps in GitHub Settings when needed.</p>}

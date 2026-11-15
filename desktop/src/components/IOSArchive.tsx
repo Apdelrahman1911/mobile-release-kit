@@ -268,7 +268,7 @@ export function IOSRecovery({ state, controller, projectName, operationProjectNa
       {state.historical && <p className="review-caution">Historical original-operation data. It cannot authorize the current project or another recovery session.</p>}
       <p>Local recovery only. No Store action or release-readiness claim. Inspect again after an action; another session is never silently substituted.</p>
     </div>}
-    <div className="button-row"><button type="button" className="button secondary small" disabled={!controller.canCheckStatus()} onClick={() => void controller.checkStatus()}>Check original iOS owner status</button>
+    <div className="button-row"><button type="button" className="button secondary small" disabled={!controller.canCheckStatus()} onClick={() => void controller.checkStatus()}>Check iOS build status</button>
       {operation && operation.phase !== 'terminal' && <button type="button" className="button secondary small" disabled={!controller.canCancel()} onClick={() => controller.cancel()}>Cancel original iOS operation</button>}</div>
     <p className="save-note">Ordinary recovery is supported only when the existing core offers it. Exceptional interactive manual recheck is not implemented here; a manual-required or preserved conflict is an explicit limitation, not a successful recovery. Cancel never forces cleanup or undoes completed restoration.</p>
   </section>;

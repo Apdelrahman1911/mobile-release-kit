@@ -13,7 +13,7 @@ export function ServiceMetadataTextAccess({controller}: {controller: MetadataSer
     {reason && <p className="save-note">{reason}</p>}
     <div className="button-row">
       <button type="button" className="button primary" disabled={reason !== null || !state.acknowledged} onClick={() => void controller.allow()}>Allow this preview once</button>
-      <button type="button" className="button secondary" disabled={!!state.pending || state.revokePending} onClick={() => void controller.check()}>Check original request</button>
+      <button type="button" className="button secondary" disabled={!!state.pending || state.revokePending} onClick={() => void controller.check()}>Check request</button>
       <button type="button" className="button secondary" disabled={!request || state.revokePending} onClick={() => void controller.revoke()}>Withdraw / stop original</button>
     </div>
     {state.message && <p role={state.unknown ? 'alert' : 'status'}>{state.message}</p>}

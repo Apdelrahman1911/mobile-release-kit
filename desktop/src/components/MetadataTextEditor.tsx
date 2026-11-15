@@ -99,7 +99,7 @@ export function SavedTextRecoveryPanel<D extends SavedTextRecoveryDomain>({ doma
     <SectionHeading title="Inspect an interrupted saved-file edit" description="A separate, explicit inspection of this editor’s persisted journal. No normal checkout or current draft is used as recovery authority." />
     <p>Selected project: <code>{projectId ?? 'None'}</code>. Close any original live review and wait for settlement before inspecting. Unknown cleanup cannot be reset here.</p>
     <div className="button-row"><button type="button" className="button secondary" disabled={inspectReason !== null} title={inspectReason ?? undefined} onClick={onInspect}>Inspect recovery</button>
-      <button type="button" className="button small secondary" disabled={readPending} onClick={onStatus}>Check original recovery status</button>
+      <button type="button" className="button small secondary" disabled={readPending} onClick={onStatus}>Check recovery status</button>
       {attempt && !attempt.handled && !attempt.closeClaimed && !terminal && <button type="button" className="button secondary" onClick={onClose}>{attempt.applyClaimed ? 'Request recovery cancellation' : 'Close inspection, keep drafts'}</button>}</div>
     {inspectReason && <p className="save-note">{inspectReason}</p>}
     {attempt && <p>Original recovery project: <code>{attempt.binding.projectId}</code>. {owner ? `Original phase: ${owner.phase}.` : 'Waiting for the original inspection; no result is assumed.'}</p>}

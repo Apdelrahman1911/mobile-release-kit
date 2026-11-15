@@ -59,7 +59,7 @@ export function VersionReservePanel({ controller, compact = false }: { controlle
       {!compact && state.enabled && <><button type="button" className="button secondary" disabled={controller.reviewReason() !== null} onClick={() => void controller.review()}>Review version choices</button>
         <button type="button" className="button primary" disabled={controller.reserveReason() !== null} onClick={() => void controller.reserve()}>Reserve this candidate</button>
         <button type="button" className="button secondary" disabled={controller.editReason() !== null} onClick={() => controller.edit()}>Open reserved version for review</button></>}
-      <button type="button" className="button secondary" disabled={controller.checkReason() !== null} onClick={() => void controller.check()}>Check original status</button>
+      <button type="button" className="button secondary" disabled={controller.checkReason() !== null} onClick={() => void controller.check()}>Check status</button>
       <button type="button" className="button secondary" disabled={controller.stopReason() !== null} onClick={() => void controller.stop()}>Stop</button>
     </div>
     {!compact && state.enabled && <p className="toolbar-reason">{busy ?? (status?.phase === 'reserved' ? controller.editReason() : status?.phase === 'reviewed' ? controller.reserveReason() : controller.reviewReason()) ??

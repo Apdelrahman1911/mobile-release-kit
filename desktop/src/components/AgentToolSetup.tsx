@@ -29,7 +29,7 @@ export function AgentToolSetup({controller}:{controller:AgentToolSetupController
           s.selected==='doctor'?' I allow one local CLI check using this copied draft; later edits will not change it.':' I allow one local CLI submission of this exact inspection.'}</label>
       <button disabled={!!controller.allowReason()} onClick={()=>void controller.allow()}>Allow this step once</button>
       {controller.allowReason()&&<p className="save-note">{controller.allowReason()}</p>}
-      <div className="button-row"><button disabled={!!controller.checkReason()} onClick={()=>void controller.check()}>Check original permission and native status</button>
+      <div className="button-row"><button disabled={!!controller.checkReason()} onClick={()=>void controller.check()}>Check status</button>
         <button disabled={!!controller.revokeReason()} onClick={()=>void controller.revoke()}>Withdraw permission / request Stop</button></div>
       {s.pending&&<p role="status">The original {s.pending} call is still returning.</p>}
       {s.revoking&&<p role="status">Stop requested; neither that request nor a terminal event proves cleanup.</p>}

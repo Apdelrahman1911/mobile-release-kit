@@ -91,6 +91,6 @@ export function ProjectInitialization({controller,state,setup,setupState,compact
       {agent.status?.request&&<button type="button" disabled={agent.revokePending||agent.status.request.phase==='final'} onClick={()=>void controller.agent.revoke()}>Withdraw / stop original CLI request</button>}
       {linked&&!state.attempt?.handled&&owner?.phase==='final'&&<p>The native terminal is visible; the original caller and history acknowledgement are still required. No completion is inferred yet.</p>}
     </details>
-    <button type="button" disabled={state.readPending} onClick={()=>void controller.checkStatus()}>Check original status</button>
+    <button type="button" disabled={state.readPending} onClick={()=>void controller.checkStatus()}>Check status</button>
   </section>;
 }

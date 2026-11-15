@@ -6,6 +6,7 @@ import type { GitHubAssertionInput, GitHubSetupController, GitHubSetupState } fr
 import { GITHUB_WORKFLOWS } from '../githubSetupProtocol.ts';
 import type { AppInfo, CredentialHelp, GitHubComparison, GitHubHelpText, GitHubSetupProposed, HelpContent, Page } from '../types.ts';
 import { Badge, DisabledAction, ErrorNotice, HelpButton, Issues, PageHeading, SectionHeading } from '../components/Common.tsx';
+import { TaskTabs } from '../components/TaskTabs.tsx';
 import { Icon } from '../components/Icon.tsx';
 import { ProgressiveDisclosure } from '../components/ProgressiveDisclosure.tsx';
 
@@ -130,13 +131,10 @@ export function GitHub({ session, state, controller, loading, onReload, onNaviga
   const attention = remoteTasks.filter((task) => task.needsAttention);
   return <>
     <PageHeading eyebrow="GITHUB" title="Connect GitHub" description="Connect your account, set up release workflows and see past runs. Each file change and online action asks for your approval. Nothing is published automatically." />
-    {attention.length > 0 && <div className="notice notice-warning" role="status"><Icon name="info" /><div>
-      <strong>GitHub tasks need your attention</strong><p>The original controls stay open below. Review their status before starting another task.</p>
-      <ul>{attention.map((task) => <li key={task.id}><a href={`#github-task-${task.id}`}>{task.title}</a></li>)}</ul>
-    </div></div>}
-    {connectionView}
-    {activityView}
-    {pullRequestView}
+    <TaskTabs label="GitHub tasks" tabs={[
+      { id: 'connect', label: 'Connect', summary: 'Sign in to GitHub and choose your repository.', content: connectionView },
+      { id: 'activity', label: 'Activity', summary: 'See recent workflow runs and pull requests for your repository.', content: <>{activityView}{pullRequestView}</> },
+      { id: 'workflows', label: 'Release workflows', summary: 'Add or update the release workflow files in your project. You review every file before it is saved.', content: <>
     <div className="notice notice-info"><Icon name="shield" /><div><strong>Prepare workflow files on this computer</strong><p>Choose the template source, then use <strong>Review local workflow files</strong> below. That review has its own confirmation before saving. The optional text preview does not save files or contact GitHub.</p></div></div>
     <form className="card github-form" onSubmit={(event) => { event.preventDefault(); void controller.propose(); }}>
       <SectionHeading title="Choose workflow templates" description="Enter the Mobile Release Kit repository and full commit to use for local workflow files. This is separate from your app’s repository above; the ? buttons explain where to find both values."><Badge>{state.pending ? 'Preparing optional preview…' : 'Not applied'}</Badge></SectionHeading>
@@ -196,6 +194,12 @@ export function GitHub({ session, state, controller, loading, onReload, onNaviga
       {state.result?.state === 'proposed' ? <Proposal result={state.result} credentialHelp={credentialHelp} onHelp={onHelp} /> :
         <p>No current text preview is available. Use the optional preview button above if you want to read one; local workflow review is separate.</p>}
     </ProgressiveDisclosure>
+    <details className="card progressive-disclosure"><summary>Help: what setup changes, and what it does not</summary><SectionHeading title="Saving workflows does not run them" description="Applying workflow files only changes your local repository. GitHub environments, secrets, checks and releases use the separate controls and approvals shown on this page or in Releases." /><div className="github-disabled-actions">
+      <p className="save-note">For supported environment protections, secrets and variables, use the separate remote setup card above. It reports current native availability, requires an eligible connection and assigned inputs where needed, and shows a review before each confirmed change. Local file approval never grants remote authority.</p>
+      <DisabledAction label="Dispatch from this setup preview" icon="rocket" reason="This preview cannot run checks or dispatch workflows. Use GitHub nonpublishing preflight on this page, or Protected release workflows in Releases; those separate actions may still be unavailable." />
+    </div></details>
+      </> },
+      { id: 'tasks', label: 'More tasks', attention: attention.length > 0, summary: 'Optional GitHub tasks, such as repository settings and release history. Open only what you need.', content: <>
     <section aria-label="Optional GitHub tasks">
       <SectionHeading title="Optional GitHub tasks" description="Open only the task you need. Each keeps its own checks, permissions and approval; saving local workflow files does not publish them." />
       {remoteTasks.map((task) => <section id={`github-task-${task.id}`} key={task.id} tabIndex={-1} aria-label={task.title}>
@@ -204,9 +208,7 @@ export function GitHub({ session, state, controller, loading, onReload, onNaviga
         </ProgressiveDisclosure>
       </section>)}
     </section>
-    <details className="card progressive-disclosure"><summary>Help: what setup changes, and what it does not</summary><SectionHeading title="Saving workflows does not run them" description="Applying workflow files only changes your local repository. GitHub environments, secrets, checks and releases use the separate controls and approvals shown on this page or in Releases." /><div className="github-disabled-actions">
-      <p className="save-note">For supported environment protections, secrets and variables, use the separate remote setup card above. It reports current native availability, requires an eligible connection and assigned inputs where needed, and shows a review before each confirmed change. Local file approval never grants remote authority.</p>
-      <DisabledAction label="Dispatch from this setup preview" icon="rocket" reason="This preview cannot run checks or dispatch workflows. Use GitHub nonpublishing preflight on this page, or Protected release workflows in Releases; those separate actions may still be unavailable." />
-    </div></details>
+      </> },
+    ]} />
   </>;
 }

@@ -56,7 +56,7 @@ export function GitLocalControls({ controller, compact = false, originalProjectN
         'Check local Git actions first. This checks native availability; it does not stage files or create a commit.'}</p>}
       <div className="button-row">
         <button type="button" className="button secondary" disabled={!controller.canCheck()} onClick={() => void controller.checkStatus()}>
-          {state.checking ? 'Checking…' : active ? 'Check original action' : 'Check local Git actions'}</button>
+          {state.checking ? 'Checking…' : active ? 'Check action' : 'Check local Git actions'}</button>
         {active && <button type="button" className="button secondary" disabled={!controller.canCancel()} onClick={() => void controller.cancel()}>Stop original action</button>}
         {state.review && <button type="button" className="button secondary" disabled={!controller.canDiscard()} onClick={() => void controller.discard()}>Close review, keep draft</button>}
         {compact && onShow && <button type="button" className="text-button" onClick={onShow}>Show local changes</button>}

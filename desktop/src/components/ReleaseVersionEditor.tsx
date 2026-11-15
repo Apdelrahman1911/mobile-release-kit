@@ -94,7 +94,7 @@ export function ReleaseVersionSave({ state, controller, onShowProject }: {
   const projectId = owner?.projectId ?? state.edit.attempt?.binding.projectId;
   return <section className="card version-status" aria-label="Retained version operation">
     {owner ? <Outcome owner={owner} /> : <p>Waiting for the original saved-version Open. No values were fabricated.</p>}
-    <div className="button-row"><button type="button" className="button small secondary" disabled={state.edit.readPending} onClick={() => void controller.checkStatus()}>Check original version status</button>
+    <div className="button-row"><button type="button" className="button small secondary" disabled={state.edit.readPending} onClick={() => void controller.checkStatus()}>Check version status</button>
       <button type="button" className="button small secondary" disabled={!state.edit.attempt || state.edit.attempt.handled || state.edit.attempt.closeClaimed || owner?.phase === 'unknown'} onClick={() => controller.requestClose()}>
         {state.edit.attempt?.applyClaimed ? 'Request cancellation' : 'Close editor, keep draft'}</button>
       {projectId && <button type="button" className="button small secondary" onClick={() => onShowProject(projectId)}>View version draft / review</button>}</div>
