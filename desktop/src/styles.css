@@ -911,3 +911,9 @@ main select:not([class]) { min-height: 34px; margin: 4px 0; padding: 6px 10px; b
 main input[type="checkbox"]:not([class]) { width: 16px; height: 16px; margin: 0 8px 0 0; accent-color: var(--primary); vertical-align: -3px; }
 main details.card > summary { cursor: pointer; font-size: 16px; font-weight: 600; color: var(--ink); }
 main details.card[open] > summary { margin-bottom: 12px; }
+.tech-details { margin: 12px 0; border: 1px dashed var(--line); border-radius: 8px; padding: 8px 12px; background: var(--subtle); }
+.tech-details > summary { cursor: pointer; font-size: 13px; font-weight: 600; color: var(--muted); }
+.tech-details[open] > summary { margin-bottom: 8px; }
+.tech-details-body p { font-size: 13px; }
+.tech-toggle { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; color: var(--muted); cursor: pointer; white-space: nowrap; }
+.tech-toggle input { accent-color: var(--primary); }
