@@ -81,7 +81,10 @@ win32_need(GetSecurityDescriptorControl(sd.p,&ctrl,&rev));
  if(privateOnly)
 need((ctrl&SE_DACL_PROTECTED)!=0);
  DWORD writes=FILE_WRITE_DATA|FILE_APPEND_DATA|FILE_WRITE_EA|FILE_WRITE_ATTRIBUTES|DELETE|WRITE_DAC|WRITE_OWNER|FILE_DELETE_CHILD|GENERIC_WRITE|GENERIC_ALL;
- if(directory && ancestor && !privateOnly)writes &= ~(FILE_WRITE_DATA|FILE_APPEND_DATA);
+ // Stock Windows grants BUILTIN\Users (CI)(WD,AD,WEA,WA) on C:\ProgramData. On a shared parent
+  // directory those rights cannot rename, replace or redirect it (reparse points are refused above
+  // and the chain is held open), so they are accepted for ancestors only; private paths stay strict.
+  if(directory && ancestor && !privateOnly)writes &= ~(FILE_WRITE_DATA|FILE_APPEND_DATA|FILE_WRITE_EA|FILE_WRITE_ATTRIBUTES);
  for(DWORD i=0;i<acl->AceCount;++i){void* ace=nullptr;
 win32_need(GetAce(acl,i,&ace)!=FALSE);auto head=static_cast<ACE_HEADER*>(ace);
   

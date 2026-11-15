@@ -190,6 +190,8 @@ jobs:
         run: |
           $sourceBinding=Get-Content "$env:RUNNER_TEMP\mrk-transaction-build\source-run-binding.json" -Raw | ConvertFrom-Json
           if($sourceBinding.sourceCommit -cne $env:GITHUB_SHA -or $sourceBinding.runId -cne $env:GITHUB_RUN_ID){throw 'Artifact original source/run binding refused'}
+          # Read-only record (job log) of the parent-folder permissions the installer guard checks.
+          foreach($d in @('C:\', $env:ProgramData, $env:ProgramFiles)){ Write-Host "== $d"; icacls $d | Write-Host }
           & desktop/packaging/windows/Invoke-InstalledAppSmoke.ps1 -Stage "$env:RUNNER_TEMP\mrk-transaction-build\msi" -Evidence "$env:RUNNER_TEMP\mrk-installed-app"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         if: always()
