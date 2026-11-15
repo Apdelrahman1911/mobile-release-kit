@@ -55,6 +55,9 @@ def main():
  (logs/'source-reader-probe.json').write_text(json.dumps(probe,indent=2,sort_keys=True)+'\n')
  refused=[k for k,v in probe['files'].items() if v!='ok']
  msi.need(not refused,'strict source reader refused before compile: '+'; '.join(k+' '+probe['files'][k] for k in refused[:5]))
+ env=os.environ.copy();msi.need(not any(env.get(key) for key in ('RUSTC_WRAPPER','RUSTC_WORKSPACE_WRAPPER','RUSTFLAGS','CARGO_ENCODED_RUSTFLAGS','CMAKE_GENERATOR','CXX','CC','CL','_CL_')),'ambient compiler injection refused');env.update(CARGO_BUILD_JOBS='1',CARGO_HOME=str(out/'cargo'),CARGO_TARGET_DIR=str(out/'target'),MSBUILDDISABLENODEREUSE='1',DOTNET_CLI_USE_MSBUILD_SERVER='0',RUSTUP_TOOLCHAIN='1.98.0')
+ def run(name,args,cwd=source,timeout=1800):
+  return run_owned(name,args,cwd=cwd,env=env,logs=logs,timeout=timeout)
  # Early native toolchain check: same generator, toolset, SDK and strict flags
  # as the MSI custom-action DLL, on a tiny library, before the long compile.
  vs=native.visual_studio();(logs/'visual-studio.json').write_text(json.dumps(vs,indent=2)+'\n')
@@ -64,9 +67,6 @@ def main():
  run('native-toolchain-configure',native.configure_args(vs,toolprobe,toolprobe/'build'),cwd=out,timeout=600)
  run('native-toolchain-build',['cmake','--build',str(toolprobe/'build'),'--config','Release','--parallel','1'],cwd=out,timeout=600)
  msi.need((toolprobe/'build/Release/MrkToolchainProbe.dll').is_file(),'native toolchain probe produced no DLL')
- env=os.environ.copy();msi.need(not any(env.get(key) for key in ('RUSTC_WRAPPER','RUSTC_WORKSPACE_WRAPPER','RUSTFLAGS','CARGO_ENCODED_RUSTFLAGS','CMAKE_GENERATOR','CXX','CC','CL','_CL_')),'ambient compiler injection refused');env.update(CARGO_BUILD_JOBS='1',CARGO_HOME=str(out/'cargo'),CARGO_TARGET_DIR=str(out/'target'),MSBUILDDISABLENODEREUSE='1',DOTNET_CLI_USE_MSBUILD_SERVER='0',RUSTUP_TOOLCHAIN='1.98.0')
- def run(name,args,cwd=source,timeout=1800):
-  return run_owned(name,args,cwd=cwd,env=env,logs=logs,timeout=timeout)
  archive=out/embedded.ZIP_NAME;request=urllib.request.Request(embedded.ZIP_URL,headers={'User-Agent':'MRK-disposable-native-validation/1'})
  with urllib.request.urlopen(request,timeout=60) as incoming,archive.open('xb') as target:
   count=0;h=hashlib.sha256()

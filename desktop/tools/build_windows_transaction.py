@@ -73,7 +73,7 @@ def visual_studio():
     43651087120). Keep the v143 toolset when it is installed; otherwise use
     that installation's default toolset. The choice is recorded as evidence.
     """
-    import os, re, subprocess
+    import os, re
     vswhere = Path(os.environ.get('ProgramFiles(x86)', r'C:\Program Files (x86)'))/'Microsoft Visual Studio/Installer/vswhere.exe'
     prep.need(vswhere.is_file(), 'vswhere missing')
     found = subprocess.run([str(vswhere), '-latest', '-products', '*', '-requires',
