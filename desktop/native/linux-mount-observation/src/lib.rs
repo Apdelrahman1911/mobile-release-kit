@@ -1,7 +1,10 @@
 //! A single read-only mount query, not installed-runtime qualification.
 //!
-//! Reviewed ABIs: Ubuntu 24.04 x86_64 GNU / GA Linux 6.8 and the exact Ubuntu
-//! Azure 6.17.0-1022.22 source. This is not native/product qualification. This crate
+//! Reviewed ABIs: Ubuntu 24.04 x86_64 GNU / GA Linux 6.8, exact Ubuntu Azure
+//! 6.17.0-1022.22 source, and 7.0.0-1017.17~24.04.1 installed headers plus original
+//! hosted read-only native observation 43015436984. The latter's byte/source
+//! binding is in packaging/debian/kernel-abi-7.0.0-1017-azure.json. This is not
+//! installed-runtime or product qualification. This crate
 //! neither selects paths nor acquires/closes descriptors, changes namespaces,
 //! raises privilege, retries unsupported syscalls, or launches a process.
 //! Its caller retains the borrowed original descriptor and the deadline owner.

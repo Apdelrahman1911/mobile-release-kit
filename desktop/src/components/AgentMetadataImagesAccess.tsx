@@ -21,7 +21,7 @@ export function AgentMetadataImagesAccess({ controller }: { controller: ServiceM
       <div className="button-row"><button type="button" disabled={key === null || reviewed !== key || !controller.canAllow()}
         onClick={() => { const same = key !== null && reviewed === controller.approvalKey(); setReviewed(null); if (same) void controller.allow(); }}>Allow this copy once</button>
         <button type="button" disabled={!controller.hasAllowance()} onClick={() => void controller.revoke()}>Revoke / stop this allowance</button>
-        <button type="button" disabled={state.pending || !controller.available()} onClick={() => void controller.check()}>Check original request</button></div>
+        <button type="button" disabled={state.pending || !controller.available()} onClick={() => void controller.check()}>Check request</button></div>
       {!key && !state.retained && <p>Use the native picker and finish the image review first. Wait for its original calls to return.</p>}
       {a?.review && <p>{a.review.platform} · {a.review.locale} · {a.review.assetType}: {a.review.createCount} new, {a.review.replaceCount} replaced,
         {' '}{a.review.preserveCount} kept. This summary is not a new preview or file observation.</p>}

@@ -22,7 +22,7 @@ export function VersionEnrollmentPanel({ controller, compact = false }: { contro
     {!compact && <p className="save-note">For optional CLI delegation, first Check status here, then choose the exact counter action in Advanced GitHub permissions. After CLI Submit, press that permission’s Check to run the queued action. Review and Connect require separate permissions; after a completed Review, withdraw only its old GitHub permission with Revoke then Check so the original review remains available. No automatic connection or background enrollment.</p>}
     <div role="status" aria-live="polite"><Badge tone={state.unknown || state.issue ? 'warning' : 'info'}>{phase}</Badge></div>
     {state.stale && status && <p className="save-note">This is an earlier observation, not a current connection or release-readiness check.</p>}
-    {status?.projectId && owner && <p className="save-note">Original native project: <bdi>{status.projectId}</bdi>. Controls stay with that operation even if the selection changes.</p>}
+    {status?.projectId && owner && <p className="save-note">Native project: <bdi>{status.projectId}</bdi>. Controls stay with that operation even if the selection changes.</p>}
     {!compact && status?.review && <div>
       <p>Repository: <strong><bdi>{status.review.repository}</bdi></strong><br />
         Counter’s latest version: <strong>{status.review.version.name} ({status.review.version.build})</strong><br />

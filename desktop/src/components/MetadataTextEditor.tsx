@@ -1,3 +1,4 @@
+import { TechnicalDetails } from './TechnicalDetails.tsx';
 import { ServiceMetadataTextAccess } from './ServiceMetadataTextAccess.tsx';
 import { useEffect, useId, useRef, useState } from 'react';
 import { savedTextRecoveryActionLabel, savedTextRecoveryGuidance, savedTextRecoveryPreservationGuidance } from '../savedTextRecovery.ts';
@@ -18,7 +19,7 @@ function ActionHelp({ state, id, onHelp }: { state: MetadataTextState; id: Metad
 }
 function RawText({ file, side }: { file: MetadataPreparedFile; side: 'before' | 'after' }) {
   const value = side === 'before' ? file.before.state === 'present' ? file.before : null : file.after;
-  return <section className="metadata-raw"><h4>{side === 'before' ? 'Original bytes' : 'Reviewed replacement bytes'}</h4>
+  return <section className="metadata-raw"><h4>{side === 'before' ? 'Bytes' : 'Reviewed replacement bytes'}</h4>
     {value ? <><p>{value.byteLength.toLocaleString()} UTF-8 bytes · {metadataLineEndings(value.text)} · {value.text.endsWith('\n') || value.text.endsWith('\r') ? 'Final line ending present' : 'No final line ending'}</p>
       <code className="metadata-digest">SHA256 {value.sha256}</code><pre tabIndex={0} aria-label={`${side === 'before' ? 'Complete original' : 'Complete reviewed'} public text for ${file.path}`}><code>{value.text}</code></pre></> : <p>Observed absent. No original text was fabricated.</p>}
   </section>;
@@ -38,26 +39,24 @@ function FileReview({ view }: { view: PreparedMetadataTextView }) {
   </div>;
 }
 function SaveConfirmation({ view, allowed, onCancel, onConfirm }: { view: PreparedMetadataTextView; allowed: boolean; onCancel: () => void; onConfirm: () => void }) {
-  const dialog = useRef<HTMLDialogElement>(null); const titleId = useId(); const inputId = useId();
-  const [confirmation, setConfirmation] = useState(''); const [reviewed, setReviewed] = useState(false);
+  const dialog = useRef<HTMLDialogElement>(null); const titleId = useId();
+  const [reviewed, setReviewed] = useState(false);
   useEffect(() => { const element = dialog.current; element?.showModal(); return () => { if (element?.open) element.close(); }; }, []);
   return <dialog ref={dialog} className="confirm-dialog metadata-confirm-dialog" aria-labelledby={titleId} onCancel={onCancel}><div className="dialog-content">
-    <h2 id={titleId}>{metadataNoOp(view) ? 'Confirm this unchanged bundle?' : 'Save this reviewed locale bundle?'}</h2>
-    <p>Save only the reviewed public text for <strong>{view.platform} / {view.locale}</strong>. Files are checked again before saving. Closing this dialog keeps your draft.</p>
-    <ul className="metadata-confirm-files">{view.files.map((file) => <li key={file.id}><code>{file.path}</code> — {file.action}</li>)}</ul>
-    <label className="save-confirm-check"><input type="checkbox" checked={reviewed} onChange={(event) => setReviewed(event.target.checked)} />I reviewed all exact paths, full original/replacement text, digests and line-ending changes.</label>
-    <label htmlFor={inputId}>Type <strong>SAVE</strong> to confirm only this local text operation</label><input id={inputId} value={confirmation} onChange={(event) => setConfirmation(event.target.value)} autoComplete="off" spellCheck={false} />
-    <p>No configuration, credentials, screenshots, Git/index changes, Store synchronization or release operation is included. A save already submitted may finish after cancellation.</p>
-    <details><summary>Save safeguards</summary><p>Only this original one-use native plan is submitted. There is no force, automatic rebase, replacement token or automatic retry. All original dependencies and targets must still match.</p></details>
+    <h2 id={titleId}>{metadataNoOp(view) ? 'Confirm unchanged text?' : 'Save your Store text?'}</h2>
+    <p>Saves the text you reviewed for <strong>{view.platform} / {view.locale}</strong> to your project. Nothing is sent to a Store. Closing this keeps your draft.</p>
+    <details><summary>Files that will change</summary><ul className="metadata-confirm-files">{view.files.map((file) => <li key={file.id}><code>{file.path}</code> — {file.action}</li>)}</ul></details>
+    <label className="save-confirm-check"><input type="checkbox" checked={reviewed} onChange={(event) => setReviewed(event.target.checked)} />I reviewed the changes.</label>
+    <details><summary>Save safeguards</summary><p>No configuration, credentials, screenshots, Git/index changes, Store synchronization or release operation is included. A save already submitted may finish after cancellation. Files are checked again before saving. Only this original one-use native plan is submitted. There is no force, automatic rebase, replacement token or automatic retry. All original dependencies and targets must still match.</p></details>
     {!allowed && <p className="review-caution" role="alert">This review is no longer current. Your draft is kept. Check this operation’s status before starting a new review.</p>}
-    <div className="button-row"><button autoFocus type="button" className="button secondary" onClick={onCancel}>Keep reviewing</button><button type="button" className="button primary" disabled={!allowed || !reviewed || confirmation !== 'SAVE'} onClick={onConfirm}>{metadataNoOp(view) ? 'Confirm unchanged text' : 'Save text'}</button></div>
+    <div className="button-row"><button autoFocus type="button" className="button secondary" onClick={onCancel}>Keep reviewing</button><button type="button" className="button primary" disabled={!allowed || !reviewed} onClick={onConfirm}>{metadataNoOp(view) ? 'Confirm unchanged text' : 'Save text'}</button></div>
   </div></dialog>;
 }
 // Pure presentation shared by the two existing editors. The supplied binding
 // is a frozen original review; this panel never manufactures an Apply request.
 function RecoveryFileFacts({ view }: { view: SavedTextRecoveryView }) {
   return <div className="review-table-wrap"><table className="review-table"><caption>Inspected journal files — not your current draft</caption>
-    <thead><tr><th scope="col">Exact selected path</th><th scope="col">Authorized effect</th><th scope="col">Original file</th><th scope="col">Interrupted save’s file</th></tr></thead>
+    <thead><tr><th scope="col">Exact selected path</th><th scope="col">Authorized effect</th><th scope="col">File</th><th scope="col">Interrupted save’s file</th></tr></thead>
     <tbody>{view.files.map((file) => <tr key={file.path}><th scope="row"><code>{file.path}</code></th><td>{file.effect.replaceAll('_', ' ')}</td>
       {(['before', 'after'] as const).map((side) => { const facts = file[side]; return <td key={side}>{facts ? <>{facts.byteLength} bytes · mode {facts.mode.toString(8).padStart(4, '0')}
         <br /><code className="metadata-digest">SHA256 {facts.sha256}</code></> : 'Not recorded / absent for this side'}</td>; })}</tr>)}</tbody>
@@ -100,23 +99,23 @@ export function SavedTextRecoveryPanel<D extends SavedTextRecoveryDomain>({ doma
     <SectionHeading title="Inspect an interrupted saved-file edit" description="A separate, explicit inspection of this editor’s persisted journal. No normal checkout or current draft is used as recovery authority." />
     <p>Selected project: <code>{projectId ?? 'None'}</code>. Close any original live review and wait for settlement before inspecting. Unknown cleanup cannot be reset here.</p>
     <div className="button-row"><button type="button" className="button secondary" disabled={inspectReason !== null} title={inspectReason ?? undefined} onClick={onInspect}>Inspect recovery</button>
-      <button type="button" className="button small secondary" disabled={readPending} onClick={onStatus}>Check original recovery status</button>
+      <button type="button" className="button small secondary" disabled={readPending} onClick={onStatus}>Check recovery status</button>
       {attempt && !attempt.handled && !attempt.closeClaimed && !terminal && <button type="button" className="button secondary" onClick={onClose}>{attempt.applyClaimed ? 'Request recovery cancellation' : 'Close inspection, keep drafts'}</button>}</div>
     {inspectReason && <p className="save-note">{inspectReason}</p>}
-    {attempt && <p>Original recovery project: <code>{attempt.binding.projectId}</code>. {owner ? `Original phase: ${owner.phase}.` : 'Waiting for the original inspection; no result is assumed.'}</p>}
+    {attempt && <p>Recovery project: <code>{attempt.binding.projectId}</code>. {owner ? `Original phase: ${owner.phase}.` : 'Waiting for the original inspection; no result is assumed.'}</p>}
     {view && <><p className={view.state === 'conflict' ? 'review-caution' : 'save-note'} role={view.state === 'conflict' ? 'alert' : 'status'}>{savedTextRecoveryGuidance(view)}</p>
       {view.state === 'conflict' && <p>Conflict category: <code>{view.reason}</code>.</p>}
       {view.selection && <dl className="save-outcome-facts">{Object.entries(view.selection).map(([key, value]) => <div key={key}><dt>{key}</dt><dd><code>{String(value)}</code></dd></div>)}</dl>}
       {view.action && <><h3>{savedTextRecoveryActionLabel[view.action]}</h3><RecoveryFileFacts view={view} />
         <p>Private cleanup is limited to {view.privateCleanup.fileCount} inspected owned files and {view.privateCleanup.directoryCount} directories. No other domain, current draft, Store state or build-input recovery is included.</p></>}
     </>}
-    {attempt?.succeeded && <div className="notice notice-info" role="status"><p><strong>Original recovery action completed; current draft kept.</strong>
+    {attempt?.succeeded && <div className="notice notice-info" role="status"><p><strong>Recovery action completed; current draft kept.</strong>
       {' '}This clears only this editor’s own journal attention. An earlier committed cleanup is not a new Save. Explicitly Load/Refresh and reconcile public text, or Reload saved version values with its discard confirmation, before another normal save or build consent.</p></div>}
-    {owner?.coreOutcome && <p>Original effect: {owner.coreOutcome.effect}; journal: {owner.coreOutcome.journal}; core resources: {owner.coreOutcome.resources}; core reason: {owner.coreOutcome.reason}.
+    {owner?.coreOutcome && <p>Effect: {owner.coreOutcome.effect}; journal: {owner.coreOutcome.journal}; core resources: {owner.coreOutcome.resources}; core reason: {owner.coreOutcome.reason}.
       {' '}Native: {owner.nativeFinality}; reason: {owner.nativeReason}{owner.lateSettled ? '; late settlement (not success)' : ''}.</p>}
     {terminal && !attempt?.succeeded && <p className="review-caution" role="alert">No successful recovery is confirmed. Idle/conflict inspection, discard, failure and late settlement do not clear earlier attention or mark drafts Saved.</p>}
     {attempt?.invalidated && !terminal && <p className="review-caution">Project, navigation or service context changed. The original review is closing; no replacement plan or automatic retry is used.</p>}
-    {current && <><p>Original review expires in about {Math.ceil(remainingMs / 1000)} seconds; the native deadline remains authoritative.</p>
+    {current && <><p>Review expires in about {Math.ceil(remainingMs / 1000)} seconds; the native deadline remains authoritative.</p>
       <button type="button" className="button primary" disabled={!canApply(current)} onClick={() => { if (canApply(current)) setConfirmation(current); }}>Review recovery confirmation…</button></>}
     <p className="subtle-note">{savedTextRecoveryPreservationGuidance}</p>
     {confirmation && <RecoveryConfirmation key={confirmation.planToken} binding={confirmation} allowed={canApply(confirmation)} onCancel={() => setConfirmation(null)}
@@ -126,7 +125,7 @@ export function SavedTextRecoveryPanel<D extends SavedTextRecoveryDomain>({ doma
 
 function operationNotice(owner: MetadataTextEditProjection): { title: string; detail: string; technical?: string; danger: boolean } {
   const core = owner.coreOutcome;
-  if (owner.recovery) return { title: 'Original recovery inspection / action', danger: owner.phase === 'unknown' || core?.journal === 'recovery_required',
+  if (owner.recovery) return { title: 'Recovery inspection / action', danger: owner.phase === 'unknown' || core?.journal === 'recovery_required',
     detail: 'This is not a normal Save. Open the editor’s recovery inspection to review its exact original action and finality; current drafts remain separate.' };
   if (owner.phase === 'unknown' || owner.nativeFinality === 'unknown') return { title: core?.effect === 'committed' ? 'Text written; completion not confirmed' : 'Text save or cleanup is unconfirmed', danger: true,
     detail: `${core?.effect === 'committed' ? 'The reviewed text was written, but cleanup is not confirmed.' : owner.applySubmitted ? 'The save may already have happened.' : 'No save request is recorded, but cleanup is not confirmed.'} Keep recovery files and operation details. Do not save again, delete journals or assume changes were undone.`,
@@ -146,7 +145,7 @@ function operationNotice(owner: MetadataTextEditProjection): { title: string; de
       core?.effect === 'rolled_back' ? 'Only this save’s changes were undone, not unrelated changes. Your text draft remains in memory.' : 'No successful save is confirmed. Closing or refusing the review did not discard text or save configuration.' };
   if (owner.phase === 'reviewing') return { title: 'Review text changes', danger: false, detail: 'Nothing has been saved. Check every file below, then confirm the whole bundle—or close the review and keep your draft.' };
   if (owner.phase === 'applying') return { title: 'Saving text…', danger: false, detail: 'Wait for confirmation before assuming the save succeeded. Newer draft changes are kept. Do not save again.', technical: 'Apply admission is not finality. The original core outcome and native resource settlement are still pending.' };
-  if (owner.phase === 'finalizing') return { title: 'Finishing the text operation…', danger: false, detail: 'Cancellation may be too late to stop the save. Wait for the result; do not assume changes were undone or cleanup succeeded.', technical: 'Original core outcome and native resource settlement remain authoritative.' };
+  if (owner.phase === 'finalizing') return { title: 'Finishing the text operation…', danger: false, detail: 'Cancellation may be too late to stop the save. Wait for the result; do not assume changes were undone or cleanup succeeded.', technical: 'Core outcome and native resource settlement remain authoritative.' };
   return { title: owner.phase === 'opening' ? 'Checking the saved locale…' : 'Preparing text changes…', danger: false, detail: 'Checking the saved configuration, ignore rules and selected text files. No text or directories are written during review.', technical: 'The native owner captures the registered project and original config, ignore, ancestor and target bindings before Prepare.' };
 }
 
@@ -178,10 +177,10 @@ export function MetadataTextSave({ state, controller, detailed, onShowProject, o
       remainingMs={controller.remainingRecoveryReviewMs()} readPending={edit.readPending} current={controller.currentRecoveryApplyBinding()}
       onInspect={() => { controller.inspectRecovery(); }} onClose={() => controller.requestRecoveryClose()} onStatus={() => void controller.checkStatus()}
       canApply={(value) => controller.canApplyRecovery(value)} onApply={(value) => controller.applyRecovery(value)} />}
-    {!detailed && edit.recovery && <section className="card" aria-label="Retained metadata recovery"><p>Original metadata recovery: {edit.recovery.projection?.phase ?? 'opening'}; drafts kept.
+    {!detailed && edit.recovery && <section className="card" aria-label="Retained metadata recovery"><p>Metadata recovery: {edit.recovery.projection?.phase ?? 'opening'}; drafts kept.
       {' '}{edit.recovery.succeeded ? 'Matching recovery completed, not a new Save.' : 'No recovery success is assumed.'}</p>
       <button type="button" className="button small secondary" onClick={() => onShowProject(edit.recovery!.binding.projectId)}>View original recovery</button></section>}
-    {(notice || attempt || edit.observationIssue || edit.nativeBlocked) && <section className="card metadata-save-panel" aria-label="Original metadata file-save operation">
+    {(notice || attempt || edit.observationIssue || edit.nativeBlocked) && <section className="card metadata-save-panel" aria-label="Metadata file-save operation">
     <SectionHeading title={edit.integrityFailed ? 'Text status could not be verified' : notice?.title ?? 'Waiting for text review…'} description="Local text files only. This operation does not change configuration or Store listings.">
       <ActionHelp state={state} id="save" onHelp={onHelp} />
     </SectionHeading>
@@ -193,7 +192,7 @@ export function MetadataTextSave({ state, controller, detailed, onShowProject, o
     {attempt?.applyClaimed && owner?.phase === 'reviewing' && <p role="status">Save was requested once. Wait for confirmation; do not submit it again.</p>}
     {edit.nativeBlocked && <p className="review-caution" role="alert">Native cleanup uncertainty blocks all edit domains even if an earlier result was saved. Preserve evidence; no generic journal reset or recovery retry is available.</p>}
     {owner && <p className="save-note">{state.entries[attempt?.binding.key ?? '']?.projectName ?? owner.projectId} · {owner.platform} / {owner.locale}</p>}
-    {owner && <details className="metadata-outcome-details"><summary>Save and recovery details</summary>{notice?.technical && <p>{notice.technical}</p>}<dl className="save-outcome-facts"><div><dt>Original project / locale</dt><dd>{state.entries[attempt?.binding.key ?? '']?.projectName ?? owner.projectId} · {owner.platform} / {owner.locale}</dd></div>
+    {owner && <details className="metadata-outcome-details"><summary>Save and recovery details</summary>{notice?.technical && <p>{notice.technical}</p>}<dl className="save-outcome-facts"><div><dt>Project / locale</dt><dd>{state.entries[attempt?.binding.key ?? '']?.projectName ?? owner.projectId} · {owner.platform} / {owner.locale}</dd></div>
       <div><dt>Effect / journal</dt><dd>{owner.coreOutcome?.effect ?? 'Not reported'} / {owner.coreOutcome?.journal ?? 'Not reported'}</dd></div><div><dt>Core / native resources</dt><dd>{owner.coreOutcome?.resources ?? 'Not reported'} / {owner.nativeFinality}{owner.lateSettled ? ' · late settled' : ''}</dd></div>
       <div><dt>Reason</dt><dd>{owner.coreOutcome?.reason !== 'none' ? owner.coreOutcome?.reason ?? owner.nativeReason : owner.nativeReason}</dd></div></dl>
       <p>Only the original session and one-use plan token can authorize this operation. Known effect, journal state, core resource status and native finality are separate facts. Review lifetime uses a local estimate; the original native deadline remains authoritative.</p></details>}
@@ -268,14 +267,14 @@ export function MetadataTextEditor({ state, controller, session, onShowProject, 
   };
   return <>
     <section className="card metadata-text-editor" aria-labelledby={`${id}-title`}>
-      <SectionHeading title="2. Edit one locale’s public text" description="Load the required three Android or five iOS text files from the saved configuration. Text drafts are separate from the configuration form above."><Badge>{state.mode === 'preview' ? 'Browser preview · unavailable' : 'Selected text only'}</Badge></SectionHeading>
+      <SectionHeading title="Store text" description="Choose a language, load its text, edit it and save. Android has three text fields and iOS has five."><Badge>{state.mode === 'preview' ? 'Browser preview · unavailable' : 'Selected text only'}</Badge></SectionHeading>
       <h3 id={`${id}-title`} className="sr-only">Configured public locale text</h3>
-      <p className="metadata-public-note">Public Store copy only. Never paste credentials, private review contacts, demo accounts or TestFlight notes. Secret-pattern scanning is a heuristic, not proof that arbitrary prose is secret-free. Text stays in memory, never browser storage or telemetry.</p>
-      <div className="metadata-context-row"><label htmlFor={`${id}-context`}>Saved platform / locale</label><select id={`${id}-context`} value={state.selectedKey ?? ''} disabled={!session || !state.choices.length && !oldContexts.length} onChange={(event) => controller.selectContext(event.target.value)}>
-        <option value="" disabled>No enabled configured locale</option><optgroup label="Current saved configuration">{state.choices.map((choice) => <option key={choice.key} value={choice.key}>{choice.platform} / {choice.locale}</option>)}</optgroup>
-        {oldContexts.length > 0 && <optgroup label="Retained earlier contexts · not retargeted">{oldContexts.map((item) => <option key={item.context.key} value={item.context.key}>{item.context.platform} / {item.context.locale} · earlier configuration {item.context.configBaselineGeneration}</option>)}</optgroup>}
-      </select><button type="button" className="button secondary" disabled={loadReason !== null} aria-describedby={`${id}-load-reason`} onClick={() => void controller.load()}><Icon name="refresh" size={16} />{entry?.loadRequest ? 'Loading text…' : entry?.baseline ? 'Refresh text' : 'Load public text'}</button><ActionHelp state={state} id="load" onHelp={onHelp} /></div>
-      <p id={`${id}-load-reason`} className="save-note">{loadReason ?? 'Read only this locale’s required public text. Refresh shows a separate observation; it never replaces your draft or its original comparison copy.'}</p>
+      <p className="metadata-public-note">This text is public. Don’t paste passwords, private contacts or test accounts.</p>
+      <div className="metadata-context-row"><label htmlFor={`${id}-context`}>Language</label><select id={`${id}-context`} value={state.selectedKey ?? ''} disabled={!session || !state.choices.length && !oldContexts.length} onChange={(event) => controller.selectContext(event.target.value)}>
+        <option value="" disabled>No languages set up yet</option><optgroup label="Your languages">{state.choices.map((choice) => <option key={choice.key} value={choice.key}>{choice.platform} / {choice.locale}</option>)}</optgroup>
+        {oldContexts.length > 0 && <optgroup label="Earlier settings (kept drafts)">{oldContexts.map((item) => <option key={item.context.key} value={item.context.key}>{item.context.platform} / {item.context.locale} · earlier configuration {item.context.configBaselineGeneration}</option>)}</optgroup>}
+      </select><button type="button" className="button secondary" disabled={loadReason !== null} aria-describedby={`${id}-load-reason`} onClick={() => void controller.load()}><Icon name="refresh" size={16} />{entry?.loadRequest ? 'Loading text…' : entry?.baseline ? 'Refresh text' : 'Load text'}</button><ActionHelp state={state} id="load" onHelp={onHelp} /></div>
+      <p id={`${id}-load-reason`} className="save-note">{loadReason ?? 'Loading never overwrites text you are editing.'}</p>
       {!state.help && <p className="review-caution">The packaged text-field guide is unavailable. No fallback limits, validation, observation or save result has been invented.</p>}
       {retainedNotice && <p className="save-note" role="status">{retainedNotice}</p>}
       {state.cacheError && <ErrorNotice error={state.cacheError} title="Text cache full; existing drafts kept" />}
@@ -289,23 +288,23 @@ export function MetadataTextEditor({ state, controller, session, onShowProject, 
         const original = entry.baseline!.originals[index]; const assertion = entry.baseline!.assertion.fields[index]; const result = entry.validation?.result.fields[index];
         const changed = field.text !== (original?.text ?? ''); const fieldId = `${id}-field-${index}`;
         return <div className="metadata-text-field" key={field.id}><div className="inline-heading"><label htmlFor={fieldId}>{guide?.label ?? field.id}</label><Badge tone="info">Required</Badge>
-          <Badge tone={changed ? 'warning' : 'neutral'}>{changed ? 'Unsaved text' : entry.baseline!.source === 'saved' ? 'Saved baseline' : assertion?.state === 'absent' ? 'Missing · observed' : 'Observed original'}</Badge>{guide && <HelpButton content={guide} onHelp={onHelp} />}</div>
-          <code>{original?.path}</code><p id={`${fieldId}-guide`}>{guide?.what ?? 'Restore the core guide before editing.'}</p>
+          <Badge tone={changed ? 'warning' : 'neutral'}>{changed ? 'Unsaved changes' : entry.baseline!.source === 'saved' ? 'Saved' : assertion?.state === 'absent' ? 'Empty' : 'Saved'}</Badge>{guide && <HelpButton content={guide} onHelp={onHelp} />}</div>
+          <p id={`${fieldId}-guide`}>{guide?.what ?? 'Restore the core guide before editing.'}</p>
           <textarea id={fieldId} value={field.text} disabled={!guide} rows={field.id.includes('description') || field.id === 'release_notes.txt' ? 7 : 3}
             autoComplete="off" aria-describedby={`${fieldId}-guide ${fieldId}-count`} aria-invalid={currentValidation && result ? !result.valid : undefined}
             onChange={(event) => controller.editField(entry.context.key, field.id, event.target.value)} />
-          <p id={`${fieldId}-count`} className="metadata-count">{result ? `${currentValidation ? 'Core' : 'Earlier, stale core'} count: ${result.characterCount.toLocaleString()} / ${result.limit.toLocaleString()} Unicode characters` : 'No core character count yet — use Validate text.'} · {new TextEncoder().encode(field.text).byteLength.toLocaleString()} UTF-8 bytes of the 32 KiB editor budget. {original?.text !== null && original?.text !== undefined ? `Original line endings: ${metadataLineEndings(original.text)}.` : 'No original bytes.'}</p>
-          <p className="save-note">{guide?.format} Untouched originals retain raw bytes. After editing, browser newline normalization is part of the new draft and must be reviewed.</p>
+          <p id={`${fieldId}-count`} className="metadata-count">{result ? `${result.characterCount.toLocaleString()} of ${result.limit.toLocaleString()} characters${currentValidation ? '' : ' (check again after editing)'}` : 'Use “Check text” to count characters.'} {original?.text !== null && original?.text !== undefined ? `Original line endings: ${metadataLineEndings(original.text)}.` : 'No original bytes.'}</p>
+          <TechnicalDetails label="File and format details"><p><code>{original?.path}</code></p><p className="save-note">{guide?.format} Untouched originals retain raw bytes. After editing, browser newline normalization is part of the new draft and must be reviewed. {new TextEncoder().encode(field.text).byteLength.toLocaleString()} UTF-8 bytes of the 32 KiB editor budget.</p></TechnicalDetails>
           {result?.issues.length ? <ul className="issues">{result.issues.map((issue) => <li key={issue.code}><Badge tone={currentValidation ? 'danger' : 'warning'}>{currentValidation ? issue.status : 'Earlier result'}</Badge><div><strong>{issue.message}</strong><code>{issue.code}</code></div></li>)}</ul> : null}
         </div>;
       })}</div> : <EmptyState compact icon="metadata" title={entry?.loadRequest ? 'Reading only the selected public text…' : 'No public text has been loaded'} description="Nothing is read from another locale or inferred from an unsafe file. Missing known leaves are shown only after a successful bounded core observation." />}
-      <div className="button-row metadata-text-actions"><button type="button" className="button secondary" disabled={validateReason !== null} aria-describedby={`${id}-validate-reason`} onClick={() => void controller.validate()}>{entry?.validationRequest ? 'Validating text…' : 'Validate text'}</button><ActionHelp state={state} id="validate" onHelp={onHelp} />
+      <div className="button-row metadata-text-actions"><button type="button" className="button secondary" disabled={validateReason !== null} aria-describedby={`${id}-validate-reason`} onClick={() => void controller.validate()}>{entry?.validationRequest ? 'Checking text…' : 'Check text'}</button><ActionHelp state={state} id="validate" onHelp={onHelp} />
         <button type="button" className="button primary" disabled={reviewReason !== null} aria-describedby={`${id}-review-reason`} onClick={() => controller.start()}>Review changes<Icon name={reviewReason ? 'lock' : 'search'} size={16} /></button><ActionHelp state={state} id="review" onHelp={onHelp} />
         {entry && <><button type="button" className="text-button" disabled={!metadataTextDirty(entry) || controller.discardReason(entry.context.key) !== null} onClick={() => askDiscard(entry.context.key, 'reset', 'Discard text draft changes')}>Discard text changes</button><ActionHelp state={state} id="discard" onHelp={onHelp} /></>}
-      </div><p id={`${id}-validate-reason`} className="save-note">Validation: {validateReason ?? 'Pure core format checks only, using the shared Unicode/newline rules. No files, URLs or Store services are contacted.'}</p>
-      <p id={`${id}-review-reason`} className="save-note">Save review: {reviewReason ?? 'Check every destination and its full before/after text. Nothing is written before you type SAVE and confirm.'}</p>
+      </div><p id={`${id}-validate-reason`} className="save-note">{validateReason ?? 'Checks length and format. Nothing is saved or sent.'}</p>
+      <p id={`${id}-review-reason`} className="save-note">{reviewReason ?? 'You’ll see every change before anything is saved.'}</p>
       {entry?.validationError && <ErrorNotice error={entry.validationError} title="Text validation was not accepted" />}
-      {entry?.validation && <p role="status" className="metadata-validation-status"><Badge tone={!currentValidation ? 'warning' : entry.validation.result.valid ? 'info' : 'danger'}>{!currentValidation ? 'Stale validation' : entry.validation.result.valid ? 'Format-valid selected text' : 'Text corrections required'}</Badge> Not a saved file, whole-metadata validation, native asset check, Store approval or release-readiness result.</p>}
+      {entry?.validation && <p role="status" className="metadata-validation-status"><Badge tone={!currentValidation ? 'warning' : entry.validation.result.valid ? 'info' : 'danger'}>{!currentValidation ? 'Check again' : entry.validation.result.valid ? 'Text looks good' : 'Needs changes'}</Badge> {!currentValidation ? 'The text changed since the last check.' : entry.validation.result.valid ? 'Not saved yet.' : 'See the notes under each field.'}</p>}
       {entry?.stale && entry.observation && !entry.observationPredatesSave && <details className="metadata-latest-observation"><summary>Separate newer observation · original draft is still above</summary><code>Configuration SHA256 {entry.observation.baseline.config.sha256}</code>
         {entry.observation.fields.map((field) => <section key={field.id}><h4>{field.path}</h4>{field.state === 'present' ? <><code>{field.byteLength} bytes · SHA256 {field.sha256}</code><pre tabIndex={0}><code>{field.text}</code></pre></> : <p>Observed absent.</p>}</section>)}
         <button type="button" className="button secondary" disabled={controller.discardReason(entry.context.key) !== null || entry.loadRequest !== null || loadReason !== null} onClick={() => askDiscard(entry.context.key, 'latest', 'Discard draft and use latest observation')}>Discard draft & use this observation</button><ActionHelp state={state} id="discard" onHelp={onHelp} />

@@ -7,7 +7,7 @@ export function AgentStoreAccess({controller}:{controller:AgentStoreAccessContro
   const state=useSyncExternalStore(controller.subscribe,controller.getSnapshot,controller.getSnapshot);
   const r=state.review,access=state.access,commands=storeCommands(access),seconds=controller.remainingSeconds();
   return <section className="card" aria-label="Local CLI Store permission">
-    <h2>Let a local CLI run one reviewed Store step</h2>
+    <h2>Store step you have reviewed</h2>
     <p>Uses the same native Store review, credentials, original cleanup and history. Each exact mode needs its own one-use approval. An access/prepare grant cannot authorize an upload, promotion, submission or recovery check.</p>
     <label>Step <select value={state.selected} disabled={!!controller.ownerReason()} onChange={e=>controller.choose(e.target.value as StoreKind)}>
       {(['access-check','candidate-prepare','execute','reconcile'] as const).map(kind=><option key={kind} value={kind}>{storeStepLabel(kind)}</option>)}
@@ -19,7 +19,7 @@ export function AgentStoreAccess({controller}:{controller:AgentStoreAccessContro
     <label><input type="checkbox" checked={state.acknowledged} disabled={!!controller.consentReason()} onChange={e=>controller.acknowledge(e.target.checked)}/> I allow one local CLI submission of this exact Store mode and its displayed effects.</label>
     <button disabled={!!controller.allowReason()} onClick={()=>void controller.allow()}>Allow this Store step once</button>
     {controller.allowReason()&&<p className="save-note">{controller.allowReason()}</p>}
-    <button disabled={!!controller.statusReason()} onClick={()=>void controller.status()}>Check original CLI permission/status</button>
+    <button disabled={!!controller.statusReason()} onClick={()=>void controller.status()}>Check permission/status</button>
     <button disabled={!!controller.revokeReason()} onClick={()=>void controller.revoke()}>Revoke permission / request Stop</button>
     {state.pending&&<p role="status">The original permission caller is still returning.</p>}
     {state.revoking&&<p role="status">Waiting for original revocation. This does not prove the Store operation stopped.</p>}

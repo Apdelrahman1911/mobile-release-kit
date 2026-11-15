@@ -22,10 +22,10 @@ export function GitHubPullRequest({ controller, state, repository = null, baseSu
   return <section className="card" aria-label="Create a pull request">
     <SectionHeading title="Create a pull request" description="Ask for feedback on changes already on GitHub. Nothing is pushed or merged here."><Icon name="github" size={24}/></SectionHeading>
     {repository&&!compact&&<p>Selected repository: <strong>{repository}</strong></p>}
-    {state.originalRepository&&attention&&<p className="save-note">Original task: <strong>{state.originalRepository}</strong></p>}
+    {state.originalRepository&&attention&&<p className="save-note">Task: <strong>{state.originalRepository}</strong></p>}
     {op&&<p role="status">{op.phase==='cleanup-unknown'?'Cleanup needs attention':op.phase==='stopping'?'Stopping the original request…':!settled?'Waiting for the original task to finish…':
       op.effect==='created-observed'?'Pull request created and checked':op.effect==='acknowledged-unconfirmed'?'GitHub acknowledged creation; final details are not confirmed':
-      op.effect==='closed-confirmed'?'Earlier acknowledged pull request confirmed closed':op.effect==='found-unattributed'?'Matching pull request found — original creation is not confirmed':op.kind==='prepare'&&status?.consent?'Review ready — nothing created yet':'Original check finished'}</p>}
+      op.effect==='closed-confirmed'?'Earlier acknowledged pull request confirmed closed':op.effect==='found-unattributed'?'Matching pull request found — original creation is not confirmed':op.kind==='prepare'&&status?.consent?'Review ready — nothing created yet':'Check finished'}</p>}
     {state.uncertain&&<p className="review-caution" role="alert">The original request is unconfirmed. Keep the app and its files. Check status; do not repeat Create or reconnect to dismiss this warning.</p>}
     {state.error&&<p className="review-caution" role="status">{PULL_REQUEST_HELP[state.error]}</p>}
     {op&&op.reason!=='none'&&op.reason!==state.error&&<p className="review-caution">{PULL_REQUEST_HELP[op.reason]}</p>}    {state.browserPending&&<p role="status">{BROWSER_HELP.requesting}</p>}
@@ -75,7 +75,7 @@ export function GitHubPullRequest({ controller, state, repository = null, baseSu
       {!management&&settled&&op?.effect==='found-unattributed'&&status?.observed&&<p>Matching pull request #{status.observed.number}: <span className="review-text">{status.observed.url}</span>. It is not claimed as this app’s successful creation.</p>}
       {!!status?.pending.length&&<div><h4>Previous attempts</h4><p>Checking an attempt only reads GitHub. It never resends Create, closes a PR or changes your branches.</p>
         {status.pending.map(p=><div key={p.prepared.target.intent!.marker}><p><strong>{p.prepared.target.scope.repository}</strong> · {pullRequestModeLabel(p.prepared.target.intent!)} · {p.prepared.target.intent!.head} → {p.prepared.target.intent!.base}<br/>
-          {p.closed?`Previously confirmed closed${p.closed.merged?' after merging':''}. A new explicit review still checks for an open PR.`:p.acknowledged?'Original creation ID saved; readback still required.':p.claimed?'A request may have been sent.':'Saved intent; do not start a replacement.'}</p>
+          {p.closed?`Previously confirmed closed${p.closed.merged?' after merging':''}. A new explicit review still checks for an open PR.`:p.acknowledged?'Creation ID saved; readback still required.':p.claimed?'A request may have been sent.':'Saved intent; do not start a replacement.'}</p>
           <button type="button" className="button small secondary" disabled={!!controller.reconcileReason(p.prepared.target.intent!.marker)} onClick={()=>controller.reconcile(p.prepared.target.intent!.marker)}>Check this attempt on GitHub</button>
           <details><summary>Advanced: select this original attempt for CLI Reconcile</summary>
             <p>Read saved attempts through this original panel or its CLI Pending action first. Selecting does not read GitHub, resend, or grant permission.</p>

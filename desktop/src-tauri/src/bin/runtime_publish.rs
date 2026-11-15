@@ -10,7 +10,7 @@ compile_error!("mrk-runtime-publish requires the Linux x86_64 GNU headless publi
 fn main() -> std::process::ExitCode {
     match mobile_release_desktop::runtime_publication::publish_fixed() {
         Ok(()) => {
-            println!("Immutable runtime payload published. Product execution remains unqualified.");
+            println!("Immutable runtime publication complete and identity-verified. Product execution remains unqualified.");
             std::process::ExitCode::SUCCESS
         }
         Err(error) => {

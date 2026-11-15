@@ -46,7 +46,7 @@ export function GitPushNewBranch({ controller, repository, connection, activity,
     {prepareReason && !prepared && <p className="save-note">{help(prepareReason)}</p>}
     {review && prepared && <section className="version-review" aria-label="Review first GitHub publication">
       <h3>Publish {prepared.commits.length} {prepared.commits.length === 1 ? 'commit' : 'commits'} as a new branch</h3>
-      <p>Original project: <strong>{originalProjectName ?? 'the previously selected project'}</strong>.</p>
+      <p>Project: <strong>{originalProjectName ?? 'the previously selected project'}</strong>.</p>
       <p>Account: <strong><bdi>{prepared.login}</bdi></strong> · Repository: <bdi>{prepared.repository}</bdi>.</p>
       <p>New GitHub branch: <strong><bdi>{prepared.upstreamRef.slice('refs/heads/'.length)}</bdi></strong>.</p>
       <p><strong>People with access to this repository can read all uploaded history.</strong> This includes earlier commits and files, even if you later removed them. Messages, author emails and file contents are not shown or scanned for secrets here.</p>

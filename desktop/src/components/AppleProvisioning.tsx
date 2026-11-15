@@ -13,7 +13,7 @@ const observations: Record<BundleIdObservation, { title: string; detail: string 
   'not-checked': { title: 'Bundle ID was not checked', detail: 'Resolve the prerequisite findings below. No registration or availability conclusion was made.' },
 };
 const checks: Partial<Record<StoreCheck, { label: string; help: string }>> = {
-  'credential-format': { label: 'Selected App Store Connect private-key format', help: 'Keep and assign the original private P8 with its matching Key ID and Issuer ID in This Mac → iOS → Store (or Full).' },
+  'credential-format': { label: 'Selected App Store Connect private-key format', help: 'Keep and assign the original private P8 with its matching Key ID and Issuer ID in This computer → iOS → Store (or Full).' },
   'query-prerequisites': { label: 'Saved iOS Bundle ID', help: 'Save a valid iOS Bundle ID and read the current saved version. This read does not require a numeric App Store app ID or TestFlight group.' },
   'runtime-unavailable': { label: 'Bundled Store runtime', help: 'Repair or update the installed app; do not use an ambient Ruby or Fastlane as a workaround.' },
   'bundle-unavailable': { label: 'Bundled Store dependencies', help: 'Repair or update the app’s bundled dependencies; do not install global gems as a workaround.' },
@@ -43,7 +43,7 @@ export function AppleProvisioning({ state, controller, compact = false, onCreden
   const result = op.result?.scope === APPLE_BUNDLE_SCOPE ? op.result : null;
   const observation = result?.observation ? observations[result.observation] : null;
   return <section className="card" aria-label="Saved Bundle ID registration check">
-    <div className="inline-heading"><h2>Bundle ID registration · This Mac</h2>{compact && <button onClick={onShow}>Show check</button>}</div>
+    <div className="inline-heading"><h2>Bundle ID registration · This computer</h2>{compact && <button onClick={onShow}>Show check</button>}</div>
     {!compact && <>
       <p>Read the saved iOS Bundle ID using the assigned App Store Connect key. This is a separate registration lookup, not an app-access or release-readiness check.</p>
       <p><strong>Read only:</strong> no Bundle ID, certificate or profile is created or changed; no build, signing, upload or release. No team ownership or global Bundle ID availability is established.</p>

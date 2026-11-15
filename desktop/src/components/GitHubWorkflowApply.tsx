@@ -113,7 +113,10 @@ export function GitHubWorkflowApply({ state, controller, setup, projects, select
   useEffect(() => {
     if (recoveryConfirmation && (linked || !detailed || selectedId !== projectId || !canRecoverWorkflows(state, selected, recoveryConfirmation))) setRecoveryConfirmation(null);
   }, [state, selected, selectedId, projectId, detailed, recoveryConfirmation, linked]);
-  if (!detailed && !notice) return null;
+  // Outside the GitHub page, a bridge read problem with no workflow operation
+  // ever started (e.g. a closed platform at startup) is not activity. The
+  // GitHub page still shows it in full.
+  if (!detailed && (!notice || !owner && state.observationIssue === 'bridge' && !state.integrityFailed && !state.recoveryProjects.length)) return null;
   return <section className="card native-workflow-panel" aria-label="Local GitHub workflow files">
     <SectionHeading title={notice?.title ?? 'Local workflow files · separate native review'} description={project ? `Original local operation for ${project.project.name}. Configuration drafts remain separate and unsaved.` : 'Create absent, update canonical or preserve identical callers. Passive previews never supply Apply authority.'}>
       <HelpButton content={workflowApplyHelp} onHelp={onHelp} />
@@ -136,7 +139,7 @@ export function GitHubWorkflowApply({ state, controller, setup, projects, select
       {showReview && owned && !terminal && owner?.prepared && <button type="button" className="button primary" disabled={!mayApply || !binding} onClick={() => { if (binding && mayApply) setConfirmation(binding); }}>{applyPending ? 'Apply already requested' : workflowNoOp(owner.prepared.view) ? 'Review unchanged confirmation' : 'Confirm reviewed local files'}<Icon name={mayApply ? 'check' : 'lock'} size={16} /></button>}
       {mayClose && <button type="button" className="button secondary" onClick={() => controller.requestClose()}>{applyPending ? 'Request cancellation' : 'Close workflow review / keep draft'}</button>}
       {project && (!detailed || selectedId !== projectId) && <button type="button" className="button secondary" onClick={() => onShowProject(project.project.id)}>View original {terminal ? 'workflow outcome' : 'workflow review'}<Icon name="arrow" size={16} /></button>}
-      {state.mode === 'native' && <button type="button" className="button small secondary" disabled={state.readPending} onClick={() => void controller.checkStatus()}><Icon name="refresh" size={15} className={state.readPending ? 'spin' : ''} />{state.readPending ? 'Checking status…' : 'Check original workflow status'}</button>}
+      {state.mode === 'native' && <button type="button" className="button small secondary" disabled={state.readPending} onClick={() => void controller.checkStatus()}><Icon name="refresh" size={15} className={state.readPending ? 'spin' : ''} />{state.readPending ? 'Checking status…' : 'Check workflow status'}</button>}
     </div>
     {detailed && <p id="github-workflow-start-reason" className="save-note">{startReason ?? 'Starts a fresh original-file observation and native review. It ignores all supplied comparison assertions and does not apply the passive preview.'}</p>}
     {detailed && <p id="github-workflow-recovery-reason" className="save-note">{recoveryStartReason ??

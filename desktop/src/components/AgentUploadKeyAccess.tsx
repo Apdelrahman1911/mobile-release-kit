@@ -67,7 +67,7 @@ export function AgentUploadKeyAccess({ controller }: { controller: AgentUploadKe
       {state.issue && <p className="review-caution" role="alert">{state.issue}</p>}
       <div className="button-row">
         <button type="button" className="button secondary" disabled={controller.allowReason() !== null} onClick={() => void controller.allow()}>Allow one CLI action</button>
-        <button type="button" className="button secondary" disabled={controller.statusReason() !== null} onClick={() => void controller.check()}>Check original permission</button>
+        <button type="button" className="button secondary" disabled={controller.statusReason() !== null} onClick={() => void controller.check()}>Check permission</button>
         <button type="button" className="button secondary" disabled={controller.revokeReason() !== null} onClick={() => void controller.revoke()}>Withdraw / request Stop</button>
       </div>
       <p className="toolbar-reason">{controller.allowReason() ?? 'Only this exact reviewed action can be submitted. Desktop checks its original source again.'}</p>
@@ -79,7 +79,7 @@ export function AgentUploadKeyAccess({ controller }: { controller: AgentUploadKe
         {!commands.length && <p>No new submit command is offered. Check or withdraw an existing permission first.</p>}
         {access?.grantId && <dl><dt>Service project</dt><dd><code>{access.projectId}</code></dd><dt>Running service</dt><dd><code>{access.serviceInstance}</code></dd>
           <dt>Permission</dt><dd><code>{access.grantId}</code></dd><dt>Allowed action</dt><dd>{access.kind}</dd>
-          {access.requestId && <><dt>Original request</dt><dd><code>{access.requestId}</code></dd></>}</dl>}
+          {access.requestId && <><dt>Request</dt><dd><code>{access.requestId}</code></dd></>}</dl>}
         <p>No private path, key, password, recovery code or recovery acknowledgment is accepted by these CLI commands. Native backup availability is still required. There is no automatic second action or assignment after Save or restore. General credential delegation does not enable native availability or make this a headless import flow.</p>
       </details>
     </section>

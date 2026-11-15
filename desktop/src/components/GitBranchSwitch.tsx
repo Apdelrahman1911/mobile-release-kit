@@ -36,7 +36,7 @@ export function GitBranchSwitch({ reader, controller, repository, originalProjec
     <p className="save-note">No force, stash, reset, push or rename. Untracked and ignored files are not discarded. Required hooks, LFS and unsupported conversions are refused rather than run or silently skipped.</p>
     {review && prepared && <section className="version-review" aria-label="Review local branch switch">
       <h3>Switch to <bdi>{prepared.name}</bdi></h3>
-      <p>Original project: <strong>{originalProjectName ?? 'the previously selected project'}</strong>.</p>
+      <p>Project: <strong>{originalProjectName ?? 'the previously selected project'}</strong>.</p>
       <p>From <strong><bdi>{prepared.branch.slice('refs/heads/'.length)}</bdi></strong> to <strong><bdi>{prepared.name}</bdi></strong>.</p>
       {prepared.files.length ? <><p>Only these {prepared.files.length} existing files change contents. No file is added, removed or renamed.</p>
         <ul>{prepared.files.map((f) => <li key={f.path}><code><bdi>{f.path}</bdi></code> · {f.targetSize} bytes after checkout</li>)}</ul></> :

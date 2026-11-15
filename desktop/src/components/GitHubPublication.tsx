@@ -9,16 +9,18 @@ export function GitHubPublication({ state, controller, compact = false, onShow }
   const selected = state.purpose !== COUNTER_PURPOSE;
   const prepareReason = controller.prepareReason(), publishReason = controller.publishReason(), pendingReason = controller.pendingReason();
   const owner = githubPublicationOwnerReason(state);
-  if (compact && !owner && !state.error && !op) return null;
+  // A workspace switch records 'target-changed' even when nothing was ever
+  // reviewed; that alone is not activity worth interrupting other pages for.
+  if (compact && !owner && !op && (!state.error || state.error === 'target-changed' && !current)) return null;
   const controls = <div className="button-row">
     <button type="button" className="button small secondary" onClick={() => void controller.checkStatus()} disabled={state.observing || state.mode !== 'native'}>Read local publication status</button>
     <button type="button" className="button small secondary" onClick={() => controller.cancel()} disabled={!controller.canCancel()}>Stop original publication</button>
     {compact && <button type="button" className="button small secondary" onClick={onShow}>Show setup publication</button>}
   </div>;
   return <section className="panel" aria-label="Publish setup draft pull request">
-    <h3>{compact && !selected ? 'Original shared-counter publication' : 'Publish setup as a draft pull request'}</h3>
+    <h3>{compact && !selected ? 'Shared-counter publication' : 'Publish setup as a draft pull request'}</h3>
     {op && <p role="status">Original {op.kind}: {op.phase} · {op.effect}. {PUBLICATION_HELP[op.reason]}</p>}
-    {state.originalTarget && <p>Original repository: <strong>{state.originalTarget.repository}</strong> · account {state.originalTarget.accountId} · repository ID {state.originalTarget.repositoryId}</p>}
+    {state.originalTarget && <p>Repository: <strong>{state.originalTarget.repository}</strong> · account {state.originalTarget.accountId} · repository ID {state.originalTarget.repositoryId}</p>}
     {(state.error || status && !status.available) && <p role="status">{PUBLICATION_HELP[state.error ?? status!.reason]}</p>}
     {controls}
     {!compact && <>

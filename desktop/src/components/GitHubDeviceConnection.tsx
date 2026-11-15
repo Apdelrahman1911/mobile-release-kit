@@ -1,7 +1,7 @@
 import { useId, useSyncExternalStore } from 'react';
 import type { GitHubDeviceConnectionController } from '../githubDeviceConnectionController.ts';
 import type { DevicePhase, DeviceReason } from '../githubDeviceConnectionProtocol.ts';
-const phases:Record<DevicePhase,string>={idle:'Browser sign-in',starting:'Requesting a device code',pending:'Waiting for your GitHub approval',checking:'Checking the same device code',connecting:'Verifying the GitHub account and repository',stopping:'Stopping the original login',settled:'Browser connection request finished',failed:'Browser connection request ended', 'cleanup-unknown':'Original login cleanup is unconfirmed'};
+const phases:Record<DevicePhase,string>={idle:'Browser sign-in',starting:'Requesting a device code',pending:'Waiting for your GitHub approval',checking:'Checking the same device code',connecting:'Verifying the GitHub account and repository',stopping:'Stopping the original login',settled:'Browser connection request finished',failed:'Browser connection request ended', 'cleanup-unknown':'Login cleanup is unconfirmed'};
 const reasons:Record<DeviceReason,string>={none:'', 'publisher-unconfigured':'The publisher has not configured its device-enabled GitHub OAuth App. Use the existing GitHub CLI account or token option.',
   'runtime-unavailable':'The installed device sign-in runtime is unavailable.',busy:'Finish the original request first.', 'target-changed':'The original app, repository or connection changed.',
   waiting:'Approval is still pending. Use the same code; wait for GitHub’s interval, then explicitly check again.', 'slow-down':'GitHub requested a longer interval. Keep the same code; do not start another login.',
@@ -34,7 +34,7 @@ export function GitHubDeviceConnection({controller,compact=false,onShow}:{contro
       <p className="save-note">{check??'Checks once. If GitHub is still waiting, keep the same code and check again after its interval.'}</p>
       {s.browserRequested&&<p>Browser opening was requested, not verified. You can type the fixed address above yourself.</p>}
     </>}
-    <div className="button-row"><button type="button" className="button secondary small" disabled={!controller.canRead()} onClick={()=>controller.read()}>{busy?'Check original login status':'Check browser sign-in availability'}</button>
+    <div className="button-row"><button type="button" className="button secondary small" disabled={!controller.canRead()} onClick={()=>controller.read()}>{busy?'Check login status':'Check browser sign-in availability'}</button>
       {(busy||s.cancelRequested)&&<button type="button" className="button secondary small" disabled={!controller.canCancel()} onClick={()=>controller.cancel()}>Stop original login</button>}
       {compact&&onShow&&<button type="button" className="button secondary small" onClick={onShow}>Show GitHub connection</button>}</div>
     {!compact&&<p className="save-note">Status never polls GitHub automatically. Stopping or closing this session does not revoke authorization in GitHub; review Authorized OAuth Apps in GitHub Settings when needed.</p>}

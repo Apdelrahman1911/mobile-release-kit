@@ -118,6 +118,7 @@ import { IosAppTargetField } from './components/IosAppTargetField.tsx';
 import { copyIosAppTarget, iosAppTargetHints } from './iosAppTargetHints.ts';
 import type { IosTargetChoiceContext } from './iosAppTargetHints.ts';
 import { ProgressiveDisclosure } from './components/ProgressiveDisclosure.tsx';
+import { TechnicalDetailsToggle } from './components/TechnicalDetails.tsx';
 import { ReleaseVersionEditController, versionOwnerReason, versionProjectDirty, versionRetainsDraft } from './releaseVersionEditController.ts';
 import { versionEditError } from './releaseVersionEdit.ts';
 import { ReleaseInputGuidanceController } from './releaseInputGuidance.ts';
@@ -197,7 +198,7 @@ import { Dashboard } from './pages/Dashboard.tsx';
 import { Environment } from './pages/Environment.tsx';
 import { Credentials } from './pages/Credentials.tsx';
 import { Metadata } from './pages/Metadata.tsx';
-import { Recovery, Releases } from './pages/Future.tsx';
+import { Recovery, Releases, revealReleaseSection } from './pages/Future.tsx';
 import { Artifacts } from './pages/Artifacts.tsx';
 import { GitHub } from './pages/GitHub.tsx';
 
@@ -1634,8 +1635,7 @@ export function App() {
     if (page !== 'releases' || releaseCheckFocus === null) return;
     const section = releaseCheckFocus === 'offline' ? offlineCheckSection.current
       : releaseCheckFocus === 'android-signing' ? androidSigningSection.current : storeAccessSection.current;
-    section?.focus({ preventScroll: true });
-    section?.scrollIntoView({ block: 'start' });
+    revealReleaseSection(section);
     setReleaseCheckFocus(null);
   }, [page, releaseCheckFocus]);
   const mode = api?.mode ?? 'unavailable';
@@ -2253,8 +2253,7 @@ export function App() {
     if (target === 'original-controls') { main.current?.focus({ preventScroll: true }); main.current?.scrollTo({ top: 0 }); return; }
     const ids = { 'local-checks': 'release-local-checks', 'android-build': 'release-android-build',
       'ios-build': 'release-ios-build', history: 'release-local-history', 'store-access': 'release-store-access' } as const;
-    const section = document.getElementById(ids[target]);
-    section?.focus({ preventScroll: true }); section?.scrollIntoView({ block: 'start' });
+    revealReleaseSection(document.getElementById(ids[target]));
   };
   const rehearsalAction = (action: RehearsalAction) => {
     if (action.kind === 'select-candidate') { selectRehearsalCandidate(action, rehearsalContext, showRehearsalTarget); return; }
@@ -2353,6 +2352,10 @@ export function App() {
     setIdentityReveal((value) => value + 1); navigate('settings');
   };
 
+  // Command-line permissions live on the Automation page. Any retained or
+  // uncertain grant is surfaced on every other page until it is resolved.
+  const automationAttention = agentLocalHistory.ownerReason() ?? agentStoreReason;
+
   const toolPreparationView: PrepareBuildEnvironmentProps = {
     state: toolAcquisitionState, controller: toolAcquisition,
     toolsBusy: loading || choosing || savedCommandBusy() !== null || diagnosticsOwnerReason(diagnosticsState) !== null,
@@ -2369,16 +2372,19 @@ export function App() {
     <aside className="sidebar">
       <div className="brand"><span className="brand-mark"><Icon name="box" size={25} /></span><div>Mobile Release Kit<span>THE KIT FOR A CAREFUL LAUNCH</span></div></div>
       <div className="project-switcher"><label htmlFor="project-switch">CURRENT PROJECT</label><div className="project-switcher-control"><span className="project-switch-icon"><Icon name="folder" size={18} /></span><select id="project-switch" aria-label="Switch project; unsaved configuration, text and version drafts are retained" value={workspace.selectedId ?? ''} onChange={(event) => dispatch({ type: 'switch', projectId: event.target.value })}><option value="" disabled>{choosing ? 'Opening project…' : 'Choose a project'}</option>{Object.values(workspace.projects).map((entry) => <option key={entry.project.id} value={entry.project.id}>{entry.project.name}{isDirty(entry) ? ' • unsaved config' : ''}{metadataProjectDirty(metadataState.entries, entry.project.id) ? ' • unsaved text' : ''}{versionProjectDirty(versionEditState, entry.project.id) ? ' • unsaved version' : ''}</option>)}</select><button type="button" className="icon-button" disabled={chooseDisabled} aria-label={preview ? 'Load example project' : 'Open another project folder'} onClick={() => void chooseProject()}><Icon name="plus" size={16} /></button></div></div>
-      <WorkspaceNavigation page={page} onNavigate={navigate} />
+      <WorkspaceNavigation page={page} onNavigate={navigate} attention={{ automation: !!automationAttention }} />
       <div className="sidebar-footer"><div className="foundation-label"><span className="local-dot" />{localEditingLabel}</div><p>Thoughtful preparation.<br />No accidental releases.</p><div className="sidebar-version"><span>{`DESKTOP ${info?.appVersion ?? 'Not loaded'}`}</span><Icon name="shield" size={14} /></div></div>
     </aside>
     <div className="workspace">
-      <header className="topbar"><div className="breadcrumbs"><Icon name="folder" size={16} /><span>{session?.project.name ?? 'Workspace'}</span><Icon name="chevron" size={13} /><strong>{currentNavigation?.label}</strong></div><div className="topbar-status"><span className="no-write-note"><Icon name="lock" size={13} />No automatic publishing</span><Badge tone={preview || appleProvisioningState.issue !== null || toolAcquisitionState.issue !== null || artifactInspectionState.nativeBlocked || initializationState.nativeBlocked || metadataImagesState.nativeBlocked || metadataImagesState.integrityFailed || metadataImagesState.generationLost || metadataImagesState.selectionIssue || metadataImagesState.editIssue || saveState.nativeBlocked || workflowState.nativeBlocked || metadataState.edit.nativeBlocked || versionEditState.edit.nativeBlocked || diagnosticsState.nativeBlocked || localHistoryState.blocked || localStoreState.blocked || localStorePrepareState.blocked || localStoreExecuteState.blocked || localStoreReconcileState.blocked || offlinePreflightState.nativeBlocked || androidBuildState.nativeBlocked || projectRecoveryState.nativeBlocked || iosArchiveState.nativeBlocked ? 'warning' : 'neutral'}>{preview ? 'Browser preview' : initializationState.status?.active ? 'Project setup · see status below' : recoveryBusy() ? 'Recovery · see status below' : androidBusy() ? 'Android build · see status below' : iosBusy() ? 'iOS build · see status below' : artifactBusy() ? 'Build files · see status below' : localHistoryBusy() ? 'Release history · see status below' : storeBusy() ? 'Store operation · see status below' : preflightBusy() ? 'Local checks · see status below' : toolPreparationBusy() ? 'Tool preparation · see status below' : diagnosticsState.status?.active ? 'Build tools · see status below' : saveState.status?.active ? 'Project settings task · see status below' : workflowState.status?.active ? 'GitHub files task · see status below' : metadataImagesOwnerReason(metadataImagesState) ? 'Store images · see status below' : metadataState.edit.status?.active ? 'Store listing task · see status below' : versionEditState.edit.status?.active ? 'Version task · see status below' : localEditingLabel}</Badge></div></header>
+      <header className="topbar"><div className="breadcrumbs"><Icon name="folder" size={16} /><span>{session?.project.name ?? 'Workspace'}</span><Icon name="chevron" size={13} /><strong>{currentNavigation?.label}</strong></div><div className="topbar-status"><TechnicalDetailsToggle /><span className="no-write-note"><Icon name="lock" size={13} />No automatic publishing</span><Badge tone={preview || appleProvisioningState.issue !== null || toolAcquisitionState.issue !== null || artifactInspectionState.nativeBlocked || initializationState.nativeBlocked || metadataImagesState.nativeBlocked || metadataImagesState.integrityFailed || metadataImagesState.generationLost || metadataImagesState.selectionIssue || metadataImagesState.editIssue || saveState.nativeBlocked || workflowState.nativeBlocked || metadataState.edit.nativeBlocked || versionEditState.edit.nativeBlocked || diagnosticsState.nativeBlocked || localHistoryState.blocked || localStoreState.blocked || localStorePrepareState.blocked || localStoreExecuteState.blocked || localStoreReconcileState.blocked || offlinePreflightState.nativeBlocked || androidBuildState.nativeBlocked || projectRecoveryState.nativeBlocked || iosArchiveState.nativeBlocked ? 'warning' : 'neutral'}>{preview ? 'Browser preview' : initializationState.status?.active ? 'Project setup in progress' : recoveryBusy() ? 'Recovery in progress' : androidBusy() ? 'Android build in progress' : iosBusy() ? 'iOS build in progress' : artifactBusy() ? 'Build files in progress' : localHistoryBusy() ? 'Release history in progress' : storeBusy() ? 'Store operation in progress' : preflightBusy() ? 'Local checks in progress' : toolPreparationBusy() ? 'Tool preparation in progress' : diagnosticsState.status?.active ? 'Build tools in progress' : saveState.status?.active ? 'Project settings task in progress' : workflowState.status?.active ? 'GitHub files task in progress' : metadataImagesOwnerReason(metadataImagesState) ? 'Store images in progress' : metadataState.edit.status?.active ? 'Store listing task in progress' : versionEditState.edit.status?.active ? 'Version task in progress' : localEditingLabel}</Badge></div></header>
       {preview && <div className="preview-banner" role="status"><Icon name="environment" size={19} /><div><strong>BROWSER PREVIEW — EXAMPLE DATA ONLY</strong><span>No native bridge, project files, core validation, credentials, or release operations. Never use this view as evidence.</span></div></div>}
       <main id="main-content" tabIndex={-1} ref={main}>
-        <AgentLocalHistory controller={agentLocalHistory} onShow={()=>navigate('releases')}/>
-        <AgentStoreAccess controller={agentStoreAccess}/>
-        <AgentStorePreparation controller={storePreparationAccess}/>
+        <section className="activity-region" aria-label="Activity and alerts">
+        {page !== 'automation' && automationAttention && <div className="notice notice-warning" role="status">
+          <Icon name="terminal" /><div><strong>A command-line request needs your attention</strong>
+            <p>{automationAttention}</p>
+            <div className="button-row"><button type="button" className="button small secondary" onClick={() => navigate('automation')}>Open Automation</button></div>
+          </div></div>}
         {loading && <div className="notice notice-info" role="status"><Icon name="refresh" className="spin" size={19} /><span>Connecting to the app and loading project settings…</span></div>}
         {bootError && <><ErrorNotice error={bootError} title="The native service is unavailable" /><div className="bridge-retry"><button className="button small secondary" disabled={loading || savedCommandBusy() !== null} onClick={() => void bootstrap()}><Icon name="refresh" size={15} />Retry connection</button><span>No browser fallback or mock engine has been enabled.</span></div></>}
         {identityBinding && identityState && identityBusy() && <div className={`notice ${identityBinding.rebindFailed || identityState.issue ? 'notice-warning' : 'notice-info'}`} role={identityBinding.rebindFailed || identityState.issue ? 'alert' : 'status'}>
@@ -2387,7 +2393,7 @@ export function App() {
             {identityBinding.rebindFailed && <p>The previous connection’s controls are no longer available. No replacement connection was opened for this task, and your local drafts are kept.</p>}
             {identityState.issue && <p>Keep the app open and preserve its project files. Your drafts are kept; reconnecting or repeating the change cannot clear an unconfirmed result.</p>}
             <div className="button-row">
-              <button type="button" className="button small secondary" disabled={identityBinding.rebindFailed || identityState.reading} onClick={() => identityBinding.native.checkStatus()}>Check original status</button>
+              <button type="button" className="button small secondary" disabled={identityBinding.rebindFailed || identityState.reading} onClick={() => identityBinding.native.checkStatus()}>Check status</button>
               <button type="button" className="button small secondary" disabled={identityBinding.rebindFailed || !identityBinding.native.canRequestClose() || identityState.issue === 'generation-changed' || identityState.issue === 'cleanup-unknown'}
                 onClick={() => identityBinding.native.requestClose()}>{identityState.closeRequested ? 'Close requested — wait for status' : 'Request close'}</button>
               <button type="button" className="button small secondary" onClick={showIdentity}>Show app ID review</button>
@@ -2396,7 +2402,7 @@ export function App() {
         {page !== 'github' && <LocalGitReadControls controller={gitRead} compact
           originalProjectName={gitReadState.original ? workspace.projects[gitReadState.original.context.projectId]?.project.name : undefined}
           onShow={() => navigate('github')} />}
-        {(page !== 'github' || !gitRepository) && <GitLocalControls controller={gitLocal} compact={page !== 'github'}
+        {page !== 'github' && <GitLocalControls controller={gitLocal} compact
           originalProjectName={gitLocalProjectName} onShow={() => navigate('github')} />}
         {catalogError && <ErrorNotice error={catalogError} title="The field catalogue could not be loaded" />}
         {chooseError && <ErrorNotice error={chooseError} title="The project could not be selected" />}
@@ -2469,10 +2475,10 @@ export function App() {
           onShow={() => navigate('github')} />}
         {page !== 'github' && (connectionState.busy || connectionState.uncertain || connectionState.blocked || connectionState.retirementPending) &&
           <div className={`notice ${connectionState.uncertain || connectionState.blocked ? 'notice-warning' : 'notice-info'}`} role="status">
-            <Icon name="github" /><div><strong>Original GitHub connection · {originalConnection?.session?.projectId ? workspace.projects[originalConnection.session.projectId]?.project.name ?? 'a previously selected project' : 'selected app'}</strong>
+            <Icon name="github" /><div><strong>GitHub connection · {originalConnection?.session?.projectId ? workspace.projects[originalConnection.session.projectId]?.project.name ?? 'a previously selected project' : 'selected app'}</strong>
               <p>{connectionState.uncertain || connectionState.blocked ? 'The original result needs attention. Do not connect again or switch accounts to bypass it.' : 'The original connection task is still finishing.'}</p>
               <div className="button-row">
-                <button type="button" className="button small secondary" disabled={!githubConnection.canCheckStatus() || connectionState.observing} onClick={() => void githubConnection.checkStatus()}>Check original connection status</button>
+                <button type="button" className="button small secondary" disabled={!githubConnection.canCheckStatus() || connectionState.observing} onClick={() => void githubConnection.checkStatus()}>Check connection status</button>
                 <button type="button" className="button small secondary" disabled={!githubConnection.canDisconnect()} onClick={() => githubConnection.disconnect()}>Disconnect original connection</button>
                 <button type="button" className="button small secondary" onClick={() => navigate('github')}>Show GitHub connection</button>
               </div>
@@ -2489,7 +2495,8 @@ export function App() {
         {page !== 'github' && <GitHubPreflight state={githubPreflightState} controller={githubPreflight} compact onShow={() => navigate('github')} onHelp={setHelp} />}
         {page !== 'github' && <GitHubHistory state={githubHistoryState} controller={githubHistory} compact onShow={() => navigate('github')} onHelp={setHelp} />}
         {page !== 'releases' && <GitHubRelease state={githubReleaseState} controller={githubRelease} compact onShow={() => navigate('releases')} onHelp={setHelp} />}
-        <ServiceConfigurationAccess controller={configEdit.agent} detailed={page === 'settings'} onShow={() => navigate('settings')} />
+        </section>
+        <ServiceConfigurationAccess controller={configEdit.agent} detailed={false} onShow={() => navigate('settings')} />
         <ConfigSave state={saveState} projects={workspace.projects} catalog={catalog} selectedId={workspace.selectedId} detailed={page === 'settings' || page === 'metadata'} onReviewVersion={showVersionProject}
           onInspectRecovery={(projectId) => configEdit.inspectRecovery(projectId)} onRecoveryApply={(binding) => configEdit.applyRecovery(binding)}
           recoveryReason={workspace.selectedId ? configEdit.inspectRecoveryReason(workspace.selectedId) : 'Select an original registered project first.'}
@@ -2561,6 +2568,7 @@ export function App() {
             </> : <p>App ID editing needs the connected native Desktop app. No app ID files are changed here; your local drafts are kept.</p>}
           </ProgressiveDisclosure>
           <ProgressiveDisclosure title="Advanced · CLI / AI access" needsAttention={cliReadNeedsAttention || !!agentRequestMessage || !!agentRequests?.pending} reveal={cliAccessReveal}>
+            <ServiceConfigurationAccess controller={configEdit.agent} detailed onShow={() => navigate('settings')} />
             <CliReadAccessPanel controller={cliReadAccess} />
             <AgentLocalCheckAccess controller={agentLocalChecks} blocked={loading || choosing || !session || savedCommandBusy() !== null} />
             {cliService.current.api?.mode === 'native' && cliService.current.api.agentIdentity && <section className="card"><h3>Let an agent propose an app ID</h3>
@@ -2583,12 +2591,12 @@ export function App() {
             </section>}
           </ProgressiveDisclosure></>}
         {page === 'environment' && <Environment info={info} api={api} preparationController={installationPreparation.current(api)} preview={preview} session={session} state={environmentState} controller={environment}
-          diagnosticsState={diagnosticsState} diagnosticsController={diagnostics} toolDelegation={<AgentToolSetup controller={agentToolSetup}/>} toolPreparation={toolPreparationView} toolSetup={{ state: androidBuildState, controller: androidBuild, onHelp: setHelp, sectionRef: androidToolSetupSection }} onRetry={() => void bootstrap()} onSettings={() => navigate('settings')} onHelp={setHelp} loading={loading} />}
+          diagnosticsState={diagnosticsState} diagnosticsController={diagnostics} toolDelegation={<ProgressiveDisclosure title="Let a command-line tool do this" description="Optional. Give a command-line tool on this computer one-time permission for this step." needsAttention={!!agentToolSetup.ownerReason()}><AgentToolSetup controller={agentToolSetup}/></ProgressiveDisclosure>} toolPreparation={toolPreparationView} toolSetup={{ state: androidBuildState, controller: androidBuild, onHelp: setHelp, sectionRef: androidToolSetupSection }} onRetry={() => void bootstrap()} onSettings={() => navigate('settings')} onHelp={setHelp} loading={loading} />}
         {page === 'credentials' && <Credentials catalog={catalog} state={assetState} controller={assetSession} project={session} inputState={releaseInputState} inputController={releaseInputs} onSettings={() => navigate('settings')} onHelp={setHelp}
           onOfflineChecks={() => reviewCredentialChecks('offline')} onAndroidSigning={() => reviewCredentialChecks('android-signing')}
           onStoreAccess={() => reviewCredentialChecks('store-access')}
           nativeBusyReason={savedCommandBusy() ?? diagnosticsOwnerReason(diagnosticsState) ?? agentUploadKey.ownerReason()}
-          delegation={<AgentUploadKeyAccess controller={agentUploadKey} />} />}
+          delegation={<ProgressiveDisclosure title="Let a command-line tool do this" description="Optional. Give a command-line tool on this computer one-time permission for this step." needsAttention={!!agentUploadKey.ownerReason()}><AgentUploadKeyAccess controller={agentUploadKey} /></ProgressiveDisclosure>} />}
         {page === 'metadata' && <Metadata catalog={catalog} textEditor={<MetadataTextEditor state={metadataState} controller={metadataText} session={session} onShowProject={showMetadataProject} onHelp={setHelp} />}
           imageEditor={<MetadataImagesEditor state={metadataImagesState} controller={metadataImages} session={session} onShowProject={showMetadataProject} onHelp={setHelp} />}>{editor(true)}</Metadata>}
         {page === 'github' && <GitHub info={info} session={session} state={githubState} controller={githubSetup} loading={loading} onReload={() => void bootstrap()} onNavigate={navigate} credentialHelp={catalog?.credentials ?? null} onHelp={setHelp} nativeReview={workflowPanel(true)}
@@ -2600,7 +2608,7 @@ export function App() {
               originalProjectName={githubGhState.originalProjectId ? workspace.projects[githubGhState.originalProjectId]?.project.name : undefined} /><GitHubDeviceConnection controller={githubDevice} /></>} />
             {connectionState.helpState !== 'current' && <div className="button-row"><button type="button" className="button small secondary" disabled={loading} onClick={() => void bootstrap()}>Reload service and connection guidance</button></div>}
             <GitHubRepositoryCreate controller={repositoryCreate} state={repositoryCreateState} />
-            <AgentGithubActionAccess controller={agentGithubAction} />
+            <ProgressiveDisclosure title="Let a command-line tool do this" description="Optional. Give a command-line tool on this computer one-time permission for one GitHub action." needsAttention={!!agentGithubAction.ownerReason()}><AgentGithubActionAccess controller={agentGithubAction} /></ProgressiveDisclosure>
             <LocalGitRead controller={gitRead} repository={gitRepository} projectName={session?.project.name ?? 'No project selected'}
             localActions={gitRepository ? <>
               <GitInitialization controller={gitLocal} repository={gitRepository} projectName={session?.project.name ?? 'No project selected'}
@@ -2614,6 +2622,7 @@ export function App() {
               <ServiceGitIndexAccess controller={agentGitIndex} />
               <ServiceGitCommitAccess controller={agentGitCommit} repository={gitRepository} /></> : undefined}
             originalProjectName={gitReadState.original ? workspace.projects[gitReadState.original.context.projectId]?.project.name : undefined} />
+            {!gitRepository && <GitLocalControls controller={gitLocal} compact={false} originalProjectName={gitLocalProjectName} onShow={() => navigate('github')} />}
             <ServiceGitRemoteAccess controller={agentGitRemote} repository={gitRepository} reader={gitRead} local={gitLocal}
               connection={githubConnection} projectName={session?.project.name ?? 'No project selected'} />
             <ServiceGitRepositoryAccess controller={agentGitRepository} repository={gitRepository} reader={gitRead} local={gitLocal}
@@ -2672,12 +2681,13 @@ export function App() {
                 <VersionEnrollmentPanel controller={versionEnrollment} /></> },
           ]} />}
         {page === 'releases' && <Releases onOpenGitHub={() => navigate('github')}
+          running={{ check: !!preflightBusy(), android: !!androidBusy(), ios: !!iosBusy(), store: !!(localHistoryBusy() ?? storeBusy()) }}
           rehearsal={<ReleaseRehearsal context={rehearsalContext()} onAction={rehearsalAction} />}
           storeNeedsAttention={!!(localHistoryBusy() ?? storeBusy()) || [localHistoryState, localStoreState, localStorePrepareState, localStoreExecuteState, localStoreReconcileState].some((state) => state.error !== null || state.status?.operation?.phase === 'terminal' && state.status.operation.outcome !== 'complete')}
           workflowNeedsAttention={githubReleaseOwnerReason(githubReleaseState) !== null || githubReleaseState.error !== null || githubRelease.currentPrepared() !== null}
           storeOperations={<>
-            <section id="release-local-history" tabIndex={-1} aria-label="Original local release history controls"><LocalReleaseHistory state={localHistoryState} controller={localHistory} onShow={()=>navigate('releases')}/></section>
-            <section id="release-store-access" ref={storeAccessSection} tabIndex={-1} aria-label="Original Store access check controls"><LocalStorePreflight agentReason={agentStoreReason} state={localStoreState} controller={localStore} onCredentials={()=>navigate('credentials')} onShow={()=>navigate('releases')}/></section>
+            <section id="release-local-history" tabIndex={-1} aria-label="Local release history controls"><LocalReleaseHistory state={localHistoryState} controller={localHistory} onShow={()=>navigate('releases')}/></section>
+            <section id="release-store-access" ref={storeAccessSection} tabIndex={-1} aria-label="Store access check controls"><LocalStorePreflight agentReason={agentStoreReason} state={localStoreState} controller={localStore} onCredentials={()=>navigate('credentials')} onShow={()=>navigate('releases')}/></section>
             <LocalStorePrepare agentReason={agentStoreReason} state={localStorePrepareState} controller={localStorePrepare} onCredentials={()=>navigate('credentials')} onShow={()=>navigate('releases')}/>
             <LocalStoreExecute agentReason={agentStoreReason} state={localStoreExecuteState} controller={localStoreExecute} onCredentials={()=>navigate('credentials')} onShow={()=>navigate('releases')}/>
             <LocalStoreReconcile agentReason={agentStoreReason} state={localStoreReconcileState} controller={localStoreReconcile} onCredentials={()=>navigate('credentials')} onShow={()=>navigate('releases')}/>
@@ -2691,7 +2701,7 @@ export function App() {
             onReadVersion={() => { externalObserver.beforeWorkspaceAction(); toolAcquisition.versionIntent(); appleProvisioning.versionIntent(); githubPublication.versionIntent(); void releaseVersion.read(); }} versionReason={releaseVersion.startReason()} onHelp={setHelp}
             onCredentials={() => navigate('credentials')} onSettings={() => navigate('settings')} onRecovery={() => navigate('recovery')} />
             <AgentAndroidBuildAccess controller={agentAndroidBuild} /></div>}
-          iosArchive={<section id="release-ios-build" tabIndex={-1} aria-label="Original iOS archive controls"><IOSArchive state={iosArchiveState} controller={iosArchive}
+          iosArchive={<section id="release-ios-build" tabIndex={-1} aria-label="IOS archive controls"><IOSArchive state={iosArchiveState} controller={iosArchive}
             projectName={session?.project.name ?? null} operationProjectName={iosArchiveState.status?.operation ? workspace.projects[iosArchiveState.status.operation.context.projectId]?.project.name ?? null : null}
             onRefresh={() => { if (session) void loadSnapshot(session.project.id); }} refreshReason={loading ? 'Capabilities are loading.' : refreshReason}
             onReadVersion={() => { externalObserver.beforeWorkspaceAction(); toolAcquisition.versionIntent(); appleProvisioning.versionIntent(); githubPublication.versionIntent(); void releaseVersion.read(); }} versionReason={releaseVersion.startReason()} onHelp={setHelp}
@@ -2699,6 +2709,15 @@ export function App() {
         {page === 'artifacts' && <><Artifacts state={evidenceState} controller={releaseEvidence} inspectionState={artifactInspectionState} inspectionController={artifactInspection} projectName={session?.project.name ?? null} onHelp={setHelp} />
           <AndroidBuildResultView state={androidBuildState} operationProjectName={androidBuildState.status?.operation ? workspace.projects[androidBuildState.status.operation.context.projectId]?.project.name ?? null : null} />
           <IOSArchiveResultView state={iosArchiveState} operationProjectName={iosArchiveState.status?.operation ? workspace.projects[iosArchiveState.status.operation.context.projectId]?.project.name ?? null : null} /></>}
+        {page === 'automation' && <>
+          <PageHeading eyebrow="AUTOMATION" title="Let a command-line tool help"
+            description="Optional. A command-line tool on this computer can ask to run one release step you have reviewed. Each permission covers one step, is used once, and can be revoked. Nothing here runs on its own." />
+          <section className="automation-stack" aria-label="Command-line permissions">
+            <AgentStorePreparation controller={storePreparationAccess}/>
+            <AgentStoreAccess controller={agentStoreAccess}/>
+            <AgentLocalHistory controller={agentLocalHistory} onShow={()=>navigate('releases')}/>
+          </section>
+        </>}
         {page === 'recovery' && <><Recovery onOpenReleases={() => navigate('releases')} evidenceGuidance={<ReleaseEvidenceGuidance state={evidenceState} onOpenEvidence={() => navigate('releases')} />}
           projectRecovery={<ProjectRecovery state={projectRecoveryState} controller={projectRecovery}
           projectName={session?.project.name ?? null} operationProjectName={projectRecoveryState.status?.operation ? workspace.projects[projectRecoveryState.status.operation.context.projectId]?.project.name ?? null : null}

@@ -24,7 +24,7 @@ export function AgentStorePreparation({controller}:{controller:StorePreparationC
  const supplemental=supplementalForView(captured);
  const commands=storePreparationCommands(a),seconds=controller.remainingSeconds();
  return <section className="card" aria-label="CLI Store preparation and current inventory">
-  <h2>Let the CLI prepare a Store step</h2>
+  <h2>Store preparation step</h2>
   <p>Use saved inputs and currently assigned credentials. First allow native preparation; after it returns, separately review and allow Start. Nothing runs automatically. Keep this Desktop open.</p>
   <label>Step <select value={s.selected} disabled={!!controller.ownerReason()} onChange={e=>controller.choose(e.target.value as PreparationKind)}>{storePreparationKinds.map(k=><option key={k} value={k}>{labels[k]}</option>)}</select></label>
   <p>{start?'Start approval':'Preparation approval'} · {labels[k]}. {selected&&<>Version {selected.savedVersion.name} · build {selected.savedVersion.build}.</>}</p>
@@ -39,7 +39,7 @@ export function AgentStorePreparation({controller}:{controller:StorePreparationC
   </>}
   {lifecycle&&selected?.release&&selected.candidate&&<>
    <p>{lifecycle.mode} · Candidate <code>{selected.candidate.operationId}</code> · SHA-256 <code>{selected.candidate.sha256}</code> · intent SHA-256 <code>{selected.release.intentSha256}</code>.</p>
-   {selected.release.stageOperationId&&<p>Original stage <code>{selected.release.stageOperationId}</code> · {lifecycle.mode==='external-readiness'?'execution receipt':'predecessor'} <code>{selected.release.basis?.operationId}</code> · SHA-256 <code>{selected.release.basis?.receiptSha256}</code>. Native preparation and Start must authenticate the same source and lineage again.</p>}
+   {selected.release.stageOperationId&&<p>Stage <code>{selected.release.stageOperationId}</code> · {lifecycle.mode==='external-readiness'?'execution receipt':'predecessor'} <code>{selected.release.basis?.operationId}</code> · SHA-256 <code>{selected.release.basis?.receiptSha256}</code>. Native preparation and Start must authenticate the same source and lineage again.</p>}
    {captured&&'recordId' in captured&&<p>Selected credential <code>{captured.recordId}</code> · revision {captured.recordRevision} · native context revision {captured.credentialContextRevision}.</p>}
    {supplemental&&<p>Current supplemental references: {(['reviewContact','commitment','reviewDemo'] as const).map(role=>{
     const record=supplemental[role];
@@ -51,7 +51,7 @@ export function AgentStorePreparation({controller}:{controller:StorePreparationC
   <label><input type="checkbox" checked={s.acknowledged} disabled={!!controller.consentReason()} onChange={e=>controller.acknowledge(e.target.checked)}/> I approve this one phase and these effects.</label>
   <button disabled={!!controller.allowReason()} onClick={()=>void controller.allow()}>{start?'Allow this Start once':'Allow native Prepare once'}</button>
   {controller.allowReason()&&<p className="save-note">{controller.allowReason()}</p>}
-  <button disabled={!!controller.statusReason()} onClick={()=>void controller.status()}>Check original permission/request</button>
+  <button disabled={!!controller.statusReason()} onClick={()=>void controller.status()}>Check permission</button>
   <button disabled={!!controller.revokeReason()} onClick={()=>void controller.revoke()}>Revoke / request Stop</button>
   {(s.pending||s.revoking)&&<p role="status">An original permission caller is still returning. A native event cannot finish it.</p>}
   {s.issue&&<p role="alert">{s.issue}</p>}

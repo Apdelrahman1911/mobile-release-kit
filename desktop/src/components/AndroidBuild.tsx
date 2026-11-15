@@ -4,6 +4,8 @@ import { androidCandidateInputsHelp, androidToolchainCatalogHelp, androidBuildCa
 import { androidBuildObservation, ANDROID_BUILD_CORE_STATUSES, ANDROID_BUILD_SIGNER_MESSAGE, androidBuildAvailabilityText, androidBuildFindingText, androidBuildLimitationText, androidBuildReasonText } from '../androidBuildProtocol.ts';
 import type { AndroidBuildCoreStatus, AndroidBuildPhase, AndroidBuildStage } from '../androidBuildTypes.ts';
 import type { HelpContent } from '../types.ts';
+import { TechnicalDetails } from './TechnicalDetails.tsx';
+import { ProgressiveDisclosure } from './ProgressiveDisclosure.tsx';
 import { Badge, ErrorNotice, HelpButton, SectionHeading } from './Common.tsx';
 import { Icon } from './Icon.tsx';
 import { androidCatalogActive, sameAndroidCatalogSelection } from '../androidToolchainCatalogProtocol.ts';
@@ -30,12 +32,11 @@ function AndroidBuildDetails({ state, review = false }: { state: AndroidBuildSta
       || state.originalUnconfirmed) return null;
   if (review && (op.phase !== 'awaiting-consent' || !op.intentUsable || !consent
       || consent.operationId !== op.operationId || consent.ownerGeneration !== op.ownerGeneration)) return null;
-  return <div className="session-review" role="group" aria-label="Build details">
-    <h4>Build details</h4>
+  return <TechnicalDetails label="Build IDs">
     <p>{`Build operation ID: ${op.operationId}`}</p>
     <p>{`Build owner generation: ${op.ownerGeneration}`}</p>
     <p className="save-note">These identify the original request; they do not authorize a build or a file operation.</p>
-  </div>;
+  </TechnicalDetails>;
 }
 
 // Shared by Releases and Artifacts. No arbitrary result prop, file opener or
@@ -46,20 +47,23 @@ export function AndroidBuildResultView({ state, operationProjectName = null }: {
   if (state.mode !== 'native' || op?.phase !== 'terminal' || op.outcome !== 'complete' || !op.result) return null;
   const result = androidBuildObservation(op.result), candidate = op.result.scope === 'local-android-candidate-inputs' ? op.result.candidateInputs : null, historical = state.historical || state.integrityFailed || state.nativeBlocked;
   return <section className="offline-report" aria-label="Completed local Android AAB observation">
-    <div className="inline-heading"><h3>Local AAB observation · {operationProjectName ?? op.context.projectId}</h3><Badge tone={historical ? 'warning' : 'info'}>{historical ? 'Historical / retained context' : 'This build only'}</Badge></div>
-    <p><strong>Complete is not PASS, a fresh build or release approval.</strong> Native completion permits this bounded observation to be shown. It does not establish that these are current source outputs or current-file authority.</p>
-    <AndroidBuildDetails state={state} />
-    {op.agentAndroidBuild && <p>CLI request <code>{op.agentAndroidBuild.requestId}</code> · original operation <code>{op.operationId}</code>. This is the same completed build, not an invitation to run it again.</p>}
+    <div className="inline-heading"><h3>Android build finished · {operationProjectName ?? op.context.projectId}</h3><Badge tone={historical ? 'warning' : 'info'}>{historical ? 'Earlier build' : 'Latest build'}</Badge></div>
+    <p>Version <strong>{result.usedVersion.name}</strong> (build {result.usedVersion.build}). Review the check results below before using this build. Finishing a build does not approve a release.</p>
+    {result.signing === 'local-upload-key' && <p><strong>Signed with your upload key and verified.</strong> Nothing was uploaded.</p>}
     {candidate && (historical ? <p className="review-caution">This candidate belongs to an earlier context. Verify it in the correct project's Local release history before using its files.</p> : <div className="session-review" aria-label="Created local candidate inputs">
-      <h4>Local candidate inputs kept · not submitted</h4>
+      <h4>Kept for a later release · not uploaded</h4>
       <p>Candidate <code>{candidate.operationId}</code> · source commit <code>{candidate.sourceCommit}</code>.</p>
       <p>The app retained these inputs for a later, separately authorized release. This is not Store approval or permission to upload.</p>
       <ul>{candidate.files.map(file => <li key={file.fileName}>{file.fileName} · {file.bytes} bytes</li>)}</ul>
       <p>Project-relative location: <code>{`.mobile-release/desktop-android-build/${candidate.operationId.replaceAll('-', '')}/artifacts`}</code>. This is a display label, not current file access. Use Local release history to verify the bundle again.</p>
     </div>)}
-    <p>Saved version {result.usedVersion.name} · build {result.usedVersion.build} · module <code>{result.selection.module}</code> · variant <code>{result.selection.variant}</code> · application ID <code>{result.selection.applicationId}</code>.</p>
-    {result.signing === 'local-upload-key' && <p><strong>Signed locally and verified with the selected upload key.</strong> No Store upload or release approval occurred.</p>}
+    <TechnicalDetails>
+    <p><strong>Complete is not PASS, a fresh build or release approval.</strong> Native completion permits this bounded observation to be shown. It does not establish that these are current source outputs or current-file authority.</p>
+    <AndroidBuildDetails state={state} />
+    {op.agentAndroidBuild && <p>CLI request <code>{op.agentAndroidBuild.requestId}</code> · original operation <code>{op.operationId}</code>. This is the same completed build, not an invitation to run it again.</p>}
+    <p>Module <code>{result.selection.module}</code> · variant <code>{result.selection.variant}</code> · application ID <code>{result.selection.applicationId}</code>.</p>
     <p>Known Gradle exit: {result.command.exitCode}. Structure: {result.assurances.structure}; native manifest: {result.assurances.nativeManifest}; application version: {result.assurances.applicationVersion}.</p>
+    </TechnicalDetails>
     {result.artifactValidation.mode === 'upload-signature' ? <>
       <p><strong>Signature integrity:</strong> {result.assurances.signature}. <strong>Saved upload certificate:</strong> {result.assurances.signer === 'matches-saved-upload-certificate' ? 'matches saved upload certificate' : result.assurances.signer}.</p>
       <p>Saved upload-certificate SHA-256: <code>{result.artifactValidation.uploadCertificateSha256}</code>. This is not Play enrollment or comparison with Play’s app-signing key.</p>
@@ -67,12 +71,11 @@ export function AndroidBuildResultView({ state, operationProjectName = null }: {
     <p>{result.summary.total} findings · {result.summary.shown} shown · {result.summary.omitted} omitted. Negative findings remain negative even though the task completed.</p>
     <dl className="offline-counts">{ANDROID_BUILD_CORE_STATUSES.map((status) => <div key={status}><dt>{status}</dt><dd>{result.summary.counts[status]}</dd></div>)}</dl>
     <ol className="offline-findings">{result.findings.map((finding) => <li key={finding.ordinal}><Badge tone={negative(finding.status) ? 'warning' : 'neutral'}>{finding.status}</Badge><span>{finding.check === 'signer' && result.artifactValidation.mode === 'structure-and-version' ? ANDROID_BUILD_SIGNER_MESSAGE : androidBuildFindingText[finding.check]}</span></li>)}</ol>
-    {result.artifacts.map((artifact) => <div key={artifact.logicalName} className="session-review">
-      <h4>{artifact.fileName} · redacted local observation</h4>
+    {result.artifacts.map((artifact) => <TechnicalDetails key={artifact.logicalName} label={`${artifact.fileName} · file details`}>
       <p>{artifact.size} observed bytes · ABIs: {artifact.architectures.length ? artifact.architectures.join(', ') : 'none reported'}{artifact.unknownAbi ? ' · unrecognized ABI content was also observed' : ''}.</p>
       <p>SHA-256: <code>{artifact.sha256}</code></p>
       <p>Freshness: {artifact.freshness}. This is not a path, download link, publication input or permission to adopt/delete a current file.</p>
-    </div>)}
+    </TechnicalDetails>)}
     <h4>Limits of this result</h4><ul>{result.limitations.map((limitation) => <li key={limitation}>{androidBuildLimitationText[limitation]}</li>)}</ul>
   </section>;
 }
@@ -125,29 +128,35 @@ export function AndroidBuild({ state, controller, projectName, operationProjectN
   </div>;
   if (compact) return <section className="notice notice-warning offline-global" aria-label="Android build status">
     <Icon name="shield" size={20} /><div><strong>Android tools / build · {operationProjectName ?? projectName ?? 'original application'}</strong>
-      <p>{androidToolServiceActive(state.toolService) ? 'Original service setup: ' + state.toolService?.phase + '.' : androidToolRegistrationActive(state.toolRegistration) || state.toolRegistration?.review ? 'Original inspection / registration: ' + state.toolRegistration?.phase + '.' : androidToolSourcesActive(state.toolSources) ? 'Original folder selection: ' + state.toolSources?.phase + '.' : androidCatalogActive(state.catalogStatus) ? 'Original protected-tool read: ' + state.catalogStatus?.phase + '.' : op ? phases[op.phase] : 'Waiting for confirmation of the original request.'} {owned}</p>{controls}
+      <p>{androidToolServiceActive(state.toolService) ? 'Service setup: ' + state.toolService?.phase + '.' : androidToolRegistrationActive(state.toolRegistration) || state.toolRegistration?.review ? 'Inspection / registration: ' + state.toolRegistration?.phase + '.' : androidToolSourcesActive(state.toolSources) ? 'Folder selection: ' + state.toolSources?.phase + '.' : androidCatalogActive(state.catalogStatus) ? 'Protected-tool read: ' + state.catalogStatus?.phase + '.' : op ? phases[op.phase] : 'Waiting for confirmation of the original request.'} {owned}</p>{controls}
       <p>Cancel is not rollback. Protected copies, project changes, network effects or signed outputs may already exist.</p>
     </div>
   </section>;
   const selected = project?.selection;
   return <section className="card offline-preflight" aria-labelledby={label}>
     {op?.agentAndroidBuild && <p className="review-caution">CLI-authorized original <code>{op.operationId}</code> · request <code>{op.agentAndroidBuild.requestId}</code>. This panel observes and can stop it; Start belongs to that one CLI request. Do not prepare or run a replacement.</p>}
-    <SectionHeading title="Build Android app" description="Build the selected saved configuration, then inspect its AAB. This does not publish a release.">
+    <SectionHeading title="Build your Android app" description="Builds an Android App Bundle from your saved settings and checks it. Nothing is uploaded or published.">
       <Badge tone="warning">Project code executes</Badge>{onHelp && <HelpButton content={androidBuildHelp} onHelp={onHelp} />}
     </SectionHeading>
-    <AndroidToolService state={state} controller={controller} onHelp={onHelp} />
-    <AndroidToolSources state={state} controller={controller} onHelp={onHelp} />
-    <AndroidToolRegistration state={state} controller={controller} onHelp={onHelp} />
-    <AndroidToolchainCatalog state={state} controller={controller} onHelp={onHelp} />
-    <h3 id={label}>Review the current saved inputs</h3>
-    <p><strong>Selected source project:</strong> {projectName ?? 'No project selected'}. {onHelp && <HelpButton content={androidBuildInputHelp} onHelp={onHelp} />}</p>
-    <div className="notice notice-warning"><Icon name="shield" /><p>Only build a project you trust. Gradle and project code can run other programs, modify files, read account files, access the network and sign outputs. The toolkit signs only when you explicitly select local signing below and never requests Store operations here; that does not constrain arbitrary project code. This is not network isolation or a sandbox. Cancel stops further owned work and waits for original cleanup; it does not undo prior effects.</p></div>
-    {project?.dirtyDraft && <p className="review-caution"><strong>Unsaved draft changes are NOT used.</strong> Selection below comes from the current completed saved snapshot, not the editor’s possibly older baseline. Your draft is neither saved nor discarded.</p>}
+    <ProgressiveDisclosure title="Android build tools" description="Set up Java, the Android SDK and Gradle once. Skip this if your tools are already set up."
+      needsAttention={androidToolServiceActive(state.toolService) || androidToolRegistrationActive(state.toolRegistration) || androidToolSourcesActive(state.toolSources) || androidCatalogActive(state.catalogStatus) || !!state.sourcesUnconfirmed || !!state.toolRegistration?.review}>
+      <AndroidToolService state={state} controller={controller} onHelp={onHelp} />
+      <AndroidToolSources state={state} controller={controller} onHelp={onHelp} />
+      <AndroidToolRegistration state={state} controller={controller} onHelp={onHelp} />
+      <AndroidToolchainCatalog state={state} controller={controller} onHelp={onHelp} />
+    </ProgressiveDisclosure>
+    <h3 id={label}>What will be built</h3>
+    <p><strong>Project:</strong> {projectName ?? 'No project selected'}{project?.savedVersion ? <> · version <strong>{project.savedVersion.name}</strong> (build {project.savedVersion.build})</> : null}. {onHelp && <HelpButton content={androidBuildInputHelp} onHelp={onHelp} />}</p>
+    <div className="notice notice-warning"><Icon name="shield" /><div><p><strong>Only build a project you trust.</strong> Building runs your project’s own code, which can change files, use the network or sign the output. Cancel stops the build but cannot undo what already happened.</p>
+      <TechnicalDetails label="More about build safety"><p>Gradle and project code can run other programs, modify files, read account files, access the network and sign outputs. The toolkit signs only when you explicitly select local signing below and never requests Store operations here; that does not constrain arbitrary project code. This is not network isolation or a sandbox. Cancel stops further owned work and waits for original cleanup; it does not undo prior effects.</p></TechnicalDetails></div></div>
+    {project?.dirtyDraft && <p className="review-caution"><strong>Your unsaved settings changes are not used.</strong> The build uses your saved settings. Your draft is kept.</p>}
+    <TechnicalDetails label="Saved settings used">
     {selected && <p>Saved module: <code>{selected.module}</code> · variant (saved or core default): <code>{selected.variant}</code> · application ID: <code>{selected.applicationId}</code>.</p>}
     {project?.savedConfig && <p>Saved configuration: {project.savedConfig.bytes} bytes · SHA-256 <code>{project.savedConfig.sha256}</code>.</p>}
     {project?.savedVersion && <p>Saved version source: <code>{project.savedVersion.source}</code> · version {project.savedVersion.name} · build {project.savedVersion.build} · {project.savedVersion.bytes} bytes · SHA-256 <code>{project.savedVersion.sha256}</code>.</p>}
     {project?.inputIssue && <p className="review-caution">{project.inputIssue}</p>}
     <p className="save-note">Refresh saved configuration → Read saved version → Review saved inputs → Build. External changes remain possible; no atomic checkout, filesystem watcher, fresh output or source binding is promised.</p>
+    </TechnicalDetails>
     <div className="button-row">
       {onRefresh && <button type="button" className="button secondary small" disabled={!project || !!refreshReason || project.snapshotPending} onClick={() => { if (project) controller.snapshotIntent(project.projectId); onRefresh(); }}>Refresh saved configuration</button>}
       {onReadVersion && <button type="button" className="button secondary small" disabled={!project || !!versionReason || project.versionPending} onClick={() => { controller.versionIntent(); onReadVersion(); }}>Read saved version</button>}
@@ -184,8 +193,10 @@ export function AndroidBuild({ state, controller, projectName, operationProjectN
     <p className="save-note">{state.status ? androidBuildAvailabilityText[state.status.availability] : 'The separate native Android-build capability has not been observed. Passive checks do not enable it.'}</p>
     {!consent && <><button type="button" className="button" disabled={prepareReason !== null} onClick={() => void controller.prepare()}>Review saved inputs</button>{prepareReason && <p className="review-caution">{prepareReason}</p>}</>}
     {consent && <div className="session-review" role="group" aria-label="Confirm this saved Android-build intent">
-      <h3>{consent.binding.context.operation === 'android-candidate-inputs' ? 'Create local candidate inputs once?' : 'Build these saved inputs once?'}</h3>
+      <h3>{consent.binding.context.operation === 'android-candidate-inputs' ? 'Build and keep this version for release?' : 'Build this version now?'}</h3>
+      <p>Version <strong>{consent.binding.context.savedVersion.name}</strong> (build <strong>{consent.binding.context.savedVersion.build}</strong>) · {consent.binding.context.operation !== 'android-build-inspect' ? 'signed with your upload key' : 'not signed by this app'} · nothing is uploaded.</p>
       {consent.binding.context.operation === 'android-candidate-inputs' && <p>This build also records a local candidate and retains its signed app, metadata and validation report. It does not submit a release. If interrupted, inspect Local release history instead of repeating Build.</p>}
+      <TechnicalDetails label="Exact build details">
       <AndroidBuildDetails state={state} review />
       <p>Build project: <strong>{consent.binding.context.projectId}</strong>. Module <code>{consent.binding.selection.module}</code>, variant <code>{consent.binding.selection.variant}</code>, application ID <code>{consent.binding.selection.applicationId}</code>.</p>
       <p>Version <strong>{consent.binding.context.savedVersion.name}</strong>, build <strong>{consent.binding.context.savedVersion.build}</strong>, selected source <code>{consent.binding.context.savedVersion.source}</code>.</p>
@@ -194,6 +205,8 @@ export function AndroidBuild({ state, controller, projectName, operationProjectN
       <p>Inspection: {consent.binding.context.artifactValidation.mode === 'upload-signature' ? <>structure, application version and upload signature; saved upload-certificate SHA-256 <code>{consent.binding.context.artifactValidation.uploadCertificateSha256}</code></> : 'structure and application version only; signer not inspected'}.</p>
       {consent.binding.toolchainSelection && <p>Protected Mac tool copy: <code>{consent.binding.toolchainSelection.instance}</code> · catalog generation {consent.binding.toolchainSelection.catalogGeneration}. Changing the tool copy retires this review; full native admission is still required at Build.</p>}
       <p>This review expires no later than five minutes after original preparation. Status refresh never renews it. Save, refresh, new version observation, selection change or leaving this unstarted review retires consent.</p>
+      </TechnicalDetails>
+      <p className="save-note">This confirmation expires after five minutes.</p>
       <label className="offline-ack"><input type="checkbox" checked={consent.acknowledged} onChange={(event) => controller.setAcknowledged(consent.operationId, consent.ownerGeneration, event.target.checked)} />
         <span>I trust this project and authorize one build of these saved Android inputs with the inspection choice above. I understand project-code effects, that my unsaved draft is not used, and that post-run bytes may be reused/stale. {consent.binding.context.operation !== 'android-build-inspect' ? 'I authorize signing the private final copy using these exact assigned inputs and verifying this saved upload certificate. Do not upload. ' : consent.binding.context.artifactValidation.mode === 'upload-signature' ? 'Verify the captured upload signature against this saved certificate; do not sign or upload. ' : 'The signer is not inspected. '}{consent.binding.context.operation === 'android-candidate-inputs' ? 'I also authorize recording this local candidate and keeping its files. ' : ''}Completion is not release approval.</span></label>
       <div className="button-row"><button type="button" className="button" disabled={startReason !== null} onClick={() => void controller.start(consent.operationId, consent.ownerGeneration)}>{consent.binding.context.operation === 'android-candidate-inputs' ? 'Create local candidate inputs' : consent.binding.context.operation !== 'android-build-inspect' ? 'Build, sign and validate' : 'Build Android app'}</button></div>
@@ -201,7 +214,7 @@ export function AndroidBuild({ state, controller, projectName, operationProjectN
     </div>}
     {state.error && <ErrorNotice error={state.error} title="No new Android-build outcome was confirmed" />}
     {state.originalUnconfirmed && <p className="review-caution" role="status">The original request acknowledgement is unconfirmed. Do not repeat Start. Original Status may help cancel or settle that operation, but cannot create new consent.</p>}
-    {op && <div className="session-progress" role="status" aria-live="polite" aria-label="Original Android build status">
+    {op && <div className="session-progress" role="status" aria-live="polite" aria-label="Android build status">
       <div className="inline-heading"><h3>Build status · {operationProjectName ?? op.context.projectId}</h3><Badge tone={op.phase === 'unknown' ? 'warning' : 'neutral'}>{phases[op.phase]}</Badge></div>
       <AndroidBuildDetails state={state} />
       {op.stage && <p>Reached stage: {stages[op.stage]}. A stage is not a progress percentage or native completion.</p>}
@@ -266,7 +279,7 @@ export function AndroidToolService({ state, controller, onHelp }: {
       onClick={() => void controller.requestAndroidToolServiceRegistration()}>Request system-service registration</button>
     {reason ? <p className="review-caution">{reason}</p> : registrationReason && <p className="save-note">{registrationReason}</p>}
     {status && <div role="status" aria-live="polite">
-      <p><strong>{servicePhases[status.phase]}.</strong> {status.operation && <>Original project: {status.operation.context.projectId}.</>}</p>
+      <p><strong>{servicePhases[status.phase]}.</strong> {status.operation && <>Project: {status.operation.context.projectId}.</>}</p>
       {status.observation && <p>{serviceStates[status.observation.state]}. {serviceOutcomes[status.observation.outcome]}.</p>}
       {status.reason !== 'none' && <p>{androidToolRegistrationReasonText[status.reason]}</p>}
       {status.observation?.mutationReturned && <p className="save-note">A system action actually returned. Cancellation cannot undo that action.</p>}
@@ -280,8 +293,8 @@ export function AndroidToolService({ state, controller, onHelp }: {
 const sourceRoles: AndroidToolSourceRole[] = ['jdk', 'sdk', 'gradle'];
 const sourcePhase: Record<AndroidToolSourcesStatus['phase'], string> = {
   idle: 'No folder selected yet', picking: 'Choose a folder in the native dialog', checking: 'Checking the selected directory',
-  selected: 'Original folder selection retained', refused: 'Folder selection could not be used', cancelled: 'Folder selection cancelled',
-  stopping: 'Stopping · waiting for the original folder selection to close', unknown: 'Original folder cleanup could not be confirmed',
+  selected: 'Folder selection retained', refused: 'Folder selection could not be used', cancelled: 'Folder selection cancelled',
+  stopping: 'Stopping · waiting for the original folder selection to close', unknown: 'Folder cleanup could not be confirmed',
 };
 const sourceReason: Record<AndroidToolSourcesStatus['reason'], string> = {
   none: '', 'not-inspected': 'Folder selection alone is not supplier inspection or a protected copy. Check the separate original registration Status.',
@@ -302,14 +315,14 @@ export function AndroidToolSources({ state, controller, onHelp }: {
   const sameProject = sources?.projectId === state.project?.projectId;
   return <section className="session-review" aria-label="Set up Android tools">
     <h3>Set up Android tools</h3>
-    <p>Choose the Java, Android SDK and Gradle folders already installed on this Mac. Use Browse; you do not need to copy, rename or move anything.</p>
-    <p className="save-note">This step only remembers the selected directories for this app session. It does not execute, install or change them. Browsing alone neither inspects supplier contents nor registers a copy; separate inspection and protected-copy approval stay disabled until their actual prerequisites are available.</p>
+    <p>Choose the Java, Android SDK and Gradle folders already installed on this computer. Nothing is copied or changed.</p>
+    <TechnicalDetails label="About folder selection"><p className="save-note">This step only remembers the selected directories for this app session. It does not execute, install or change them. Browsing alone neither inspects supplier contents nor registers a copy; separate inspection and protected-copy approval stay disabled until their actual prerequisites are available.</p></TechnicalDetails>
     {sourceRoles.map((role) => {
       const help = androidToolSourceHelp[role], selected = sameProject ? sources?.selections.find((item) => item.role === role) : null;
       return <div className="session-review" key={role} role="group" aria-label={`${help.label} source folder`}>
         <div className="inline-heading"><h4>{help.label}</h4>{onHelp && <HelpButton content={help} onHelp={onHelp} />}</div>
-        <p>{help.what}</p><p className="save-note">{help.where}</p>
-        <p className="save-note">Required before registering Android tools. {selected ? <>Selected folder: <strong>{selected.displayName}</strong> · folder selection only.</> : 'No folder selected for this project.'}</p>
+        <p>{help.what}</p><p className="save-note"><strong>Where to find it:</strong> {help.where}</p>
+        <p className="save-note">{selected ? <>Selected: <strong>{selected.displayName}</strong></> : 'Not selected yet.'}</p>
         <button type="button" className="button secondary small" disabled={reason !== null}
           onClick={() => void controller.chooseToolSource(role)}>{selected ? 'Choose a different folder' : 'Browse for folder'}</button>
       </div>;
@@ -328,17 +341,17 @@ const registrationPhases: Record<AndroidToolRegistrationStatus['phase'], string>
   copying: 'Copying into protected storage', verifying: 'Verifying the protected copy',
   publishing: 'Publishing the registration', settling: 'Waiting for original cleanup',
   stopping: 'Stopping · waiting for original cleanup', complete: 'Protected copy published',
-  refused: 'Inspection or registration refused', cancelled: 'Original operation cancelled',
-  unknown: 'Original cleanup is unconfirmed',
+  refused: 'Inspection or registration refused', cancelled: 'Operation cancelled',
+  unknown: 'Cleanup is unconfirmed',
 };
 const registrationProblems: Record<AndroidToolRegistrationProblem, string> = {
   ...sourceInspectionProblemText,
-  binding: 'Original input binding changed', bounds: 'A fixed input or result limit was reached',
+  binding: 'Input binding changed', bounds: 'A fixed input or result limit was reached',
   'supplier-unavailable': 'Official supplier correspondence is unavailable', inventory: 'Content inventory was refused',
   ownership: 'Required file ownership was not established', collision: 'A protected destination already exists',
   native: 'Native operation failed', stopped: 'The original operation was stopped',
   unknown: 'An original native outcome is unconfirmed', transfer: 'Content transfer failed',
-  persist: 'Protected output persistence failed', admission: 'Original admission was refused',
+  persist: 'Protected output persistence failed', admission: 'Admission was refused',
   unavailable: 'A required original service or resource is unavailable',
 };
 const registrationHelp: HelpContent = {
@@ -370,12 +383,12 @@ export function AndroidToolRegistration({ state, controller, onHelp }: {
     {inspectReason && <p className="save-note">{inspectReason}</p>}
     {status && <div className="session-progress" role="status" aria-live="polite">
       <div className="inline-heading"><h4>{registrationPhases[status.phase]}</h4><Badge tone={status.phase === 'unknown' ? 'warning' : 'neutral'}>{status.operation?.kind ?? 'not started'}</Badge></div>
-      {status.operation && <p>Original project: <strong>{status.operation.context.projectId}</strong>. Saved version {status.operation.context.savedVersion.name} · build {status.operation.context.savedVersion.build}.</p>}
+      {status.operation && <p>Project: <strong>{status.operation.context.projectId}</strong>. Saved version {status.operation.context.savedVersion.name} · build {status.operation.context.savedVersion.build}.</p>}
       <p>{androidToolRegistrationReasonText[status.reason]}</p>
     </div>}
     {review && <div className="session-review" role="group" aria-label="Confirm this exact protected-copy review">
       <h4>Register these inspected sources once?</h4>
-      <p>Original source project: <strong>{review.context.projectId}</strong>. Saved configuration SHA-256: <code>{review.context.savedConfig.sha256}</code>. Saved version SHA-256: <code>{review.context.savedVersion.sha256}</code>.</p>
+      <p>Source project: <strong>{review.context.projectId}</strong>. Saved configuration SHA-256: <code>{review.context.savedConfig.sha256}</code>. Saved version SHA-256: <code>{review.context.savedVersion.sha256}</code>.</p>
       <ul>{review.sources.map((source) => <li key={source.role}><strong>{androidToolSourceHelp[source.role].label}</strong>: {source.version} · {source.logicalBytes} logical bytes · {source.files} files · {source.aliases} aliases · {source.entries} entries · complete compatible role observation.</li>)}</ul>
       <p className="save-note">These are picked-role subtotals, not whole-copy or disk-usage totals. The private review also includes the separate fixed app-provided support originals within the same native limits.</p>
       <p>This copy includes the reviewed JDK and Gradle distributions, selected SDK platform/build-tools contents and fixed support tools. It does not modify the selected source folders. No project build, signing or upload is authorized by registration.</p>

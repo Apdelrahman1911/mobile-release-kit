@@ -8,11 +8,11 @@ import { Icon } from './Icon.tsx';
 const phases: Record<GitHubGhPhase, string> = {
   idle: 'No CLI connection request', picking: 'Choose GitHub CLI in the file picker', running: 'Reading the selected local login',
   'checking-identity': 'Checking the account with GitHub', stopping: 'Stopping — waiting for the original request',
-  settled: 'CLI request finished', failed: 'CLI request ended without completing', 'cleanup-unknown': 'Original cleanup is unconfirmed',
+  settled: 'CLI request finished', failed: 'CLI request ended without completing', 'cleanup-unknown': 'Cleanup is unconfirmed',
 };
 const accountPhases: Record<GitHubGhAccountsStatus['phase'], string> = {
   reading: 'Reading local GitHub account names', stopping: 'Stopping the local account read',
-  settled: 'Local account names read', failed: 'Local account names could not be read', 'cleanup-unknown': 'Original cleanup is unconfirmed',
+  settled: 'Local account names read', failed: 'Local account names could not be read', 'cleanup-unknown': 'Cleanup is unconfirmed',
 };
 
 // No mount/read/Connect effect. Root retains this controller across navigation;
@@ -70,7 +70,7 @@ export function GitHubGhEntry({ controller, compact = false, originalProjectName
     </>}
     {(busy || original && original.phase !== 'idle' || accountRead || state.failure) && <div className={`notice ${state.issue || state.failure ? 'notice-warning' : 'notice-info'}`} role={state.issue ? 'alert' : 'status'}>
       <Icon name="info" /><div>
-        <strong>{original ? phases[original.phase] : accountRead ? accountPhases[accountRead.phase] : 'Original GitHub CLI request'}{foreign && ` · ${originalProjectName ?? 'a previously selected project'}`}</strong>
+        <strong>{original ? phases[original.phase] : accountRead ? accountPhases[accountRead.phase] : 'GitHub CLI request'}{foreign && ` · ${originalProjectName ?? 'a previously selected project'}`}</strong>
         {original?.selectedLogin && <p>Requested username: <strong>{original.selectedLogin}</strong>. Only GitHub’s own result can confirm the connected account.</p>}
         {busy && <p>{busy}</p>}
         {state.issue && <p>Do not reconnect, repeat the request or switch to a token to bypass this warning. Keep the app open; no cleanup or account approval is inferred.</p>}

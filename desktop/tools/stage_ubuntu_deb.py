@@ -85,6 +85,22 @@ def runtime_records(root: Path, manifest_sha: str, protocol_sha: str) -> dict[st
 
 
 def kit_records(root: Path, admitted: dict[str, dict]) -> dict[str, dict]:
+    if "inventory.json" in admitted:
+        inventory = pinned_json(root / "inventory.json", admitted["inventory.json"]["sha256"])
+        D.need(set(inventory) == {"schemaVersion", "profile", "files"}
+               and inventory["schemaVersion"] == 1
+               and inventory["profile"] == "ubuntu-candidate-source-runtime-v1", "Candidate kit profile differs")
+        rows = D.records(inventory["files"])
+        D.need(set(admitted) == set(rows) | {"inventory.json"}, "Candidate kit roster differs")
+        required = {"components.json", "notices/PYTHON-CHANGES.txt", "notices/SOURCE-AVAILABILITY.txt",
+                    "recipe/source-lock.json", "recipe/prepare_ubuntu_execution.py"}
+        required.update("sources/" + name + ".archive" for name in ("cpython", "libffi", "openssl", "zlib"))
+        D.need(required <= set(rows), "Candidate kit lacks source or notices")
+        for name, record in rows.items():
+            D.need(D.same(record, admitted[name]), "Candidate kit pin differs")
+            D.bound(root / name, record)
+        exact_files(root, admitted)
+        return admitted
     D.need(KIT_CONTROL | PREPARATION_ONLY <= set(admitted), "Prepared delivery control inventory differs")
     D.bound(root / "notice-inventory.json", admitted["notice-inventory.json"])
     notices = D.decode(D.read(root / "notice-inventory.json", 1 << 20))

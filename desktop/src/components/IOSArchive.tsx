@@ -1,3 +1,4 @@
+import { TechnicalDetails } from './TechnicalDetails.tsx';
 import { useId } from 'react';
 import { IOSSigningInputsCheck, IOSSigningInputsResult } from './IOSSigningInputsCheck.tsx';
 import type { IOSArchiveController, IOSArchiveState } from '../iosArchive.ts';
@@ -63,7 +64,7 @@ export function IOSArchiveResultView({ state, operationProjectName = null }: { s
       <p>Candidate manifest SHA-256 <code>{candidate.candidateInputs.candidateSha256}</code>.</p>
       <p>Captured source commit <code>{candidate.candidateInputs.sourceCommit}</code> · tree <code>{candidate.candidateInputs.sourceTree}</code>.</p>
       <ul>{candidate.candidateInputs.files.map((file) => <li key={file.fileName}><code>{file.fileName}</code> · {file.bytes} bytes · SHA-256 <code>{file.sha256}</code></li>)}</ul>
-      <p>Original archive inventory SHA-256 <code>{candidate.candidateInputs.archive.sha256}</code>. The archive and IPA were not copied into a second candidate tree.</p>
+      <p>Archive inventory SHA-256 <code>{candidate.candidateInputs.archive.sha256}</code>. The archive and IPA were not copied into a second candidate tree.</p>
       <p>This original Create completed its required owner and checkpoint closes. The retained summary does not prove files remain unchanged or establish prior Create finality on restart. Review current inputs in Local release history before any later action. No Store readiness, symbol upload or publication is granted.</p>
     </div>}
     <UnsignedArchiveDetails state={state} />
@@ -114,18 +115,18 @@ export function IOSArchive({ state, controller, projectName, operationProjectNam
     refreshReason={refreshReason} versionReason={versionReason} />;
   const selected = project?.selection;
   return <section className="card offline-preflight" aria-labelledby={label} data-mrk-ios-archive="status" data-phase={op?.phase ?? 'idle'} data-stage={op?.stage ?? ''} data-outcome={op?.outcome ?? ''}>
-    <SectionHeading title={signed ? 'Sign and export a local iOS IPA' : 'Create unsigned iOS archive'} description={signed ? 'Use assigned session inputs to archive, export and validate one local IPA. No Store upload or symbol uploader.' : 'Archive the saved app with full Xcode, then check identity, version and symbols. No signing, IPA export or Store upload.'}>
+    <SectionHeading title={signed ? 'Build a signed iOS app (IPA)' : 'Build your iOS app'} description={signed ? 'Builds your app with Xcode, signs it with your certificate and checks the result. Nothing is uploaded.' : 'Builds your app with Xcode and checks its ID, version and symbols. It is not signed and nothing is uploaded.'}>
       <Badge tone="warning">Project code executes</Badge>{onHelp && <HelpButton content={iosArchiveHelp} onHelp={onHelp} />}
     </SectionHeading>
     {modes}
     {signed && <label className="offline-ack"><input type="checkbox" checked={state.keepCandidate}
       disabled={state.pending === 'start' || !!op && !['awaiting-consent', 'terminal'].includes(op.phase)}
-      onChange={(event) => controller.setKeepCandidate(event.target.checked)} /><span>Keep local candidate inputs · bind the original archive/IPA to clean configured source, metadata and enrolled local history. No Store operation.</span></label>}
-    {signed && state.keepCandidate && <p className="save-note">Requires local release opt-in, the configured candidate branch and an intact enrolled Local release history. Create records pending intent before signing and retains evidence on interruption. It does not enroll, repair, delete or retry another operation.</p>}
-    <h3 id={label}>Review the current saved inputs</h3>
-    <p><strong>Selected source project:</strong> {projectName ?? 'No project selected'}. {onHelp && <HelpButton content={iosArchiveInputHelp} onHelp={onHelp} />}</p>
-    <div className="notice notice-warning"><Icon name="shield" /><p>Only archive a project you trust. Xcode build phases and saved preparation code can run programs, modify files, read account files and use the network. This is not a sandbox. {signed ? 'Signed export borrows the assigned P12/password/profile and the admitted account signing state. No toolkit Store upload, provisioning download or symbol uploader is requested.' : 'The toolkit requests an unsigned archive and no credentials or Store operation; that does not constrain arbitrary project code.'} Cancel does not undo prior effects.</p></div>
-    {project?.dirtyDraft && <p className="review-caution"><strong>Unsaved draft changes are NOT used.</strong> {signed ? 'Signed review is blocked until the credential context and saved configuration agree. Save or explicitly revert the draft; the app does neither automatically.' : 'Your draft is neither saved nor discarded. The saved snapshot below is the archive input.'}</p>}
+      onChange={(event) => controller.setKeepCandidate(event.target.checked)} /><span>Keep this build for a release (saved to your local release history). Nothing is uploaded.</span></label>}
+    {signed && state.keepCandidate && <TechnicalDetails label="Requirements"><p className="save-note">Requires local release opt-in, the configured candidate branch and an intact enrolled Local release history. Create records pending intent before signing and retains evidence on interruption. It does not enroll, repair, delete or retry another operation.</p></TechnicalDetails>}
+    <h3 id={label}>What will be built</h3>
+    <p><strong>Project:</strong> {projectName ?? 'No project selected'}. {onHelp && <HelpButton content={iosArchiveInputHelp} onHelp={onHelp} />}</p>
+    <div className="notice notice-warning"><Icon name="shield" /><div><p><strong>Only build a project you trust.</strong> Building runs your project’s own code, which can change files or use the network. Cancel stops the build but cannot undo what already happened.</p><TechnicalDetails label="More about build safety"><p>Xcode build phases and saved preparation code can run programs, modify files, read account files and use the network. This is not a sandbox. {signed ? 'Signed export borrows the assigned P12/password/profile and the admitted account signing state. No toolkit Store upload, provisioning download or symbol uploader is requested.' : 'The toolkit requests an unsigned archive and no credentials or Store operation; that does not constrain arbitrary project code.'} Cancel does not undo prior effects.</p></TechnicalDetails></div></div>
+    {project?.dirtyDraft && <p className="review-caution"><strong>Your unsaved settings changes are not used.</strong> {signed ? 'Save or undo your settings changes first — signing needs your saved settings.' : 'The build uses your saved settings. Your draft is kept.'}</p>}
     {selected && <div className="session-review"><h4>Saved Xcode selection {onHelp && <HelpButton content={iosArchiveSelectionHelp} onHelp={onHelp} />}</h4>
       <p>{selected.containerKind === 'workspace' ? 'Workspace' : 'Project'}: <code>{selected.container}</code> · scheme: <code>{selected.scheme}</code> · configuration: <code>{selected.configuration}</code>.</p>
       <p>Bundle ID: <code>{selected.bundleId}</code> · symbols policy: {selected.symbolsPolicy} · saved preparation: {selected.preparationConfigured ? 'will execute before archive' : 'not configured'}.</p>
@@ -151,7 +152,7 @@ export function IOSArchive({ state, controller, projectName, operationProjectNam
     <p className="save-note">{state.status ? iosArchiveAvailabilityText[iosArchiveModeAvailability(state.status, signed ? 'ios-signed-export' : 'ios-unsigned-archive')] : 'The separate native iOS archive capability has not been observed. Passive checks do not enable it.'}</p>
     {!consent && <><button type="button" className="button" data-mrk-ios-archive-action="review" disabled={prepareReason !== null} onClick={() => void controller.prepare()}>Review saved iOS inputs</button>{prepareReason && <p className="review-caution">{prepareReason}</p>}</>}
     {consent && consent.binding.selection && consent.binding.context.operation !== 'ios-local-recovery' && <div className="session-review" role="group" aria-label={signed ? 'Confirm this saved signed iOS export intent' : 'Confirm this saved unsigned iOS archive intent'}>
-      <h3>{state.keepCandidate ? 'Create and retain these local iOS candidate inputs once?' : signed ? 'Sign and export this saved app once?' : 'Create this unsigned archive once?'}</h3>
+      <h3>{state.keepCandidate ? 'Build, sign and keep this version for release?' : signed ? 'Build and sign this version now?' : 'Build this version now?'}</h3>
       <UnsignedArchiveDetails state={state} review />
       <p>Project <strong>{consent.binding.context.projectId}</strong> · <code>{consent.binding.selection.container}</code> · scheme <code>{consent.binding.selection.scheme}</code> · configuration <code>{consent.binding.selection.configuration}</code>.</p>
       <p>Bundle ID <code>{consent.binding.selection.bundleId}</code> · saved version <strong>{consent.binding.context.savedVersion.name}</strong> · build <strong>{consent.binding.context.savedVersion.build}</strong>.</p>
@@ -165,7 +166,7 @@ export function IOSArchive({ state, controller, projectName, operationProjectNam
     </div>}
     {state.error && <ErrorNotice error={state.error} title="No new iOS archive outcome was confirmed" />}
     {state.originalUnconfirmed && <p className="review-caution" role="status">The original acknowledgement is unconfirmed. Do not repeat Start. Check original Status to cancel or settle that operation; it cannot create new consent.</p>}
-    {op && <div className="session-progress" role="status" aria-live="polite" aria-label="Original iOS archive status">
+    {op && <div className="session-progress" role="status" aria-live="polite" aria-label="IOS archive status">
       <UnsignedArchiveDetails state={state} />
       <div className="inline-heading"><h3>Archive status · {operationProjectName ?? op.context.projectId}</h3><Badge tone={op.phase === 'unknown' ? 'warning' : 'neutral'}>{phases[op.phase]}</Badge></div>
       {op.stage && <p>Reached stage: {stages[op.stage]}. A stage is not a completion percentage or proof that cleanup finished.</p>}
@@ -256,7 +257,7 @@ export function IOSRecovery({ state, controller, projectName, operationProjectNa
       {recovery.outcome && <p>Operation outcome: {recovery.outcome}. {recovery.context.recovery.action === 'inspect' && 'A complete inspection can still find pending state; it is not completed recovery.'}</p>}
       <p>{iosArchiveReasonText[recovery.reason]}</p>
     </div>}
-    {report && recovery && <div className="session-review" aria-label="Original native local recovery report">
+    {report && recovery && <div className="session-review" aria-label="Native local recovery report">
       {(['account', 'project'] as const).map((domain) => { const row = report[domain]; if (!row) return null;
         const actionReason = controller.recoveryReason(domain, recovery);
         return <div key={domain} role="group" aria-label={domain === 'account' ? 'Account signing recovery state' : 'Project build-input recovery state'}><h4>{domain === 'account' ? 'Account signing state' : 'Project build-input state'} · {row.status}</h4><p>{recoveryStates[row.status]}</p>
@@ -267,7 +268,7 @@ export function IOSRecovery({ state, controller, projectName, operationProjectNa
       {state.historical && <p className="review-caution">Historical original-operation data. It cannot authorize the current project or another recovery session.</p>}
       <p>Local recovery only. No Store action or release-readiness claim. Inspect again after an action; another session is never silently substituted.</p>
     </div>}
-    <div className="button-row"><button type="button" className="button secondary small" disabled={!controller.canCheckStatus()} onClick={() => void controller.checkStatus()}>Check original iOS owner status</button>
+    <div className="button-row"><button type="button" className="button secondary small" disabled={!controller.canCheckStatus()} onClick={() => void controller.checkStatus()}>Check iOS build status</button>
       {operation && operation.phase !== 'terminal' && <button type="button" className="button secondary small" disabled={!controller.canCancel()} onClick={() => controller.cancel()}>Cancel original iOS operation</button>}</div>
     <p className="save-note">Ordinary recovery is supported only when the existing core offers it. Exceptional interactive manual recheck is not implemented here; a manual-required or preserved conflict is an explicit limitation, not a successful recovery. Cancel never forces cleanup or undoes completed restoration.</p>
   </section>;

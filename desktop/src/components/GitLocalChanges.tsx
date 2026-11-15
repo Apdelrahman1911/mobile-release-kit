@@ -37,7 +37,7 @@ export function GitLocalControls({ controller, compact = false, originalProjectN
         op?.stage === 'settled' ? op.outcome !== 'ok' || result?.state === 'failed' ? 'Git action did not complete' : 'Git check finished' : 'Local Git actions';
   return <section className={compact ? 'notice notice-info' : 'github-workflow'} aria-label="Local Git action status">
     <div><h3>{title}</h3>
-      {state.projectId && <p>Original project: <strong>{originalProjectName ?? 'a previously selected project'}</strong>.</p>}
+      {state.projectId && <p>Project: <strong>{originalProjectName ?? 'a previously selected project'}</strong>.</p>}
       {state.uncertain && <p className="review-caution" role="alert">The original result or cleanup is unconfirmed. Keep the app and project files. Do not repeat the action, reconnect to dismiss it, or remove Git lock files.</p>}
       {state.recovery && <p className="review-caution" role="alert">Preserve the original task and project files. This screen cannot prove recovery or safely repeat the change.</p>}
       {result?.action === 'set-upstream' && <GitUpstreamRecovery result={result} />}
@@ -56,14 +56,14 @@ export function GitLocalControls({ controller, compact = false, originalProjectN
         'Check local Git actions first. This checks native availability; it does not stage files or create a commit.'}</p>}
       <div className="button-row">
         <button type="button" className="button secondary" disabled={!controller.canCheck()} onClick={() => void controller.checkStatus()}>
-          {state.checking ? 'Checking…' : active ? 'Check original action' : 'Check local Git actions'}</button>
+          {state.checking ? 'Checking…' : active ? 'Check action' : 'Check local Git actions'}</button>
         {active && <button type="button" className="button secondary" disabled={!controller.canCancel()} onClick={() => void controller.cancel()}>Stop original action</button>}
         {state.review && <button type="button" className="button secondary" disabled={!controller.canDiscard()} onClick={() => void controller.discard()}>Close review, keep draft</button>}
         {compact && onShow && <button type="button" className="text-button" onClick={onShow}>Show local changes</button>}
       </div>
       {!active && controller.checkReason() && <p className="save-note">{controller.checkReason()}</p>}
-      {op && <details><summary>Original action details</summary><p>{op.phase === 'prepare' ? 'Read-only review' : 'Submitted change'} · {op.action.kind} · {op.stage}.</p>
-        <p>Original operation: <code>{op.operationId}</code>. Native outcome: {op.outcome ?? 'not settled'}.</p>
+      {op && <details><summary>Action details</summary><p>{op.phase === 'prepare' ? 'Read-only review' : 'Submitted change'} · {op.action.kind} · {op.stage}.</p>
+        <p>Operation: <code>{op.operationId}</code>. Native outcome: {op.outcome ?? 'not settled'}.</p>
         {result && <p>Git result: {result.state}. This is not a fresh file or remote observation.</p>}</details>}
     </div>
   </section>;

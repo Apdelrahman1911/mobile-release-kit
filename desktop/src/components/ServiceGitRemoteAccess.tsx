@@ -49,7 +49,7 @@ export function ServiceGitRemoteAccess({ controller, repository, reader, local, 
         <p>Use <code>mrk git-remote-scope PROJECT_ID --json</code> for the exact permitted action. Keep its service-instance and request IDs. After a lost reply, use <code>mrk requests PROJECT_ID --json</code> and the original status/cancel commands, not another Prepare or Start.</p>
         {access?.projectId && <p>Project <code>{access.projectId}</code> · grant <code>{access.grantId}</code></p>}
         {access?.selection && <p>Selection comparison <code>{access.selection.selectionSha256}</code></p>}
-        <p>Original terminal effects and retained names are diagnostics, not permission to delete files. Activity is a separate explicit Desktop read; it cannot settle or replay a Push. There is no CLI reconciliation shortcut.</p>
+        <p>Terminal effects and retained names are diagnostics, not permission to delete files. Activity is a separate explicit Desktop read; it cannot settle or replay a Push. There is no CLI reconciliation shortcut.</p>
       </details>
       {state.message && <p role="status" className="review-caution">{state.message}</p>}
     </section>

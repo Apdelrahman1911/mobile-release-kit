@@ -19,7 +19,7 @@ export function AgentAppleProvisioningAccess({ controller }: { controller: Agent
       onChange={event => controller.acknowledge(event.target.checked)} /> Allow the installed CLI to Start this exact prepared Apple step once, with its existing credentials and limits.</label>
     <div className="actions">
       <button type="button" disabled={!!controller.allowReason()} onClick={() => void controller.allow()}>Allow this step once</button>
-      <button type="button" disabled={!!controller.checkReason()} onClick={() => void controller.check()}>Check original CLI step</button>
+      <button type="button" disabled={!!controller.checkReason()} onClick={() => void controller.check()}>Check step</button>
       <button type="button" disabled={!!controller.revokeReason()} onClick={() => void controller.revoke()}>Withdraw exact permission</button>
     </div>
     {controller.allowReason() && <p className="save-note">{controller.allowReason()}</p>}
@@ -28,7 +28,7 @@ export function AgentAppleProvisioningAccess({ controller }: { controller: Agent
     {state.stale && <p>These are the retained original controls, not permission for the currently selected project.</p>}
     {commands.map(command => <pre key={command}><code>{command}</code></pre>)}
     <p>Submit prints a request ID before sending. If its response is lost, use Status or Cancel with that ID; do not Submit again. Keep this Desktop session open. After completion, withdraw this permission before delegating a different prepared step.</p>
-    {status && <p>Original CLI step: {status.state} · {status.settlement}. {status.result?.decision ? `Recorded decision: ${String(status.result.decision)}.` : ''}</p>}
+    {status && <p>CLI step: {status.state} · {status.settlement}. {status.result?.decision ? `Recorded decision: ${String(status.result.decision)}.` : ''}</p>}
     {status?.recordAtCompletion && <p>Encrypted record at completion: <code>{status.recordAtCompletion.reference.recordId}</code>. This historical reference is not a current credential loan, assignment, backup or signing-readiness proof.</p>}
     <p>No private key, CSR, P12 password, certificate bytes or credential path belongs in these commands. Account access, encrypted storage, runtime setup and any system prompts remain in the app. Assess, Assign and backup remain separate explicit actions.</p>
   </details>;

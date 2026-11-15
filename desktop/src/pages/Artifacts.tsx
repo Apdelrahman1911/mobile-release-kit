@@ -10,7 +10,7 @@ export function Artifacts({ state, controller, inspectionState, inspectionContro
   state: LifecycleEvidenceView; controller: LifecycleEvidenceController; projectName: string | null; onHelp: (help: HelpContent) => void;
 }) {
   return <>
-    <PageHeading eyebrow="ARTIFACTS" title="Understand your saved release evidence." description="The same selected-folder observation is shared with Releases and Recovery. Artifact declarations do not verify payload bytes." />
+    <PageHeading eyebrow="BUILD FILES" title="Inspect a build" description="Open a built app package or a folder of release results to see what it contains. Inspecting a file does not change or upload it." />
     <ArtifactInspection state={inspectionState} controller={inspectionController} projectName={projectName} onHelp={onHelp}/>
     <ReleaseEvidence state={state} controller={controller} projectName={projectName} onHelp={onHelp} />
   </>;

@@ -45,7 +45,7 @@ export function GitFetch({ controller, repository, connection, originalProjectNa
     </form>
     {review && prepared && <section className="version-review" aria-label="Review one GitHub branch fetch">
       <h3>{upToDate ? 'This tracking copy matched when checked' : 'Review the branch to download'}</h3>
-      <p>Original project: <strong>{originalProjectName ?? 'the previously selected project'}</strong>.</p>
+      <p>Project: <strong>{originalProjectName ?? 'the previously selected project'}</strong>.</p>
       <p>Account: <strong><bdi>{prepared.login}</bdi></strong> · Repository: <bdi>{prepared.repository}</bdi>.</p>
       <p>GitHub branch <strong><bdi>{prepared.reference.slice('refs/heads/'.length)}</bdi></strong> → local tracking copy <strong><bdi>{prepared.targetRef.slice('refs/remotes/'.length)}</bdi></strong>.</p>
       <p>Previous tracking commit: <code>{prepared.expectedTarget?.slice(0, 12) ?? 'not present'}</code> → observed GitHub commit: <code>{prepared.candidateRefOid.slice(0, 12)}</code>.</p>

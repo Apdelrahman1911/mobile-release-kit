@@ -19,7 +19,7 @@ export function GitHubActionsRetry({controller,state,compact=false,onShow}: {
   const original=op?.target.scope.repository??state.originalRepository;
   const selected=op?.target.selection,link=original&&selected?activityLink(original,'run',selected.runId):null;
   return <section className="card">
-    <SectionHeading title={compact?'Original Actions retry':'Retry failed jobs'}
+    <SectionHeading title={compact?'Actions retry':'Retry failed jobs'}
       description={original?`Original repository: ${original}`:'Review a failed workflow run from Activity, then approve its retry.'}><Icon name="github" size={24}/></SectionHeading>
     {!state.native&&<p className="save-note">The native GitHub operation is unavailable in this preview. No retry will be sent.</p>}
     {state.uncertain&&<p className="review-caution" role="alert">The original request or its cleanup is unconfirmed. Keep its task and attempt files. Checking status cannot repeat it, undo a sent retry or clear uncertain cleanup.</p>}

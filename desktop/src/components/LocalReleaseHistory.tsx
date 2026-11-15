@@ -41,7 +41,7 @@ export function LocalReleaseHistory({ state, controller, compact = false, onShow
   const originalId = op?.context && 'stageOperationId' in op.context ? op.context.stageOperationId : op?.context.candidateOperationId;
   if (compact && !retained) return null;
   return <section className="card" aria-label="Local release history">
-    <div className="inline-heading"><h2>Release history · This Mac</h2>{compact && <button onClick={onShow}>Show history</button>}</div>
+    <div className="inline-heading"><h2>Release history · This computer</h2>{compact && <button onClick={onShow}>Show history</button>}</div>
     {!compact && <>
       <p>Keep a verifiable record of local release operations for the selected project. This is separate from GitHub history and never authorizes a build or Store release.</p>
       <details><summary>Help: what is enrollment, and where does the key come from?</summary>
@@ -92,14 +92,14 @@ export function LocalReleaseHistory({ state, controller, compact = false, onShow
         <p>{'bundleId' in candidate?candidate.bundleId:candidate.applicationId} · Version {candidate.version.name} · Build {candidate.version.build}</p>
         <ul>{candidate.files.map(file=><li key={file.fileName}>{file.fileName} — {file.bytes.toLocaleString()} bytes</li>)}</ul>
         <p>Saved inside your project at <code>{'archive' in candidate?`.mobile-release/desktop-ios-archive/${candidate.operationId.replaceAll('-','')}`:`.mobile-release/desktop-android-build/${candidate.operationId.replaceAll('-','')}/artifacts`}</code>. No copying or registration is needed.</p>
-        {'archive' in candidate && <p>Original signed archive: <code>{candidate.archive.directory}</code> · {candidate.archive.entries.toLocaleString()} entries · {candidate.archive.bytes.toLocaleString()} bytes. The IPA and archive inventory were checked without copying them.</p>}
+        {'archive' in candidate && <p>Signed archive: <code>{candidate.archive.directory}</code> · {candidate.archive.entries.toLocaleString()} entries · {candidate.archive.bytes.toLocaleString()} bytes. The IPA and archive inventory were checked without copying them.</p>}
         <p>This review verifies the current bundle only. It does not establish that the earlier creation finished cleanly, authorize Store submission, or confirm any Store state.</p>
       </div>}
       {prepared && state.historical && <p>This intent was reviewed for an earlier project context. Its current prepared files have not been checked for the selected project.</p>}
       {prepared && !state.historical && <div className="notice">
         <h3>{selectedAction==='review-reconcile'?'Files ready for a separate Store check':'Prepared files currently verified · Not executed'}</h3>
         <p>{'bundleId' in prepared?prepared.bundleId:prepared.applicationId} · Version {prepared.version.name} · Build {prepared.version.build} · {'stage' in prepared?localStoreStageLabel(prepared.stage,'bundleId' in prepared?'ios':'android'):'bundleId' in prepared?'TestFlight internal':'Play internal testing'}</p>
-        <p>Operation: <code>{prepared.operationId}</code></p>{'stage' in prepared&&<p>Original candidate <code>{prepared.candidateOperationId}</code> · predecessor <code>{prepared.predecessorOperationId}</code>. The original uploaded binary is reused.</p>}
+        <p>Operation: <code>{prepared.operationId}</code></p>{'stage' in prepared&&<p>Candidate <code>{prepared.candidateOperationId}</code> · predecessor <code>{prepared.predecessorOperationId}</code>. The original uploaded binary is reused.</p>}
         <p>Intent SHA-256: <code>{prepared.intentSha256}</code></p>
         <p>Store snapshot originally observed at {prepared.observedAt}. {'bundleId' in prepared?'It is not a current App Store Connect check; the snapshot may have changed.':'It is not a current Store check; the temporary edit may have expired.'}</p>
         <p>This verifies the current retained files only, not the earlier preparation’s finality or the current working tree. It grants no Execute, Recover, retry or Store authority. Keep all files and history intact.</p>
@@ -116,7 +116,7 @@ export function LocalReleaseHistory({ state, controller, compact = false, onShow
       {readiness&&state.historical&&<p>This external readiness record belongs to an earlier project context, not the selected project.</p>}
       {readiness&&!state.historical&&<div className="notice"><h3>External readiness record currently verified</h3>
         <p>{readiness.bundleId} · Version {readiness.version.name} · Build {readiness.version.build}. External target observed available to testers at {readiness.observedAt}.</p>
-        <p>Original external execution receipt: <code>{readiness.executionReceiptSha256}</code>. Separate readiness receipt: <code>{readiness.receiptSha256}</code>.</p>
+        <p>External execution receipt: <code>{readiness.executionReceiptSha256}</code>. Separate readiness receipt: <code>{readiness.receiptSha256}</code>.</p>
         <p>This offline review verifies the retained observation, not current Store state or the earlier process’s finality. Production preparation still needs fresh credentials, source checks and consent. No upload, retry or public release is authorized.</p>
       </div>}
       {recovery && state.historical && <p>This recovery checkpoint belongs to an earlier project context; its files have not been checked for the selected project.</p>}

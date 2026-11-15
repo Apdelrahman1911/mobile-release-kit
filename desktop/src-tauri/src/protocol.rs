@@ -4,7 +4,7 @@ use serde::{de::DeserializeSeed, Deserialize, Serialize};
 use serde_json::{Map, Value};
 use crate::error::BridgeError;
 
-pub const PROTOCOL: u32 = 1;
+include!("protocol_version.rs");
 pub const REQUEST_LIMIT: usize = 1024 * 1024;
 pub const RESPONSE_LIMIT: usize = 4 * 1024 * 1024;
 pub const STDERR_LIMIT: usize = 64 * 1024;

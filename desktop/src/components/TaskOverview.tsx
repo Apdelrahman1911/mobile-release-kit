@@ -17,7 +17,7 @@ export function TaskOverview({ overview, preview, onAction }: {
         <h2>Current release</h2>
         <strong className="guided-version-value">{overview.versionLabel}</strong>
         {overview.version && <p>Build {overview.version.build}</p>}
-        <p>{preview ? 'Example mode — no project version has been read.' : 'Saved version only. Not the latest release in a Store.'}</p>
+        <p>{preview ? 'Example mode — no project version has been read.' : 'From your project files — not necessarily what’s live in the Store.'}</p>
         <button type="button" className="text-button" onClick={() => onAction({ kind: 'open-version' })}>Review version &amp; build number<Icon name="chevron" size={15} /></button>
       </div>
       <div className="guided-next-step" aria-live="polite">
@@ -31,14 +31,8 @@ export function TaskOverview({ overview, preview, onAction }: {
           {overview.next.label}<Icon name="arrow" size={17} />
         </button>
         {overview.next.disabledReason && <p id="guided-next-reason" className="guided-blocker">{overview.next.disabledReason}</p>}
-        <p className="guided-safety">{activity ? 'Keep the original task until its outcome is known.' : 'Nothing is built, uploaded or published by opening a step.'}</p>
+        <p className="guided-safety">{activity ? 'Keep the original task until its outcome is known.' : 'Opening a step never builds, uploads or publishes anything.'}</p>
       </div>
     </div>
-    <div className="guided-known" aria-label="What is ready and what remains">
-      <div><h3>Known so far</h3><p>{overview.known.length ? overview.known.join(' · ') : 'No project checks completed yet.'}</p></div>
-      <div><h3>Continue locally</h3><p>{overview.remaining.slice(0, 2).join(' · ')}{overview.remaining.length > 2 ? ' · See the steps below' : ''}</p>
-        <p>Signing is needed only for the chosen signed mode. Store setup can wait.</p></div>
-    </div>
-    <p className="guided-safety">Setup checks are not release approval. Each build and Store action checks its own requirements.</p>
   </section>;
 }

@@ -48,7 +48,7 @@ export function GitBranches({ reader, controller, repository, originalProjectNam
     </form>
     {review && prepared && <section className="version-review" aria-label="Review new local branch">
       <h3>Create <bdi>{prepared.name}</bdi> locally</h3>
-      <p>Original project: <strong>{originalProjectName ?? 'the previously selected project'}</strong>.</p>
+      <p>Project: <strong>{originalProjectName ?? 'the previously selected project'}</strong>.</p>
       <p>Starts at commit <code>{prepared.head}</code>.</p>
       <p>{prepared.branch ? <>The current branch stays <strong><bdi>{prepared.branch.slice('refs/heads/'.length)}</bdi></strong>.</> : 'The checkout stays detached.'}
         {' '}No files are staged, committed, checked out or changed by this branch action.</p>

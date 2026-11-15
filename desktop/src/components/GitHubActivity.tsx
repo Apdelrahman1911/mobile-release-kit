@@ -30,7 +30,7 @@ export function GitHubActivity({ controller, state, branchSuggestion = null, com
     <SectionHeading title="Pull requests & Actions" description="Read what is happening on GitHub. Nothing is approved, created, rerun or published here.">
       <Icon name="github" size={24} />
     </SectionHeading>
-    {originalRepository && (busy || attention) && <p>Original repository: <strong>{originalRepository}</strong></p>}
+    {originalRepository && (busy || attention) && <p>Repository: <strong>{originalRepository}</strong></p>}
     {(state.pending || op && op.phase !== 'settled') && <p role="status">{op?.phase === 'cleanup-unknown' ? 'Cleanup needs attention.' : op?.phase === 'stopping' ? 'Stopping the original read…' : 'Reading the original GitHub selection…'}</p>}
     {state.uncertain && <p className="review-caution" role="alert">The original read is unconfirmed. Keep the app open and preserve its files. Checking status does not repeat the remote read or clear unknown cleanup.</p>}
     {state.error && <p className="review-caution" role="status">{ACTIVITY_HELP[state.error]}</p>}

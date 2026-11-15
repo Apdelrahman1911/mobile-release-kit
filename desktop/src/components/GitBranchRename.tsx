@@ -27,7 +27,7 @@ export function GitBranchRename({ controller, repository, originalProjectName }:
     <p className="save-note">Use an unused name in the same branch folder. No force, reset, checkout, remote change or automatic recovery is included.</p>
     {review && prepared && <section className="version-review" aria-label="Review local branch rename">
       <h3>Rename <bdi>{prepared.branch.slice('refs/heads/'.length)}</bdi> to <bdi>{prepared.name}</bdi></h3>
-      <p>Original project: <strong>{originalProjectName ?? 'the previously selected project'}</strong>.</p>
+      <p>Project: <strong>{originalProjectName ?? 'the previously selected project'}</strong>.</p>
       <p>The commit and index stay unchanged, including staged work. Your working files are kept.</p>
       <p>{prepared.configMoved ? 'Existing branch settings move to the new local name. Upstream values and unrelated settings stay unchanged.' :
         'There is no existing branch settings section to move. The configuration file stays unchanged.'}</p>

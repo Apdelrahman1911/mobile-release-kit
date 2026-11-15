@@ -13,7 +13,7 @@ export function VersionReservePanel({ controller, compact = false }: { controlle
   if (compact && !busy) return null;
   const configure = (value: Partial<typeof state.options>) => controller.configure({ ...state.options, ...value });
   return <section className={compact ? 'notice notice-warning' : 'card'} aria-labelledby={`${id}-title`}>
-    <h3 id={`${id}-title`}>{compact ? 'Original version reservation' : 'Automatic version · optional'}</h3>
+    <h3 id={`${id}-title`}>{compact ? 'Version reservation' : 'Automatic version · optional'}</h3>
     {!compact && <>
       <p>Manual editing stays the default. This option uses the connected shared counter and current Store inventories for every enabled platform; it does not build or upload an app.</p>
       <label><input type="checkbox" checked={state.enabled} disabled={!!busy} onChange={(e) => controller.setEnabled(e.target.checked)} /> Use a shared reservation for this version</label>
@@ -35,7 +35,7 @@ export function VersionReservePanel({ controller, compact = false }: { controlle
         <p className="save-note">Check “Current Play versions” or “Current App Store versions” first and connect the shared counter in GitHub. For a shared Android+iOS source, use “Shared Android + iOS versions” under the dedicated paired credential context. A checked-out branch is required. Android-only builds support up to 2,100,000,000; iOS and shared builds up to 9,999. Missing, stale, partial or unsupported Store data stops this action; it never falls back to a guessed floor.</p>
       </fieldset>}
     </>}
-    <p role={state.unknown ? 'alert' : 'status'}>{state.unknown ? 'Original outcome or cleanup unconfirmed' : state.pending === 'review' ? 'Reading the exact saved source…' :
+    <p role={state.unknown ? 'alert' : 'status'}>{state.unknown ? 'Outcome or cleanup unconfirmed' : state.pending === 'review' ? 'Reading the exact saved source…' :
       state.pending === 'reserve' ? 'Reserving on the shared counter…' : status?.phase === 'reserved' ? 'Number reserved — not yet saved to the project' :
       status?.phase === 'reviewed' ? 'Choices reviewed — no number reserved by this review' : 'No current usable reservation'}</p>
     {state.stale && status && <p>This earlier observation is not permission to reserve or edit.</p>}
@@ -59,7 +59,7 @@ export function VersionReservePanel({ controller, compact = false }: { controlle
       {!compact && state.enabled && <><button type="button" className="button secondary" disabled={controller.reviewReason() !== null} onClick={() => void controller.review()}>Review version choices</button>
         <button type="button" className="button primary" disabled={controller.reserveReason() !== null} onClick={() => void controller.reserve()}>Reserve this candidate</button>
         <button type="button" className="button secondary" disabled={controller.editReason() !== null} onClick={() => controller.edit()}>Open reserved version for review</button></>}
-      <button type="button" className="button secondary" disabled={controller.checkReason() !== null} onClick={() => void controller.check()}>Check original status</button>
+      <button type="button" className="button secondary" disabled={controller.checkReason() !== null} onClick={() => void controller.check()}>Check status</button>
       <button type="button" className="button secondary" disabled={controller.stopReason() !== null} onClick={() => void controller.stop()}>Stop</button>
     </div>
     {!compact && state.enabled && <p className="toolbar-reason">{busy ?? (status?.phase === 'reserved' ? controller.editReason() : status?.phase === 'reviewed' ? controller.reserveReason() : controller.reviewReason()) ??

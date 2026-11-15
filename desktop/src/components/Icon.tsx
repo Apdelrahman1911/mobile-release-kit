@@ -28,6 +28,7 @@ const paths = {
   check: 'M5 12l4 4L19 6',
   list: 'M8 6h13 M8 12h13 M8 18h13 M3 6h.01 M3 12h.01 M3 18h.01',
   help: 'M9 9a3 3 0 1 1 5 2c-2 1-2 2-2 3 M12 17h.01',
+  terminal: 'M4 5h16v14H4z M7.5 9.5l3 2.5-3 2.5 M12.5 15h4',
   spark: 'M12 3l2.5 6.5L21 12l-6.5 2.5L12 21l-2.5-6.5L3 12l6.5-2.5Z',
 } as const;
 

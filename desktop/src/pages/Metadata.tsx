@@ -9,7 +9,7 @@ export function Metadata({ catalog, children, textEditor, imageEditor }: { catal
   const groups = localeRequirements(rules);
   const limits = rules ? Object.entries(rules.textLimits) : [];
   return <>
-    <PageHeading eyebrow="STORE METADATA" title="Make every first impression count." description="Save your locale settings first, then edit public text or review a localized image copy. Header checks and local saving are not Store acceptance; nothing is sent to a Store." />
+    <PageHeading eyebrow="STORE LISTING" title="Write your Store listing" description="Edit your app’s Store text and images for each language. Changes are saved to your project only; nothing is sent to a Store from here." />
     {children}
     {textEditor}
     {imageEditor}

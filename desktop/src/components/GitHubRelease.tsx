@@ -30,7 +30,7 @@ const HELP: Record<'stage' | 'branch' | 'platform' | 'access' | 'original' | 'ru
     where: 'GitHub Settings → Developer settings → Personal access tokens → Fine-grained tokens; select only this application repository.',
     format: 'Contents: read, Actions: write and GitHub’s required Metadata: read; organization approval or SSO may also apply. Enter the token only in GitHub connection.',
     failure: 'A displayed repository role does not prove token grants or environment access. The app never adds permissions or renews the original session automatically.' },
-  original: { label: 'Original release source and version', requiredness: 'conditional', requiredWhen: 'For promotion or recovery, not a fresh candidate.',
+  original: { label: 'Release source and version', requiredness: 'conditional', requiredWhen: 'For promotion or recovery, not a fresh candidate.',
     what: 'The source commit, marketing version and build number declared by the original release evidence.',
     why: 'Current dispatch source can differ from the artifact’s original source. Confirmation must name the original version, not silently switch to today’s version file.',
     where: 'Read the retained original release/provenance documents produced by the protected workflow. The local evidence inspector is useful for reading but does not authenticate them.',
@@ -60,7 +60,7 @@ const HELP: Record<'stage' | 'branch' | 'platform' | 'access' | 'original' | 'ru
     where: 'Review current dispatch source, original declarations, effects, and required environment below; then type the exact displayed confirmation.',
     format: 'Type stage:platform:version:build exactly and select the explicit Store-effect consent checkbox, including any displayed additional Apple recovery confirmation.',
     failure: 'Changed selection, expired/reused consent or wrong text is refused. No automatic resend follows uncertainty. The workflow still enforces provenance, approvals and Store safeguards.' },
-  pending: { label: 'Original requests and recovery observations', requiredness: 'optional', requiredWhen: 'After dispatch or a lost acknowledgement.',
+  pending: { label: 'Requests and recovery observations', requiredness: 'optional', requiredWhen: 'After dispatch or a lost acknowledgement.',
     what: 'Private local request records, separated from nonpublishing preflight records. They contain no session token or private Store responses.',
     why: 'Track reads a known original attempt; Reconcile matches one exact original request. Neither resends, reruns, cancels remotely or changes a Store.',
     where: 'Reconnect the same local project, GitHub account and repository, then load original requests.',
@@ -130,15 +130,15 @@ export function GitHubRelease({ state, controller, onHelp, compact = false, onSh
       <p className="save-note">Find the branch in GitHub’s Code selector. Use the committed candidate branch for candidate/external testing, production branch for production submission. Local drafts are not sent.</p>
       <p className="save-note">Uses the original GitHub connection; Store secrets remain in the protected workflow environment.<HelpButton content={HELP.access} onHelp={onHelp} /></p>
       <div className="field-label-row"><input id={`${id}-recovery`} type="checkbox" checked={state.recovery} onChange={(event) => controller.setRecovery(event.target.checked)} /><label htmlFor={`${id}-recovery`}>Recover an assessed original attempt of this same step</label><Badge>Optional</Badge><HelpButton content={HELP.recovery} onHelp={onHelp} /></div>
-      {state.recovery && <>{field('recoveryRunId', 'Original recovery evidence producer run ID', true, HELP.recovery, '123456789')}
+      {state.recovery && <>{field('recoveryRunId', 'Recovery evidence producer run ID', true, HELP.recovery, '123456789')}
         <p className="save-note">Use the original step’s retained recovery evidence. Recovery is not a fresh release or a blind retry. This is the evidence-producing run; the workflow resolves original authorization from its evidence.</p></>}
       {state.stage && state.stage !== 'candidate' && <>{field('candidateRunId', 'Candidate evidence producer run ID', !state.recovery, HELP.run, '123456789')}
         {state.stage === 'production-submit' && field('externalRunId', 'External-testing evidence producer run ID', !state.recovery, HELP.run, '123456790')}
         <p className="save-note">Find exact producer IDs in the retained release documents, not “latest run”. Recovery can derive predecessors from its authenticated original evidence.</p></>}
-      {original && <article className="github-environment"><div className="inline-heading"><h4>Original artifact declarations</h4><HelpButton content={HELP.original} onHelp={onHelp} /></div>
-        {field('originalSourceSha', 'Original artifact source commit', true, HELP.original, '40 lowercase hexadecimal characters')}
-        {field('originalVersionName', 'Original marketing version', true, HELP.original, '1.2.3')}
-        {field('originalVersionBuild', 'Original build number', true, HELP.original, '42')}
+      {original && <article className="github-environment"><div className="inline-heading"><h4>Artifact declarations</h4><HelpButton content={HELP.original} onHelp={onHelp} /></div>
+        {field('originalSourceSha', 'Artifact source commit', true, HELP.original, '40 lowercase hexadecimal characters')}
+        {field('originalVersionName', 'Marketing version', true, HELP.original, '1.2.3')}
+        {field('originalVersionBuild', 'Build number', true, HELP.original, '42')}
         <p className="review-caution">These are declarations, not authenticated release evidence. The original version enters the exact confirmation; the declared source is retained for review, not sent as another workflow source check. The core authenticates actual producer relationships and provenance before Store effects.</p>
       </article>}
       {showRecoveryConfirmation && <article className="github-environment" aria-label="Additional Apple recovery confirmation">
@@ -201,7 +201,7 @@ export function GitHubRelease({ state, controller, onHelp, compact = false, onSh
         <details><summary>Advanced CLI observation</summary><button type="button" className="button small secondary" disabled={controller.recordReason(record)!==null||state.observing} onClick={()=>controller.selectRecordForAgent(record.prepared.target.marker)}>Select this original for one CLI Track/Reconcile</button><p>This only selects a genuinely returned record. Check and Allow the distinct observation permission in the GitHub Advanced panel; no read or dispatch is submitted here.</p></details>
         {controller.recordReason(record) && <p className="save-note">{controller.recordReason(record)}</p>}
       </article>)}
-      {status?.run && <article className="github-environment" aria-label="Original protected workflow observation"><h4>Run {status.run.id} · attempt 1</h4><Badge tone={status.run.conclusion === 'failure' ? 'danger' : 'info'}>{status.run.status} · {status.run.conclusion ?? 'not concluded'}</Badge>
+      {status?.run && <article className="github-environment" aria-label="Protected workflow observation"><h4>Run {status.run.id} · attempt 1</h4><Badge tone={status.run.conclusion === 'failure' ? 'danger' : 'info'}>{status.run.status} · {status.run.conclusion ?? 'not concluded'}</Badge>
         <p className="review-caution">This is a GitHub workflow observation, not authenticated artifact evidence, complete release history or production readiness. Reports and private Store data are not downloaded by this view.</p>
         <p className="save-note">Observed <time dateTime={status.run.observedAt}>{status.run.observedAt}</time>.</p>
         <ul>{status.run.jobs.map((job) => <li key={job.id}>{job.kind}: {job.status} · {job.conclusion ?? 'not concluded'}</li>)}</ul>

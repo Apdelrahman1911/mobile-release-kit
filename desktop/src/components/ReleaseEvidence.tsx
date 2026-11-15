@@ -88,7 +88,7 @@ export function ReleaseEvidence({ state, controller, projectName, onHelp }: {
       <div role="status" aria-live="polite">
         {stopping ? <p>Stopping; waiting for the original operation to settle. No successful observation is confirmed.</p>
           : active || state.pending ? <p>{status?.phase === 'choosing' || state.pending === 'choose' ? 'Waiting for the native evidence-folder picker…' : 'Checking the selected evidence documents…'}</p> : null}
-        {status?.phase === 'cancelled' && <p>Original operation cancelled and settled. No new result was accepted.</p>}
+        {status?.phase === 'cancelled' && <p>Operation cancelled and settled. No new result was accepted.</p>}
         {status?.problem && status.problem !== 'unavailable' && <p>{evidenceProblemText(status.problem)}</p>}
       </div>
       {state.error && <ErrorNotice error={state.error} title="No current evidence result was accepted" />}

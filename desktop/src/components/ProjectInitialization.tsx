@@ -65,8 +65,8 @@ export function ProjectInitialization({controller,state,setup,setupState,compact
       {recoveryReason&&<p>{recoveryReason}</p>}
     </>}
     {state.observationIssue&&<p role="alert">The original initialization status is unavailable or invalid. No success or cleanup is assumed; do not repeat Apply.</p>}
-    {(state.nativeBlocked||state.generationLost)&&<p role="alert">Original ownership is unverified or the native document changed. Keep the original evidence; review authority cannot be reattached.</p>}
-    {owner&&<div role="status"><p>Original operation: {owner.intent}; {owner.phase}. Native finality: {owner.nativeFinality}.</p>
+    {(state.nativeBlocked||state.generationLost)&&<p role="alert">Ownership is unverified or the native document changed. Keep the original evidence; review authority cannot be reattached.</p>}
+    {owner&&<div role="status"><p>Operation: {owner.intent}; {owner.phase}. Native finality: {owner.nativeFinality}.</p>
       {owner.coreOutcome&&<p>Effect: {owner.coreOutcome.effect}; journal: {owner.coreOutcome.journal}; resources: {owner.coreOutcome.resources}; reason: {owner.coreOutcome.reason}.</p>}
       {owner.nativeReason!=='none'&&<p>Native reason: {owner.nativeReason}. A cancellation request or late result does not undo the first failure.</p>}
       {result&&<p>{result==='initialized'?'Initialization confirmed.':'All target files already matched and were preserved.'} This is a local-file result only, not build, signing, GitHub or release readiness. Your draft and baseline were retained, not marked saved: the core pins the toolkit schema in the saved configuration. Use Refresh on Dashboard to observe saved files. Refresh does not replace a draft. To adopt that saved configuration, use Project settings → Discard & load latest observation (or Discard draft changes) and explicitly confirm; this discards unsaved edits, including newer edits, so keep them if needed.</p>}
@@ -91,6 +91,6 @@ export function ProjectInitialization({controller,state,setup,setupState,compact
       {agent.status?.request&&<button type="button" disabled={agent.revokePending||agent.status.request.phase==='final'} onClick={()=>void controller.agent.revoke()}>Withdraw / stop original CLI request</button>}
       {linked&&!state.attempt?.handled&&owner?.phase==='final'&&<p>The native terminal is visible; the original caller and history acknowledgement are still required. No completion is inferred yet.</p>}
     </details>
-    <button type="button" disabled={state.readPending} onClick={()=>void controller.checkStatus()}>Check original status</button>
+    <button type="button" disabled={state.readPending} onClick={()=>void controller.checkStatus()}>Check status</button>
   </section>;
 }

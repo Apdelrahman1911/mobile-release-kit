@@ -106,7 +106,7 @@ export function GitHubConnection({ state, controller, onHelp, repositoryInput, o
         {[...state.help.inputs, ...state.help.guidance].map((entry) => <span key={entry.id}>{entry.label} <HelpButton content={helpContent(entry)} onHelp={onHelp} /></span>)}
       </div>}
       {status && <>
-        <p className="save-note">{retained ? 'Retained / stale original status' : 'Original native status'} · revision {status.revision}. {status.session ? <>Session <code>{status.session.id}</code>, project <code>{status.session.projectId}</code>, target <code>{status.session.targetRepository}</code>: {status.session.state}.</> : 'No retained native session.'}</p>
+        <p className="save-note">{retained ? 'Retained / stale original status' : 'Native status'} · revision {status.revision}. {status.session ? <>Session <code>{status.session.id}</code>, project <code>{status.session.projectId}</code>, target <code>{status.session.targetRepository}</code>: {status.session.state}.</> : 'No retained native session.'}</p>
         {status.session?.expiresAt && <p className="save-note">Native session ceiling <time dateTime={status.session.expiresAt}>{status.session.expiresAt}</time>. This may be shorter than the token’s lifetime; it is not necessarily observed server expiry. Display information only; native deadlines decide admission.</p>}
         {status.operation && <p className="save-note">Original {status.operation.kind}: {status.operation.phase}. {GITHUB_CONNECTION_REASON_HELP[status.operation.reason]}</p>}
         <h3>Account</h3><FactLabel fact={status.account} retained={retained} />

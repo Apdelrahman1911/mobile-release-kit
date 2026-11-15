@@ -94,13 +94,13 @@ function RecoveryPreview({ view }: { view: MetadataImagesRecoveryView }) {
     <p>Positively bound listing context: {view.platform ?? 'platform not established'} / {view.locale ?? 'locale not established'} / {view.assetType ?? 'type not established'}.</p>
     <ImageIssues issues={view.issues} />
     {view.files.length > 0 && <div className="review-table-wrap"><table className="review-table"><caption>Only these inspected public paths may be affected</caption>
-      <thead><tr><th scope="col">Public target</th><th scope="col">Inspected effect</th><th scope="col">Original plan image</th><th scope="col">New plan image</th></tr></thead>
+      <thead><tr><th scope="col">Public target</th><th scope="col">Inspected effect</th><th scope="col">Plan image</th><th scope="col">New plan image</th></tr></thead>
       <tbody>{view.files.map((file) => <tr key={file.path}><th scope="row"><code>{file.path}</code></th>
         <td>{file.effect === 'restore_original' ? file.original === null ? 'Restore original absence; remove only this attempt’s created public copy' : 'Restore inspected original bytes' :
           file.effect === 'keep_committed' ? 'Keep the inspected committed result' : 'Preserve the inspected public target'}</td>
         <td><Digest value={file.original} /></td><td><Digest value={file.new} /></td></tr>)}</tbody>
     </table></div>}
-    <p>Original image-journal-only cleanup: {view.privateCleanup.fileCount.toLocaleString()} private files and {view.privateCleanup.directoryCount.toLocaleString()} private directories.
+    <p>Image-journal-only cleanup: {view.privateCleanup.fileCount.toLocaleString()} private files and {view.privateCleanup.directoryCount.toLocaleString()} private directories.
       No private path, arbitrary deletion, process termination or force option is exposed.</p>
     <p className="subtle-note">Source files are unchanged. Nothing is sent to a Store. Null summaries mean proven absence or no entry in the admitted original plan—not unknown bytes assumed safe.</p>
   </div>;
@@ -108,7 +108,7 @@ function RecoveryPreview({ view }: { view: MetadataImagesRecoveryView }) {
 function operationCopy(state: MetadataImagesState): { title: string; detail: string; danger: boolean } {
   const { owner, selection: selected } = retainedMetadataImagesOperation(state);
   if (state.integrityFailed || state.nativeBlocked || state.generationLost || state.unknownSelection || state.unknownEdit || state.selectionIssue || state.editIssue)
-    return { title: 'Original image operation is unverified', danger: true,
+    return { title: 'Image operation is unverified', danger: true,
       detail: 'Keep the original files and operation evidence. Unknown or late settlement does not mean success, undo, or permission to import again.' };
   if (owner?.phase === 'final' && (state.callerPending || state.delegationRetained))
     return { title: 'Waiting for the original image operation to return', danger: false,
@@ -128,10 +128,10 @@ function operationCopy(state: MetadataImagesState): { title: string; detail: str
       detail: 'The original owner rechecked the reviewed set and settled without creating a journal. The newly selected sources were not copied over preserved images.' };
     if (normal === 'recovered') return { title: 'Reviewed image recovery completed', danger: false,
       detail: 'The new restoration attempt completed its exact inspected action with a clean journal and original native settlement. It did not retry the import.' };
-    if (owner.phase === 'final') return { title: core?.effect === 'committed' ? 'Images written; completion needs attention' : 'Original image review ended', danger: core?.effect === 'committed',
+    if (owner.phase === 'final') return { title: core?.effect === 'committed' ? 'Images written; completion needs attention' : 'Image review ended', danger: core?.effect === 'committed',
       detail: core?.effect === 'rolled_back' ? 'The original owner reports its own changes rolled back. This is not a new observation of unrelated files.' :
         'No successful local copy or recovery is confirmed. Review the original outcome below before choosing a corrected batch.' };
-    if (owner.phase === 'applying' || owner.phase === 'finalizing') return { title: 'Original image operation is running…', danger: false,
+    if (owner.phase === 'applying' || owner.phase === 'finalizing') return { title: 'Image operation is running…', danger: false,
       detail: 'Wait for original native settlement. Stop may be too late to prevent writes and is never proof of undo. No automatic retry will be sent.' };
     if (owner.phase === 'reviewing') return { title: 'Review the exact local image action', danger: false,
       detail: 'Nothing has been copied by this review. Read every destination, preservation/replacement and resulting order, then provide fresh explicit acknowledgement.' };
@@ -141,7 +141,7 @@ function operationCopy(state: MetadataImagesState): { title: string; detail: str
   if (selected?.phase === 'selected') return { title: 'Source images captured, not imported', danger: false,
     detail: selected.selectionToken === null ? 'This selection was consumed once by its original edit. A cancelled selection cannot stop an active copy; use the edit’s original Stop action.' :
       'The original native capture settled. The one-use batch is awaiting core image checks; selection alone is not image validation or a local copy.' };
-  if (selected?.phase === 'cancelled' || selected?.phase === 'failed') return { title: selected.phase === 'cancelled' ? 'Original image selection cancelled' : 'Original image selection refused', danger: selected.phase === 'failed',
+  if (selected?.phase === 'cancelled' || selected?.phase === 'failed') return { title: selected.phase === 'cancelled' ? 'Image selection cancelled' : 'Image selection refused', danger: selected.phase === 'failed',
     detail: 'This selection has no reusable token. Correct the source batch and choose again only after original settlement.' };
   return { title: 'Waiting for the original native image selection…', danger: false,
     detail: 'The original file dialog and bounded capture must join and settle. Navigation does not detach this operation or authorize a replacement dialog.' };
@@ -159,17 +159,17 @@ export function MetadataImagesOperation({ state, controller, detailed, onShowPro
   const showDetails = detailed && projectId === state.projectId;
   const owned = Boolean(attempt && !imageAttemptFinished(attempt) || state.selectionStatus?.active || state.editStatus?.active ||
     selected?.phase === 'selected' && selected.selectionToken !== null);
-  const stopReason = state.generationLost || state.nativeBlocked || state.integrityFailed ? 'Original authority is unverified. Observe status without issuing a new action.' : null;
+  const stopReason = state.generationLost || state.nativeBlocked || state.integrityFailed ? 'Authority is unverified. Observe status without issuing a new action.' : null;
   useEffect(() => {
     if (owner?.phase !== 'reviewing') return;
     const timer = setInterval(() => refreshClock((value) => value + 1), 1000);
     return () => clearInterval(timer);
   }, [owner?.phase, owner?.sessionId]);
   if (!attempt && !owner && !selected && !state.nativeBlocked && !state.integrityFailed) return null;
-  return <section className="card metadata-images-panel" aria-label="Original localized-image operation">
+  return <section className="card metadata-images-panel" aria-label="Localized-image operation">
     <SectionHeading title={notice.title} description={notice.detail}><Badge tone={notice.danger ? 'danger' : 'info'}>
       {owner?.phase ?? selected?.phase ?? 'Waiting for native status'}</Badge></SectionHeading>
-    <p><strong>{attempt?.binding.projectName ?? 'Original registered project'}</strong>{attempt?.binding.context &&
+    <p><strong>{attempt?.binding.projectName ?? 'Registered project'}</strong>{attempt?.binding.context &&
       <> · {attempt.binding.context.platform} / {attempt.binding.context.locale} / {attempt.binding.context.assetType}</>}</p>
     {state.error && <ErrorNotice error={state.error} title="Image operation status needs attention" />}
     {attempt?.invalidated && <p className="review-caution" role="status">The earlier project or selection context was retired. Its original operation remains visible until it settles; no earlier consent can be reused.</p>}
@@ -185,7 +185,7 @@ export function MetadataImagesOperation({ state, controller, detailed, onShowPro
       {controller.prepareReason() && <p className="save-note">{controller.prepareReason()}</p>}
     </div>}
     {showDetails && owner?.phase === 'reviewing' && view && <section className="image-copy-consent" aria-label="Fresh local action confirmation">
-      <p>Original review time remaining: {Math.ceil(controller.remainingReviewMs() / 1000).toLocaleString()} seconds. A status check cannot renew this deadline.</p>
+      <p>Review time remaining: {Math.ceil(controller.remainingReviewMs() / 1000).toLocaleString()} seconds. A status check cannot renew this deadline.</p>
       <label htmlFor={consentId}><input id={consentId} type="checkbox" checked={Boolean(state.acknowledged && controller.canAcknowledge(binding))}
         disabled={!controller.canAcknowledge(binding)} onChange={(event) => controller.acknowledge(event.target.checked)} />
         {view.kind === 'recover' ? 'I reviewed the exact restoration/cleanup action and admitted public paths. Start only this new recovery attempt; do not retry image import.' :
@@ -201,13 +201,13 @@ export function MetadataImagesOperation({ state, controller, detailed, onShowPro
       {owned && <button type="button" className="button secondary" disabled={stopReason !== null || Boolean(attempt && !imageAttemptFinished(attempt) && (attempt.cancelClaimed || attempt.closeClaimed))}
         onClick={() => controller.requestStop()}>{owner?.applySubmitted || attempt?.applyClaimed ? 'Request original STOP' : 'Cancel / close original review'}</button>}
     </div>{stopReason && <p className="save-note">{stopReason}</p>}
-    {owner && <details className="save-native-details"><summary>Original native outcome, not a retry receipt</summary>
+    {owner && <details className="save-native-details"><summary>Native outcome, not a retry receipt</summary>
       <dl className="limit-list"><div><dt>Native finality</dt><dd>{owner.nativeFinality}{owner.lateSettled ? ' (late; earlier uncertainty retained)' : ''}</dd></div>
         <div><dt>Native reason</dt><dd>{owner.nativeReason}</dd></div><div><dt>Effect</dt><dd>{owner.coreOutcome?.effect ?? 'Not reported'}</dd></div>
         <div><dt>Journal</dt><dd>{owner.coreOutcome?.journal ?? 'Not reported'}</dd></div><div><dt>Core resources</dt><dd>{owner.coreOutcome?.resources ?? 'Not reported'}</dd></div>
         <div><dt>Core reason</dt><dd>{owner.coreOutcome?.reason ?? 'Not reported'}</dd></div></dl>
     </details>}
-    {!owner && selected && <p className="save-note">Original capture settlement: {selected.settlement}. Reason: {selected.reason}. Selection is not import, and cancellation is not proof of undo.</p>}
+    {!owner && selected && <p className="save-note">Capture settlement: {selected.settlement}. Reason: {selected.reason}. Selection is not import, and cancellation is not proof of undo.</p>}
   </section>;
 }
 

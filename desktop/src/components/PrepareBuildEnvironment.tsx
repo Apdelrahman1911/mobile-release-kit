@@ -43,7 +43,7 @@ export function PrepareBuildEnvironment({ state, controller, compact = false, to
       active && op.phase !== 'awaiting-consent' ? 'Preparing tool sources' : consent ? 'Review the tool download' : 'Prepare the Android build environment';
   const originalControls = <div className="button-row">
     <button type="button" className="button secondary" disabled={!state.canRead} onClick={() => void controller.checkStatus()}>
-      {state.reading ? 'Checking status…' : 'Check original status'}</button>
+      {state.reading ? 'Checking status…' : 'Check status'}</button>
     {state.canCancel && <button type="button" className="button secondary" onClick={() => void controller.cancel()}>Cancel tool preparation</button>}
     {state.cancelSent && active && <span className="save-note">Cancellation requested. Waiting for the original operation to finish.</span>}
   </div>;
@@ -53,7 +53,7 @@ export function PrepareBuildEnvironment({ state, controller, compact = false, to
         op.reason === 'context-changed' || op.reason === 'stale-intent' || op.reason === 'intent-expired'
           ? 'The saved project or this review changed. Check the current tools again; the old approval cannot be reused.' :
           toolAcquisitionFailureGuidance(op.reason).body : null;
-  if (compact) return <section className={`notice ${attention ? 'notice-warning' : 'notice-info'}`} aria-label="Original tool preparation">
+  if (compact) return <section className={`notice ${attention ? 'notice-warning' : 'notice-info'}`} aria-label="Tool preparation">
     <div><strong>{title}</strong>{problem && <p role="status">{problem}</p>}
       {state.historical && <p>This request belongs to an earlier project or review. Its original status and cancel control are kept here.</p>}
       {originalControls}</div>
