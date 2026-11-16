@@ -28,7 +28,7 @@ are recorded for coordination. Shared consumer interfaces are preserved.
 | #50 CLI status | INTENDED GATE DOCUMENTED; GUIDANCE FIXED | `ed423ce6` | Exact UI steps, three actual shared Rust formatter tests and 58 frontend access tests pass; signed installed observation remains open. |
 | #62 Android journeys | REAL FIXTURE COMPILE + VERSION PROPAGATION PASS; UI GATE OPEN | `1bc113bd` | 180 tests, two disposable Gradle builds, actual typed version edit and APK inspection; protected installed/helper journey remains open. |
 | #63 iOS journeys | UNSIGNED REAL FIXTURE/CORE INSPECTION PASS; SIGNED GATE OPEN | `b18af24f` | Simulator build, unsigned Debug archive, typed version propagation; 63 focused tests. |
-| #64 Store journeys | FIXED PROVIDER FLAG MISMATCH; ACCOUNT/HOST GATES OPEN | issue commit in branch history | 136 network-denied provider contracts, 52 source/owner tests, 52 preparation/recovery tests and 51 frontend tests pass. Protected Xcode qualification refuses this host's writable ancestor. |
+| #64 Store journeys | FIXED PROVIDER FLAG MISMATCH; ACCOUNT/HOST GATES OPEN | `2e8f6c1d` | 136 network-denied provider contracts, 52 source/owner tests, 52 preparation/recovery tests and 51 frontend tests pass. Protected Xcode qualification refuses this host's writable ancestor. |
 
 ## Evidence policy
 
@@ -134,6 +134,15 @@ The fresh affected run covers initialization, fetch and the real driver code.
 The 205-test desktop Git run's ten errors were the same initialization defect;
 its affected initialization group also passes after the fix. Full outputs are
 retained as separate runs; these are not presented as one post-fix green run.
+
+Final complete source rerun: all 660 Git core and desktop-worker tests complete
+in 359.75 seconds: 656 pass, four explicit platform/filesystem cases skip, zero
+failures. This supersedes the earlier loaded-module failures for those groups.
+An intermediate rerun under physical `/private/tmp` refused 16 upstream cases
+because that namespace inherits a different group; the final run uses the
+canonical private test directory with the account's original group. No group,
+ownership or source check was relaxed. The separately recorded macOS source
+projection/extended-attribute qualification and 11 installed groups remain gates.
 
 ## #65 interruption integrity
 
@@ -281,3 +290,34 @@ the actual `/Applications` directory is root-owned mode 0775, rejected by
 material. Group-writable ancestry is not relaxed. That qualification failure
 and coordinated native/tool-selection policy need owner review before installed
 Store acceptance. No installed tool permissions or helper code were changed.
+
+## Final source review and integration notes
+
+The full frontend rerun passes 2,464 tests with zero skips, and the normal
+TypeScript/Vite build passes. The existing bundle-size warning is retained.
+The final Git core/desktop-worker suite passes 656 tests with four explicit skips.
+Sanitized counts, original Rust check returns, RSS peaks and private output
+hashes are in `macos-essential-checks.json`. Those receipts bind source/test
+checks, not an installed acceptance verdict. Raw logs remain private; in
+particular, Xcode destination output can contain device identifiers.
+
+This branch contains one local implementation/evidence commit for each of the
+ten assigned issues. It has no merge, push, release, installer, workflow trigger,
+application-version, repository-setting or installed-app change. No peer agent
+was spawned. The other agent's checkout, uncommitted changes and refs were not
+modified, and its work was not integrated.
+
+Potential mechanical overlap is `desktop/src-tauri/src/installed_runtime_macos.rs`:
+#46 adds a diagnostic field, initialization and failure-step reporting around
+the existing inspection path. An eventual integration must preserve the other
+agent's lifecycle changes and these original failure semantics. The application
+`desktop/src-tauri/Cargo.lock` patch may also meet dependency changes during
+integration. No independent helper/image lock was edited.
+
+Coordination findings are the vulnerable independent helper/image locks listed
+under #30 and the protected Xcode ancestry gate under #64. Their exact files and
+observed refusals are documented, not repaired by changing installer/helper
+ownership or writable-directory policy. #47–#49, #26 and #70 remain untouched.
+Independent owner/reviewer approval and an authorized integrated installed
+candidate are still required; these local results do not close the acceptance
+issues or prove the three original installed incidents resolved.
