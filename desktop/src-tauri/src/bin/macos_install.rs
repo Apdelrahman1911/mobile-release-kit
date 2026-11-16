@@ -12493,7 +12493,19 @@ mod installer {
                     .ok_or("fresh-preparation-storage-memory")?
             }else{control_bound};
             let budget=transaction::BudgetData::checked_with_reason_data(&costs, invocation_count, planned_evidence, control_bound, records, live)
-                .map_err(transaction::BudgetRefusalData::reason_data)?;
+                .map_err(|refusal|{
+                    // Failure-only finite scalars (no paths/names) so a refused
+                    // budget can be corrected from evidence (#49). Never written
+                    // when this process's stderr is the worker gate.
+                    if !book.worker_stderr_is_gate {
+                        let line=format!("MRK_MACOS_INSTALL_BUDGET_DIAGNOSTIC=reason={};action={:?};openFds={};removalLive={};launcher={};launcherPhase={};live={};records={};control={};generations={};invocations={}\n",
+                            refusal.reason_data(),action,book.originals.iter().filter(|r|r.fd.is_some()).count(),
+                            book.removal_live_reserved,u8::from(launcher.is_some()||launcher_removal.is_some()),
+                            u8::from(creates_launcher_phase),live,records,control_bound,costs.len(),invocation_count);
+                        if line.len()<=512 {let _=std::io::Write::write_all(&mut std::io::stderr().lock(),line.as_bytes());}
+                    }
+                    refusal.reason_data()
+                })?;
             if restore_originals!=0 {
                 reserve_removal_original_storage(book,usize::try_from(records).map_err(|_|"restore-recovery-future-originals")?)?;
             }
