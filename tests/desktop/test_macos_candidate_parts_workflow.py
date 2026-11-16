@@ -50,11 +50,12 @@ class CandidatePartsWorkflowTests(unittest.TestCase):
 
         constants = []
         for path, names in (
-            ('macos_install_record.rs', ('CONTROL_LIMIT','FILE_LIMIT','ORIGINAL_LIMIT','PAYLOAD_LIMIT')),
+            ('macos_install_record.rs', ('CONTROL_LIMIT','FILE_LIMIT','INVENTORY_LIMIT','ORIGINAL_LIMIT','PAYLOAD_LIMIT')),
             ('macos_install_maintenance.rs', ('PREDECESSOR_LIMIT',)),
             ('macos_install_transaction.rs', ('INTENT_LIMIT','STATE_LIMIT','CAPSULE_LIMIT',
                                               'REQUEST_EXPORT_LIMIT','INVOCATION_LIMIT','PRODUCER_CONTROL_LIMIT',
-                                              'MAINTENANCE_STORAGE_LIMIT')),
+                                              'MAINTENANCE_STORAGE_LIMIT','LAUNCHER_PHASE_EVIDENCE_LIMIT',
+                                              'STAGE_EVIDENCE_LIMIT')),
         ):
             source = (ROOT/'desktop/src-tauri/src'/path).read_text()
             constants += [declaration(source, name) for name in names]

@@ -9,7 +9,7 @@ use std::collections::BTreeSet;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use crate::{macos_install_maintenance::{ActionData, ReleaseData, ReleaseSetData, PREDECESSOR_LIMIT},
-    macos_install_record::{DirectoryIdentity, CONTROL_LIMIT, FILE_LIMIT, ORIGINAL_LIMIT, PAYLOAD_LIMIT}, protocol::strict_json};
+    macos_install_record::{DirectoryIdentity, CONTROL_LIMIT, FILE_LIMIT, INVENTORY_LIMIT, ORIGINAL_LIMIT, PAYLOAD_LIMIT}, protocol::strict_json};
 
 pub const STATE_LIMIT: usize = 16 * 1024;
 pub const INTENT_LIMIT: usize = 16 * 1024;
@@ -27,9 +27,10 @@ pub const LAUNCHER_PHASE_EVIDENCE_LIMIT: usize = 4096;
 /// hashes and charges in evidence_bytes (#49): four phase receipts (each read
 /// under STATE_LIMIT), the fresh output origin and enrollment journal, and
 /// one launcher publication phase. Each file keeps its own read limit; the
-/// aggregate control and storage caps still bound the sum.
-pub const STAGE_EVIDENCE_LIMIT: usize = 4 * STATE_LIMIT + crate::macos_fresh_recovery::ORIGIN_LIMIT
-    + crate::macos_fresh_recovery::JOURNAL_LIMIT + LAUNCHER_PHASE_EVIDENCE_LIMIT;
+/// aggregate control and storage caps still bound the sum. The fresh output
+/// ORIGIN_LIMIT (INTENT_LIMIT) and JOURNAL_LIMIT (INVENTORY_LIMIT) are tested
+/// equal; plain names keep this closed DATA independently compilable.
+pub const STAGE_EVIDENCE_LIMIT: usize = 4 * STATE_LIMIT + INTENT_LIMIT + INVENTORY_LIMIT + LAUNCHER_PHASE_EVIDENCE_LIMIT;
 /// Physical storage for current, retained and incoming generations together.
 /// Each generation still has its own PAYLOAD_LIMIT. Include the existing
 /// bounded control allowance for persisted evidence; this is a quota, never
@@ -2199,8 +2200,9 @@ mod tests {
         let one = GenerationCostData {files:1,bytes:1};
         let records = (INTENT_LIMIT + STATE_LIMIT + CAPSULE_LIMIT + REQUEST_EXPORT_LIMIT) as u64;
         let stage = STAGE_EVIDENCE_LIMIT as u64;
-        assert_eq!(stage, 4 * STATE_LIMIT as u64 + INTENT_LIMIT as u64
-            + crate::macos_install_record::INVENTORY_LIMIT as u64 + 4096);
+        assert_eq!(stage, 4 * STATE_LIMIT as u64 + INTENT_LIMIT as u64 + INVENTORY_LIMIT as u64 + 4096);
+        assert_eq!(crate::macos_fresh_recovery::ORIGIN_LIMIT, INTENT_LIMIT);
+        assert_eq!(crate::macos_fresh_recovery::JOURNAL_LIMIT, INVENTORY_LIMIT);
         // #49: fresh history (records + phases + output journal) plus the
         // planned Update records/results for two invocations.
         let journal = 1_500_000u64;
