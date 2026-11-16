@@ -8,9 +8,9 @@
     "release": "macos26-arm64-desktop-04"
   },
   "next": {
-    "runId": "1",
-    "artifactId": "1",
-    "packageSha256": "0000000000000000000000000000000000000000000000000000000000000000",
+    "runId": "43807046755",
+    "artifactId": "14234804766",
+    "packageSha256": "a83a6c060f3138ec5fd29b926c68af4913c7f493a28e7ac4e718a049c04dbc2c",
     "packageVersion": "0.1.5",
     "release": "macos26-arm64-desktop-05"
   }
