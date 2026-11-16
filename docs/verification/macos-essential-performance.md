@@ -61,3 +61,24 @@ Full safe numeric receipt: [macos-essential-performance.json](macos-essential-pe
 These gates need an authorized installed/test candidate containing the combined
 fixes, including the independent #47–#49 work. This task does not build, install,
 modify, sign or publish that application, and does not perform that integration.
+
+## Reopened macOS WebView lifecycle check
+
+A disposable test-only Cocoa/WKWebView host loaded the actual current React App
+and styles, with controlled finite native DATA. After the complete helper
+approval/settings/focus-return sequence, it performed 100 App mount → Project
+settings → Home → unmount cycles. Every cycle retired all native-event
+subscriptions and left zero root DOM elements; no fatal boundary fired. The
+original host returned 0 after 14.716 seconds. This checks real WebKit DOM and
+effects, rather than SSR, but does not run the product's native workers/helper.
+The output SHA-256 is
+`29badf90425fd89894c46b6fe137c45f52f4db23efd3ebc34df689e7d2069de5`.
+
+This short repeated-lifecycle observation is not a one-hour leak check or a
+whole-app memory measurement. WebKit XPC processes are reparented outside the
+host process group; the supervisor's host RSS omits them and is deliberately
+not reported as application memory. No MRK process was running when checked,
+and the installed app was not started, restarted or altered for this experiment.
+The existing source path-comparison fix remains the only measured bottleneck
+eliminated here. Original #66 installed-candidate and agreed-budget acceptance
+is still incomplete.
