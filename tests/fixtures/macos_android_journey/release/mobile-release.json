@@ -11,6 +11,7 @@
   },
   "android": {
     "enabled": true,
+    "module": ":app",
     "applicationId": "org.mrk.fixture",
     "identityStatus": "unverified"
   },

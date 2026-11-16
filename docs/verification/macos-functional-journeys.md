@@ -49,6 +49,22 @@ through the final installed app. Existing real transaction/recovery tests from
 #65 cover their core file effects, not installed UI acceptance. Protected tool
 copy/registration and approval are coordinated with #47–#49; their code is intact.
 
+Reopened #62 adds the actual application-identity transaction to the buildable
+Gradle fixture. The saved settings now explicitly select its real `:app` module;
+without that setting the editor correctly refuses `target-mismatch`. The real
+capture/prepare/apply changes only applicationId and the saved ID, preserving
+namespace, activity source and unrelated file identities. The combined identity
+and fixture-version group passes 75 tests. A fresh fixture then receives both
+typed version 2.3.4 / 8 and identity `org.mrk.changedfixture`; exactly three files
+change. Its fresh offline one-worker Gradle build returns 0 in 7.039s, and SDK
+`aapt` confirms that package and version in the resulting 8,732-byte APK, SHA-256
+`7eb40106efdecac92fb4b360d955572cee9c50b4f4515b2fa93f779dfb8264b7`.
+An independent descendant monitor retains the one-use JVM across process-group
+changes: peak observed aggregate RSS 595,771,392 bytes; all observed build
+processes retire. The APK is private test output, not an MRK release or a Store
+artifact. This verifies another core-to-compiler journey, not installed UI or
+protected-helper acceptance.
+
 ## #63 iOS
 
 Fixture source: `tests/fixtures/macos_ios_journey`. macOS 27.0 arm64, ordinary
