@@ -63,10 +63,10 @@ def smoke(deb,digest,work):
         assert observed==installed
     # Also invoke the actual maintainer-script configure entry twice explicitly.
     for i in range(2):
-        run([(f'postinst-{i}',['/var/lib/dpkg/info/mobile-release-kit-desktop.postinst','configure','0.1.4-1'],300)],Path('/'),work,env)
+        run([(f'postinst-{i}',['/var/lib/dpkg/info/mobile-release-kit-desktop.postinst','configure','0.1.5-1'],300)],Path('/'),work,env)
         assert snapshot(root)==installed
     run([('package-state',['/usr/bin/dpkg-query','-W','-f=${Status} ${Version}\n','mobile-release-kit-desktop'],30)],Path('/'),work,env)
-    assert (work/'package-state/stdout.log').read_text()=='install ok installed 0.1.4-1\n'
+    assert (work/'package-state/stdout.log').read_text()=='install ok installed 0.1.5-1\n'
     (work/'RESULT.json').write_text(json.dumps(dict(installerSha256=digest,installAndRepeatedConfigure=True,qualified=False,signed=False))+'\n')
 
 
