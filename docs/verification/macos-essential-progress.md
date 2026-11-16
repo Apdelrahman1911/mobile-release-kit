@@ -22,8 +22,8 @@ are recorded for coordination. Shared consumer interfaces are preserved.
 | #45 workspace failure | DIAGNOSTICS/FALLBACK FIXED; ORIGINAL INCIDENT BLOCKED | `0278652e` | Persistent bounded journal, safe error boundary, helper-state render regressions; 2,463 frontend tests and TypeScript checking pass. Original installed exception remains uncaptured. |
 | #46 first connection | STEP DIAGNOSTICS ADDED; ORIGINAL INCIDENT BLOCKED | `1e7c4411` | Two diagnostic tests pass; whole-source check pending. No failing native predicate or first-launch race is proven. |
 | #17 Git timeout | MACOS INIT DEFECT FIXED; ORIGINAL TIMEOUT BLOCKED | `ff2571cf` | Fixed per-call/phase traces; protected-ancestor regression passes. Broader tests recorded below. |
-| #65 interruption integrity | CORE CRASH MATRIX VERIFIED; GUI GATE OPEN | issue commit in branch history | Eight real SIGKILL/restart scenarios across four durable boundaries; broader recovery regressions tracked below. |
-| #66 performance/memory | PENDING | — | Reproducible test-environment measurements; physical Mac gates separated. |
+| #65 interruption integrity | CORE CRASH MATRIX VERIFIED; GUI GATE OPEN | `f20b9463` | Eight real SIGKILL/restart scenarios across four durable boundaries; broader recovery regressions tracked below. |
+| #66 performance/memory | SOURCE BASELINE + HOT-PATH FIX VERIFIED; APP GATES OPEN | issue commit in branch history | Reproducible Node/SSR fixture, linear path matching, 10,000 controller cycles; installed one-hour/WebView/helper measurements remain open. |
 | #30 macOS security | PENDING | — | Credentials/IPC/privilege review; coordinate native helper/installer findings. |
 | #50 CLI status | PENDING | — | Diagnose permission refusal and verify enabled path/guidance. |
 | #62 Android journeys | PENDING | — | macOS fixtures; no personal device, account or real signing material. |
@@ -179,3 +179,19 @@ in eight fresh interpreters with `PYTHONHASHSEED=0..7`, covering different set
 orders. The two real restart tests cover 20 original child invocations, including
 eight SIGKILL/recovery pairs. No project corruption was observed. Store fixture
 protocol failures remain separately assigned to the conditional #64 review.
+
+## #66 performance and memory
+
+The maximum admitted 512-path review comparison used repeated linear scans.
+Three such checks run through prepare/preview validation. A temporary membership
+set removes the quadratic scan without changing matching semantics, limits,
+reviews, permissions, retained originals or native calls; there is no persistent
+project-path cache. Regression coverage includes reordered paths, mismatches,
+duplicates, Unicode and the 512/513 admission boundary. All 2,464 frontend tests
+and the normal frontend TypeScript/Vite build pass. The existing large-bundle
+warning remains; no loading architecture was changed without a runtime profile.
+
+See `macos-essential-performance.md` and its numeric JSON receipt for the
+repeatable isolated-source baseline and exact limits. No installed application,
+helper, user project, signing identity or account participated. The actual app's
+startup/idle WebView memory and one-hour resource behavior remain hardware gates.

@@ -196,7 +196,9 @@ export function gitDiscardAcknowledged(value: unknown): boolean {
   try { return connectionBounded(value, 64, 4, 2) && connectionKeys(value, ['discarded']) && value.discarded === true; } catch { return false; }
 }
 export function gitSamePaths(a: readonly string[], b: readonly string[]): boolean {
-  return a.length === b.length && a.every((item) => b.includes(item));
+  if (a.length !== b.length) return false;
+  const members = new Set(b);
+  return a.every((item) => members.has(item));
 }
 export function gitStagedPaths(value: GitObservation): readonly string[] {
   return value.changes.filter((row) => ![' ', '?', '!'].includes(row.index)).map((row) => row.path);

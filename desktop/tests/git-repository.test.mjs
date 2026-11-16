@@ -3,12 +3,29 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 import { GitRepositoryController } from '../src/gitRepositoryController.ts';
-import { GIT_ISSUE_HELP, gitDraftFieldFits, parseGitApplyReceipt, parseGitDiff, parseGitFailure,
+import { GIT_ISSUE_HELP, gitDraftFieldFits, gitSamePaths, parseGitApplyReceipt, parseGitDiff, parseGitFailure,
   parseGitObservation, parseGitPlan } from '../src/gitRepositoryProtocol.ts';
 
 const A = 'src/App.kt', B = 'docs/guide.md';
 const REV = 'a'.repeat(64), NEXT = 'b'.repeat(64), HEAD = '1'.repeat(40), BRANCH = 'refs/heads/demo';
 const DRAFT = { message: 'Describe the synthetic changes', authorName: 'Fixture Author', authorEmail: 'fixture@example.invalid' };
+
+test('large path comparisons preserve order-independent review matching and duplicate semantics', () => {
+  const paths = Array.from({ length: 512 }, (_, i) => `source/module-${i}/file.kt`);
+  assert.equal(gitSamePaths(paths, [...paths].reverse()), true);
+  assert.equal(gitSamePaths(paths, [...paths.slice(1), 'different/file.kt']), false);
+  assert.equal(gitSamePaths(paths, paths.slice(1)), false);
+  const large = { revision: REV, head: HEAD, branch: BRANCH, unborn: false, detached: false,
+    remotes: ['origin'], restrictions: [],
+    changes: paths.map((path) => ({ path, index: 'M', worktree: ' ', kind: 'file', conflict: false })) };
+  assert.ok(parseGitObservation(large));
+  assert.equal(parseGitObservation({ ...large, changes: [...large.changes,
+    { path: 'over-limit.kt', index: 'M', worktree: ' ', kind: 'file', conflict: false }] }), null);
+  const inputs = [[], ['a'], ['b'], ['a', 'b'], ['b', 'a'], ['a', 'a'], ['a', 'b', 'a'], ['ق', 'b']];
+  for (const a of inputs) for (const b of inputs) {
+    assert.equal(gitSamePaths(a, b), a.length === b.length && a.every((path) => b.includes(path)));
+  }
+});
 const clone = (value) => structuredClone(value);
 const deferred = () => { let resolve, reject; const promise = new Promise((yes, no) => { resolve = yes; reject = no; }); return { promise, resolve, reject }; };
 const flush = async () => { for (let i = 0; i < 10; i += 1) await Promise.resolve(); };
