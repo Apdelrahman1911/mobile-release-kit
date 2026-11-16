@@ -107,6 +107,24 @@ Signed archive/export, real credential enrollment/assignment, installed-app
 review/cancellation/recovery, and device execution remain separate verification.
 No Apple account, P12, profile, Store request or installed MRK app was used.
 
+Reopened #63 extends the real build journey to bundle-identity editing. The
+fixture now declares its real saved project, scheme and Debug configuration,
+and uses `public/version.xcconfig` as the shared version source. The previous
+`.properties` base-configuration name is outside the identity editor's explicit
+closed filename policy; that production refusal remains unchanged. The actual
+version and identity transactions commit cleanly and settle their owners,
+changing exactly the saved configuration, version source and PBX project.
+The Info.plist, Objective-C source and other original files retain their bytes
+and identities. All 75 fixture/identity regressions pass.
+
+A fresh arm64 simulator build returns 0 in 5.041s, then a fresh generic-iOS
+unsigned Debug archive returns 0 in 3.314s, both with one compiler job. The actual
+core archive/Mach-O inspector accepts bundle `org.mrk.changediosfixture`, version
+2.3.4 / 8, with symbol retention disabled for this Debug fixture and no signature
+directory. No app code executes, simulator boots or device/account/signing step
+occurs. This is additional source-to-compiler verification, not the full signed
+or installed-app acceptance required by the original issue.
+
 ## #64 Store
 
 Real account acceptance in #64 explicitly requires an approved #57 candidate

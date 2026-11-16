@@ -4,7 +4,7 @@ objects = {
 A00000000000000000000001 = {isa = PBXBuildFile; fileRef = A00000000000000000000002; };
 A00000000000000000000002 = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.objc; path = main.m; sourceTree = "<group>"; };
 A00000000000000000000003 = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; path = Info.plist; sourceTree = "<group>"; };
-A00000000000000000000004 = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = public/version.properties; sourceTree = SOURCE_ROOT; };
+A00000000000000000000004 = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; path = public/version.xcconfig; sourceTree = SOURCE_ROOT; };
 A00000000000000000000005 = {isa = PBXFileReference; explicitFileType = wrapper.application; includeInIndex = 0; path = MRKFixture.app; sourceTree = BUILT_PRODUCTS_DIR; };
 A00000000000000000000006 = {isa = PBXGroup; children = (A00000000000000000000002,A00000000000000000000003,A00000000000000000000004,A00000000000000000000007); sourceTree = "<group>"; };
 A00000000000000000000007 = {isa = PBXGroup; children = (A00000000000000000000005); name = Products; sourceTree = "<group>"; };

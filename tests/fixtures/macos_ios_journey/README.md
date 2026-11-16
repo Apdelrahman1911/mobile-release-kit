@@ -15,7 +15,7 @@ An unsigned Debug test archive can use the same arguments with -sdk iphoneos,
 instead of build. These are disposable test binaries, not MRK app releases or
 installers. They are never exported, signed, installed or distributed.
 
-The typed-core test edits public/version.properties from 1.0.0 / 1 to 2.3.4 / 8:
+The typed-core test edits public/version.xcconfig from 1.0.0 / 1 to 2.3.4 / 8:
 
     PYTHONPATH=src:tests:tests/desktop python3.11 -m unittest test_macos_ios_journey_fixture
 
