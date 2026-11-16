@@ -1,0 +1,1711 @@
+{
+  "schemaVersion": 1,
+  "repository": "Apdelrahman1911/mobile-release-kit",
+  "archiveBranch": "archive/legacy-branches",
+  "capturedAt": "2026-11-16T04:21:31.374672+00:00",
+  "preservedBranchHeads": {
+    "main": "dddc25916bf9e89eb4a31c558382e0822bbe3b94",
+    "release/desktop-production": "c52b57a5ef2d877e03be66387301266729aaa36d",
+    "verify/desktop-linux-installer-candidate-014": "86d8be4941eba8e1e6e9c8d30c3c6b97ba4393e1",
+    "verify/desktop-macos-candidate": "85ae36cbe5a7f7bbd3bd1d38a09d577962e75453",
+    "verify/desktop-windows-installer-candidate-014": "a224d81c51aaeb71180bff2bb145a6b64c4162a1"
+  },
+  "branches": [
+    {
+      "name": "checkpoint/macos-local-20261024",
+      "sha": "af9a4f76be5c4ced9186fb9e2e80e302e3078d7d",
+      "snapshots": [
+        "before-first-cleanup"
+      ],
+      "tree": "ee8a656f7003e7f6166cb78073ea3a5feb09d560"
+    },
+    {
+      "name": "codex/macos-63be-fresh-source",
+      "sha": "fd50c7757cbbd57ae53481ba28407a7eba40e805",
+      "snapshots": [
+        "before-first-cleanup",
+        "before-archive-consolidation"
+      ],
+      "tree": "f8506b2724eea807334175f74fd4d3dc27d1897b"
+    },
+    {
+      "name": "codex/macos-63be-fresh-transport",
+      "sha": "54b18bed94fdc7828dc1295377146524ce7fa759",
+      "snapshots": [
+        "before-first-cleanup",
+        "before-archive-consolidation"
+      ],
+      "tree": "6f7acd75f707dbcc6731e591708f9e9b4ccba96b"
+    },
+    {
+      "name": "codex/macos-8097-fresh-source",
+      "sha": "ad9da8ce15da2e776b2389c3e39b0833a36ea79a",
+      "snapshots": [
+        "before-first-cleanup",
+        "before-archive-consolidation"
+      ],
+      "tree": "38db22d3a9ba903de2ff852533288e088a094805"
+    },
+    {
+      "name": "codex/macos-8097-fresh-transport",
+      "sha": "ad782615a2d7b46e03ce717bacc58f023344924f",
+      "snapshots": [
+        "before-first-cleanup",
+        "before-archive-consolidation"
+      ],
+      "tree": "46c0c7cc1ea34527da35186e56de56ff21798421"
+    },
+    {
+      "name": "codex/macos-a3e7-fresh-source",
+      "sha": "3971f8efac85b86b0270e70ae1aa5fd7d941fae9",
+      "snapshots": [
+        "before-first-cleanup",
+        "before-archive-consolidation"
+      ],
+      "tree": "0303d09efe5647404658a8225e531af7c3560d99"
+    },
+    {
+      "name": "codex/macos-a3e7-fresh-transport",
+      "sha": "ed3fd89502163ae33e4d7a9b7a9f8b9a04a14cd7",
+      "snapshots": [
+        "before-first-cleanup",
+        "before-archive-consolidation"
+      ],
+      "tree": "5febdec1dde775e99fcdf318307f29a112f75a93"
+    },
+    {
+      "name": "codex/macos-ac506-fresh-source",
+      "sha": "c1e56ce139ef5707006fc75e7235e95fe55748c1",
+      "snapshots": [
+        "before-first-cleanup",
+        "before-archive-consolidation"
+      ],
+      "tree": "d9b2494bbe2c4aec0656d711763691566495caf5"
+    },
+    {
+      "name": "codex/macos-ac506-fresh-transport",
+      "sha": "0f4816f482748131fb24c451db68230fb47918ad",
+      "snapshots": [
+        "before-first-cleanup",
+        "before-archive-consolidation"
+      ],
+      "tree": "2ab933d18c9a67bbae7a2f5062d106330780643d"
+    },
+    {
+      "name": "codex/macos-bc17-fresh-source",
+      "sha": "11c88c8b315e1d19f8aa59ee671afe0168a9d445",
+      "snapshots": [
+        "before-first-cleanup",
+        "before-archive-consolidation"
+      ],
+      "tree": "10a628bf07b24105aa75c2433fd01640d3a4faf8"
+    },
+    {
+      "name": "codex/macos-bc17-fresh-transport",
+      "sha": "5b6f9f3d17718a1e4286ad478478e4d3ecb1da40",
+      "snapshots": [
+        "before-first-cleanup",
+        "before-archive-consolidation"
+      ],
+      "tree": "55cb4784a01e9dc384d56cec69f91cf260e200bc"
+    },
+    {
+      "name": "codex/macos-cargo-control",
+      "sha": "dd82280b780d5b779ce0490b5fdb53e0105f2ae2",
+      "snapshots": [
+        "before-first-cleanup",
+        "before-archive-consolidation"
+      ],
+      "tree": "41b0895cbf9c2c89ea0a6c2c33e24ade449938b5"
+    },
+    {
+      "name": "codex/macos-correspondence-diagnostic",
+      "sha": "399ccb6a19514c45d5996c5fd382bafa5dfd0b16",
+      "snapshots": [
+        "before-first-cleanup",
+        "before-archive-consolidation"
+      ],
+      "tree": "7dbf857bec1c3bc35278f53fb38f789e2b00363d"
+    },
+    {
+      "name": "codex/macos-f778-fresh-source",
+      "sha": "76b3d82493ce43a461dac364faf2eefaa4cd0839",
+      "snapshots": [
+        "before-first-cleanup"
+      ],
+      "tree": "9433787d6158ca5f47277e721cfe395710d0e346"
+    },
+    {
+      "name": "codex/macos-f778-fresh-transport",
+      "sha": "99ecb0a65b5564ef5b48092a349c0348630aaa92",
+      "snapshots": [
+        "before-first-cleanup",
+        "before-archive-consolidation"
+      ],
+      "tree": "922933f51fc5a38f67ebb6c5daa21bb42d24dfd0"
+    },
+    {
+      "name": "codex/macos-f778-inventory-diagnostic-source",
+      "sha": "3829d746b98d63ee4f478a7e84f2d6f703e12e93",
+      "snapshots": [
+        "before-first-cleanup"
+      ],
+      "tree": "58bdcdf9b6abd914ccd28c280011e77f12e481db"
+    },
+    {
+      "name": "codex/macos-f778-inventory-diagnostic-transport",
+      "sha": "2b290309aebc352e4312956d448d34154148b4eb",
+      "snapshots": [
+        "before-first-cleanup"
+      ],
+      "tree": "1d064085209ae3944596ab8abf78dcb1fb66f9d1"
+    },
+    {
+      "name": "codex/macos-f778-inventory-trace-source",
+      "sha": "0e4d05c3f2dd8e57f2abead282a00d83eb378b83",
+      "snapshots": [
+        "before-first-cleanup"
+      ],
+      "tree": "462d3859b3f07b64a241842c73c53039eaac0852"
+    },
+    {
+      "name": "codex/macos-f778-inventory-trace-transport",
+      "sha": "6cf1d138781e652b26c28051470254c338186982",
+      "snapshots": [
+        "before-first-cleanup"
+      ],
+      "tree": "ad1eadeb560bd4a24a9b4f9e8e6254686a8c3fdf"
+    },
+    {
+      "name": "codex/macos-f778-memory-phase-source",
+      "sha": "9876917cce98066dc7c91be78ab1dc18350a79a1",
+      "snapshots": [
+        "before-first-cleanup",
+        "before-archive-consolidation"
+      ],
+      "tree": "b41a7fbaebde8939e622d811ecd1bed379be5d1a"
+    },
+    {
+      "name": "codex/macos-f778-memory-phase-transport",
+      "sha": "e345d05c4a1dd70c4f49d4bae7e502bc2450a70b",
+      "snapshots": [
+        "before-first-cleanup",
+        "before-archive-consolidation"
+      ],
+      "tree": "2d5a499069b3d70c9934b90f89892ea1c79f6a2d"
+    },
+    {
+      "name": "codex/macos-f778-preparation-handle-safe-source",
+      "sha": "af8dac0d7e1a524dcd73536f739d3b13e6247312",
+      "snapshots": [
+        "before-first-cleanup"
+      ],
+      "tree": "4d0fecb8fba1aed83ce4c60e2eaa5a7c9465bc49"
+    },
+    {
+      "name": "codex/macos-f778-preparation-handle-transport",
+      "sha": "e207721e8da6e324796351ba84b154a0f6cfd8b7",
+      "snapshots": [
+        "before-first-cleanup"
+      ],
+      "tree": "db36f78169e986022df0319e7b6d534ce5685f8b"
+    },
+    {
+      "name": "codex/macos-fixed-fresh-source",
+      "sha": "0489f28814b48009d08de3b5c72074328ba87c93",
+      "snapshots": [
+        "before-first-cleanup",
+        "before-archive-consolidation"
+      ],
+      "tree": "1373478089c11e89c16fb6038f379ef3d7f654d4"
+    },
+    {
+      "name": "codex/macos-fixed-fresh-transport",
+      "sha": "7d0e46ebf5a810ca5de068a937b84b688dfcfc7b",
+      "snapshots": [
+        "before-first-cleanup",
+        "before-archive-consolidation"
+      ],
+      "tree": "d6bf84de70f4688806da463899080ee56a932ecf"
+    },
+    {
+      "name": "codex/macos-fresh-controls-5c53",
+      "sha": "7aad717f8e89637b740298e7aa2cf3d20840c4c8",
+      "snapshots": [
+        "before-first-cleanup",
+        "before-archive-consolidation"
+      ],
+      "tree": "8928525ddfc3ed09f1c4afe01c667319cf81f8ca"
+    },
+    {
+      "name": "codex/macos-fresh-inventory-diagnostic",
+      "sha": "a00bff82d1be77d865dff4713a1173d09eb99270",
+      "snapshots": [
+        "before-first-cleanup"
+      ],
+      "tree": "c2c76ba67361b2f4854622883817943ac7de57ea"
+    },
+    {
+      "name": "codex/macos-fresh-inventory-trace",
+      "sha": "d37059c634c08920afbf169098737d135ebe3cc5",
+      "snapshots": [
+        "before-first-cleanup"
+      ],
+      "tree": "ee77143fcc7a4419f229d0e44ae0238319fe0e11"
+    },
+    {
+      "name": "codex/macos-fresh-memory-lifetimes",
+      "sha": "889a679f9c28935ab59c273fa96d75129a86c91e",
+      "snapshots": [
+        "before-first-cleanup"
+      ],
+      "tree": "bae9504b03eb3eea86c7f4f6f13a0a61c0920118"
+    },
+    {
+      "name": "codex/macos-fresh-memory-phases",
+      "sha": "b5bf84725fd43ff8a7570db3d766cccf2ea8ee0f",
+      "snapshots": [
+        "before-first-cleanup",
+        "before-archive-consolidation"
+      ],
+      "tree": "42e33d5846397b098296734763a709a5152f043d"
+    },
+    {
+      "name": "codex/macos-fresh-preparation-handles",
+      "sha": "7c9f5701d00a04a22a3122ce8714666288906b59",
+      "snapshots": [
+        "before-first-cleanup"
+      ],
+      "tree": "87dc64d8387578018e31dfeb223de77ee29bdbe0"
+    },
+    {
+      "name": "codex/macos-fresh-validation",
+      "sha": "6cba0c2a5921802da4ccc2e0e70b09128490336a",
+      "snapshots": [
+        "before-first-cleanup",
+        "before-archive-consolidation"
+      ],
+      "tree": "c1c31162c8a4961632b7422a63ba7a23eb7eda72"
+    },
+    {
+      "name": "codex/macos-git-read-continuation",
+      "sha": "dd5732b90ee74f187b06b14f3eb30a2e21ebd951",
+      "snapshots": [
+        "before-first-cleanup",
+        "before-archive-consolidation"
+      ],
+      "tree": "aa7d6e252cb6759fc5ead67e3e6cfe07eb390ed1"
+    },
+    {
+      "name": "codex/macos-libtest-control",
+      "sha": "10540da4fe8175bd5179d8e79e03fae25edcd8ce",
+      "snapshots": [
+        "before-first-cleanup",
+        "before-archive-consolidation"
+      ],
+      "tree": "a2000e945fbf57e38378086178cf830b8022dbdb"
+    },
+    {
+      "name": "codex/macos-parent-baseline-source",
+      "sha": "715565ac2cae2664c6cbafa884792c69769c55d8",
+      "snapshots": [
+        "before-first-cleanup",
+        "before-archive-consolidation"
+      ],
+      "tree": "32e1859c426b8f6a89def933989f5445fc6042c2"
+    },
+    {
+      "name": "codex/macos-parent-baseline-transport",
+      "sha": "3c44c73cb6af0c778635c866462e994f62f6cee8",
+      "snapshots": [
+        "before-first-cleanup",
+        "before-archive-consolidation"
+      ],
+      "tree": "5fb89ea66972a94d235428f813279656e12df565"
+    },
+    {
+      "name": "docs/agent-assignments",
+      "sha": "7112ceb34127a8c640466337936b33e5f8bb9000",
+      "snapshots": [
+        "before-archive-consolidation"
+      ],
+      "tree": "74dc0a20ae9c850217ef5cc9f628d373bf184c26"
+    },
+    {
+      "name": "docs/security-support-86",
+      "sha": "2053196b0aff1c6360702e02e96c86ce821772bb",
+      "snapshots": [
+        "before-first-cleanup"
+      ],
+      "tree": "bbdde635cac6bf9c5438620fd37f67a486669104"
+    },
+    {
+      "name": "feature/desktop-application",
+      "sha": "b499d801850d9078f722d918d5c98099d6640d0d",
+      "snapshots": [
+        "before-first-cleanup",
+        "before-archive-consolidation"
+      ],
+      "tree": "8bda4f77f2bd49b288afe655a7b602a26490b330"
+    },
+    {
+      "name": "fix/final-four-remediation",
+      "sha": "ee283d47e49f60d802a896d318d9b184470d161a",
+      "snapshots": [
+        "before-first-cleanup"
+      ],
+      "tree": "9eee1332e375649835ed0170f09bc603a750de0c"
+    },
+    {
+      "name": "fix/mrk-002-recoverable-store-mutations",
+      "sha": "9fbe3348e0035984f434d34832671707a78750f9",
+      "snapshots": [
+        "before-first-cleanup"
+      ],
+      "tree": "50d692142d2eba15bd53e0c8d60063510f45f621"
+    },
+    {
+      "name": "fix/mrk-003-producer-attempt-provenance",
+      "sha": "186b4e354bc8d59074ea723156b6c67e500fc8f6",
+      "snapshots": [
+        "before-first-cleanup"
+      ],
+      "tree": "73275246b7b14e6f289e4468e8a66f35e28f7a0e"
+    },
+    {
+      "name": "fix/mrk-004-required-android-release-notes",
+      "sha": "67ec16e609c17c1fb69dea675a137a92f0f42bc5",
+      "snapshots": [
+        "before-first-cleanup"
+      ],
+      "tree": "d8b820674c42f38444db8a352b765d5b375beb61"
+    },
+    {
+      "name": "fix/mrk-005-correlate-ios-artifacts",
+      "sha": "44e492a9dabdc503d984512a26affedba11c4f13",
+      "snapshots": [
+        "before-first-cleanup"
+      ],
+      "tree": "34f1c02cc93f7cabff528716192a60b055ac04d3"
+    },
+    {
+      "name": "fix/mrk-006-transactional-init",
+      "sha": "1cd625d6fa0c017d1f3eeb7c3a65f39db33449d3",
+      "snapshots": [
+        "before-first-cleanup"
+      ],
+      "tree": "7848907da33461de744a3c5a3e3e4e7a6a2c1066"
+    },
+    {
+      "name": "fix/mrk-007-complete-entitlements",
+      "sha": "105580430f55e7fb13603f60464e89d4c45c5ab1",
+      "snapshots": [
+        "before-first-cleanup"
+      ],
+      "tree": "ef5b2c0ea634d4a82897c09acaa2a8780b75403b"
+    },
+    {
+      "name": "fix/qa-001-process-fixture",
+      "sha": "7ced2db2e203c8fb35c4ba8e38b20be458147e9d",
+      "snapshots": [
+        "before-first-cleanup"
+      ],
+      "tree": "fc7ce9b72cff1624aee0ff7f978d2df1cf9435f2"
+    },
+    {
+      "name": "fix/qa-002-profile-authority",
+      "sha": "0d610e605774ddd034d41268ccaf73986d97a960",
+      "snapshots": [
+        "before-first-cleanup"
+      ],
+      "tree": "00f3acee00c994e6e81470cc76e42f1f2108fcdb"
+    },
+    {
+      "name": "fix/qa-003-local-signing-lifetime",
+      "sha": "4aee2daaeebce55fe9fc684cbd0fad92a3b39179",
+      "snapshots": [
+        "before-first-cleanup"
+      ],
+      "tree": "67a97ecd46ce85c6c3eb3ab1ff68140740e0f764"
+    },
+    {
+      "name": "fix/qa-006-disposable-verification",
+      "sha": "9fc41e3907c7338565020cb0d0d7477069c812f3",
+      "snapshots": [
+        "before-first-cleanup"
+      ],
+      "tree": "66daf6504eeedd553e014da6fd83bd486d63bea2"
+    },
+    {
+      "name": "fix/qa-007-native-process-ownership",
+      "sha": "0df108a6d1fd408a8ddf2cdb20ec53ba948f711f",
+      "snapshots": [
+        "before-first-cleanup"
+      ],
+      "tree": "fff2349ed679d8a7fb6a909d02da478287969d2d"
+    },
+    {
+      "name": "handoff/2026-09-08",
+      "sha": "ae6a973de8cbebb22c64ce1c689c1568669b9ec7",
+      "snapshots": [
+        "before-first-cleanup",
+        "before-archive-consolidation"
+      ],
+      "tree": "7b720b0c3db6df893b8ebd4aea9aa66bc2b9c61c"
+    },
+    {
+      "name": "qa/qa006-native-20260910",
+      "sha": "9fc41e3907c7338565020cb0d0d7477069c812f3",
+      "snapshots": [
+        "before-first-cleanup"
+      ],
+      "tree": "66daf6504eeedd553e014da6fd83bd486d63bea2"
+    },
+    {
+      "name": "task/ci-simplification-20261015",
+      "sha": "8a5a73baaee1b513196ab8235898729ae2c25e4f",
+      "snapshots": [
+        "before-first-cleanup",
+        "before-archive-consolidation"
+      ],
+      "tree": "6705c456388bf1815c6d44061b4b114bb82007c8"
+    },
+    {
+      "name": "verify/automation-contracts-20261021",
+      "sha": "d0b56b9046cb998f65e6ea7e51fcb6754788a24f",
+      "snapshots": [
+        "before-first-cleanup"
+      ],
+      "tree": "6f9b139afe60139ffbf27dfb576e6cd07bcb14dc"
+    },
+    {
+      "name": "verify/automation-macos-20261019",
+      "sha": "5174096599b64a88eb5159b9d8e566b2da457772",
+      "snapshots": [
+        "before-first-cleanup"
+      ],
+      "tree": "2a6e758c4805663d5ebce6dd974d05ff41dca735"
+    },
+    {
+      "name": "verify/desktop-builder-host-observation",
+      "sha": "f810a14b553b182bce224aae007d97ae53000fb6",
+      "snapshots": [
+        "before-first-cleanup",
+        "before-archive-consolidation"
+      ],
+      "tree": "9815be3126a375f0320449d00e1443c32da19ccc"
+    },
+    {
+      "name": "verify/desktop-conventional-prepare",
+      "sha": "a446e648e298d843824e9598ffb8a5d8e5f38364",
+      "snapshots": [
+        "before-first-cleanup",
+        "before-archive-consolidation"
+      ],
+      "tree": "ceabced510b0cd4105cf9d9402ce5ffa6ab3b00f"
+    },
+    {
+      "name": "verify/desktop-conventional-smoke",
+      "sha": "8e900de6c510698f5490db69838b2d3e37cd230d",
+      "snapshots": [
+        "before-first-cleanup",
+        "before-archive-consolidation"
+      ],
+      "tree": "84220fc354923eca0a5a26f7d0ff75f81a4e9869"
+    },
+    {
+      "name": "verify/desktop-cpython-source-build",
+      "sha": "37079ce7874bedc804f434f8f8851c3adf5333ac",
+      "snapshots": [
+        "before-first-cleanup",
+        "before-archive-consolidation"
+      ],
+      "tree": "e4c68a1b9a5d28ddca2d9ae17ae3c815a754adad"
+    },
+    {
+      "name": "verify/desktop-environment-diagnostics-native",
+      "sha": "d2b1cb5f2611da3266b044902a70d6d24cc50e5d",
+      "snapshots": [
+        "before-first-cleanup",
+        "before-archive-consolidation"
+      ],
+      "tree": "5c134ced4fd692746c7b09621e9fbd6c4f9d51c6"
+    },
+    {
+      "name": "verify/desktop-environment-diagnostics-native-macos",
+      "sha": "28042829481176d3010d7b12b64f3b5bccfdb7ca",
+      "snapshots": [
+        "before-first-cleanup",
+        "before-archive-consolidation"
+      ],
+      "tree": "68405c9e10679533aef94761cccf3d3a7b246528"
+    },
+    {
+      "name": "verify/desktop-github-connection-native",
+      "sha": "d84a15db77e4776c5d89e23b87b868e21fb3a314",
+      "snapshots": [
+        "before-first-cleanup",
+        "before-archive-consolidation"
+      ],
+      "tree": "876a27926d6342df6c80bf7310b189ffdc362945"
+    },
+    {
+      "name": "verify/desktop-github-connection-tls",
+      "sha": "128b3ac438908f554f762e14c355b0ac7421d479",
+      "snapshots": [
+        "before-first-cleanup",
+        "before-archive-consolidation"
+      ],
+      "tree": "06e70812d3230e5ed4db5880f9d26a93d9c83608"
+    },
+    {
+      "name": "verify/desktop-github-workflow-apply-native",
+      "sha": "676f8e221f671f72a77e33d99ff2eb047aee089f",
+      "snapshots": [
+        "before-first-cleanup",
+        "before-archive-consolidation"
+      ],
+      "tree": "a014ff673a81cf2f30cf80b16c7bba8b4f0bed3e"
+    },
+    {
+      "name": "verify/desktop-gnome-controller-characterization",
+      "sha": "1fb22af475fd0808fb3d891522af0ee6c2147849",
+      "snapshots": [
+        "before-first-cleanup",
+        "before-archive-consolidation"
+      ],
+      "tree": "8c9538591681051fb23cd21580f5b8e47d3eb0e6"
+    },
+    {
+      "name": "verify/desktop-gnome-host-observation",
+      "sha": "c02c4442c8033c718d52c7fa7dbb626afc2464d9",
+      "snapshots": [
+        "before-first-cleanup",
+        "before-archive-consolidation"
+      ],
+      "tree": "9bd78de03af7b4f3ee869e0d10786c56ee564d59"
+    },
+    {
+      "name": "verify/desktop-installed-github-normal-boundaries",
+      "sha": "4d2209287850f4a19b2900af0e577912e95b69a5",
+      "snapshots": [
+        "before-first-cleanup",
+        "before-archive-consolidation"
+      ],
+      "tree": "56cc8a45cfe85ee4227d83eaf31989d1e66c0cd3"
+    },
+    {
+      "name": "verify/desktop-installed-github-readonly",
+      "sha": "4d2209287850f4a19b2900af0e577912e95b69a5",
+      "snapshots": [
+        "before-first-cleanup",
+        "before-archive-consolidation"
+      ],
+      "tree": "56cc8a45cfe85ee4227d83eaf31989d1e66c0cd3"
+    },
+    {
+      "name": "verify/desktop-installed-passive",
+      "sha": "9827b9e7abe9e4d5140b3333205c93ed13298202",
+      "snapshots": [
+        "before-first-cleanup",
+        "before-archive-consolidation"
+      ],
+      "tree": "85b0245d39059cd4ab8cf97c515b90d9e4033560"
+    },
+    {
+      "name": "verify/desktop-installed-shell",
+      "sha": "7017621590d92864bad9e7c41ee60e821760acaf",
+      "snapshots": [
+        "before-first-cleanup",
+        "before-archive-consolidation"
+      ],
+      "tree": "643f89c792f1295a4c76a45a838192ebc1977503"
+    },
+    {
+      "name": "verify/desktop-linux-notice-census-014",
+      "sha": "f2aef25d17c9d0e86c10416d48d39da884df85a6",
+      "snapshots": [
+        "before-first-cleanup",
+        "before-archive-consolidation"
+      ],
+      "tree": "2bdbaac2b8cb385de45e7f90bd3dae9789669b9d"
+    },
+    {
+      "name": "verify/desktop-linux-platform-abi-014",
+      "sha": "2cbdc930bd3a54d18a511a64ac004052da9c04d6",
+      "snapshots": [
+        "before-first-cleanup",
+        "before-archive-consolidation"
+      ],
+      "tree": "367a64425d3a879e5894fa79806721d7f9defa4a"
+    },
+    {
+      "name": "verify/desktop-macos-android-dependencies",
+      "sha": "af23e7fcb1b9f968d045615fe8543202f0687d07",
+      "snapshots": [
+        "before-first-cleanup",
+        "before-archive-consolidation"
+      ],
+      "tree": "ce6e86cfc38bdc3cf032f12fbf343de50285cea1"
+    },
+    {
+      "name": "verify/desktop-macos-android-support-signing",
+      "sha": "8e4a942c5f23dd6bfd850ddd31b6addf347fc0b3",
+      "snapshots": [
+        "before-first-cleanup",
+        "before-archive-consolidation"
+      ],
+      "tree": "316dd3a8e5314b88382609745f55f85c6ac6ac84"
+    },
+    {
+      "name": "verify/desktop-macos-app-signature",
+      "sha": "65718253aca575f80eddafc638877dad09e6aecd",
+      "snapshots": [
+        "before-first-cleanup",
+        "before-archive-consolidation"
+      ],
+      "tree": "59b85a581eea1a755c7e48811ad79d5ab3e21961"
+    },
+    {
+      "name": "verify/desktop-macos-aqua",
+      "sha": "248a6b16f47ac48f8dc582e2d5c5aa588e5dadc6",
+      "snapshots": [
+        "before-first-cleanup",
+        "before-archive-consolidation"
+      ],
+      "tree": "96e1293a406e8543178802250cf8c6d2477db96a"
+    },
+    {
+      "name": "verify/desktop-macos-candidate-consume",
+      "sha": "fa01d4198f5f675efaa3e5ed570a1e96641a4fc1",
+      "snapshots": [
+        "before-first-cleanup",
+        "before-archive-consolidation"
+      ],
+      "tree": "d6746ca12ce2f1df49a30c7b36fab441f1c53eda"
+    },
+    {
+      "name": "verify/desktop-macos-components",
+      "sha": "d93fcae717b6d7eeff0b6802d531f458355e791d",
+      "snapshots": [
+        "before-first-cleanup",
+        "before-archive-consolidation"
+      ],
+      "tree": "26815e533ce152c56b14bdb8329e04d0ac20aba7"
+    },
+    {
+      "name": "verify/desktop-macos-context-distribution-shape",
+      "sha": "87ae3872c8afaac29ce1bd3bf22a20705e8e6264",
+      "snapshots": [
+        "before-first-cleanup",
+        "before-archive-consolidation"
+      ],
+      "tree": "f111f4bf7616e5b51427e6293b05c68d3559cecb"
+    },
+    {
+      "name": "verify/desktop-macos-cpython-source-build",
+      "sha": "52485f9fd837f0dacb8dc9621e5a1bee30803506",
+      "snapshots": [
+        "before-first-cleanup",
+        "before-archive-consolidation"
+      ],
+      "tree": "9516e075c5ab5f19be720c33d95ea27e91c90a86"
+    },
+    {
+      "name": "verify/desktop-macos-cpython-source-build-intel",
+      "sha": "a2f7a10b4c86305f5ee65c6779ceaf6b128cd8fa",
+      "snapshots": [
+        "before-first-cleanup",
+        "before-archive-consolidation"
+      ],
+      "tree": "9516e075c5ab5f19be720c33d95ea27e91c90a86"
+    },
+    {
+      "name": "verify/desktop-macos-directory-identity",
+      "sha": "ecd3b559e692b181a02874f18f026a2b069becce",
+      "snapshots": [
+        "before-first-cleanup",
+        "before-archive-consolidation"
+      ],
+      "tree": "5123d686888a258e747dfd9963e7edffb55e8857"
+    },
+    {
+      "name": "verify/desktop-macos-dmg-attributes",
+      "sha": "2d5927384f8765fe232c6df0d5ffd790da856d84",
+      "snapshots": [
+        "before-first-cleanup",
+        "before-archive-consolidation"
+      ],
+      "tree": "883ef138bc86ed3305ffa4d03fc875d928296590"
+    },
+    {
+      "name": "verify/desktop-macos-engineering-ui",
+      "sha": "94aa6977bdde49775152c9e071ad0b586e681a75",
+      "snapshots": [
+        "before-first-cleanup",
+        "before-archive-consolidation"
+      ],
+      "tree": "e28d327affe55658168f4090d4b9741cf1d8fbfb"
+    },
+    {
+      "name": "verify/desktop-macos-entry-diagnostic",
+      "sha": "649e740b5a9b4750d38d6d628d0b4504cf64395d",
+      "snapshots": [
+        "before-first-cleanup"
+      ],
+      "tree": "b6079569641f282a17ab53410e324ec754cb0756"
+    },
+    {
+      "name": "verify/desktop-macos-feature-integration-20261009-v1",
+      "sha": "7521a908c0712de0e424082ce2334181b4f888db",
+      "snapshots": [
+        "before-first-cleanup"
+      ],
+      "tree": "0bd81291478b5b7a68c36a339ff9d3dc0c0b876a"
+    },
+    {
+      "name": "verify/desktop-macos-g2-certificate-enrollment",
+      "sha": "0e0abab0121d512905cab55e94be6823eaa2d712",
+      "snapshots": [
+        "before-first-cleanup",
+        "before-archive-consolidation"
+      ],
+      "tree": "a7fbb7637d355e58526168b1de97ffb6b235d8dd"
+    },
+    {
+      "name": "verify/desktop-macos-github-seal",
+      "sha": "ff0c718c2bb403cf608a8cde2561324e2e9063a6",
+      "snapshots": [
+        "before-first-cleanup",
+        "before-archive-consolidation"
+      ],
+      "tree": "53cc419c700002497587a88a7f07b745fce1a91b"
+    },
+    {
+      "name": "verify/desktop-macos-github-tool-signing",
+      "sha": "45b5fec15294c5c4b9cfc6f180a8ece7e56d3a8d",
+      "snapshots": [
+        "before-first-cleanup",
+        "before-archive-consolidation"
+      ],
+      "tree": "698342dd5c1637415c9c4d61eed98ed9e7c19737"
+    },
+    {
+      "name": "verify/desktop-macos-hfs-parser-probe",
+      "sha": "0ba963c5e90241752fc85f847997aa148494a807",
+      "snapshots": [
+        "before-first-cleanup",
+        "before-archive-consolidation"
+      ],
+      "tree": "b6848fac493366be3009be293bdd772b81b3ea32"
+    },
+    {
+      "name": "verify/desktop-macos-history-provider-probe",
+      "sha": "608e93f1d1a396e6e38654d70a50266c75dbf25e",
+      "snapshots": [
+        "before-first-cleanup",
+        "before-archive-consolidation"
+      ],
+      "tree": "068240b9f93ed45c03c7a90930530295ae34447f"
+    },
+    {
+      "name": "verify/desktop-macos-image-compile",
+      "sha": "f3260553ba539c674a119cab9ac334d6af4c6a3e",
+      "snapshots": [
+        "before-first-cleanup",
+        "before-archive-consolidation"
+      ],
+      "tree": "b1be19c9f78d534b8473d1f577aa1269c277730b"
+    },
+    {
+      "name": "verify/desktop-macos-image-detach-20261023",
+      "sha": "73f2ae1680e32e55ebb4d8c10a9dabe6ea057e55",
+      "snapshots": [
+        "before-first-cleanup"
+      ],
+      "tree": "176707a7519a99b587ac3b396889aaf004441aff"
+    },
+    {
+      "name": "verify/desktop-macos-installed",
+      "sha": "57a6c215728649cf29439b3f2654b04d14e21286",
+      "snapshots": [
+        "before-first-cleanup",
+        "before-archive-consolidation"
+      ],
+      "tree": "8ccd15e4b8772efa04cdaaf64643281ce00a9967"
+    },
+    {
+      "name": "verify/desktop-macos-installer-certificate-enrollment",
+      "sha": "afd7f20e1d896a08866592ca87fb39c86c7c8cee",
+      "snapshots": [
+        "before-first-cleanup",
+        "before-archive-consolidation"
+      ],
+      "tree": "2db98fc7093bf7e0cd333952dfad58b19a843aed"
+    },
+    {
+      "name": "verify/desktop-macos-installer-chain",
+      "sha": "92a8fd59587605b60804f8f12eebb7c36f5c8d40",
+      "snapshots": [
+        "before-first-cleanup",
+        "before-archive-consolidation"
+      ],
+      "tree": "5485a6163e3529ab3c851fc04b00afaaadc5763a"
+    },
+    {
+      "name": "verify/desktop-macos-installer-compile-20261023",
+      "sha": "a7e073227d593bb7d24b3169070054e26f8a1997",
+      "snapshots": [
+        "before-first-cleanup"
+      ],
+      "tree": "2693417d20610e80b390ce93bb9aeabe7a3b7588"
+    },
+    {
+      "name": "verify/desktop-macos-intel-os-providers",
+      "sha": "df9504d93dab99c620d05cbe07a5ab21f2a8e381",
+      "snapshots": [
+        "before-first-cleanup"
+      ],
+      "tree": "9d41bc82f31a108772d6304f0550de102db76976"
+    },
+    {
+      "name": "verify/desktop-macos-intel-removal-abrupt",
+      "sha": "d26fbc94ac72cda5160a412eb1cab734f106af7b",
+      "snapshots": [
+        "before-first-cleanup",
+        "before-archive-consolidation"
+      ],
+      "tree": "b90b9dffca938e576295882b9a7be4379ecd2b5a"
+    },
+    {
+      "name": "verify/desktop-macos-intel-source-slots",
+      "sha": "49298d94e4b4bd3566aed5b2b5ffa799ef249e0a",
+      "snapshots": [
+        "before-first-cleanup",
+        "before-archive-consolidation"
+      ],
+      "tree": "550741f459afc75b98f8d7fafcb023668e1712fe"
+    },
+    {
+      "name": "verify/desktop-macos-m2-entry",
+      "sha": "7b6105251fb126b056a33e0fc94011cfe1103206",
+      "snapshots": [
+        "before-first-cleanup",
+        "before-archive-consolidation"
+      ],
+      "tree": "7c67b222181ce687af2d0ae4603b5d9aad9b2c7d"
+    },
+    {
+      "name": "verify/desktop-macos-maintenance-fixture",
+      "sha": "cff910494bf481f23df5fb6504fbd0cb3a15fce1",
+      "snapshots": [
+        "before-first-cleanup",
+        "before-archive-consolidation"
+      ],
+      "tree": "e7fdea10e8190cc4ee3d1d39cf8ec526e92e5258"
+    },
+    {
+      "name": "verify/desktop-macos-normal-compile",
+      "sha": "182a0b444e13e54a8d3ce156b0441648735c9231",
+      "snapshots": [
+        "before-first-cleanup",
+        "before-archive-consolidation"
+      ],
+      "tree": "16d39c472913bcefc5a039ebad630fb1086436e5"
+    },
+    {
+      "name": "verify/desktop-macos-normal-ui-build-intel",
+      "sha": "296e4e4a7478576b34491e7263286a75979fd4ea",
+      "snapshots": [
+        "before-first-cleanup"
+      ],
+      "tree": "984bef0064104f3c2fba813d84b65f9386c989cc"
+    },
+    {
+      "name": "verify/desktop-macos-notary-admission",
+      "sha": "c0e7691bbbab269428de2c26e70437713de87eed",
+      "snapshots": [
+        "before-first-cleanup",
+        "before-archive-consolidation"
+      ],
+      "tree": "0068fc6aa352b8811870685ef694d6237ff53935"
+    },
+    {
+      "name": "verify/desktop-macos-notary-diagnostic",
+      "sha": "1137dab8c210bc3cf5de98f756addc418e7602e7",
+      "snapshots": [
+        "before-first-cleanup",
+        "before-archive-consolidation"
+      ],
+      "tree": "1df2fd9ba522d8c5881c3d8739b146876e6caff3"
+    },
+    {
+      "name": "verify/desktop-macos-notary-inspect",
+      "sha": "92cf91e969fb94d00d41de2f93b21d03078df634",
+      "snapshots": [
+        "before-first-cleanup",
+        "before-archive-consolidation"
+      ],
+      "tree": "cf4508909f468fea156efab4641be9c897e073f6"
+    },
+    {
+      "name": "verify/desktop-macos-notary-key-shape",
+      "sha": "13086221de66fbfd1fb199072ea63091d3c3d71e",
+      "snapshots": [
+        "before-first-cleanup",
+        "before-archive-consolidation"
+      ],
+      "tree": "f534d91791f0b3a10519e5c6bf443996ccc13f24"
+    },
+    {
+      "name": "verify/desktop-macos-notary-log",
+      "sha": "14f41e995c64ad61de93bd2eeef72b10424cbbf6",
+      "snapshots": [
+        "before-first-cleanup",
+        "before-archive-consolidation"
+      ],
+      "tree": "752d95f5fb5c1ccc5fd88812bfe24c66ae016f55"
+    },
+    {
+      "name": "verify/desktop-macos-observer-compile-20261022",
+      "sha": "c39d0506d0d1f74b574db5fbd9b2c43ed067e5d4",
+      "snapshots": [
+        "before-first-cleanup"
+      ],
+      "tree": "1e9796b45387121c9572a62102d7f56a154f9b3a"
+    },
+    {
+      "name": "verify/desktop-macos-observer-reuse",
+      "sha": "2cb018014c3843e88a4d3dd72ee0f10490c19b35",
+      "snapshots": [
+        "before-first-cleanup",
+        "before-archive-consolidation"
+      ],
+      "tree": "dcdad7ab4cc77e6fbe915172e3389ac35331cfcc"
+    },
+    {
+      "name": "verify/desktop-macos-package-format-diagnostic",
+      "sha": "3744e5d2480aaf119d6bec3bf35ed3196303c904",
+      "snapshots": [
+        "before-first-cleanup",
+        "before-archive-consolidation"
+      ],
+      "tree": "468ba5e82d18850f4a6053a357108daa30ed9302"
+    },
+    {
+      "name": "verify/desktop-macos-packaged-ui",
+      "sha": "72013b3c1d24d02bd08c7f1e3288908bf6836d15",
+      "snapshots": [
+        "before-first-cleanup",
+        "before-archive-consolidation"
+      ],
+      "tree": "e6ad32a82bc76402be39405ab96da0982bbdcedb"
+    },
+    {
+      "name": "verify/desktop-macos-panel-probe",
+      "sha": "0d7bcc9182359f75b4bae5b6e4563a1b192fad8a",
+      "snapshots": [
+        "before-first-cleanup"
+      ],
+      "tree": "508b3876e69c6ff2197111972060dd8f0d410a21"
+    },
+    {
+      "name": "verify/desktop-macos-payload",
+      "sha": "aa455fa2a5bffe9cc05c0593830f4359946888ec",
+      "snapshots": [
+        "before-first-cleanup",
+        "before-archive-consolidation"
+      ],
+      "tree": "bf4fa295048661b20170e1bdc09e392a8a4fa971"
+    },
+    {
+      "name": "verify/desktop-macos-predecessor-inspection",
+      "sha": "567c1ceac25ec5f8cd915304d9b8c4205bc4f71e",
+      "snapshots": [
+        "before-first-cleanup",
+        "before-archive-consolidation"
+      ],
+      "tree": "5deae6356a9cba1901df9077be87aed1d02adc53"
+    },
+    {
+      "name": "verify/desktop-macos-predecessor-install",
+      "sha": "735de1ffef69bd7e792f49286e6f8376af1b094c",
+      "snapshots": [
+        "before-first-cleanup",
+        "before-archive-consolidation"
+      ],
+      "tree": "35c5d1ae8e3864c5085cca051a977643214170b4"
+    },
+    {
+      "name": "verify/desktop-macos-preview",
+      "sha": "a443ccc310d657ccea57c91fda9a9f9e3f76eb1a",
+      "snapshots": [
+        "before-first-cleanup",
+        "before-archive-consolidation"
+      ],
+      "tree": "ad8812c02df2ee14e8d586b4dff70beab39a1f9f"
+    },
+    {
+      "name": "verify/desktop-macos-python-runtime-signing-engineering",
+      "sha": "cf6c43dbcba35886e5f91907c2701650fb618526",
+      "snapshots": [
+        "before-first-cleanup",
+        "before-archive-consolidation"
+      ],
+      "tree": "3bd0b64e310da46931cd879f9faf2506ff2a8cdc"
+    },
+    {
+      "name": "verify/desktop-macos-python-runtime-signing-shipping",
+      "sha": "70ae6f78af7fe240a0406b9f391cd7b43bac592e",
+      "snapshots": [
+        "before-first-cleanup",
+        "before-archive-consolidation"
+      ],
+      "tree": "173daabd99dd19803f8cd22c57014eab3531a5a0"
+    },
+    {
+      "name": "verify/desktop-macos-removal-lifecycle",
+      "sha": "0692669c41968d12174ae4d6cec2a49bd33cce82",
+      "snapshots": [
+        "before-first-cleanup",
+        "before-archive-consolidation"
+      ],
+      "tree": "c77c707940fe46f293757539e422b03dc2478aff"
+    },
+    {
+      "name": "verify/desktop-macos-signing",
+      "sha": "086501a4b7ffdb57daccf9e9412837ac35225bf4",
+      "snapshots": [
+        "before-first-cleanup",
+        "before-archive-consolidation"
+      ],
+      "tree": "fa97d2e10e833df4e864b6b394153a81da185180"
+    },
+    {
+      "name": "verify/desktop-macos-stage-contracts-20261017",
+      "sha": "f11c28f2af05e177abbb63c258252ea08a79498c",
+      "snapshots": [
+        "before-first-cleanup",
+        "before-archive-consolidation"
+      ],
+      "tree": "f16dffd97212c336981a932c363dda7898bee3b5"
+    },
+    {
+      "name": "verify/desktop-macos-store-retention",
+      "sha": "d89843404f19d14f3e73eba2666f650c7acb771d",
+      "snapshots": [
+        "before-first-cleanup",
+        "before-archive-consolidation"
+      ],
+      "tree": "cb50df0b2f64132cb36da94c7e53c2f8d558e886"
+    },
+    {
+      "name": "verify/desktop-macos-store-runtime",
+      "sha": "73abc3c1a54b0e3e81bd0661a7244802485b496a",
+      "snapshots": [
+        "before-first-cleanup",
+        "before-archive-consolidation"
+      ],
+      "tree": "63d498c79bbaf7b82f70e5862c96df9e4e878946"
+    },
+    {
+      "name": "verify/desktop-macos-store-signing",
+      "sha": "f05ec74e3d061e5576e5473a62be809932f8372c",
+      "snapshots": [
+        "before-first-cleanup",
+        "before-archive-consolidation"
+      ],
+      "tree": "936532305f889a7abde8d53720ba9ec16d258c9c"
+    },
+    {
+      "name": "verify/desktop-macos-ui-host",
+      "sha": "563ca3bc376dfcb9bce333c2569b67f41467812f",
+      "snapshots": [
+        "before-first-cleanup",
+        "before-archive-consolidation"
+      ],
+      "tree": "d0606415c9a47dbf29e677a70598d72043d26b37"
+    },
+    {
+      "name": "verify/desktop-macos-vault-startup",
+      "sha": "5767b3e2275171ab81b8f5ee1cfdb16a410a2a4e",
+      "snapshots": [
+        "before-first-cleanup",
+        "before-archive-consolidation"
+      ],
+      "tree": "cd60f77ba83ac83d535d00bcebc34160c5c652f9"
+    },
+    {
+      "name": "verify/desktop-macos-xcode-compile-20261017",
+      "sha": "680ac48dd4a76b3d72a2ddbfaad6df99d2779199",
+      "snapshots": [
+        "before-first-cleanup",
+        "before-archive-consolidation"
+      ],
+      "tree": "2165fce2ff35838b9cc2b953a2efb619dd432b86"
+    },
+    {
+      "name": "verify/desktop-macos-xcode-setup",
+      "sha": "bf9d397bde641aae4b4cd205f3c962e899557650",
+      "snapshots": [
+        "before-first-cleanup",
+        "before-archive-consolidation"
+      ],
+      "tree": "f3d2f9117d1f29e080c5138fa9675426fb79e247"
+    },
+    {
+      "name": "verify/desktop-macos-xctest-compile",
+      "sha": "d26fbc94ac72cda5160a412eb1cab734f106af7b",
+      "snapshots": [
+        "before-first-cleanup"
+      ],
+      "tree": "b90b9dffca938e576295882b9a7be4379ecd2b5a"
+    },
+    {
+      "name": "verify/desktop-metadata-text-apply-native",
+      "sha": "80b6f1bd4e152b5d494b6f9546b0f36f0bfb4637",
+      "snapshots": [
+        "before-first-cleanup",
+        "before-archive-consolidation"
+      ],
+      "tree": "f97cda80ab3b99503e52d9343c482f7ff596a374"
+    },
+    {
+      "name": "verify/desktop-offline-preflight-native",
+      "sha": "958bca03b807545685766274f3ac6555f2cd752e",
+      "snapshots": [
+        "before-first-cleanup",
+        "before-archive-consolidation"
+      ],
+      "tree": "bc966277d6ccc4f64050cdd217e1fb488439a470"
+    },
+    {
+      "name": "verify/desktop-offline-preflight-native-macos",
+      "sha": "958bca03b807545685766274f3ac6555f2cd752e",
+      "snapshots": [
+        "before-first-cleanup",
+        "before-archive-consolidation"
+      ],
+      "tree": "bc966277d6ccc4f64050cdd217e1fb488439a470"
+    },
+    {
+      "name": "verify/desktop-packaged-host-tools",
+      "sha": "69361ad662efe8220c052722d15e9f513486211c",
+      "snapshots": [
+        "before-first-cleanup",
+        "before-archive-consolidation"
+      ],
+      "tree": "f5df9b1468fa11b017dfa7ebc5b64a222253de9a"
+    },
+    {
+      "name": "verify/desktop-release-version-apply-native",
+      "sha": "eee6e1a2af35c1925a824d5afd063cc6e2f76942",
+      "snapshots": [
+        "before-first-cleanup",
+        "before-archive-consolidation"
+      ],
+      "tree": "93f5714f9d7644774a49a838946678e2f59c5b18"
+    },
+    {
+      "name": "verify/desktop-session-compile",
+      "sha": "958bca03b807545685766274f3ac6555f2cd752e",
+      "snapshots": [
+        "before-first-cleanup",
+        "before-archive-consolidation"
+      ],
+      "tree": "bc966277d6ccc4f64050cdd217e1fb488439a470"
+    },
+    {
+      "name": "verify/desktop-session-gtk-compile",
+      "sha": "fba6e4b316785f2153ef523596a75d7fc7a9fd9e",
+      "snapshots": [
+        "before-first-cleanup",
+        "before-archive-consolidation"
+      ],
+      "tree": "cdbf7f0810f3d08308849fc94181952766546aa1"
+    },
+    {
+      "name": "verify/desktop-shell-host-metadata",
+      "sha": "eb39c5980968ae280a067baa9170228a4fa1dcb1",
+      "snapshots": [
+        "before-first-cleanup",
+        "before-archive-consolidation"
+      ],
+      "tree": "a7422fd550734d269ad124e7c1b0be6daa7f9c19"
+    },
+    {
+      "name": "verify/desktop-ubuntu-alpha-package",
+      "sha": "ad5586f1e6b296c1783a7a79983d62c4e2e637f8",
+      "snapshots": [
+        "before-first-cleanup",
+        "before-archive-consolidation"
+      ],
+      "tree": "d35e5dce02d8bb0b421e1cd02b97ac951bdaebf8"
+    },
+    {
+      "name": "verify/desktop-ubuntu-publication",
+      "sha": "b8305d31d0492beae55c9ac7c242ab280ba31bb0",
+      "snapshots": [
+        "before-first-cleanup",
+        "before-archive-consolidation"
+      ],
+      "tree": "e3715e942ad3aadf4ef8d175e908fd7a5b5935ef"
+    },
+    {
+      "name": "verify/desktop-windows-current53-source-20261002",
+      "sha": "5c8b95e5378d985a0d6b163b49882cf72c4ef9a2",
+      "snapshots": [
+        "before-first-cleanup",
+        "before-archive-consolidation"
+      ],
+      "tree": "7c000ba38737b3db025ac4513c43e0112b810e45"
+    },
+    {
+      "name": "verify/desktop-windows-image-writer-b2-native22",
+      "sha": "a7d7839cf184fe29d6e87dcd292a68771b732a9e",
+      "snapshots": [
+        "before-first-cleanup",
+        "before-archive-consolidation"
+      ],
+      "tree": "de29a0cefc006f49a7a5852ced366a4ee4797e0b"
+    },
+    {
+      "name": "verify/desktop-windows-installed-native",
+      "sha": "2cbcaebb3aea60ce50bf96474184b7333edafc79",
+      "snapshots": [
+        "before-first-cleanup",
+        "before-archive-consolidation"
+      ],
+      "tree": "c64c4b0fc9c286016cc424cd7948e1b964737938"
+    },
+    {
+      "name": "verify/desktop-windows-installed-passive",
+      "sha": "6b1d705acf8fc42adb7e8bc4b402750ba13e7a2c",
+      "snapshots": [
+        "before-first-cleanup",
+        "before-archive-consolidation"
+      ],
+      "tree": "b80529a73abde172b405954da2cfe7a95e89670c"
+    },
+    {
+      "name": "verify/desktop-windows-normal-project-ui",
+      "sha": "d5c28e3a80b7ae0dc4aee50345d6766497931b1e",
+      "snapshots": [
+        "before-first-cleanup",
+        "before-archive-consolidation"
+      ],
+      "tree": "b626db6b363f5c82d3c29dcd6cb08ceff01a6031"
+    },
+    {
+      "name": "verify/desktop-windows-payload",
+      "sha": "0d90980b2dd319ef3d06247a54513d80684c5fd5",
+      "snapshots": [
+        "before-first-cleanup",
+        "before-archive-consolidation"
+      ],
+      "tree": "cdb179779f2e56b4eb322cb7022c3fafd56862d2"
+    },
+    {
+      "name": "verify/desktop-windows-required-notes-source",
+      "sha": "a9e67dc8de6607f58440c895846810ab152de6b5",
+      "snapshots": [
+        "before-first-cleanup"
+      ],
+      "tree": "dc20f4cfb083614e772feea444d7376d64d1c48b"
+    },
+    {
+      "name": "verify/desktop-windows-runtime-publication",
+      "sha": "5ef02975a188b1a26b50e53f50fb18f6c10c439c",
+      "snapshots": [
+        "before-first-cleanup",
+        "before-archive-consolidation"
+      ],
+      "tree": "64176ad6287a26d03f35ffac9dbc3baa2125d621"
+    },
+    {
+      "name": "verify/desktop-windows-snapshot",
+      "sha": "e9ba6105013a892eb2c0578a7db65fa8d87be646",
+      "snapshots": [
+        "before-first-cleanup",
+        "before-archive-consolidation"
+      ],
+      "tree": "120c448663090e88aeb810baaf71ee34992b1fc0"
+    },
+    {
+      "name": "verify/final-four-pr16-r1",
+      "sha": "babcc57f833a56667e0768efd583f282326805c9",
+      "snapshots": [
+        "before-first-cleanup"
+      ],
+      "tree": "e9f77522f7a673fe1c414b7353ea38b485f95dde"
+    },
+    {
+      "name": "verify/final-four-pr16-r10",
+      "sha": "68f9ba3ff4c0e356b4ad1589262467f8e8a56d8e",
+      "snapshots": [
+        "before-first-cleanup"
+      ],
+      "tree": "9d13cb6eed29ed69a61d3ced77558b7847351a4f"
+    },
+    {
+      "name": "verify/final-four-pr16-r11",
+      "sha": "12377298c1fbf0c31886abb14745f1615a2c4b44",
+      "snapshots": [
+        "before-first-cleanup"
+      ],
+      "tree": "3e28ec5103c050a7b6387e4b459f7a74201efa57"
+    },
+    {
+      "name": "verify/final-four-pr16-r12-store",
+      "sha": "5bc8d2fa223d0f4a7a390d0fc18215452386480c",
+      "snapshots": [
+        "before-first-cleanup"
+      ],
+      "tree": "a7eed4d86df1c07e70c1cefdbcf31b58f885b690"
+    },
+    {
+      "name": "verify/final-four-pr16-r13",
+      "sha": "f8c91354d4d8aac873a06cd325e8156fd6ea5b85",
+      "snapshots": [
+        "before-first-cleanup"
+      ],
+      "tree": "164ebe83a6ca32e6faf0ebb25937e09a4dce8b3d"
+    },
+    {
+      "name": "verify/final-four-pr16-r14",
+      "sha": "c13dd6008910c6ccdbb23cb3f6b952752fc96a01",
+      "snapshots": [
+        "before-first-cleanup"
+      ],
+      "tree": "cb8abc393e79bd68565892abe51e294f1972c247"
+    },
+    {
+      "name": "verify/final-four-pr16-r15",
+      "sha": "48ca8a15938ed1bf2e0ffcd416c997c9d0d85f70",
+      "snapshots": [
+        "before-first-cleanup"
+      ],
+      "tree": "b0177f95ddd96ffb6c854b265630d92652854e4f"
+    },
+    {
+      "name": "verify/final-four-pr16-r16",
+      "sha": "321428109d30ec20973fc70e66eed261dc1b760e",
+      "snapshots": [
+        "before-first-cleanup"
+      ],
+      "tree": "3c933d562817554b9aa4e212e446ca987059002a"
+    },
+    {
+      "name": "verify/final-four-pr16-r2",
+      "sha": "9847226a6f6b54d0e0265102977ce5880458690d",
+      "snapshots": [
+        "before-first-cleanup"
+      ],
+      "tree": "262eeb6909c6dc861cd657d63b10944fab02e6df"
+    },
+    {
+      "name": "verify/final-four-pr16-r3",
+      "sha": "4a3e80e7cb60a8faeb21bc9da98e15e7da32b3b1",
+      "snapshots": [
+        "before-first-cleanup"
+      ],
+      "tree": "c48ddd5dc88dd414c5f86d13646e64b973d7a807"
+    },
+    {
+      "name": "verify/final-four-pr16-r4",
+      "sha": "1214c8501e8c7019f96e82c53619dc301aff9207",
+      "snapshots": [
+        "before-first-cleanup"
+      ],
+      "tree": "61a43f8e9f223205b5238ed247bb16f5d7d06611"
+    },
+    {
+      "name": "verify/final-four-pr16-r5",
+      "sha": "53c647ab8b38a4d97f9e981eb2c281289d7f12fc",
+      "snapshots": [
+        "before-first-cleanup"
+      ],
+      "tree": "2572e12c10cac781236c8ef69e862a7b029a0748"
+    },
+    {
+      "name": "verify/final-four-pr16-r6",
+      "sha": "7304c03e4655225ad1007314f873688315517ab9",
+      "snapshots": [
+        "before-first-cleanup"
+      ],
+      "tree": "8f3b3a313cb013de5874ce45140fca045169613e"
+    },
+    {
+      "name": "verify/final-four-pr16-r7",
+      "sha": "564cb23fc56c5f5232db11033a528d37c3e3485f",
+      "snapshots": [
+        "before-first-cleanup"
+      ],
+      "tree": "58237a4bedfb16ebf14a063fd8778bd495bc913a"
+    },
+    {
+      "name": "verify/final-four-pr16-r8",
+      "sha": "5177e639422542ff592328f81681e8d1ea8649bf",
+      "snapshots": [
+        "before-first-cleanup"
+      ],
+      "tree": "8d536c45f5f54a78f20def67f1505dd98bbd3cc8"
+    },
+    {
+      "name": "verify/final-four-pr16-r9",
+      "sha": "d1b35fdffc09c46d60ce61a3baca857cb268a5fc",
+      "snapshots": [
+        "before-first-cleanup"
+      ],
+      "tree": "4e535416696847948098d445c79d87302543fd9a"
+    },
+    {
+      "name": "verify/final-four-pr16-store-r2",
+      "sha": "208f9c9fdd4199f3b2588b301d45175c757f9549",
+      "snapshots": [
+        "before-first-cleanup"
+      ],
+      "tree": "5ecd7d573d0d0c5c62fd789fb1c594ea0f8a3937"
+    },
+    {
+      "name": "verify/qa-003-adapter-r30",
+      "sha": "f84c62fe8a414da48faaf76b0cd07209f51bc3a5",
+      "snapshots": [
+        "before-first-cleanup"
+      ],
+      "tree": "91c3f237693a2ec1fe9da7adeeff036204dd9223"
+    },
+    {
+      "name": "verify/qa-003-linux-r17",
+      "sha": "1fa05998f35d6617e49093b51b6787d3dea7f33d",
+      "snapshots": [
+        "before-first-cleanup"
+      ],
+      "tree": "b7b1c707308e16da697e5c31f511bd75351600c8"
+    },
+    {
+      "name": "verify/qa-003-linux-r18",
+      "sha": "080279da6c76c13f04b27f14da699e4e4e712b20",
+      "snapshots": [
+        "before-first-cleanup"
+      ],
+      "tree": "ec0ed73e24105ef58eb9aa20ad3bdb637c74d70a"
+    },
+    {
+      "name": "verify/qa-003-linux-r19",
+      "sha": "a4719c91f4eb5e55775a9c0630d8cc1808068d6d",
+      "snapshots": [
+        "before-first-cleanup"
+      ],
+      "tree": "c3e0dbbc970844e196b6e9210ab337cb03c1c703"
+    },
+    {
+      "name": "verify/qa-003-linux-r20",
+      "sha": "b45bf2689c65394ef60fce61c5bcda5a17c58e0c",
+      "snapshots": [
+        "before-first-cleanup"
+      ],
+      "tree": "a18a8e93f744d0bd9c5bb078c5d7a1a78888f7ff"
+    },
+    {
+      "name": "verify/qa-003-linux-r21",
+      "sha": "8da80c59f3616719ae976f946dfa0d5c9fd90736",
+      "snapshots": [
+        "before-first-cleanup"
+      ],
+      "tree": "b806045e0b84c2324d498373423f719c39259cb2"
+    },
+    {
+      "name": "verify/qa-003-linux-r22",
+      "sha": "5cdb23b20966cfa231825d67fd81077e1d33fd4f",
+      "snapshots": [
+        "before-first-cleanup"
+      ],
+      "tree": "488551a4fdec9f569e1de22b710e08f94825956e"
+    },
+    {
+      "name": "verify/qa-003-linux-r23",
+      "sha": "63551a13c0289ea040ecb19e19b2fce86c411ec4",
+      "snapshots": [
+        "before-first-cleanup"
+      ],
+      "tree": "6375d9c057d78006d9e8630243d21462d024fe3b"
+    },
+    {
+      "name": "verify/qa-003-linux-r24",
+      "sha": "a93d25b714453c1d9f07727a2c230e2d8c523b1d",
+      "snapshots": [
+        "before-first-cleanup"
+      ],
+      "tree": "d7c15b8a3981253f9519762dfd2ff6230e388689"
+    },
+    {
+      "name": "verify/qa-003-linux-r25",
+      "sha": "98fdd3c023b5503ff1bd12f978c74d94fc1901d9",
+      "snapshots": [
+        "before-first-cleanup"
+      ],
+      "tree": "d03e8ed609016bf620efaf79e11b736c9141fe54"
+    },
+    {
+      "name": "verify/qa-003-linux-r26",
+      "sha": "5c8d73102241f7f64f650d04d81bdc3c92b575d8",
+      "snapshots": [
+        "before-first-cleanup"
+      ],
+      "tree": "e03f655340405a3400b3e8bcd3e2e1c2ad29b510"
+    },
+    {
+      "name": "verify/qa-003-linux-r27",
+      "sha": "bcc03314a831617ee3ed00c3e67e787fb1a3f322",
+      "snapshots": [
+        "before-first-cleanup"
+      ],
+      "tree": "fa6434dae32584195cb7fe043a9651452c6328df"
+    },
+    {
+      "name": "verify/qa-003-linux-r28",
+      "sha": "acf71bd5868840d6295d4519af0835fd3773eff2",
+      "snapshots": [
+        "before-first-cleanup"
+      ],
+      "tree": "2d627331f800bca2524b0fad909da2d71ea6c038"
+    },
+    {
+      "name": "verify/qa-003-linux-r29",
+      "sha": "7575eeb9a0c78a0bb9b96ae2baae46d1f3f1be30",
+      "snapshots": [
+        "before-first-cleanup"
+      ],
+      "tree": "6b460af841829881906599a3f93d67cbd9f9610d"
+    },
+    {
+      "name": "verify/qa-003-linux-r31",
+      "sha": "e470d0c280b084ec1aa3c49e74eaebf29dfe25b9",
+      "snapshots": [
+        "before-first-cleanup"
+      ],
+      "tree": "756028f027ec1a10bd9b9ecd71195dc53ca52d4b"
+    },
+    {
+      "name": "verify/qa-003-linux-r32",
+      "sha": "48ff8221dd38e5a22bd087b903d612cbdf9ce148",
+      "snapshots": [
+        "before-first-cleanup"
+      ],
+      "tree": "86cf1c7877ce8c672cb0d2320a3b1eb30813fb53"
+    },
+    {
+      "name": "verify/qa-003-r33",
+      "sha": "7b827b777c218174aff82795b0028b8e37b14a93",
+      "snapshots": [
+        "before-first-cleanup"
+      ],
+      "tree": "46349874687a7f992ed3efbdbcbffc87abda8c57"
+    },
+    {
+      "name": "verify/qa-003-r34",
+      "sha": "8eed10c727406884cbae97a3261bec0f02890ae9",
+      "snapshots": [
+        "before-first-cleanup"
+      ],
+      "tree": "754b74b3e7c3976ca4ff6cebed08a509b0d88e7a"
+    },
+    {
+      "name": "verify/qa-003-r35",
+      "sha": "d93a55e216a6d4c4f4d1d776644e4101fa2b270a",
+      "snapshots": [
+        "before-first-cleanup"
+      ],
+      "tree": "6e37456d43d86341ca805f6313a1db6e2d51c5dd"
+    },
+    {
+      "name": "verify/qa-007-macos-r20",
+      "sha": "fef7bed8aef663301c79e3c095e4f43df88578df",
+      "snapshots": [
+        "before-first-cleanup"
+      ],
+      "tree": "fa9b568252e63eaa10bf00048c1a3b35d0a720e6"
+    },
+    {
+      "name": "verify/qa-007-macos-r21",
+      "sha": "b978f8778dbcc59b4b3473f214bb9b553be1cb48",
+      "snapshots": [
+        "before-first-cleanup"
+      ],
+      "tree": "24936e74ee5e0e9ca7d1c73b8f82cad50147e394"
+    },
+    {
+      "name": "verify/qa-007-macos-r22",
+      "sha": "b11c885610214902a1ad9e629253ae025b20374b",
+      "snapshots": [
+        "before-first-cleanup"
+      ],
+      "tree": "929ca3980eaada416445afa759b3fd4c55215e45"
+    },
+    {
+      "name": "verify/qa-007-macos-r23",
+      "sha": "8f16f7c3e625b1f805bda2d1fc44400e5e6f9a33",
+      "snapshots": [
+        "before-first-cleanup"
+      ],
+      "tree": "842c3fe5b8855559850f79276bfce2a27be4bbd8"
+    },
+    {
+      "name": "verify/qa-007-macos-r25",
+      "sha": "cbcf66341c729db0a1a4d38cc9353544a710936d",
+      "snapshots": [
+        "before-first-cleanup"
+      ],
+      "tree": "5cb4317748e883d6fb89baf6d5099cdfb7f31f9a"
+    },
+    {
+      "name": "verify/qa-007-macos-r27",
+      "sha": "0d4afdd308c46088ae909de1242f2b5f7a904af8",
+      "snapshots": [
+        "before-first-cleanup"
+      ],
+      "tree": "2583563616dc9541af53c5d174d9798635cdd37c"
+    },
+    {
+      "name": "verify/qa-007-macos-r28",
+      "sha": "3f4d976c8807683391ccb47d9d142179c7759565",
+      "snapshots": [
+        "before-first-cleanup"
+      ],
+      "tree": "81be30920dcf9a91db53800e8558d380172e1aa9"
+    },
+    {
+      "name": "verify/qa-007-macos-r29",
+      "sha": "1d62690e150662df6f857c5a6f18fae0c652c41f",
+      "snapshots": [
+        "before-first-cleanup"
+      ],
+      "tree": "11607fd63da3240ea9cb9b2cb41580ccb474d1c9"
+    },
+    {
+      "name": "verify/qa-007-macos-r31",
+      "sha": "43a3a225d457b044ab214b2ca08f2fc3083cd34b",
+      "snapshots": [
+        "before-first-cleanup"
+      ],
+      "tree": "8607c381054586dd5a4e56220967a26c56bfb243"
+    },
+    {
+      "name": "verify/qa-007-macos-r32",
+      "sha": "6f926e2364c84b1e41e71e69cc9a1067aa3ff2fa",
+      "snapshots": [
+        "before-first-cleanup"
+      ],
+      "tree": "18d25491a4696704b407f0686e5801fa5d3365e8"
+    },
+    {
+      "name": "verify/qa-007-macos-r33",
+      "sha": "ce181edded9ce639852b059376c9c7989f663a0b",
+      "snapshots": [
+        "before-first-cleanup"
+      ],
+      "tree": "eb86363086d10fd79137986cd500b1e779d9a6d2"
+    }
+  ]
+}
