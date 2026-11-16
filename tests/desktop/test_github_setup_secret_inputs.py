@@ -263,12 +263,7 @@ class SecretConfigurationTests(unittest.TestCase):
                 self.fail("link")
         self.path.unlink()
         self.path.write_bytes(self.raw)
-        alias = self.path.with_name("MOBILE-RELEASE.JSON")
-        alias.write_bytes(b"{}")
-        with self.assertRaises(inputs.SecretConfigurationError):
-            with inputs.observe_secret_configuration(self.source, self.selection, budget=budget()):
-                self.fail("portable alias")
-        alias.unlink()
+        alias = self.path.with_name("hardlink-config.json")
         os.link(self.path, alias)
         with self.assertRaises(inputs.SecretConfigurationError):
             with inputs.observe_secret_configuration(self.source, self.selection, budget=budget()):
@@ -280,6 +275,18 @@ class SecretConfigurationTests(unittest.TestCase):
             with self.subTest(length=len(raw)), self.assertRaises(inputs.SecretConfigurationError):
                 with inputs.observe_secret_configuration(self.source, self.selection, budget=budget()):
                     self.fail("bad config")
+
+    def test_distinct_case_alias_refuses_on_case_sensitive_filesystem(self):
+        alias = self.path.with_name("MOBILE-RELEASE.JSON")
+        try:
+            stream = alias.open("xb")
+        except FileExistsError:
+            self.skipTest("A distinct case-folded config requires a case-sensitive filesystem")
+        with stream:
+            stream.write(b"{}")
+        with self.assertRaises(inputs.SecretConfigurationError):
+            with inputs.observe_secret_configuration(self.source, self.selection, budget=budget()):
+                self.fail("portable alias")
 
     def test_original_budget_boundaries_deadline_and_close_failure_are_absorbing(self):
         with self.assertRaises(inputs.SecretConfigurationError):

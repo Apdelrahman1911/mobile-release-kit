@@ -23,8 +23,8 @@ are recorded for coordination. Shared consumer interfaces are preserved.
 | #46 first connection | STEP DIAGNOSTICS ADDED; ORIGINAL INCIDENT BLOCKED | `1e7c4411` | Two diagnostic tests pass; whole-source check pending. No failing native predicate or first-launch race is proven. |
 | #17 Git timeout | MACOS INIT DEFECT FIXED; ORIGINAL TIMEOUT BLOCKED | `ff2571cf` | Fixed per-call/phase traces; protected-ancestor regression passes. Broader tests recorded below. |
 | #65 interruption integrity | CORE CRASH MATRIX VERIFIED; GUI GATE OPEN | `f20b9463` | Eight real SIGKILL/restart scenarios across four durable boundaries; broader recovery regressions tracked below. |
-| #66 performance/memory | SOURCE BASELINE + HOT-PATH FIX VERIFIED; APP GATES OPEN | issue commit in branch history | Reproducible Node/SSR fixture, linear path matching, 10,000 controller cycles; installed one-hour/WebView/helper measurements remain open. |
-| #30 macOS security | PENDING | — | Credentials/IPC/privilege review; coordinate native helper/installer findings. |
+| #66 performance/memory | SOURCE BASELINE + HOT-PATH FIX VERIFIED; APP GATES OPEN | `4266d1c6` | Reproducible Node/SSR fixture, linear path matching, 10,000 controller cycles; installed one-hour/WebView/helper measurements remain open. |
+| #30 macOS security | APP LOCK PATCHED; COORDINATION GATES OPEN | issue commit in branch history | Scoped report, 335-command inventory, credential/wire tests; independent helper locks and Tokio pin need coordination. |
 | #50 CLI status | PENDING | — | Diagnose permission refusal and verify enabled path/guidance. |
 | #62 Android journeys | PENDING | — | macOS fixtures; no personal device, account or real signing material. |
 | #63 iOS journeys | PENDING | — | Test-only unsigned fixtures; account/hardware/signed acceptance gates recorded. |
@@ -195,3 +195,16 @@ See `macos-essential-performance.md` and its numeric JSON receipt for the
 repeatable isolated-source baseline and exact limits. No installed application,
 helper, user project, signing identity or account participated. The actual app's
 startup/idle WebView memory and one-hour resource behavior remain hardware gates.
+
+## #30 scoped security review
+
+See `../security-review-0.1.4-macos.md`. Fixed the application's vulnerable
+ctutils resolution from 0.4.2 to 0.4.4 with a two-field lockfile change. The
+independent desktop-image and Android-registration graphs retain their own
+locks and require owner-agent coordination; they were not edited. Tokio's
+pinned-runtime advisory is also recorded for coordinated update/regression.
+No app, helper, installer, Keychain, account, secret value, setting or workflow
+was changed. Ninety credential tests pass plus one filesystem-specific skip;
+seven native-independent wire tests and targeted frontend security tests pass.
+The patched crypto package compiles under Rust 1.98.1. Current-lock whole-source
+checking remains in the final gate; full #30 production approval is not claimed.
