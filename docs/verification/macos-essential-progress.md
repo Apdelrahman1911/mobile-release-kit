@@ -189,6 +189,21 @@ orders. The two real restart tests cover 20 original child invocations, includin
 eight SIGKILL/recovery pairs. No project corruption was observed. Store fixture
 protocol failures were subsequently resolved under #64 without production clock changes.
 
+Reopened verification adds `test_project_crash_recovery.py`: twelve actual
+SIGKILL/fresh-process recovery cases across image import, Android application
+identity and iOS bundle identity. Each domain is interrupted before READY,
+after the first actual new-file replacement, after COMMITTED, and during backup
+cleanup. Twenty-four original child outcomes prove signal/normal returns,
+complete result delivery and retired resources before subsequent recovery.
+Every present edited file remains a whole old/new payload; explicit recovery
+produces the complete pre-commit original or post-commit result, preserves
+unrelated file bytes and identities, and leaves no journal. The combined
+saved-text, image and identity regression group passes 57 tests in 30.488s.
+This extends verified core coverage to five write domains. It found no new
+corruption defect and does not prove installed GUI/app-state recovery, physical
+power-loss durability or shutdown behavior. Those original acceptance gates
+remain open, and no installed application was killed.
+
 ## #66 performance and memory
 
 The maximum admitted 512-path review comparison used repeated linear scans.
