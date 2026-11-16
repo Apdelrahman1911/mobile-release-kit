@@ -3,16 +3,18 @@
 Base: `c52b57a5ef2d877e03be66387301266729aaa36d` on `release/desktop-production`.
 Implementation branch: `fix/macos-remaining-essential`, in its own worktree.
 
-All work is local. Application releases, installers, signing, notarization,
-publication, release/workflow changes, installed-app modifications and real-user
-project interruption tests are excluded. Local compiles use one job and a
-3 GiB aggregate compiler RSS cap. Synthetic fixtures and test binaries are allowed.
+All work is local. The owner's 2026-11-16 authorization permits native builds,
+test installation, installed-app/state debugging and backed-up recovery tests.
+Release/workflow changes and production publication remain excluded. Destructive
+experiments use disposable projects; real projects and personal data are kept.
+Local compiles use one job and a 3 GiB aggregate compiler RSS cap.
 
 Current original-issue verdicts, follow-up commits and remaining gates are in
 [the reopened status matrix](macos-essential-reopened-status.md), with numeric
 receipts in [the reopened checks](macos-essential-reopened-checks.json).
-The original #45, #46 and #17 incidents remain unresolved; no claim is made
-that all ten assigned issues are fully resolved and verified.
+The #45 update-depth cause is now reproduced and fixed; native candidate
+acceptance continues. #46 and the original #17 timeout remain unresolved.
+No claim is made that all ten assigned issues are fully resolved and verified.
 
 ## Ownership boundary
 
@@ -25,7 +27,7 @@ are recorded for coordination. Shared consumer interfaces are preserved.
 
 | Issue | State | Commit | Evidence / remaining verification |
 |---|---|---|---|
-| #45 workspace failure | DIAGNOSTICS/FALLBACK FIXED; ORIGINAL INCIDENT BLOCKED | `0278652e` | Persistent bounded journal, safe error boundary, helper-state render regressions; 2,463 frontend tests and TypeScript checking pass. Original installed exception remains uncaptured. |
+| #45 workspace failure | REPRODUCED ROOT CAUSE FIXED; NATIVE ACCEPTANCE IN PROGRESS | Follow-up after `0278652e` | [Native status-backlog reproduction](macos-essential-45-status-backlog.md): pre-fix React 185 at cycle 52; post-fix 900 cycles / 3,600 deliveries, helper return and retained project drafts pass. Complete frontend suite: 2,465 passes; TypeScript/Vite pass. |
 | #46 first connection | STEP DIAGNOSTICS ADDED; ORIGINAL INCIDENT BLOCKED | `1e7c4411` | Two diagnostic tests and the whole-source check pass. No failing native predicate or first-launch race is proven. |
 | #17 Git timeout | MACOS INIT DEFECT FIXED; ORIGINAL TIMEOUT BLOCKED | `ff2571cf` | Fixed per-call/phase traces; protected-ancestor regression passes. Broader tests recorded below. |
 | #65 interruption integrity | CORE CRASH MATRIX VERIFIED; GUI GATE OPEN | `f20b9463` | Eight real SIGKILL/restart scenarios across four durable boundaries; broader recovery regressions tracked below. |
@@ -44,6 +46,10 @@ material, real project data or local machine paths are committed. A local test
 pass is recorded separately from installed-app or hosted-release acceptance.
 
 ## #45 investigation
+
+The newly authorized installed reproduction and verified update-depth fix are
+recorded in [the status-backlog report](macos-essential-45-status-backlog.md).
+The following paragraph records the earlier, narrower non-reproduction phase.
 
 The retained application observations confirm a workspace error after helper
 approval and a successful later normal quit/reopen. They explicitly record

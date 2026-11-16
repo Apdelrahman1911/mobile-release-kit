@@ -3,12 +3,18 @@
 No claim is made that all ten original assigned issues are fully resolved.
 Diagnostics, source checks and adjacent fixes are evidence for their specific
 boundaries, not substitutes for reproducing the original failures. All changes
-remain on `fix/macos-remaining-essential`; no installed app, helper, real project,
-release, workflow, other agent's branch or account was changed.
+remain on `fix/macos-remaining-essential`.
+
+**Authorization update, 2026-11-16:** the owner authorized installed-app and
+physical-Mac testing, including backed-up state changes and disposable-project
+interruption experiments. Earlier restrictions below describe historical work.
+The real helper-settings experiment now reproduces a fatal workspace screen;
+approval has been restored. Protected app bytes remain unchanged at this
+checkpoint. No other agent's branch, release or workflow was changed.
 
 | Issue | Original reported problem fixed? | Root cause eliminated? | Original failure reproduced and verified absent? | Evidence and remaining gate | Status |
 |---|---|---|---|---|---|
-| #45 | Not established | Original cause unknown; a separate unsafe error-boundary accessor was fixed | No. Historical `ac506bb3` and current frontend both survive the controlled approval journey | Sixteen mounted-React scenarios; real macOS 27 WKWebView DOM/effects approval→settings→focus→enabled journey on both trees returns 0 without a fatal boundary. Native helper DATA is controlled; no fresh OS helper registration/approval occurred | **Unresolved original incident** |
+| #45 | Update-depth failure fixed in source; fresh native acceptance pending | Confirmed unchanged Git-selection dispatch during accumulated native status events; dispatch now occurs only on a selection change | Original installed app showed fatal screen and React 185; historical and pre-fix source fail the automated backlog test at cycle 52; corrected source passes 900 cycles / 3,600 deliveries | [Reproduction, fix and regression evidence](macos-essential-45-status-backlog.md); 2,465 frontend tests and build pass; physical-Mac candidate acceptance continues | **Fix verified in WebKit; installed acceptance open** |
 | #46 | No | No failing native predicate or first-launch race identified | No original first-connection failure reproduced | Two phase-diagnostic Rust tests and full source checks prove diagnostics preserve the failure, not that Native inspection succeeds on first launch. An independently built executable cannot satisfy the fixed installed-payload identity proof | **Unresolved** |
 | #17 | Historical Checked timeout not fixed | Historical pending call unknown; separate Darwin ancestor-flags initialization cause was eliminated | Initialization refusal reproduced/fixed; historical `GitCli(Checked)` deadline not reproduced after a fix | 660 Git core/worker tests: 656 pass, four explicit skips. Exact original job log recovered and hash matched; its timings show the case deadline was nearly exhausted before Checked, without an original pending-call return. Eleven installed groups remain open | **Unresolved original timeout** |
 | #65 | Verified for five core write domains; not installed app state/shutdown | No corruption found in the exercised cases. A stale-journal error-classification defect was fixed | Actual disposable writers were killed and fresh processes recovered whole old/new files | Twenty SIGKILL/recovery cases across metadata text, version, images, Android identity and iOS identity; two additional abrupt-exit cases. Original process finality precedes recovery and cleanup. Installed GUI restart, shutdown and power-loss acceptance remain open | **Partially resolved / verified** |
@@ -19,7 +25,7 @@ release, workflow, other agent's branch or account was changed.
 | #63 | Unsigned iOS source/version/identity fixture journeys work; full installed journey not proven | No original iOS failure isolated; fixture uses the editor's conventional xcconfig policy | Fresh simulator compile and unsigned Debug archive pass after actual version and identity transactions; core inspector accepts new bundle ID/version | Prior 63 tests plus 75 fixture/identity regressions. Installed tool binding, signing, physical-device and account paths remain open | **Partially verified** |
 | #64 | CLT provider flag mismatch fixed; Store acceptance incomplete | Exact Python/native flag-policy mismatch reproduced and eliminated; protected Xcode host refusal remains | Source policy regression is covered; no Store-account journey claimed | 136 network-denied provider contracts, 52 source/owner, 52 preparation/recovery and 51 frontend tests pass. A 92-test host set has 90 passes, one filesystem skip and one real protected Xcode ancestry refusal. No accounts, Store mutations or relaxed writable-ancestor policy | **Partially resolved** |
 
-## New original-boundary evidence
+## Earlier original-boundary evidence (before installed testing authorization)
 
 The #45 retained owner log contains no original React exception; the historical
 boundary discarded it. The controlled macOS test now exercises real React

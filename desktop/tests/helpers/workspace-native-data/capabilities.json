@@ -1,0 +1,191 @@
+{
+  "coreVersion": "0.3.0",
+  "apiVersion": 1,
+  "hostPlatform": "macos",
+  "mode": "read-only-foundation",
+  "methods": [
+    {
+      "method": "capabilities",
+      "available": true,
+      "reason": "Implemented passive API; no native, signing or Store verification."
+    },
+    {
+      "method": "catalog",
+      "available": true,
+      "reason": "Implemented passive API; no native, signing or Store verification."
+    },
+    {
+      "method": "project.snapshot",
+      "available": true,
+      "reason": "Implemented passive API; no native, signing or Store verification."
+    },
+    {
+      "method": "config.validate",
+      "available": true,
+      "reason": "Implemented passive API; no native, signing or Store verification."
+    },
+    {
+      "method": "config.suggest",
+      "available": true,
+      "reason": "Implemented passive API; no native, signing or Store verification."
+    },
+    {
+      "method": "config.preview",
+      "available": true,
+      "reason": "Implemented passive API; no native, signing or Store verification."
+    },
+    {
+      "method": "github.setup.propose",
+      "available": true,
+      "reason": "Implemented passive API; no native, signing or Store verification."
+    },
+    {
+      "method": "credentials.assess",
+      "available": true,
+      "reason": "Pure supplied-input assessment only; no selected files, native or service verification."
+    },
+    {
+      "method": "metadata.text.observe",
+      "available": true,
+      "reason": "Implemented passive API; no native, signing or Store verification."
+    },
+    {
+      "method": "metadata.text.validate",
+      "available": true,
+      "reason": "Implemented passive API; no native, signing or Store verification."
+    },
+    {
+      "method": "environment.requirements",
+      "available": true,
+      "reason": "Implemented passive API; no native, signing or Store verification."
+    },
+    {
+      "method": "release.version.observe",
+      "available": true,
+      "reason": "Implemented passive API; no native, signing or Store verification."
+    },
+    {
+      "method": "artifacts.candidate.observe",
+      "available": true,
+      "reason": "Local document consistency; provenance and artifact bytes unverified."
+    },
+    {
+      "method": "release.evidence.observe",
+      "available": true,
+      "reason": "Local document consistency; provenance and artifact bytes unverified."
+    }
+  ],
+  "actions": [
+    {
+      "id": "project.initialize",
+      "available": false,
+      "reason": "Not implemented in the read-only desktop foundation; no action was performed."
+    },
+    {
+      "id": "config.save",
+      "available": false,
+      "reason": "Not implemented in the read-only desktop foundation; no action was performed."
+    },
+    {
+      "id": "doctor",
+      "available": false,
+      "reason": "Not implemented in the read-only desktop foundation; no action was performed."
+    },
+    {
+      "id": "preflight.offline",
+      "available": false,
+      "reason": "Not implemented in the read-only desktop foundation; no action was performed."
+    },
+    {
+      "id": "preflight.signing",
+      "available": false,
+      "reason": "Not implemented in the read-only desktop foundation; no action was performed."
+    },
+    {
+      "id": "preflight.online",
+      "available": false,
+      "reason": "Not implemented in the read-only desktop foundation; no action was performed."
+    },
+    {
+      "id": "android.build",
+      "available": false,
+      "reason": "Not implemented in the read-only desktop foundation; no action was performed."
+    },
+    {
+      "id": "ios.build",
+      "available": false,
+      "reason": "Not implemented in the read-only desktop foundation; no action was performed."
+    },
+    {
+      "id": "assets.import",
+      "available": false,
+      "reason": "Not implemented in the read-only desktop foundation; no action was performed."
+    },
+    {
+      "id": "credentials.vault",
+      "available": false,
+      "reason": "Not implemented in the read-only desktop foundation; no action was performed."
+    },
+    {
+      "id": "metadata.edit",
+      "available": false,
+      "reason": "Not implemented in the read-only desktop foundation; no action was performed."
+    },
+    {
+      "id": "github.authenticate",
+      "available": false,
+      "reason": "Not implemented in the read-only desktop foundation; no action was performed."
+    },
+    {
+      "id": "github.setup",
+      "available": false,
+      "reason": "Not implemented in the read-only desktop foundation; no action was performed."
+    },
+    {
+      "id": "release.candidate",
+      "available": false,
+      "reason": "Not implemented in the read-only desktop foundation; no action was performed."
+    },
+    {
+      "id": "release.external-testing",
+      "available": false,
+      "reason": "Not implemented in the read-only desktop foundation; no action was performed."
+    },
+    {
+      "id": "release.production",
+      "available": false,
+      "reason": "Not implemented in the read-only desktop foundation; no action was performed."
+    },
+    {
+      "id": "artifacts.verify",
+      "available": false,
+      "reason": "Not implemented in the read-only desktop foundation; no action was performed."
+    },
+    {
+      "id": "history.load",
+      "available": false,
+      "reason": "Not implemented in the read-only desktop foundation; no action was performed."
+    },
+    {
+      "id": "recovery.inspect",
+      "available": false,
+      "reason": "Not implemented in the read-only desktop foundation; no action was performed."
+    },
+    {
+      "id": "recovery.apply",
+      "available": false,
+      "reason": "Not implemented in the read-only desktop foundation; no action was performed."
+    }
+  ],
+  "limitations": [
+    "Static hints and format-valid configuration do not establish release readiness.",
+    "No configuration is saved and no project, Git or native tool is executed.",
+    "Credential assessment processes supplied scalars and file assertions only; no credential files, Store services, release evidence or recovery journals are inspected.",
+    "Credential assessment does not enable renderer secret entry, native acquisition, storage or assignment.",
+    "Windows static snapshots require the actual admitted x64 native ABI and a local fixed-drive NTFS project; reads are independent observations, not an atomic snapshot.",
+    "Windows project selection and in-memory drafts do not enable configuration writes, builds, credentials, evidence or Store operations.",
+    "A native desktop bridge and packaged standalone runtime require their own verification.",
+    "The candidate inspector reads three separately selected local documents only; artifact bytes, provenance and source-project association remain unverified.",
+    "Release evidence reads only fixed documents from one selected final-artifact folder; its recorded stages and recovery guidance do not authenticate history or authorize a retry."
+  ]
+}

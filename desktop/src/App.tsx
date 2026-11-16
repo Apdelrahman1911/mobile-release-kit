@@ -336,6 +336,7 @@ export function App() {
   const gitReadGenerationLost = useRef(false);
   const gitRepositories = useRef<{ service: object; projectId: string; controller: GitRepositoryController }[]>([]);
   const [gitRepository, setGitRepository] = useState<GitRepositoryController | null>(null);
+  const selectedGitRepository = useRef<GitRepositoryController | null>(null);
   const syncGitReadRef = useRef<() => void>(() => {});
   // All peers/reconnection include BOTH Git owners. Their own admission below
   // excludes only themselves, never the other original or a retained review.
@@ -1454,7 +1455,14 @@ export function App() {
       gitRepositories.current.push(entry);
     }
     for (const value of gitRepositories.current) value.controller.setActive(value === entry);
-    setGitRepository(entry?.controller ?? null);
+    const nextRepository = entry?.controller ?? null;
+    // Native status bursts render this effect repeatedly. Even a same-value
+    // dispatch can leave ordinary work queued behind synchronous store updates.
+    // Compare before dispatch, retaining immediate selection/ABA tracking too.
+    if (selectedGitRepository.current !== nextRepository) {
+      selectedGitRepository.current = nextRepository;
+      setGitRepository(nextRepository);
+    }
     gitLocalRef.current?.syncContext();
   }, [gitRead]);
   syncGitReadRef.current = syncGitRead;
