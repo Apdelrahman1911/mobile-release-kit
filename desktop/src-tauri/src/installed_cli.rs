@@ -535,8 +535,7 @@ fn human(response: &p::ResponseBody) -> String {
         format!("{}  {state}{} (reported observation, not authority)\n", operation.operation_id.as_str(), if operation.stale { "; stale" } else { "" })
     }
     match response {
-        p::ResponseBody::Info(info) if info.read_only && !info.requires_running_desktop => "Connected to foreground cached history. No fresh reads, actions or restored grants; observations remain stale.\n".to_owned(),
-        p::ResponseBody::Info(_) => "Connected to Desktop. The read grant cannot execute checks; execution needs a separate one-use grant. Saved observations are not release validation.\n".to_owned(),
+        p::ResponseBody::Info(info) => p::cli_status_text(info.read_only, info.requires_running_desktop).to_owned(),
         p::ResponseBody::Projects(projects) => if projects.is_empty() { "No projects are allowed for this read session.\n".to_owned() } else { projects.iter().map(project).collect() },
         p::ResponseBody::Observation(value) => {
             let mut text = project(value);

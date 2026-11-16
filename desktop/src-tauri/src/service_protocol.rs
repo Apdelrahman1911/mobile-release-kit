@@ -4,6 +4,9 @@
 //! In particular, a deserialized operation status cannot settle original work.
 use serde::{Deserialize, Serialize};
 use std::fmt;
+#[path = "service_cli_guidance.rs"]
+mod cli_guidance;
+pub(crate) use cli_guidance::status_text as cli_status_text;
 
 pub const VERSION: u32 = 1;
 
@@ -60,7 +63,7 @@ impl Error {
     pub fn message(self) -> &'static str {
         match self {
             Self::InvalidRequest => "The service request is invalid or unsupported.",
-            Self::Unavailable => "Enable Desktop agent read access, or explicitly start mrk serve-history for cached reads only.",
+            Self::Unavailable => cli_guidance::READ_UNAVAILABLE,
             Self::AccessDenied => "This host or grant does not allow the request. Actions require separate Desktop permission; serve-history allows only five cached reads.",
             Self::Expired => "Read access expired. Explicitly allow it in Desktop or start a new foreground history invocation; access is not renewed automatically.",
             Self::Busy => "The application service is busy. Try again after current work settles.",

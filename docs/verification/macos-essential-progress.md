@@ -24,8 +24,8 @@ are recorded for coordination. Shared consumer interfaces are preserved.
 | #17 Git timeout | MACOS INIT DEFECT FIXED; ORIGINAL TIMEOUT BLOCKED | `ff2571cf` | Fixed per-call/phase traces; protected-ancestor regression passes. Broader tests recorded below. |
 | #65 interruption integrity | CORE CRASH MATRIX VERIFIED; GUI GATE OPEN | `f20b9463` | Eight real SIGKILL/restart scenarios across four durable boundaries; broader recovery regressions tracked below. |
 | #66 performance/memory | SOURCE BASELINE + HOT-PATH FIX VERIFIED; APP GATES OPEN | `4266d1c6` | Reproducible Node/SSR fixture, linear path matching, 10,000 controller cycles; installed one-hour/WebView/helper measurements remain open. |
-| #30 macOS security | APP LOCK PATCHED; COORDINATION GATES OPEN | issue commit in branch history | Scoped report, 335-command inventory, credential/wire tests; independent helper locks and Tokio pin need coordination. |
-| #50 CLI status | PENDING | — | Diagnose permission refusal and verify enabled path/guidance. |
+| #30 macOS security | APP LOCK PATCHED; COORDINATION GATES OPEN | `b8169e10` | Scoped report, 335-command inventory, credential/wire tests; independent helper locks and Tokio pin need coordination. |
+| #50 CLI status | INTENDED GATE DOCUMENTED; GUIDANCE FIXED | issue commit in branch history | Exact UI steps, three actual shared Rust formatter tests and 58 frontend access tests pass; signed installed observation remains open. |
 | #62 Android journeys | PENDING | — | macOS fixtures; no personal device, account or real signing material. |
 | #63 iOS journeys | PENDING | — | Test-only unsigned fixtures; account/hardware/signed acceptance gates recorded. |
 | #64 Store journeys | PENDING | — | Credential-free contract tests; real accounts are an external gate. |
@@ -208,3 +208,16 @@ was changed. Ninety credential tests pass plus one filesystem-specific skip;
 seven native-independent wire tests and targeted frontend security tests pass.
 The patched crypto package compiles under Rust 1.98.1. Current-lock whole-source
 checking remains in the final gate; full #30 production approval is not claimed.
+
+## #50 CLI status
+
+Read access is intentionally explicit. `version`/`capabilities` are offline;
+`status` becomes a fixed Info request to the authenticated live-grant service.
+The unavailable message now names Project settings, the Advanced CLI/AI panel,
+Check access and the one-hour Allow button, with foreground cached history as
+an explicit separate option. Live and cached status text now share a pure,
+actually used formatter with three passing Rust tests. Fifty-eight frontend
+access/permission tests pass. See `../macos-cli-read-access.md` for trace and
+steps. No grant, service state, installed app or default permission was changed.
+A signed installed transition observation and final installed-cli feature compile
+remain gates; the former cannot be supplied by inert/controller tests.
