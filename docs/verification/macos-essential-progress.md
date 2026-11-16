@@ -67,6 +67,30 @@ Remaining #45 gate: obtain a diagnostic from the failing installed workspace
 or reproduce it in an authorized test environment. The retained observations
 say the raw exception is unknown. No current synthetic render reproduces it.
 
+Reopened #45 investigation does not require the owner to remember the lost
+exception. The retained historical system log was inspected privately; the
+historical boundary did not retain a React exception. A full mounted-App matrix
+now covers historical `ac506bb3` and current source, initially unavailable and
+available runtime, event-before-reply and reply-before-event, registration and
+already-registered paths, duplicate events, settings/focus return, workspace
+loading/navigation and subscription retirement. All sixteen controlled
+cases pass. A separate test-only Cocoa/WKWebView host on macOS 27 runs the real
+DOM/effects sequence on both trees, with no real helper call or product worker;
+both return 0 without a fatal boundary.
+
+The exact historical Python core was also exported read-only and used against
+the disposable project. Its capabilities and version payloads match current
+core DATA exactly; its snapshot differs only by observation time. The historical
+WebView journey passes again with those historical responses. A further native
+profile case fills the non-null installation description and project-path
+availability, and retains the real `bundled` mode even while capabilities are
+unavailable; historical source also passes that sequence. This closes gaps in
+the initial preview-derived DTO fixture without asserting native qualification.
+The fixed background service is the Android registration helper, not a separate
+maintenance helper. No real OS helper approval was reset or requested. The
+original failure remains unreproduced, its root cause remains unknown, and #45
+is still unresolved. The controlled passes are negative reproduction evidence.
+
 ## #46 investigation
 
 The retained first-connection reason maps to `AdmissionFailure::Native` in
