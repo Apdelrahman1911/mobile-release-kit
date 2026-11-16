@@ -19,8 +19,8 @@ are recorded for coordination. Shared consumer interfaces are preserved.
 
 | Issue | State | Commit | Evidence / remaining verification |
 |---|---|---|---|
-| #45 workspace failure | DIAGNOSTICS/FALLBACK FIXED; ORIGINAL INCIDENT BLOCKED | issue commit in branch history | Persistent bounded journal, safe error boundary, helper-state render regressions; 2,463 frontend tests and TypeScript checking pass. Original installed exception remains uncaptured. |
-| #46 first connection | PENDING | — | Trace the first failing inspection predicate; no blind retry or timeout increase. |
+| #45 workspace failure | DIAGNOSTICS/FALLBACK FIXED; ORIGINAL INCIDENT BLOCKED | `0278652e` | Persistent bounded journal, safe error boundary, helper-state render regressions; 2,463 frontend tests and TypeScript checking pass. Original installed exception remains uncaptured. |
+| #46 first connection | STEP DIAGNOSTICS ADDED; ORIGINAL INCIDENT BLOCKED | issue commit in branch history | Two diagnostic tests pass; whole-source check pending. No failing native predicate or first-launch race is proven. |
 | #17 Git timeout | PENDING | — | Preserve the original 120-second bound; diagnose calls/driver phases. |
 | #65 interruption integrity | PENDING | — | Synthetic project fixtures only; installed GUI termination remains an external gate. |
 | #66 performance/memory | PENDING | — | Reproducible test-environment measurements; physical Mac gates separated. |
@@ -66,3 +66,27 @@ upgrade implementation was changed.
 Remaining #45 gate: obtain a diagnostic from the failing installed workspace
 or reproduce it in an authorized test environment. The retained observations
 say the raw exception is unknown. No current synthetic render reproduces it.
+
+## #46 investigation
+
+The retained first-connection reason maps to `AdmissionFailure::Native` in
+`installed_runtime_macos.rs`, returned during the original passive capabilities
+inspection. It covers native filesystem/ACL/signature operations, allocation,
+manifest reads and decoding. The old evidence contains no exact failing native
+predicate. A later successful reload alone does not prove a race or authorize
+weakening those predicates.
+
+Each new inspection book now retains a fixed diagnostic phase. On an inspection
+failure it emits one fixed step code (admission, record reservation, protected
+application, runtime root, manifest open/read/decode, inventory, payload walk or
+final validation). No path, native exception text, request or credential enters
+the diagnostic. A closed output sink preserves the exact original failure and
+introduces no retry. Two isolated Rust tests cover distinct bounded codes and
+failure identity with an unavailable diagnostic sink. The full headless source
+check is also queued under the local compiler cap; its result will be recorded
+before delivery.
+
+Remaining #46 gate: a trace from the actual first-launch failure, in an authorized
+test installation or the existing app once it contains these diagnostics. No
+installed app was changed, and no speculative retry or deadline increase was
+implemented. Helper registration/lifecycle code remains owned by #47–#49.

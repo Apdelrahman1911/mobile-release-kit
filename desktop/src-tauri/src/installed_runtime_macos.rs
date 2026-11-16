@@ -34,6 +34,8 @@ pub(crate) const LOCAL_EXECUTE_ORIGINAL_FDS:usize=MAC_RUNTIME_FDS+android_tools:
 
 #[path = "macos_runtime_budget.rs"]
 mod budget;
+#[path = "runtime_inspection_phase.rs"]
+mod inspection_phase;
 const MAC_RUNTIME_FDS:usize=budget::LIVE_FDS;
 pub(crate) use android_tools::AndroidToolchainSlots;
 #[cfg(not(feature = "macos-android-registration-helper"))]
@@ -680,7 +682,7 @@ fn push_worker_name(selection:&VerifiedRuntime)->&'static str {
     "git_push_bootstrap.py"
 }
 struct Record { state: State, fd: Option<OwnedFd>, parent: Option<usize>, name: String, identity: Option<Identity>, android_flags: Option<u32> }
-struct Book { upload_key_inspection:bool, initialization_agent_inspection:bool,workflow_edit_agent_inspection:bool, records: Vec<Record>, started: bool, inspected: bool, prepared: bool, unknown: bool, closed: bool,
+struct Book { inspection_phase: inspection_phase::Phase, upload_key_inspection:bool, initialization_agent_inspection:bool,workflow_edit_agent_inspection:bool, records: Vec<Record>, started: bool, inspected: bool, prepared: bool, unknown: bool, closed: bool,
     // Three fixed installed bundle roots only; no per-payload allocation.
     // Capturing opaque metadata never substitutes for record/signature admission.
     bundle_metadata: [Option<(Identity,crate::macos_existing_app_metadata::SnapshotData)>;3],
@@ -728,7 +730,7 @@ fn metadata(s: &FileStat, directory: bool) -> Result<Identity> {
     Ok(Identity::of(s))
 }
 impl Book {
-    fn new() -> Self { Self { upload_key_inspection:false, initialization_agent_inspection:false,workflow_edit_agent_inspection:false, records: Vec::new(), started: false, inspected: false, prepared: false, unknown: false, closed: false,
+    fn new() -> Self { Self { inspection_phase: inspection_phase::Phase::default(), upload_key_inspection:false, initialization_agent_inspection:false,workflow_edit_agent_inspection:false, records: Vec::new(), started: false, inspected: false, prepared: false, unknown: false, closed: false,
         history_nomination: None, history_provider: None, tool_ca_required:false, tool_ca:None,fetch_helper_required:false,fetch_helper:None,push_helper_required:false,push_helper:None,
         store: None, bundle_metadata: [None;3],
         #[cfg(not(feature = "macos-android-registration-helper"))]
@@ -1287,21 +1289,28 @@ impl Book {
     }
     fn inspect(&mut self, selection: &VerifiedRuntime, end: Instant, stop: &watch::Receiver<bool>) -> Result<()> {
         if !self.inspection_ready(){return Err(AdmissionFailure::AlreadyUsed);}
+        self.inspection_phase = inspection_phase::Phase::RecordReservation;
         self.records.try_reserve_exact(crate::macos_install_record::RUNTIME_RECORD_LIMIT).map_err(native_error)?;
         if (self.upload_key_inspection||self.initialization_agent_inspection||self.workflow_edit_agent_inspection)&&self.records.capacity()>crate::macos_install_record::RUNTIME_RECORD_LIMIT{return Err(AdmissionFailure::Bounds);}
+        self.inspection_phase = inspection_phase::Phase::ProtectedApplication;
         self.protected_app_once(end, stop)?;
+        self.inspection_phase = inspection_phase::Phase::RuntimeRoot;
         if selection.cwd != runtime_root() { return Err(AdmissionFailure::Inventory); }
         let root = self.chain(&selection.cwd, end, stop)?;
         let id = self.records[root].identity.ok_or(AdmissionFailure::Identity)?;
         if id.gid != 0 || id.mode & 0o7777 != 0o555 { return Err(AdmissionFailure::Ownership); }
         native::no_xattrs(self.fd(root)?.as_fd()).map_err(native_error)?;
+        self.inspection_phase = inspection_phase::Phase::ManifestOpen;
         let manifest = self.open(Some(root), "manifest.json", false, end, stop)?;
         let id = self.records[manifest].identity.ok_or(AdmissionFailure::Identity)?;
         if id.gid != 0 || id.mode & 0o7777 != 0o444 { return Err(AdmissionFailure::Ownership); }
         let size = u64::try_from(self.records[manifest].identity.ok_or(AdmissionFailure::Identity)?.size).map_err(native_error)?;
+        self.inspection_phase = inspection_phase::Phase::ManifestRead;
         let (hash, bytes) = self.read(manifest, size, true, end, stop)?;
         if Some(hash.as_str()) != option_env!("MRK_BUNDLED_RUNTIME_MANIFEST_SHA256") { return Err(AdmissionFailure::Inventory); }
+        self.inspection_phase = inspection_phase::Phase::ManifestDecode;
         let manifest: Manifest = serde_json::from_value(crate::protocol::strict_macos_runtime_manifest_json(&bytes).map_err(native_error)?).map_err(native_error)?;
+        self.inspection_phase = inspection_phase::Phase::Inventory;
         if manifest.schema_version != 1 || manifest.protocol != PROTOCOL || manifest.core_version != runtime::CORE_VERSION
             || !crate::macos_build_profile::MacBuildTarget::matches_compiled(&manifest.target) || manifest.protocol_sha256 != PROTOCOL_SHA
             || option_env!("MRK_BUNDLED_PROTOCOL_SHA256") != Some(PROTOCOL_SHA)
@@ -1348,7 +1357,9 @@ impl Book {
         for name in files.keys().chain(directories.iter()) {
             if !folded.insert(name.to_ascii_lowercase()) { return Err(AdmissionFailure::Inventory); }
         }
+        self.inspection_phase = inspection_phase::Phase::PayloadWalk;
         let mut observed = BTreeSet::new(); self.walk(root, "", &files, &directories, &mut observed, selection, 0, end, stop)?;
+        self.inspection_phase = inspection_phase::Phase::FinalValidation;
         if observed.len() != files.len() + directories.len() { return Err(AdmissionFailure::Inventory); }
         if self.store.as_ref().is_some_and(|store| !store.complete()) { return Err(AdmissionFailure::Inventory); }
         if self.fetch_helper_required && (self.fetch_helper.is_none() || self.tool_ca.is_none()){return Err(AdmissionFailure::Inventory)}
@@ -1507,7 +1518,11 @@ macro_rules! slots {
                 self.selection = Some(profile.selection()?);
                 let selection = self.selection.as_ref().ok_or_else(BridgeError::cleanup_unknown)?;
                 let book = self.inspection.as_mut().ok_or_else(BridgeError::cleanup_unknown)?;
-                book.inspect(selection, end, stop).map_err(runtime_inspection_error)?;
+                book.inspect(selection, end, stop).map_err(|failure| {
+                    // Fixed step only. Diagnostics cannot change failure/finality;
+                    // an unavailable sink is ignored and no retry is introduced.
+                    runtime_inspection_error(book.inspection_phase.report(failure, &mut std::io::stderr()))
+                })?;
                 Ok(VerifiedRuntime { python: selection.python.clone(), bootstrap: selection.bootstrap.clone(), core: selection.core.clone(), cwd: selection.cwd.clone() })
             }
             pub(crate) fn transfer_once(&mut self) -> Result<()> {
