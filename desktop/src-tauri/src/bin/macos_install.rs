@@ -15288,6 +15288,22 @@ mod installer {
                 u8::from(originals),u8::from(native),u8::from(timely),u8::from(unknown));
             (line.len() <= 256).then_some(line)
         }
+        // Failure-only diagnostic DATA for the shape the refusal line above
+        // withholds (an original, the deadline or a native producer is not
+        // settled). It carries closed flags and the static reason hash only,
+        // never a refusal claim, a path or a receipt, so a nonzero completed
+        // exit is never silent in the Installer log.
+        fn completed_unsettled_line_data(reason: Option<&'static str>, exit: i32, writer_exit: Option<i32>,
+            flags: [bool;8]) -> Option<String> {
+            let [originals,native,timely,unknown,native_settled,published,exported,command]=flags;
+            if !matches!(exit,1|20) || (originals && timely && native_settled) { return None; }
+            let digest = hash(reason.unwrap_or("completed-original-finality-refused").as_bytes());
+            let writer = match writer_exit { Some(0)=>"0",Some(1)=>"1",Some(20)=>"20",Some(_)=>"other",None=>"none" };
+            let line = format!("MRK_MACOS_INSTALL_COMPLETED_UNSETTLED=reasonSha256={digest};exit={exit};writer={writer};originals={};native={};timely={};unknown={};nativeSettled={};published={};exported={};command={}\n",
+                u8::from(originals),u8::from(native),u8::from(timely),u8::from(unknown),u8::from(native_settled),
+                u8::from(published),u8::from(exported),u8::from(command));
+            (line.len() <= 320).then_some(line)
+        }
         #[cfg(test)]
         pub(super) fn completed_failure_diagnostic_data_checks() {
             // Pure diagnostic formatting only: no native/Installer/FD execution.
@@ -15331,7 +15347,19 @@ mod installer {
             for invalid in [0,2,-1,101] {assert!(completed_failure_line_data(None,invalid,true,true,true,false,true).is_none());}
             for (originals,timely,settled) in [(false,true,true),(true,false,true),(true,true,false)] {
                 assert!(completed_failure_line_data(None,1,originals,true,timely,false,settled).is_none());
+                // Exactly the withheld shapes gain the closed unsettled line.
+                let line=completed_unsettled_line_data(Some("worker-self-image"),20,Some(20),
+                    [originals,true,timely,false,settled,true,false,true]).unwrap();
+                assert!(line.starts_with(&format!("MRK_MACOS_INSTALL_COMPLETED_UNSETTLED=reasonSha256={};exit=20;writer=20;",hash(b"worker-self-image"))));
+                assert!(line.contains(&format!("originals={};",u8::from(originals))) && line.contains(&format!("timely={};",u8::from(timely)))
+                    && line.contains(&format!("nativeSettled={};",u8::from(settled))) && line.ends_with("published=1;exported=0;command=1\n"));
+                assert!(line.is_ascii() && line.len()<=320 && !line.contains("worker-self-image"));
             }
+            assert!(completed_unsettled_line_data(None,1,None,[true,true,true,false,true,false,false,false]).is_none());
+            for invalid in [0,2,-1,101] {assert!(completed_unsettled_line_data(None,invalid,Some(7),[false;8]).is_none());}
+            let longest=completed_unsettled_line_data(Some("/private/example-not-an-output"),20,Some(7),[false;8]).unwrap();
+            assert!(longest.contains(";writer=other;") && !longest.contains("/private/") && longest.len()<=320);
+            assert!(completed_unsettled_line_data(None,1,None,[false;8]).unwrap().contains(";writer=none;"));
         }
         fn completed_exit_data(writer_exit: Option<i32>, published: bool, exported: bool,
             originals: bool, native: bool, command_kernel_retained: bool, timely: bool,
@@ -22465,6 +22493,11 @@ exec ./mrk-macos-remove --fixture-supervise "$1"
                 completed_reason_data(parent.errors.first().copied(),writer_reason),exit,
                 originals,native,timely,unknown,native_settled) {
                 // One bounded best-effort write; no retry, panic, or success-path output.
+                let _ = std::io::Write::write(&mut std::io::stderr().lock(),line.as_bytes());
+            } else if let Some(line) = completed_unsettled_line_data(
+                completed_reason_data(parent.errors.first().copied(),writer_reason),exit,writer_exit,
+                [originals,native,timely,unknown,native_settled,published,exported,
+                    parent.command_gate_kernel_retained && parent.command.is_some()]) {
                 let _ = std::io::Write::write(&mut std::io::stderr().lock(),line.as_bytes());
             }
             exit
