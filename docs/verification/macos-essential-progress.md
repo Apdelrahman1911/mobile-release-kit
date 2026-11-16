@@ -114,6 +114,17 @@ test installation or the existing app once it contains these diagnostics. No
 installed app was changed, and no speculative retry or deadline increase was
 implemented. Helper registration/lifecycle code remains owned by #47–#49.
 
+Reopened #46 followed the complete native inspection book. Its protected
+application/runtime filesystem and manifest proof does not call the background
+helper. Adding a helper-ready wait would therefore be speculative. The fixed
+payload check also compares `current_exe()` with the protected installed
+executable; an independently compiled test program cannot legitimately qualify
+itself as that original installed image. No payload/path/signature predicate was
+bypassed. The retained first-launch record still has no exact native errno or
+failed predicate. OS provenance/metadata overlap, allocation and interrupted
+native IO remain hypotheses, not established causes. Neither arbitrary retries
+nor a timeout change were introduced. Original #46 remains unresolved.
+
 ## #17 investigation
 
 The historical `GitCli(Checked)` timeout still has no original call return or
