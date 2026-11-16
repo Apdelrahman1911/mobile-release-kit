@@ -6,9 +6,35 @@ see [preparation status](README.md#preparation-status).
 
 ## Reporting a vulnerability
 
-Do not open a public issue containing a secret, signing asset, private Store response, tester identity, reviewer contact, or exploitable release-pipeline detail. Use GitHub's private security-advisory reporting for this repository. If private reporting is unavailable, contact the repository owner through a private channel listed on the GitHub account and include only enough non-secret detail to establish contact.
+Report security vulnerabilities privately through GitHub Private Vulnerability Reporting:
 
-No maintainer will ask for a keystore, P12, provisioning profile, P8 key, password, demo credential, or service-account key to reproduce an issue. Use sanitized fixtures.
+1. Open this repository's **Security** tab.
+2. Select **Report a vulnerability**.
+
+Direct link: <https://github.com/Apdelrahman1911/mobile-release-kit/security/advisories/new>
+
+Do not open a public issue, pull request or discussion for a vulnerability. Public
+issues are for ordinary bugs and questions; see [SUPPORT.md](SUPPORT.md).
+
+Please include:
+
+- the affected component: Mobile Release Kit Desktop, the CLI toolkit, or the
+  shared workflows;
+- the version (desktop app version, CLI version, or the full commit SHA you pinned);
+- your operating system and how you installed the app or toolkit;
+- the steps to reproduce, what you expected and what happened;
+- the impact you believe the issue has.
+
+Never include secrets in a report, even a private one. This means no passwords,
+tokens, API keys, keystores, P12 files, provisioning profiles, P8 keys,
+service-account JSON keys, demo credentials, private Store responses, tester
+identities or reviewer contacts. Replace personal paths, user names and machine
+names with placeholders. No maintainer will ask for any of these to reproduce an
+issue; use sanitized fixtures instead.
+
+If private reporting is unavailable, contact the repository owner through a private
+channel listed on the GitHub account and include only enough non-secret detail to
+establish contact.
 
 ## Security boundary
 
@@ -289,4 +315,13 @@ profile decoder's finality or replace the outer build-input owner's separate set
 
 ## Supported versions
 
-Until the first stable major release, only the latest `0.x` release receives security fixes. After `v1.0.0`, the latest minor release of the current major is supported. Consumers remain pinned and must upgrade deliberately; security advisories will name affected versions and safe commits.
+Security fixes are made only for:
+
+| Component | Supported version |
+| --- | --- |
+| Mobile Release Kit Desktop | the latest published desktop release |
+| CLI toolkit and shared workflows | the latest published CLI toolkit release |
+
+Older releases do not receive fixes; upgrade to the latest release first and check
+whether the problem remains. Consumers stay pinned and must upgrade deliberately;
+security advisories name the affected versions and the fixed release or commit.
