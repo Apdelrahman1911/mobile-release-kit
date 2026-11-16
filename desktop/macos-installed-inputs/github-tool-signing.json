@@ -21,7 +21,18 @@
           "state": "configured"
         },
         "signed": {
-          "state": "unconfigured"
+          "state": "configured",
+          "buildSha256": "72fb75e58710d7d6998b07a0f4cd7384aa2205a541bee5e783c54503242b1906",
+          "signingSourceCommit": "4f3cdb3d8f810018c6f372c122a3cb83c0338c77",
+          "signedSha256": "4e9ceeb4dc32d5eceee93184a607b5f4db8ae16206e0a07772a659310c21895d",
+          "signedBytes": 37272832,
+          "receiptSha256": "9b1c2093f49bb113485a15b5b5ff373c05205e30755440dfb0b9c4425a73ed9d",
+          "runId": "43910187343",
+          "runAttempt": "1",
+          "artifactId": "14247431467",
+          "producerProfileSha256": "2f42e8e333ceb5dd96089c3dd7c38fbe4aaa1c79b6ae7369157c06179f0c08f2",
+          "serviceProfileSha256": "7f1a96c30d75d915e84f1a45095170ba6e4b2870203efda199515c7260e98663",
+          "entitlementsSha256": "0132721aff0bd52a1201ded4ea0234f622715d418d78b05917a191d8fe569e85"
         }
       },
       "x86_64-apple-darwin": {
@@ -43,7 +54,18 @@
           "state": "configured"
         },
         "signed": {
-          "state": "unconfigured"
+          "state": "configured",
+          "buildSha256": "2815867a0c5bb243867ab379dc5c723a261cbcce51fa53d6d9cdfa93d51c4a93",
+          "signingSourceCommit": "4f3cdb3d8f810018c6f372c122a3cb83c0338c77",
+          "signedSha256": "3657571adb915d65728c8df0cb6c1d71c3928d6a761192c7f369c05d65477fa0",
+          "signedBytes": 40220064,
+          "receiptSha256": "6ac226f24e7026ef76e183e6b7c42a10594c1fcd4efabc068e8d786040f81200",
+          "runId": "43910187343",
+          "runAttempt": "1",
+          "artifactId": "14247865590",
+          "producerProfileSha256": "2f42e8e333ceb5dd96089c3dd7c38fbe4aaa1c79b6ae7369157c06179f0c08f2",
+          "serviceProfileSha256": "7f1a96c30d75d915e84f1a45095170ba6e4b2870203efda199515c7260e98663",
+          "entitlementsSha256": "0132721aff0bd52a1201ded4ea0234f622715d418d78b05917a191d8fe569e85"
         }
       }
     },
@@ -62,7 +84,18 @@
           "state": "configured"
         },
         "signed": {
-          "state": "unconfigured"
+          "state": "configured",
+          "buildSha256": "193b59b294e849e584c23ef7aca25a0f207dbdfd8110d4e7af5374db513079dc",
+          "signingSourceCommit": "4f3cdb3d8f810018c6f372c122a3cb83c0338c77",
+          "signedSha256": "38ac874503f626c1040d2e2368c6a4423b76f7b406c40be21d600a2c1859b607",
+          "signedBytes": 570544,
+          "receiptSha256": "c853a7a342695af08330b99cc03ce4b09cc17ceda86af6e181c6494afc92d7ff",
+          "runId": "43910187343",
+          "runAttempt": "1",
+          "artifactId": "14248535358",
+          "producerProfileSha256": "2f42e8e333ceb5dd96089c3dd7c38fbe4aaa1c79b6ae7369157c06179f0c08f2",
+          "serviceProfileSha256": "7f1a96c30d75d915e84f1a45095170ba6e4b2870203efda199515c7260e98663",
+          "entitlementsSha256": "0132721aff0bd52a1201ded4ea0234f622715d418d78b05917a191d8fe569e85"
         }
       },
       "x86_64-apple-darwin": {
