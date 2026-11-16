@@ -38,10 +38,14 @@ The status renderer is shared with the compiled data-only regression tests.
 It distinguishes live Desktop status from foreground cached-history status and
 keeps the separate-execution-permission caveat.
 
-The retained old acceptance JSON confirms original return 3 but does not retain
-an error payload. The issue's prose reason is therefore not treated as an exact
-literal from the current source. Current source policy establishes the intended
-gate; no default read access or automatic Allow was introduced.
+The retained raw stdout confirms the original `unavailable` response and message
+"Enable Desktop agent read access, or explicitly start mrk serve-history for
+cached reads only." The issue's prose reason was a paraphrase. The trace reaches
+the Rust client/store/IPC path; Python is not the producer of that refusal.
+Current source policy establishes the intended gate; no default read access or
+automatic Allow was introduced. The shared unavailable code can also represent
+path or transport admission failure, so the response alone does not prove which
+endpoint predicate refused. No enabled installed session is inferred from it.
 
 ## Verification and remaining installed gate
 
