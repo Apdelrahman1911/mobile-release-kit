@@ -30,6 +30,20 @@ ranges include 1.51.6–1.51.x and >=1.53.3. A root manifest pin change would al
 require coordinated helper/image lock updates and runtime/finality regression
 checks. The issue is recorded rather than creating inconsistent locked graphs.
 
+Reopened verification confirmed that the helper image manifests depend on the
+app crate by path. A trial app-only exact pin update to 1.51.6 (and its required
+tokio-macros 2.7.2) removes the Tokio notice from the app audit, but both untouched
+helper image roots then fail `cargo metadata --locked` because their independent
+locks still contain 1.48.0. The trial was withdrawn; the root manifest/lock are
+restored to the committed versions, and no helper file was edited. The exact
+two-file patch and audit are retained privately for a coordinated lock refresh.
+The trial's own source-check supervisor was explicitly stopped and joined after
+670.168s while compiling the unchanged catalogue; return -9 is **not a pass**.
+Its updated Tokio dependency had checked, but the full app had not. Existing
+full current-lock source-check receipts apply to the restored committed graph.
+Do not merge the saved trial without updating and verifying both owned image
+locks together. This is a real ownership/dependency gate, not a helper-free fix.
+
 [Rustix RUSTSEC-2026-0486](https://rustsec.org/advisories/RUSTSEC-2026-0486.html)
 concerns zero-length xattr buffers being marked initialized, patched in 1.1.6.
 The macOS ARM tree with `desktop-shell,custom-protocol` reports no dependency on
@@ -93,6 +107,9 @@ Unmaintained dependencies and the GTK notice remain in the all-target lock scan.
   was refused by Cargo because dependency dev tests are outside the workspace;
   it is not reported as a passing test. Full current-lock and installed-cli source
   checks subsequently pass with Rust 1.98.1, one job, peak RSS below 3 GiB.
+- Reopened credential regressions: 91 tests, 90 pass and one distinct case-alias
+  skip on APFS; all 67 focused frontend credential tests pass. These checks do
+  not prove a previously observed native security exploit was reproduced.
 
 ## Additional Store boundary findings (#64)
 
