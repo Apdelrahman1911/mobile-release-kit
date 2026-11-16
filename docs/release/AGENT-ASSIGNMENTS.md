@@ -18,7 +18,7 @@ Difficulty labels `difficulty:1`–`difficulty:5`, and exactly one primary `cate
 
 | Total | Done | Ready | Blocked | In progress | Review |
 |---|---|---|---|---|---|
-| 72 | 5 | 7 | 60 | 0 | 0 |
+| 72 | 5 | 6 | 61 | 0 | 0 |
 
 ### Difficulty distribution
 
@@ -134,7 +134,7 @@ _Effort = implementation agent-days only. CI time, external waiting (certificate
 | #76 | Linux: package for distributions outside the Debian and Fedora families (format chosen by research) | `blocked` | 3 | Linux Native & Packaging | Linux Packaging Agent | 5 agent-days (low confidence) | #74 | — | — |
 | #77 | Linux: widen Debian-family support (Ubuntu and Debian versions) | `blocked` | 3 | Linux Native & Packaging | Linux Packaging Agent | 6 agent-days (medium confidence) | #40, #74, #89 | — | — |
 | #78 | Linux: enable local Android build and signing in the installed app | `blocked` | 4 | Android / iOS Tooling | Linux Agent | 8 agent-days (medium confidence) | #26, #40, #43 | Yes | — |
-| #79 | Direct Google Play and App Store Connect operations from the desktop app on every capable platform | `ready` | 5 | Android / iOS Tooling | Store Agent | 20 agent-days (low confidence) | #90 | Yes | — |
+| #79 | Direct Google Play and App Store Connect operations from the desktop app on every capable platform | `blocked` | 5 | Android / iOS Tooling | Store Agent | 20 agent-days (low confidence) | #26, #37, #43, #90 | Yes | — |
 | #80 | Windows and Linux: ship and verify the installed `mrk` CLI | `blocked` | 3 | Cross-Platform Architecture | Windows Packaging Agent | 5 agent-days (medium confidence) | #26, #31, #44 | — | — |
 | #81 | Windows: user-controlled elevated (administrator) mode | `blocked` | 5 | Security & Cryptography | Windows Agent | 8 agent-days (low confidence) | #26, #35 | Yes | — |
 | #82 | App permission configuration: user-configurable capability restrictions | `blocked` | 4 | Cross-Platform Architecture | Cross-Platform Agent | 8 agent-days (medium confidence) | #26 | Yes | — |
@@ -149,7 +149,7 @@ _Effort = implementation agent-days only. CI time, external waiting (certificate
 ### Dependency-aware execution plan
 
 1. **Ready now (implementation/research):** #26, #72, #74.
-2. **Blocked directly by #26:** #17, #27, #29, #30, #31, #36, #40, #44, #45, #46, #47, #48, #50, #51, #53, #71, #73, #78, #80, #81, #82, #83, #87, #89, #90.
+2. **Blocked directly by #26:** #17, #27, #29, #30, #31, #36, #40, #44, #45, #46, #47, #48, #50, #51, #53, #71, #73, #78, #79, #80, #81, #82, #83, #87, #89, #90.
 3. **Can run simultaneously:** the agent streams in the batches below. They own separate files; shared files (`runtime.rs`, `App.tsx`, workflows) follow each issue's ownership rules: Windows edits stay in Windows `cfg` blocks, Linux in Linux blocks, workflow edits are serialized per file, and `App.tsx` edits are sequenced #90 → #82 → #28.
 4. **Strictly sequential:** #26 → everything in Phase 2; #31 → #33 → #35 → #36 → #37 → #38/#39; #40 + #89 → #43 → #42/#78; #74 → #75/#76/#77; #48 → #49 → #51; #90 → #79 and #82; all Phase 2 → #28 → #57 → Phase 4 → #67 → #68 → #69.
 5. **Critical path:** #26 → #31 → #33 → #35 → #36 → #37 → #38/#39 (+ #71, #79) → #28 → #30 → #57 → Phase 4 → #67 → #68 → #69. External gates before publication: #22 (Windows signing, deferred) and #52 (signing environment, deferred).
@@ -872,12 +872,12 @@ _Effort = implementation agent-days only. CI time, external waiting (certificate
 
 #### #79 — Direct Google Play and App Store Connect operations from the desktop app on every capable platform
 
-- Status: `ready` · Difficulty 5 · Android / iOS Tooling (secondary: Cross-Platform Architecture, Security & Cryptography)
+- Status: `blocked` · Difficulty 5 · Android / iOS Tooling (secondary: Cross-Platform Architecture, Security & Cryptography)
 - Agent: **Store Agent** · Effort: 20 agent-days (low confidence) · Waiting: Real accounts in #64
 - Skills: Play Developer API, ASC API/JWT, fastlane, Rust/Python
 - Risks: New Build Uploads API; Ruby bundling; production-publish safety
 - Files/modules: `local_store_*_owner.rs`, Store runtime, Python core
-- Blockers (all): #90; open: #90 · Parallel: No — critical path, sequential
+- Blockers (all): #26, #37, #43, #90; open: #26, #37, #43, #90 · Parallel: No — critical path, sequential
 - Validation: Play upload on 3 OS; ASC ops; confirmation gates; no production publish without explicit confirm
 - Independent review mandatory: yes · Owner involvement: no
 
