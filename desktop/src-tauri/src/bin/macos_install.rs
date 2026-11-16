@@ -250,6 +250,35 @@ mod installer {
         safe_macos_install_path(path) && depth==path.bytes().filter(|b|*b==b'/').count()
             && depth<=if directory{PAYLOAD_DIRECTORY_DEPTH_LIMIT}else{PAYLOAD_DIRECTORY_DEPTH_LIMIT+1}
     }
+    // Maintenance admission's live-descriptor forecast above the originals
+    // already held (#49). The payload copier's recursive source+target chain
+    // (two per depth level) is fully forward-closed before stage_payload
+    // returns, and the Applications launcher is staged/published/retired only
+    // after that (publish_before_state/finish_after_state). The launcher peak
+    // therefore overlaps only the four retained payload roots (stage, app,
+    // runtime, release) plus the unchanged non-recursive core slack, never
+    // the recursive chain. Summing both peaks refused every enrolled-launcher
+    // Update holding >29 originals (observed: 31 held, forecast 98 > 96).
+    // Launcher removal keeps the previous summed forecast unchanged.
+    const MAINTENANCE_COPY_CHAIN_LIVE:u64=2*PAYLOAD_DIRECTORY_DEPTH_LIMIT as u64;
+    const MAINTENANCE_CORE_LIVE:u64=12+1;
+    const MAINTENANCE_RETAINED_ROOTS_LIVE:u64=4;
+    const MAINTENANCE_LAUNCHER_LIVE:u64=20;
+    fn maintenance_live_data(held:u64,removal_live:u64,launcher:bool,launcher_removal:bool,
+        launcher_phase_live:u64)->Option<u64> {
+        if launcher && launcher_removal {return None;}
+        let transient=if launcher {
+            MAINTENANCE_COPY_CHAIN_LIVE.max(MAINTENANCE_RETAINED_ROOTS_LIVE.checked_add(MAINTENANCE_LAUNCHER_LIVE)?
+                .checked_add(launcher_phase_live)?)
+        } else if launcher_removal {
+            if launcher_phase_live!=0 {return None;}
+            MAINTENANCE_COPY_CHAIN_LIVE.checked_add(MAINTENANCE_LAUNCHER_LIVE)?
+        } else {
+            if launcher_phase_live!=0 {return None;}
+            MAINTENANCE_COPY_CHAIN_LIVE
+        };
+        held.checked_add(MAINTENANCE_CORE_LIVE)?.checked_add(transient)?.checked_add(removal_live)
+    }
     // Audits use inventory-absolute depth, unlike the separate launcher copier's
     // local recursion depth. This fixed subtree begins three levels below app.
     fn launcher_inventory_depth_data() -> usize {
@@ -12481,9 +12510,10 @@ mod installer {
                 .and_then(|n|n.checked_add(restore_originals as u64))
                 .and_then(|n|n.checked_add((conservation.as_ref().map_or(0,|v|v.future_originals()) as u64).checked_mul(4)?))
                 .ok_or("maintenance-original-bound")?;
-            let live = book.originals.iter().filter(|r| r.fd.is_some()).count() as u64 + 2 * 16 + 12 + 1
-                + book.removal_live_reserved as u64 + if launcher.is_some() || launcher_removal.is_some() {20} else {0}
-                + if creates_launcher_phase {applications::PHASE_LIVE_QUOTE} else {0};
+            let live = maintenance_live_data(book.originals.iter().filter(|r| r.fd.is_some()).count() as u64,
+                book.removal_live_reserved as u64,launcher.is_some(),launcher_removal.is_some(),
+                if creates_launcher_phase {applications::PHASE_LIVE_QUOTE} else {0})
+                .ok_or("maintenance-budget-live-fds")?;
             let control_bound=if action==ActionData::FreshInstall && conservation.is_some()
                 && book.fresh_preparation_phase==FreshPreparationPhase::HandlesRetired {
                 check(history.is_none() && !book.worker_stderr_is_gate,"fresh-preparation-storage-phase")?;
@@ -23916,6 +23946,40 @@ exec ./mrk-macos-remove --fixture-supervise "$1"
             book.removal_control_reserved=other;
             maintenance::reserve_removal_original_storage(&mut book,120_000).unwrap();
             book
+        }
+        #[test]
+        fn maintenance_live_forecast_overlaps_launcher_only_with_retained_roots() {
+            use super::*;
+            let phase=applications::PHASE_LIVE_QUOTE;
+            // No launcher: unchanged historical forecast held+2*16+12+1.
+            assert_eq!(maintenance_live_data(10,0,false,false,0),Some(10+2*16+12+1));
+            assert_eq!(maintenance_live_data(10,3,false,false,0),Some(10+2*16+12+1+3));
+            // Launcher removal: unchanged historical summed forecast.
+            assert_eq!(maintenance_live_data(10,3,false,true,0),Some(10+2*16+12+1+20+3));
+            // Hosted #49 evidence: an enrolled-launcher Update holding 31
+            // originals was refused at 98. The launcher peak (4 retained
+            // roots+20+phase) lies within the closed recursive copy chain.
+            let update=maintenance_live_data(31,0,true,false,phase).unwrap();
+            assert_eq!(update,31+12+1+2*16);
+            let one=transaction::GenerationCostData{files:1,bytes:1};
+            assert!(transaction::BudgetData::checked_with_reason_data(&[one],1,0,0,0,update).is_ok());
+            assert_eq!(31+2*16+12+1+20+phase,98); // the previous refused forecast
+            // The launcher never shrinks the forecast below the copy chain and
+            // is charged in full when it would exceed it.
+            assert_eq!(maintenance_live_data(0,0,true,false,0),maintenance_live_data(0,0,false,false,0));
+            assert!(MAINTENANCE_RETAINED_ROOTS_LIVE+MAINTENANCE_LAUNCHER_LIVE+phase<=MAINTENANCE_COPY_CHAIN_LIVE);
+            // The 96 cap itself is unchanged: 51 held still admits, 52 refuses.
+            let edge=maintenance_live_data(51,0,true,false,phase).unwrap();
+            assert_eq!(edge,96);
+            assert!(transaction::BudgetData::checked_with_reason_data(&[one],1,0,0,0,edge).is_ok());
+            assert_eq!(transaction::BudgetData::checked_with_reason_data(&[one],1,0,0,0,
+                maintenance_live_data(52,0,true,false,phase).unwrap()).unwrap_err().reason_data(),"maintenance-budget-live-fds");
+            // Impossible shapes and overflow refuse instead of under-charging.
+            assert_eq!(maintenance_live_data(0,0,true,true,0),None);
+            assert_eq!(maintenance_live_data(0,0,false,false,phase),None);
+            assert_eq!(maintenance_live_data(0,0,false,true,phase),None);
+            assert_eq!(maintenance_live_data(u64::MAX,0,true,false,phase),None);
+            assert_eq!(maintenance_live_data(0,u64::MAX,false,false,0),None);
         }
         #[test]
         fn fresh_memory_retirement_preserves_records_and_capacity_and_real_growth_boundaries() {
