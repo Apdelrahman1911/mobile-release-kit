@@ -545,10 +545,18 @@ int mrk_android_maintenance_watch(void *raw) {
 done:return client_leave(c,ready);
 }
 static int maintenance_pipe_same(mrk_android_client *c,int fd,const struct stat *before) {
+    (void)c;
+    // XNU pipe_stat (bsd/kern/sys_pipe.c) fills st_uid/st_gid from the CALLING
+    // credential (kauth_getuid/kauth_getgid), not from the root helper that
+    // created the pipe. A uid-0 owner predicate therefore can never hold in this
+    // unprivileged app and refused every genuine tail (EPROTO at Receive, #47).
+    // Provenance is the authenticated helper connection; this predicate requires
+    // the documented caller projection plus the unchanged original identity.
     struct stat now;const int flags=fcntl(fd,F_GETFL);
     return fd>=3 && flags>=0 && (flags&O_ACCMODE)==O_RDONLY && (flags&O_NONBLOCK)
         && !(flags&(O_APPEND|O_ASYNC)) && fcntl(fd,F_GETFD)==FD_CLOEXEC && !fstat(fd,&now)
-        && S_ISFIFO(now.st_mode) && now.st_uid==0 && now.st_dev==before->st_dev
+        && S_ISFIFO(now.st_mode) && now.st_uid==geteuid() && now.st_gid==getegid()
+        && now.st_dev==before->st_dev
         && now.st_ino==before->st_ino && now.st_mode==before->st_mode
         && now.st_uid==before->st_uid && now.st_gid==before->st_gid
         && now.st_nlink==before->st_nlink && now.st_flags==before->st_flags;
