@@ -8,6 +8,12 @@ publication, release/workflow changes, installed-app modifications and real-user
 project interruption tests are excluded. Local compiles use one job and a
 3 GiB aggregate compiler RSS cap. Synthetic fixtures and test binaries are allowed.
 
+Current original-issue verdicts, follow-up commits and remaining gates are in
+[the reopened status matrix](macos-essential-reopened-status.md), with numeric
+receipts in [the reopened checks](macos-essential-reopened-checks.json).
+The original #45, #46 and #17 incidents remain unresolved; no claim is made
+that all ten assigned issues are fully resolved and verified.
+
 ## Ownership boundary
 
 The independent `fix/macos-difficulty5` agent owns #47, #48 and #49. This branch

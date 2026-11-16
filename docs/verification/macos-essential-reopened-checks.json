@@ -1,0 +1,219 @@
+{
+  "schemaVersion": 1,
+  "host": {
+    "os": "macOS 27.0",
+    "arch": "arm64",
+    "python": "3.11",
+    "rust": "1.98.1"
+  },
+  "sourceBase": "c52b57a5",
+  "productionSourceUnchangedSince": "2e8f6c1d",
+  "interpretation": "Source/fixture proof; no original installed incident is declared resolved. No signed/account acceptance. Counts overlap across suites; do not sum as unique tests. WK host RSS excludes XPC processes and is not app memory.",
+  "checks": [
+    {
+      "scope": "combined-recovery-identity-version",
+      "tests": 100,
+      "passed": 100,
+      "skipped": 0,
+      "failed": 0,
+      "outputSha256": "2528a34bfcc4aa99f59b07ea3332c4fccb76a66a66d2fba804b2a05793b4064a"
+    },
+    {
+      "scope": "new-crash-recovery-group",
+      "tests": 57,
+      "passed": 57,
+      "skipped": 0,
+      "failed": 0,
+      "outputSha256": "2a31021baf4c5e19e1b153de2fa67b73490bfb2eb3f47f0ec129afa062ad01da"
+    },
+    {
+      "scope": "android-identity-fixture",
+      "tests": 75,
+      "passed": 75,
+      "skipped": 0,
+      "failed": 0,
+      "outputSha256": "1044f0e877b9742b23e49842f7fa12a9f6a58deea9d182dabdf241498e201c26"
+    },
+    {
+      "scope": "ios-identity-fixture",
+      "tests": 75,
+      "passed": 75,
+      "skipped": 0,
+      "failed": 0,
+      "outputSha256": "16500e7fc7a1b362af9de410026491be8ecd0c92ae4f710a4f290035a09c1285"
+    },
+    {
+      "scope": "credential-security",
+      "tests": 91,
+      "passed": 90,
+      "skipped": 1,
+      "failed": 0,
+      "outputSha256": "7a6f344e3591c2027a3c268c3b5edcd7f86ddd371a2daac3d20ce820119b3977"
+    },
+    {
+      "scope": "store-core",
+      "tests": 70,
+      "passed": 69,
+      "skipped": 1,
+      "failed": 0,
+      "outputSha256": "280cd6dcfbaa48e35102382f033045624fc33813a305a9ed4bf25a879cebf857"
+    },
+    {
+      "scope": "store-real-Mac-tool-qualification",
+      "tests": 10,
+      "passed": 9,
+      "skipped": 0,
+      "failed": 1,
+      "outputSha256": "8840cf129ff2ac25781784572a4bca0deb6e11730e27d2a94ee1d76892cae331"
+    },
+    {
+      "scope": "frontend-credentials",
+      "tests": 67,
+      "passed": 67,
+      "failed": 0,
+      "outputSha256": "a92fe32a038021863c75691ce5666f81ee049d1faab10f2d7565ee87bf79a090"
+    },
+    {
+      "scope": "frontend-CLI-access",
+      "tests": 30,
+      "passed": 30,
+      "failed": 0,
+      "outputSha256": "c24bae2455c6f282e6f227950dbbaa062dc093ded2ebe26a5d858da08918db3b"
+    }
+  ],
+  "originalReturns": [
+    {
+      "scope": "CLI-guidance",
+      "originalReturn": 0,
+      "captureFailure": null,
+      "elapsedSeconds": 0.38496787499752827,
+      "stdoutSha256": "57c0f50adbcde032ee1890188f3b40c45fd9b0207cced787c9948c7bbabe5f4a",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "scope": "Android-Gradle",
+      "originalReturn": 0,
+      "captureFailure": null,
+      "elapsedSeconds": 7.038854250014992,
+      "stdoutSha256": "6e7450befa4fb3a281d1c1a338c5dbb5c2267f08ce21b021c697adae64d80c50",
+      "stderrSha256": "8da39de6cb923047d35236ed262a74965faf488cbc82be3b1db8ee3adc1d36b3"
+    },
+    {
+      "scope": "Android-aapt",
+      "originalReturn": 0,
+      "captureFailure": null,
+      "elapsedSeconds": 0.0466339589911513,
+      "stdoutSha256": "7bd9c5cdfcdf35f684b65218aa97683a745bcff3aa03625423d176654aff5aa9",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "scope": "iOS-simulator",
+      "originalReturn": 0,
+      "captureFailure": null,
+      "elapsedSeconds": 5.04089262499474,
+      "stdoutSha256": "20cc71fb88f499871948ba61f709e558781aabdca9448377c0d206842c6078e7",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "scope": "iOS-unsigned-archive",
+      "originalReturn": 0,
+      "captureFailure": null,
+      "elapsedSeconds": 3.3140082079917192,
+      "stdoutSha256": "a260c092cf0ad38b8c9794b09ebed012eaa5015c1632ff60c66f55df7cf89255",
+      "stderrSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "scope": "WK-historical-core",
+      "originalReturn": 0,
+      "captureFailure": null,
+      "elapsedSeconds": 2.5289686670002993,
+      "stdoutSha256": "ad3b55b43165881f5f1db72aba94741cd79dcbd72482ef9141527c789aa16d5b",
+      "stderrSha256": "f1630a0eacf629b58d6efbd968fbbf22fac5d8ec852fb33654f4c99efa00c71c"
+    },
+    {
+      "scope": "WK-installed-profile-old",
+      "originalReturn": 0,
+      "captureFailure": null,
+      "elapsedSeconds": 1.1970272499893326,
+      "stdoutSha256": "ad3b55b43165881f5f1db72aba94741cd79dcbd72482ef9141527c789aa16d5b",
+      "stderrSha256": "f1630a0eacf629b58d6efbd968fbbf22fac5d8ec852fb33654f4c99efa00c71c"
+    },
+    {
+      "scope": "WK-installed-profile-current",
+      "originalReturn": 0,
+      "captureFailure": null,
+      "elapsedSeconds": 0.7230846669990569,
+      "stdoutSha256": "ad3b55b43165881f5f1db72aba94741cd79dcbd72482ef9141527c789aa16d5b",
+      "stderrSha256": "f1630a0eacf629b58d6efbd968fbbf22fac5d8ec852fb33654f4c99efa00c71c"
+    },
+    {
+      "scope": "WK-100-lifecycle-cycles",
+      "originalReturn": 0,
+      "captureFailure": null,
+      "elapsedSeconds": 14.715753041004064,
+      "stdoutSha256": "29badf90425fd89894c46b6fe137c45f52f4db23efd3ebc34df689e7d2069de5",
+      "stderrSha256": "0e86e251487b4ddb3ab64a845606c3d8bfc15635e32641d2526599958a791e46"
+    }
+  ],
+  "androidBuildTree": {
+    "scope": "owned-build-tree-including-reparented-one-use-JVM",
+    "peakRssBytes": 595771392,
+    "samples": 61,
+    "failure": [],
+    "allObservedProcessesRetired": true
+  },
+  "androidArtifact": {
+    "package": "org.mrk.changedfixture",
+    "versionName": "2.3.4",
+    "versionCode": 8,
+    "apkBytes": 8732,
+    "apkSha256": "7eb40106efdecac92fb4b360d955572cee9c50b4f4515b2fa93f779dfb8264b7",
+    "artifact": "disposable-debug-APK-not-distributed"
+  },
+  "iosArtifact": {
+    "scope": "real-unsigned-Debug-archive-core-MachO-inspection",
+    "bundleId": "org.mrk.changediosfixture",
+    "versionName": "2.3.4",
+    "versionCode": 8,
+    "signatureDirectoryPresent": false,
+    "symbolsInspected": 0,
+    "executableBytes": 67064,
+    "executableSha256": "7fc5dca6f835d344c121d63f6371d6c65c9fc51c604fa99705a84ffa39b6fdc9"
+  },
+  "withdrawnTokioTrial": {
+    "adopted": false,
+    "reason": "exact app pin invalidates both owned helper image locks; no helper locks edited",
+    "sourceCheckReturn": -9,
+    "sourceCheckPassed": false
+  },
+  "originalIncidentAcceptance": {
+    "45": "unresolved",
+    "46": "unresolved",
+    "17": "unresolved",
+    "65": "partial",
+    "66": "partial",
+    "30": "partial",
+    "50": "partial",
+    "62": "partial",
+    "63": "partial",
+    "64": "partial"
+  },
+  "incompleteOrderingProbes": [
+    {
+      "scope": "no-project",
+      "originalReturn": 1,
+      "phase": "Check installed service",
+      "fatal": null,
+      "interpretation": "helper control unavailable before reload; intended approval step not reached; not a product crash or passing approval case",
+      "outputSha256": "868b1ca4c2ffd584419e5eb6b4839a9a12d35be1c2093fa21a6a539711464c58"
+    },
+    {
+      "scope": "selected-project",
+      "originalReturn": 1,
+      "phase": "Check installed service",
+      "fatal": null,
+      "interpretation": "helper control unavailable before reload; intended approval step not reached; not a product crash or passing approval case",
+      "outputSha256": "868b1ca4c2ffd584419e5eb6b4839a9a12d35be1c2093fa21a6a539711464c58"
+    }
+  ]
+}
