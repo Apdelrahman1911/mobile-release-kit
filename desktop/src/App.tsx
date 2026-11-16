@@ -75,6 +75,7 @@ import { ConfigEditController } from './configEditController.ts';
 import { GitHubSetupController } from './githubSetupController.ts';
 import { EnvironmentController } from './environment.ts';
 import { InstallationPreparationConnection } from './installationController.ts';
+import { workspaceDiagnostics } from './workspaceDiagnostics.ts';
 import { ReleaseVersionController } from './releaseVersion.ts';
 import { ExternalProjectObservationController } from './externalProjectObservationController.ts';
 import { CliReadAccessController } from './cliReadAccessController.ts';
@@ -1732,6 +1733,7 @@ export function App() {
     setLoading(true);
     setBootError(null);
     setCatalogError(null);
+    workspaceDiagnostics().setPhase('connecting');
     passivePending.current += 1; setPassivePending(passivePending.current);
     try {
       const connection = await desktopApi();
@@ -1775,6 +1777,7 @@ export function App() {
       void githubHistory.connect(connection);
       const appInfo = await connection.appInfo();
       if (generation !== bootGeneration.current) return;
+      workspaceDiagnostics().setPhase(appInfo?.runtime?.state === 'available' ? 'runtime-available' : 'runtime-unavailable');
       pathService.current = { api: connection, info: appInfo }; syncGitReadRef.current();
       cliService.current = pathService.current;
       connectIdentity(pathService.current);

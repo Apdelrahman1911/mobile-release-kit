@@ -1,3 +1,4 @@
+import { WorkspaceDiagnosticHistory } from '../components/WorkspaceDiagnosticHistory.tsx';
 import type { ReactNode } from 'react';
 import { InstallationDetails } from '../components/InstallationDetails.tsx';
 import type { InstallationPreparationController } from '../installationController.ts';
@@ -114,6 +115,7 @@ export function Environment({ info, api, preparationController, preview, session
     </ProgressiveDisclosure>
     <ProgressiveDisclosure title="Advanced · app connection details" description="App and engine information for troubleshooting."
       needsAttention={!preview && info !== null && runtime?.state !== 'available'}>
+    <WorkspaceDiagnosticHistory />
     <div className="button-row"><button type="button" className="button secondary" disabled={loading} onClick={onRetry}><Icon name="refresh" size={17} className={loading ? 'spin' : ''} />{loading ? 'Loading…' : 'Reload connection'}</button></div>
     <div className="environment-summary">
       <section className="card runtime-card"><span className="eyebrow">CORE RUNTIME</span><h2>{preview ? 'Browser preview' : runtime?.state === 'available' ? runtime.mode === 'development' ? 'Development runtime' : 'Bundled runtime' : 'Runtime unavailable'}</h2><Badge tone={runtime?.state === 'available' && !preview ? 'info' : 'warning'}>{preview ? 'No native connection' : runtime?.state ?? 'Not loaded'}</Badge><p>{preview ? 'This page is a design preview. No platform or engine capability has been verified.' : runtime?.reason ?? (runtime?.state === 'available' ? 'A runtime is available for the listed static functions. This does not establish native process finality or packaged release readiness.' : 'No runtime availability has been established. Capabilities and environment state remain unassessed.')}</p>{runtime?.mode === 'development' && <p className="warning-text">An explicit developer runtime is not a standalone end-user distribution.</p>}<div className="runtime-versions"><span>Desktop <strong>{info?.appVersion ?? 'Not loaded'}</strong></span><span>Core <strong>{capabilities?.coreVersion ?? 'Not loaded'}</strong></span><span>Platform <strong>{capabilities?.hostPlatform ?? 'Not observed'}</strong></span></div></section>
