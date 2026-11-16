@@ -70,8 +70,11 @@ class IOSCandidateHistoryTests(unittest.TestCase):
         self.assertEqual(self.snapshot(directory), before)
 
     def test_ios_platform_context_is_exact_and_android_namespace_is_not_adopted(self):
-        for action in ['verify','enroll','review-execution','review-reconcile','review-recovery']:
+        for action in ['verify','enroll','review-recovery']:
             with self.assertRaises(wire.ProtocolError): wire.context(dict(projectId='p', executionMode='local', action=action, platform='ios', candidateOperationId=android.CANDIDATE))
+        for action in ['review-execution','review-reconcile']:
+            value=dict(projectId='p',executionMode='local',action=action,platform='ios',candidateOperationId=android.CANDIDATE)
+            self.assertEqual(wire.context(value),value)
         for platform in [None,'android','macos']:
             with self.assertRaises(wire.ProtocolError): wire.context(dict(projectId='p',executionMode='local',action='review-inputs',platform=platform,candidateOperationId=android.CANDIDATE))
         # Seed authentic Android candidate; iOS must not reinterpret its flat bundle.

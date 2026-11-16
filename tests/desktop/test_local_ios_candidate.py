@@ -9,6 +9,7 @@ from contextlib import ExitStack, contextmanager, nullcontext
 import hashlib
 import json
 import os
+import sys
 from pathlib import Path
 import tempfile
 import time
@@ -93,6 +94,9 @@ class LocalIOSHandoffTests(unittest.TestCase):
         self.patch(service, "invocation_custody", new=custody)
         self.patch(local_signing, "local_signing_lease", return_value=nullcontext(lease))
         path = root / ".mobile-release/desktop-ios-archive" / request.operation_id
+        # The real producer prepares a private 0700 output root. This fixture
+        # replaces prepare(), so it must construct that same namespace itself.
+        path.mkdir(mode=0o700, parents=True)
         archivepath, exportpath = path / "archive.xcarchive", path / "export"
         (archivepath / "Products/Applications").mkdir(mode=0o700, parents=True)
         exportpath.mkdir(mode=0o700)
@@ -167,7 +171,8 @@ class LocalIOSHandoffTests(unittest.TestCase):
 
     def test_actual_service_cut_retains_originals_before_close_and_terminal_joins(self):
         f = self.fixture()
-        before = len(os.listdir("/proc/self/fd"))
+        fd_directory = "/dev/fd" if sys.platform == "darwin" else "/proc/self/fd"
+        before = len(os.listdir(fd_directory))
         real = C.LocalIOSBuildHandoff._capture
         def capture(handoff, run):
             self.assertIn("work-closed", f.events)
@@ -186,7 +191,7 @@ class LocalIOSHandoffTests(unittest.TestCase):
             with handoff.ipa_blocks() as blocks: self.assertEqual(b"".join(blocks), f.body)
             self.assertEqual(handoff.saved_inputs()[0], f.op.inputs.saved.configuration.raw)
             self.assertLessEqual(handoff.owned_fd_quote, 256)
-        self.assertLess(len(os.listdir("/proc/self/fd")), before)
+        self.assertLess(len(os.listdir(fd_directory)), before)
         self.assertEqual(f.ipa.read_bytes(), f.body)
         with self.assertRaises(C.LocalIOSCandidateError): handoff.saved_inputs()
 

@@ -27,7 +27,7 @@ class IOSCandidateCreateTests(unittest.TestCase):
     setUp=old.LocalIOSHandoffTests.setUp
     patch=old.LocalIOSHandoffTests.patch
     def subject(self, *, fault=None, ipa_body=None):
-        self.patch(time,'CLOCK_UPTIME_RAW',new=time.CLOCK_MONOTONIC,create=True)
+        self.patch(time,'CLOCK_UPTIME_RAW',new=getattr(time,'CLOCK_UPTIME_RAW',time.CLOCK_MONOTONIC),create=True)
         from mobile_release.checked_files import _Reader
         self.patch(_Reader,'_physical_role',return_value=None)  # Linux originals; no Darwin alias claim.
         home=Path.home()/Path(self.temp).name;home.mkdir(mode=0o700)

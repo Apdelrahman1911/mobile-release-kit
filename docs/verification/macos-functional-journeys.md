@@ -8,7 +8,7 @@ generated debug keys remain outside the source checkout and are not published.
 | Issue | Available verification | Remaining gate |
 |---|---|---|
 | #62 Android | Real Gradle debug compile, typed version edit, rebuilt APK inspection, 180 source/adapter tests | Installed app + protected tool/helper path and complete UI journey |
-| #63 iOS | Pending sequential investigation | Signed/account/device acceptance outside this task |
+| #63 iOS | Real unsigned simulator build and Debug archive, core archive inspection, typed version propagation and source/phase tests | Installed app path and signed account-backed archive/export |
 | #64 Store | Pending sequential investigation | Account-backed Store operations outside this task |
 
 ## #62 Android
@@ -48,3 +48,45 @@ credential import/signing, history/recovery and cancellation still need evidence
 through the final installed app. Existing real transaction/recovery tests from
 #65 cover their core file effects, not installed UI acceptance. Protected tool
 copy/registration and approval are coordinated with #47–#49; their code is intact.
+
+## #63 iOS
+
+Fixture source: `tests/fixtures/macos_ios_journey`. macOS 27.0 arm64, ordinary
+nonroot account, Xcode 27.0 (27A266a), iPhoneSimulator/iPhoneOS SDK 27.0. The
+project has no team, provisioning profile, entitlement, external dependency or
+script build phase. Code signing is disabled explicitly. All builds use Debug,
+one compiler job, private derived data and private result bundles.
+
+- A real arm64 simulator build returned zero, without booting a simulator.
+- The actual registered-root typed version transaction committed 2.3.4 / 8,
+  cleaned its journal, settled original resources and preserved unrelated source.
+- A fresh unsigned Debug archive for the generic iOS SDK returned zero. No
+  personal device was selected or required. A current-source simulator rebuild
+  also returned zero and contains the edited version.
+- The actual core archive/Mach-O inspector accepts the archive with expected
+  bundle ID `org.mrk.iosfixture` and version 2.3.4 / 8. No code-signature directory
+  is present. The 67,064-byte test executable has SHA256
+  `378af37d7d0aadc61d6b3b3eeeb4d5b39c8aace6015e145c606c7dee29c9ccbb`. No archive or app binary is committed/distributed.
+
+The initial archive attempt used a simulator base SDK in the generated test
+project and returned 70; correcting the fixture base SDK to iphoneos enables
+both generic targets. The final committed fixture is the corrected project.
+Raw Xcode logs stay private because tool destination diagnostics can enumerate
+machine/device identifiers even for a generic destination; none are copied here.
+
+Candidate/history fixtures incorrectly replaced Darwin CLOCK_UPTIME_RAW with
+CLOCK_MONOTONIC while seeding deadlines with monotonic_ns. On this Mac those
+clock values differ, so valid fixture requests were refused before their phase
+lease was admitted. The test adapter now preserves the real raw clock when
+available and supplies the old Linux alias only when absent. Production clocks,
+deadlines and admission are unchanged. The producer fixture also now constructs
+the real private 0700 output root it replaces, and uses /dev/fd on macOS for
+its descriptor-retirement check. Current explicitly supported iOS execution/
+reconciliation contexts are tested while cross-platform manifest/namespace
+refusals remain intact.
+
+All 63 focused archive/candidate/history and iOS-only project/version tests pass.
+The permanent iOS-only regression runs without Xcode or an account.
+Signed archive/export, real credential enrollment/assignment, installed-app
+review/cancellation/recovery, and device execution remain separate verification.
+No Apple account, P12, profile, Store request or installed MRK app was used.

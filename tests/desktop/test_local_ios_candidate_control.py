@@ -79,7 +79,7 @@ class IOSCandidateInputControlTests(unittest.TestCase):
             engine=_Engine(time.monotonic());error=None
             scope=CleanupScope(engine.guard,engine.cleanup,owns_cancellation=True,first_primary=True)
             try:
-                with patch.object(time,'CLOCK_UPTIME_RAW',time.CLOCK_MONOTONIC,create=True),patch.object(_Engine,'write',write),patch.object(IOSArchiveRun,'run',run),patch.object(CandidateCreateRun,'finish_build',return_value=None),patch.object(subprocess,'Popen',side_effect=AssertionError('no native')):
+                with patch.object(time,'CLOCK_UPTIME_RAW',getattr(time,'CLOCK_UPTIME_RAW',time.CLOCK_MONOTONIC),create=True),patch.object(_Engine,'write',write),patch.object(IOSArchiveRun,'run',run),patch.object(CandidateCreateRun,'finish_build',return_value=None),patch.object(subprocess,'Popen',side_effect=AssertionError('no native')):
                     try:
                         with scope:engine.run()
                     except BaseException as e:error=e

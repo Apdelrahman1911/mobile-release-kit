@@ -71,7 +71,7 @@ class LocalHistoryTests(unittest.TestCase):
             return value
         engine=_Engine(time.monotonic())
         try:
-            with patch.object(time,'CLOCK_UPTIME_RAW',time.CLOCK_MONOTONIC,create=True),patch.object(_Engine,'local_event',parent_reply),patch.object(subprocess,'Popen',side_effect=AssertionError('no tools')),patch.object(LocalHistoryInput,'_take',take):
+            with patch.object(time,'CLOCK_UPTIME_RAW',getattr(time,'CLOCK_UPTIME_RAW',time.CLOCK_MONOTONIC),create=True),patch.object(_Engine,'local_event',parent_reply),patch.object(subprocess,'Popen',side_effect=AssertionError('no tools')),patch.object(LocalHistoryInput,'_take',take):
                 code=run_engine(engine)
         finally:
             for n,fd in enumerate(old):os.dup2(fd,n);os.close(fd)

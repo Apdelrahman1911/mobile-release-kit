@@ -26,8 +26,8 @@ are recorded for coordination. Shared consumer interfaces are preserved.
 | #66 performance/memory | SOURCE BASELINE + HOT-PATH FIX VERIFIED; APP GATES OPEN | `4266d1c6` | Reproducible Node/SSR fixture, linear path matching, 10,000 controller cycles; installed one-hour/WebView/helper measurements remain open. |
 | #30 macOS security | APP LOCK PATCHED; COORDINATION GATES OPEN | `b8169e10` | Scoped report, 335-command inventory, credential/wire tests; independent helper locks and Tokio pin need coordination. |
 | #50 CLI status | INTENDED GATE DOCUMENTED; GUIDANCE FIXED | `ed423ce6` | Exact UI steps, three actual shared Rust formatter tests and 58 frontend access tests pass; signed installed observation remains open. |
-| #62 Android journeys | REAL FIXTURE COMPILE + VERSION PROPAGATION PASS; UI GATE OPEN | issue commit in branch history | 180 tests, two disposable Gradle builds, actual typed version edit and APK inspection; protected installed/helper journey remains open. |
-| #63 iOS journeys | PENDING | — | Test-only unsigned fixtures; account/hardware/signed acceptance gates recorded. |
+| #62 Android journeys | REAL FIXTURE COMPILE + VERSION PROPAGATION PASS; UI GATE OPEN | `1bc113bd` | 180 tests, two disposable Gradle builds, actual typed version edit and APK inspection; protected installed/helper journey remains open. |
+| #63 iOS journeys | UNSIGNED REAL FIXTURE/CORE INSPECTION PASS; SIGNED GATE OPEN | issue commit in branch history | Simulator build, unsigned Debug archive, typed version propagation; corrected Mac fixture clocks/private output and descriptor census. |
 | #64 Store journeys | PENDING | — | Credential-free contract tests; real accounts are an external gate. |
 
 ## Evidence policy
@@ -230,3 +230,20 @@ SDK inspection verifies the edited version in the APK. All 180 focused tests
 pass. A test-host compatibility defect in inert Linux xattr mocks is corrected.
 No MRK release, installed app, protected tool registry or real project was changed.
 Full installed UI/native/helper and signed acceptance remain separate gates.
+
+## #63 iOS journeys
+
+See `macos-functional-journeys.md`. The real Xcode simulator and unsigned Debug
+archive fixtures both contain the typed-core edited saved version; the actual
+core archive/Mach-O inspector accepts the archive. Existing 62 focused tests
+pass after fixing test-only raw-clock substitution, private output-root mode,
+current action expectations and the Darwin descriptor-directory spelling.
+The permanent iOS-only source transaction regression also passes: 63 focused tests total.
+No production timeout/permission/native helper behavior changed. Signed export
+and installed GUI/account/device verification remain gates.
+
+Whole-source Rust library check: PASS with Rust 1.98.1, locked dependencies,
+no default features, one job, peak group RSS 2,812,182,528 bytes (<3 GiB). The
+initial one-hour catalogue attempt stopped at its runner deadline and is kept
+separate. The current-lock retry completed in 32m29s after cache reuse. Existing
+compiler warnings remain; the installed-cli feature check is running separately.
