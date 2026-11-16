@@ -87,7 +87,11 @@ def fetch(role, row, work, steps):
         for name in ("MobileReleaseKit.pkg", "PREPARED.json"):
             z.extract(name, target)
     archive.unlink()
-    package, prepared = target / "MobileReleaseKit.pkg", json.loads((target / "PREPARED.json").read_text())
+    # The bundled installer admits only the fixed package names "Install.pkg" or
+    # "MobileReleaseKit-Request-<32 hex>.pkg" (macos_install_transaction.rs), so
+    # each role's package is installed as Install.pkg from its own directory.
+    (target / "MobileReleaseKit.pkg").rename(target / "Install.pkg")
+    package, prepared = target / "Install.pkg", json.loads((target / "PREPARED.json").read_text())
     need(digest(package) == row["packageSha256"], f"{role}-package-digest")
     need(prepared.get("packageVersion") == row["packageVersion"] and prepared.get("release") == row["release"]
          and prepared.get("origin", {}).get("runId") == row["runId"], f"{role}-prepared-identity")
