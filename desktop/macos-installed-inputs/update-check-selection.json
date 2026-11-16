@@ -3,6 +3,7 @@
   "previous": {
     "runId": "42930321870",
     "artifactId": "13821079751",
+    "carrierArtifactId": "13822869472",
     "packageSha256": "ed44a41a0b286ce831fe18c36e5178afbab492ce12e77aff294ce3dfaa0a4f15",
     "packageVersion": "0.1.4",
     "release": "macos26-arm64-desktop-04"
@@ -10,6 +11,7 @@
   "next": {
     "runId": "43807046755",
     "artifactId": "14234804766",
+    "carrierArtifactId": "14238012228",
     "packageSha256": "a83a6c060f3138ec5fd29b926c68af4913c7f493a28e7ac4e718a049c04dbc2c",
     "packageVersion": "0.1.5",
     "release": "macos26-arm64-desktop-05"

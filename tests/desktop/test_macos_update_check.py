@@ -12,9 +12,9 @@ M = importlib.util.module_from_spec(SPEC)
 SPEC.loader.exec_module(M)
 
 VALID = {"schemaVersion": 1,
-         "previous": {"runId": "42930321870", "artifactId": "13821079751", "packageSha256": "e" * 64,
+         "previous": {"runId": "42930321870", "artifactId": "13821079751", "carrierArtifactId": "13822869472", "packageSha256": "e" * 64,
                       "packageVersion": "0.1.4", "release": "macos26-arm64-desktop-04"},
-         "next": {"runId": "43900000000", "artifactId": "14200000000", "packageSha256": "f" * 64,
+         "next": {"runId": "43900000000", "artifactId": "14200000000", "carrierArtifactId": "14200000001", "packageSha256": "f" * 64,
                   "packageVersion": "0.1.5", "release": "macos26-arm64-desktop-05"}}
 
 

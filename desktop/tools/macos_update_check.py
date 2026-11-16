@@ -64,8 +64,9 @@ def load_selection(path):
     need(set(data) == {"schemaVersion", "previous", "next"} and data["schemaVersion"] == 1, "selection-shape")
     for role in ("previous", "next"):
         row = data[role]
-        need(set(row) == {"runId", "artifactId", "packageSha256", "packageVersion", "release"}, f"selection-{role}")
+        need(set(row) == {"runId", "artifactId", "carrierArtifactId", "packageSha256", "packageVersion", "release"}, f"selection-{role}")
         need(re.fullmatch(r"[1-9][0-9]{0,19}", row["runId"]) and re.fullmatch(r"[1-9][0-9]{0,19}", row["artifactId"])
+             and re.fullmatch(r"[1-9][0-9]{0,19}", row["carrierArtifactId"])
              and hex_field(row["packageSha256"], 64) and re.fullmatch(r"\d+\.\d+\.\d+", row["packageVersion"])
              and re.fullmatch(r"macos26-arm64-desktop-[0-9]+", row["release"]), f"selection-{role}-fields")
     key = lambda v: tuple(int(x) for x in v.split("."))
@@ -76,17 +77,24 @@ def load_selection(path):
 def fetch(role, row, work, steps):
     target = work / role
     target.mkdir(mode=0o700)
-    archive = target / "artifact.zip"
-    with open(archive, "wb") as out:
-        p = subprocess.run(["gh", "api", f"repos/{REPOSITORY}/actions/artifacts/{row['artifactId']}/zip"],
-                           stdout=out, stderr=subprocess.PIPE, timeout=900)
-    need(p.returncode == 0, f"{role}-artifact-download")
-    with zipfile.ZipFile(archive) as z:
-        names = set(z.namelist())
-        need({"MobileReleaseKit.pkg", "PREPARED.json"} <= names, f"{role}-artifact-members")
-        for name in ("MobileReleaseKit.pkg", "PREPARED.json"):
-            z.extract(name, target)
-    archive.unlink()
+    def download(artifact, members, label):
+        archive = target / f"{label}.zip"
+        with open(archive, "wb") as out:
+            p = subprocess.run(["gh", "api", f"repos/{REPOSITORY}/actions/artifacts/{artifact}/zip"],
+                               stdout=out, stderr=subprocess.PIPE, timeout=900)
+        need(p.returncode == 0, f"{role}-{label}-download")
+        with zipfile.ZipFile(archive) as z:
+            need(set(members) <= set(z.namelist()), f"{role}-{label}-members")
+            for name in members:
+                z.extract(name, target)
+        archive.unlink()
+    download(row["artifactId"], ("MobileReleaseKit.pkg", "PREPARED.json"), "prepared")
+    # The signed producer descriptor and signature come from the carrier run
+    # that authenticated this exact package (the installer reads them beside it).
+    download(row["carrierArtifactId"], ("producer-root/producer.json", "producer-root/producer.sig"), "carrier")
+    producer = json.loads((target / "producer-root/producer.json").read_text())["releaseSet"]["current"]
+    need((producer["release"], producer["packageVersion"], producer["packageSha256"])
+         == (row["release"], row["packageVersion"], row["packageSha256"]), f"{role}-producer-identity")
     # The bundled installer admits only the fixed package names "Install.pkg" or
     # "MobileReleaseKit-Request-<32 hex>.pkg" (macos_install_transaction.rs), so
     # each role's package is installed as Install.pkg from its own directory.
@@ -104,26 +112,34 @@ def fetch(role, row, work, steps):
     text = gatekeeper.stdout + gatekeeper.stderr
     need(gatekeeper.returncode == 0 and "accepted" in text and "Notarized Developer ID" in text, f"{role}-gatekeeper")
     steps += [dict(s1, role=role), dict(s2, role=role)]
-    return package
+    return target
 
 
-def root_staged(role, package):
-    """The bundled installer refuses a package whose file or folders are not
-    root-owned (protection-other-owner), so stage a root-owned read-only copy,
-    as the owner's install did under /private/var/tmp."""
-    folder = Path(f"/private/var/tmp/mrk-update-check-{role}")
-    staged = folder / "Install.pkg"
-    for argv in (["/bin/mkdir", "-m", "0755", str(folder)], ["/bin/cp", str(package), str(staged)],
-                 ["/usr/sbin/chown", "-R", "root:wheel", str(folder)], ["/bin/chmod", "0444", str(staged)]):
-        need(subprocess.run(["/usr/bin/sudo", "-n"] + argv, capture_output=True, timeout=300).returncode == 0,
-             f"{role}-root-staging")
-    need(digest(staged) == digest(package), f"{role}-root-staging-digest")
-    return staged
+def carrier_image(role, folder, steps):
+    """Same shape as the owner's successful install: a read-only HFS+ image
+    holding exactly Install.pkg, producer.json and producer.sig, mounted under
+    /Volumes; the bundled installer refuses user-owned or non-file sources."""
+    source = folder / f"carrier-{role}"
+    source.mkdir(mode=0o755)
+    for name, origin in (("Install.pkg", folder / "Install.pkg"),
+                         ("producer.json", folder / "producer-root/producer.json"),
+                         ("producer.sig", folder / "producer-root/producer.sig")):
+        os.link(origin, source / name) if name == "Install.pkg" else (source / name).write_bytes(origin.read_bytes())
+    image, volume = folder / f"carrier-{role}.dmg", f"MRK-Update-{role}"
+    p, row = run(["/usr/bin/hdiutil", "create", "-srcfolder", str(source), "-fs", "HFS+", "-format", "UDRO",
+                  "-volname", volume, str(image)], 600, check=True)
+    steps.append(dict(row, role=role))
+    p, row = run(["/usr/bin/hdiutil", "attach", "-readonly", "-nobrowse", "-noautoopen", str(image)], 300, check=True)
+    steps.append(dict(row, role=role))
+    mount = Path("/Volumes") / volume
+    need(sorted(os.listdir(mount)) == ["Install.pkg", "producer.json", "producer.sig"], f"{role}-carrier-roster")
+    need(digest(mount / "Install.pkg") == digest(folder / "Install.pkg"), f"{role}-carrier-digest")
+    return mount
 
 
-def install(role, package, steps, expect_success=True):
-    staged = root_staged(role, package)
-    p, row = run(["/usr/bin/sudo", "-n", "/usr/sbin/installer", "-pkg", str(staged), "-target", "/"], 1500)
+def install(role, folder, steps, expect_success=True):
+    mount = carrier_image(role, folder, steps)
+    p, row = run(["/usr/bin/sudo", "-n", "/usr/sbin/installer", "-pkg", str(mount / "Install.pkg"), "-target", "/"], 1500)
     row.update(role=role, expected="success" if expect_success else "refusal")
     steps.append(row)
     return p.returncode
