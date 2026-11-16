@@ -409,6 +409,19 @@ class InitTransactionTests(unittest.TestCase):
                         self.assertTrue(injected)
                         self.assertEqual(code, 2, error)
                         self.assertEqual(output, "")
+                        if index == commit_index and when == "before":
+                            # The terminal handoff was entered, but the rename
+                            # did not return. The live owner cannot infer that
+                            # no commit happened or erase the recovery journal.
+                            self.assert_complete(root, force=force)
+                            self.assertTrue((root / tx.READY).is_dir())
+                            self.assertFalse((root / tx.READY / "COMMITTED").exists())
+                            self.assertIn("preserve the private transaction", error)
+                            recovered, _, recovery_error = invoke(["init", "--root", str(root), "--recover"])
+                            self.assertEqual(recovered, 0, recovery_error)
+                            self.assert_no_state(root)
+                            self.assertEqual(snapshot(root), before)
+                            continue
                         self.assert_no_state(root)
                         committed = index > commit_index or (index == commit_index and when == "after")
                         if committed:

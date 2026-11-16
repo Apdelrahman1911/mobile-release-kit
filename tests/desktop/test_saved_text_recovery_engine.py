@@ -84,6 +84,7 @@ class _Guard:
 class _Input:
     def __init__(self, requests):
         self.requests, self.closed = iter(requests), False
+        self.reserved = None  # No reserved native inputs in this inert fixture.
     def acquire(self): pass
     def idle(self): pass
     def request(self, sequence, session):

@@ -21,8 +21,8 @@ are recorded for coordination. Shared consumer interfaces are preserved.
 |---|---|---|---|
 | #45 workspace failure | DIAGNOSTICS/FALLBACK FIXED; ORIGINAL INCIDENT BLOCKED | `0278652e` | Persistent bounded journal, safe error boundary, helper-state render regressions; 2,463 frontend tests and TypeScript checking pass. Original installed exception remains uncaptured. |
 | #46 first connection | STEP DIAGNOSTICS ADDED; ORIGINAL INCIDENT BLOCKED | `1e7c4411` | Two diagnostic tests pass; whole-source check pending. No failing native predicate or first-launch race is proven. |
-| #17 Git timeout | MACOS INIT DEFECT FIXED; ORIGINAL TIMEOUT BLOCKED | issue commit in branch history | Fixed per-call/phase traces; protected-ancestor regression passes. Broader tests recorded below. |
-| #65 interruption integrity | PENDING | — | Synthetic project fixtures only; installed GUI termination remains an external gate. |
+| #17 Git timeout | MACOS INIT DEFECT FIXED; ORIGINAL TIMEOUT BLOCKED | `ff2571cf` | Fixed per-call/phase traces; protected-ancestor regression passes. Broader tests recorded below. |
+| #65 interruption integrity | CORE CRASH MATRIX VERIFIED; GUI GATE OPEN | issue commit in branch history | Eight real SIGKILL/restart scenarios across four durable boundaries; broader recovery regressions tracked below. |
 | #66 performance/memory | PENDING | — | Reproducible test-environment measurements; physical Mac gates separated. |
 | #30 macOS security | PENDING | — | Credentials/IPC/privilege review; coordinate native helper/installer findings. |
 | #50 CLI status | PENDING | — | Diagnose permission refusal and verify enabled path/guidance. |
@@ -135,3 +135,47 @@ The fresh affected run covers initialization, fetch and the real driver code.
 The 205-test desktop Git run's ten errors were the same initialization defect;
 its affected initialization group also passes after the fix. Full outputs are
 retained as separate runs; these are not presented as one post-fix green run.
+
+## #65 interruption integrity
+
+Extended the existing real edit-engine restart fixture with eight self-SIGKILL
+scenarios: two saved-text domains (metadata and version) at staged-before-READY,
+first completed new-file replacement, durable COMMITTED publication, and partial
+journal cleanup. Each signal targets only the disposable test child's own PID.
+The original process supervisor must publish finality and retire its creation
+and run resources before a fresh recovery process starts or fixtures are removed.
+All eight scenarios pass: present files are complete old/new payloads at the
+interruption; recovery produces the complete old transaction before commit or
+the complete new transaction after commit. Unrelated file bytes and identities
+are unchanged. All journals are cleaned after explicit successful recovery.
+The existing two-domain abrupt-exit/restart test also passes (20 joined child
+invocations across the two restart tests).
+
+Two inert edit-engine input doubles lacked the current `reserved` cleanup field;
+updated those fixtures, without changing runtime behavior. A legacy all-write-
+boundaries test incorrectly demanded erasing a journal after an uncertain
+terminal rename. It now requires complete files, retained journal and truthful
+attention, followed by a fresh explicit recovery that restores the exact old
+snapshot. No file corruption was found. A confirmed classification defect did surface:
+set-order-dependent cleanup checks reported the same replaced journal object
+as either `stale_revision` or `filesystem_error`. Completed captured-identity
+comparisons now raise a stale conflict consistently during guarded recovery;
+actual IO exceptions and every preservation/finality rule are unchanged.
+
+The broader Store recovery-settlement fixture currently fails its upstream
+inert Play-preparation protocol before recovery starts (18 cases); investigate
+that contract under #64. An alternate `/private/tmp` run also cannot create
+set-group-ID fixture modes when its inherited group is unavailable to this
+account. Final canonical private-namespace results are recorded before delivery.
+
+Remaining #65 gates: installed GUI termination/relaunch, Prepare-and-quit (owned
+by the independent shutdown agent), and actual power-loss/filesystem durability
+under a hosted RC. Source-level SIGKILL tests are not those acceptance claims.
+No real project, installed application or helper was terminated or modified.
+
+Final #65 result: all 146 recovery/configuration/metadata/init tests pass in the
+canonical private fixture namespace. The replaced-journal regression also passes
+in eight fresh interpreters with `PYTHONHASHSEED=0..7`, covering different set
+orders. The two real restart tests cover 20 original child invocations, including
+eight SIGKILL/recovery pairs. No project corruption was observed. Store fixture
+protocol failures remain separately assigned to the conditional #64 review.

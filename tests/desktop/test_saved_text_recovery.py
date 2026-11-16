@@ -11,6 +11,7 @@ import copy
 import json
 import os
 import shutil
+import signal
 import stat
 import sys
 import tempfile
@@ -685,33 +686,37 @@ def _child_engine(root, domain, mode):
     from mobile_release import _desktop_edit_protocol as wire
     from mobile_release._desktop_edit_control import EditInput
 
-    assert domain in {"metadata_text", "release_version"} and mode in {"interrupt", "recover"}
+    assert domain in {"metadata_text", "release_version"} and mode in {
+        "interrupt", "recover", "recover-preparing", "recover-committed",
+        "crash-preparing", "crash-replacement", "crash-committed", "crash-cleanup"}
+    recovering = mode.startswith("recover")
     assert root.is_absolute() and os.geteuid() != 0
     case = "android" if domain == "metadata_text" else "version"
     reader, writer = os.pipe()
     os.dup2(reader, 0); os.close(reader)
     child = engine._Engine(time.monotonic(), domain=domain)
     original_request, original_move = EditInput.request, tx.InitWorkspace._move
+    original_state_move, original_unlink = tx.InitWorkspace._state_move, tx.InitWorkspace._unlink
     def feed(control, sequence, session):
         assert control is child.input and session in {None, SESSION}
         if sequence == 0:
             v = root.stat()
             params = {"root": str(root), "registeredIdentity": {"device": str(v.st_dev), "inode": str(v.st_ino),
                 "mode": v.st_mode, "uid": v.st_uid, "gid": v.st_gid}}
-            if mode == "recover": params["intent"] = "recover"
+            if recovering: params["intent"] = "recover"
             elif case != "version": params.update(platform=case, locale="en-US")
             op = "open"
         elif sequence == 1:
             checkout = child.authority
             params = {"revision": checkout.revision}
-            if mode == "recover": params["intent"] = "recover"
+            if recovering: params["intent"] = "recover"
             elif case == "version": params.update(expectedBaseline=checkout.baseline, intent="edit", values=VALUES)
             else: params.update(expectedBaseline=checkout.baseline, fields=_fields(case, changed=True))
             op = "prepare"
         else:
             assert sequence == 2
             params = {"planToken": child.authority.token}
-            if mode == "recover": params["intent"] = "recover"
+            if recovering: params["intent"] = "recover"
             op = "apply"
         raw = json.dumps({"protocol": wire.METADATA_PROTOCOL if case != "version" else wire.VERSION_PROTOCOL,
             "session": SESSION, "seq": sequence, "op": op, "params": params}, separators=(",", ":")).encode()+b"\n"
@@ -723,10 +728,24 @@ def _child_engine(root, domain, mode):
             # The ORIGINAL _move has returned only after both actual directory
             # fsyncs and exact destination checks. Do not run Python finally.
             os._exit(INTERRUPTED)
+        if w._saved_text_recovery is None and (
+                mode == "crash-replacement" and source == "new-0" or
+                mode == "crash-committed" and destination == "COMMITTED"):
+            os.kill(os.getpid(), signal.SIGKILL)  # This disposable test child ONLY.
+        return value
+    def state_move(w, old, new):
+        if mode == "crash-preparing" and old == w._state_names[0] and new == w._state_names[1]:
+            os.kill(os.getpid(), signal.SIGKILL)
+        return original_state_move(w, old, new)
+    def unlink(w, name, **kwargs):
+        value = original_unlink(w, name, **kwargs)
+        if mode == "crash-cleanup" and name == "old-0":
+            os.kill(os.getpid(), signal.SIGKILL)
         return value
     scope = CleanupScope(child.guard, child.cleanup, owns_cancellation=True, first_primary=True)
     try:
-        with patch.object(EditInput, "request", new=feed), patch.object(tx.InitWorkspace, "_move", new=interrupt):
+        with patch.object(EditInput, "request", new=feed), patch.object(tx.InitWorkspace, "_move", new=interrupt), \
+             patch.object(tx.InitWorkspace, "_state_move", new=state_move), patch.object(tx.InitWorkspace, "_unlink", new=unlink):
             try:
                 try:
                     with scope: child.run()
@@ -734,15 +753,16 @@ def _child_engine(root, domain, mode):
             except BaseException as error:
                 child._remember(error)
             child.terminal()
-        assert mode == "recover", "first child failed to reach the actual fixed move boundary"
-        assert child.outcome == shared.CoreEditOutcome("rolled_back", "clean", "settled", "none")
+        assert recovering, "first child failed to reach the actual fixed crash boundary"
+        effect = {"recover": "rolled_back", "recover-preparing": "not_started", "recover-committed": "committed"}[mode]
+        assert child.outcome == shared.CoreEditOutcome(effect, "clean", "settled", "none")
         assert child.input.closed and child.lease.closed and child.guard.handler_state == "RESTORED"
         with _live_lease(root, case, restoring=False) as (lease, _):
             checkout = (version_edit.capture_release_version_edit(lease) if case == "version" else
                         text_edit.capture_metadata_text_edit(lease, case, "en-US"))
             loaded = [{"path": f.path, **text.content_digest(f.data)} for f in checkout._files]
             if case == "version":
-                assert checkout.values == {"name": "1.2.3", "build": "7"}
+                assert checkout.values == (VALUES if mode == "recover-committed" else {"name": "1.2.3", "build": "7"})
                 version_edit.discard_release_version_edit(checkout)
             else: text_edit.discard_metadata_text_edit(checkout)
         raw = json.dumps({"freshLoad": loaded, "domain": domain, "engineResourcesSettled": True}, separators=(",", ":")).encode()+b"\n"
@@ -755,6 +775,69 @@ def _child_engine(root, domain, mode):
 
 class SavedTextRecoveryRestartTests(unittest.TestCase):
     """Actual C/A/W original join precedes every second child and cleanup."""
+    def test_sigkill_at_four_transaction_boundaries_restarts_from_durable_journal(self):
+        from mobile_release import owned_process as owned
+        from unit.test_owned_process import original_command_outcomes, all_original_commands_final
+
+        self.assertNotEqual(os.geteuid(), 0)
+        fixture = Path(tempfile.mkdtemp(prefix="mrk-saved-text-crash-",
+            dir="/private/tmp" if sys.platform == "darwin" else None))
+        outcomes, safe = [], True
+        points = (("preparing", "recover-preparing", "preparing_cleanup", "not_started"),
+                  ("replacement", "recover", "rollback", "rolled_back"),
+                  ("committed", "recover-committed", "committed_cleanup", "committed"),
+                  ("cleanup", "recover-committed", "committed_cleanup", "committed"))
+        try:
+            with original_command_outcomes() as outcomes:
+                for domain, case in (("metadata_text", "android"), ("release_version", "version")):
+                    for point, recover_mode, action, effect in points:
+                        with self.subTest(domain=domain, point=point):
+                            root = _init_project(fixture / (domain + "-" + point), case)
+                            old = [(root / path).read_bytes() for path in _selection(case).paths]
+                            new = ([version.prepare_payload(_selection(case), OLD_VERSION, "edit", VALUES)[0]]
+                                   if case == "version" else [r["text"].encode() for r in _fields(case, changed=True)])
+                            unrelated = {p: (_facts(root / p), (root / p).read_bytes()) for p in
+                                         ("release/mobile-release.json", ".gitignore", "unrelated.txt")}
+                            for mode, expected in (("crash-" + point, -signal.SIGKILL), (recover_mode, 0)):
+                                self.assertTrue(not outcomes or all_original_commands_final(outcomes))
+                                ordinal, safe = len(outcomes), False
+                                result = owned.run_owned([sys.executable, "-I", "-S", "-B", str(Path(__file__).absolute()),
+                                    "--restart-child", str(root), domain, mode], cwd=root,
+                                    environ={"PATH": "/usr/bin:/bin", "HOME": str(fixture), "TMPDIR": str(fixture),
+                                             "LC_ALL": "C", "LANG": "C"}, timeout=20, output_limit=64 * 1024)
+                                self.assertEqual(len(outcomes), ordinal + 1)
+                                actual = outcomes[ordinal]
+                                self.assertIsNotNone(actual.original_finality)
+                                safe = True
+                                self.assertEqual(actual.result_integrity, "complete")
+                                self.assertEqual((actual.returncode, result.returncode), (expected, expected))
+                                self.assertTrue(actual.create_w.retired and actual.run_tool.retired)
+                                self.assertEqual(result.stderr, "")
+                                frames = [json.loads(line) for line in result.stdout.splitlines()]
+                                if mode.startswith("crash"):
+                                    self.assertEqual([f["kind"] for f in frames], ["opened", "prepared"])
+                                    # Interrupted public files may be a mixed transaction;
+                                    # each present file must still be an entire old/new file.
+                                    for path, before, after in zip(_selection(case).paths, old, new):
+                                        if (root / path).exists():
+                                            self.assertIn((root / path).read_bytes(), (before, after))
+                                else:
+                                    self.assertEqual(frames[0]["result"]["recovery"]["action"], action)
+                                    self.assertEqual(frames[2]["result"]["effect"], effect)
+                                    self.assertEqual(frames[2]["result"]["resources"], "settled")
+                                    self.assertEqual(frames[2]["result"]["journal"], "clean")
+                                    self.assertEqual(len(frames), 4)
+                            for path, expected in zip(_selection(case).paths, new if effect == "committed" else old):
+                                self.assertEqual((root / path).read_bytes(), expected)
+                            for path, (facts, body) in unrelated.items():
+                                self.assertEqual((_facts(root / path), (root / path).read_bytes()), (facts, body))
+                            self.assertTrue(all(not (root / name).exists() for name in tx.ALL_STATE_NAMES))
+                self.assertEqual(len(outcomes), 16)
+        finally:
+            if not safe or not all_original_commands_final(outcomes):
+                self.fail("original crash child lifetime unknown; preserving private fixture")
+            shutil.rmtree(fixture)
+
     def test_two_new_processes_per_domain_recover_only_persisted_fsynced_originals(self):
         from mobile_release import owned_process as owned
         from unit.test_owned_process import original_command_outcomes, all_original_commands_final

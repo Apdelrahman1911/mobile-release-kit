@@ -71,6 +71,7 @@ class _RoutingInput:
     def __init__(self, requests):
         self.requests = iter(requests)
         self.closed = False
+        self.reserved = None  # Match the real EditInput cleanup contract.
 
     def acquire(self):
         pass

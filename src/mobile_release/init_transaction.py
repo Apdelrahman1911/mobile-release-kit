@@ -1747,6 +1747,14 @@ class InitWorkspace:
         with self._private(self._state_names[2]) as fd:
             current_recovery = self._workflow_restoration()
             saved_recovery = self._saved_text_restoration()
+            def captured_unchanged(condition: bool, message: str) -> None:
+                # A compared recovery original changed, regardless of which
+                # unordered inventory entry exposed it first. Do not relabel
+                # an actual IO exception: only this completed comparison is a
+                # stale conflict. Legacy cleanup keeps its existing carrier.
+                if not condition and (current_recovery is not None or saved_recovery is not None):
+                    raise InitConflict("init transaction: " + message)
+                _require(condition, message)
             if current_recovery is not None:
                 current_recovery.cleanup_start(self, fd)
             workflow_entries: dict[str, tuple[bool, dict[str, Any]]] = {}
@@ -1855,13 +1863,13 @@ class InitWorkspace:
                         for prefix, binding in (("new", entry["after"]), ("old", entry["before"])):
                             name = f"{prefix}-{i}"
                             if name in data:
-                                _require(binding is not None and self._binding(fd, name) == binding,
-                                         "cleanup captured file changed; preserve it")
+                                captured_unchanged(binding is not None and self._binding(fd, name) == binding,
+                                                   "cleanup captured file changed; preserve it")
                     for i, entry in enumerate(plan["directories"]):
                         name = f"directory-{i}"
                         if name in data:
-                            _require(entry["after"] is not None and self._binding(fd, name, directory=True) == entry["after"],
-                                     "cleanup directory identity changed")
+                            captured_unchanged(entry["after"] is not None and self._binding(fd, name, directory=True) == entry["after"],
+                                               "cleanup directory identity changed")
                             with self._descriptor(name, self.flags, dir_fd=fd) as child:
                                 _require(not self._list(child), "cleanup directory contains unrelated content")
                 else:
