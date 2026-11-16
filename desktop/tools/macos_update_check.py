@@ -55,6 +55,48 @@ def run(argv, timeout, check=False):
     return p, row
 
 
+def tail_text(text, lines=40):
+    home = str(Path.home())
+    return [line.replace(home, "~")[:400] for line in text.splitlines()[-lines:]]
+
+
+def failure_diagnostics(evidence, role, p):
+    """Failure-only evidence: installer output, post-failure state, crashes, unified log."""
+    out = {"role": role, "installerStdout": tail_text(p.stdout), "installerStderr": tail_text(p.stderr)}
+    try:
+        out["afterFailure"] = installed_state()
+    except Exception as error:  # the state may legitimately be absent or partial
+        out["afterFailure"] = {"error": type(error).__name__, "detail": str(error)[:120]}
+    listing = subprocess.run(["/usr/bin/sudo", "-n", "/bin/ls", "-laR", str(STATE)],
+                             capture_output=True, text=True, timeout=60)
+    out["stateListing"] = [line[:200] for line in listing.stdout.splitlines()
+                           if ".app/" not in line][:200]
+    reports = []
+    for folder in (Path("/Library/Logs/DiagnosticReports"), Path.home() / "Library/Logs/DiagnosticReports"):
+        r = subprocess.run(["/usr/bin/sudo", "-n", "/usr/bin/find", str(folder), "-mmin", "-30", "-type", "f"],
+                           capture_output=True, text=True, timeout=60)
+        for name in r.stdout.split():
+            if "mrk" in name.lower() or "install" in name.lower():
+                body = subprocess.run(["/usr/bin/sudo", "-n", "/usr/bin/head", "-c", "12000", name],
+                                      capture_output=True, text=True, timeout=30)
+                (evidence / ("crash-" + Path(name).name + ".txt")).write_text(body.stdout)
+                reports.append(Path(name).name)
+    out["crashReports"] = reports
+    log = subprocess.run(["/usr/bin/sudo", "-n", "/usr/bin/log", "show", "--style", "syslog", "--last", "8m",
+                          "--predicate", 'process BEGINSWITH "mrk" OR process == "postinstall" '
+                          'OR eventMessage CONTAINS[c] "mrk-macos" OR eventMessage CONTAINS[c] "MobileReleaseKit" '
+                          'OR (process == "kernel" AND (eventMessage CONTAINS[c] "mrk" OR eventMessage CONTAINS "CODE SIGNING" '
+                          'OR eventMessage CONTAINS "Sandbox"))'],
+                         capture_output=True, text=True, timeout=300)
+    (evidence / "unified-log-excerpt.txt").write_text("\n".join(tail_text(log.stdout, 1500)) + "\n")
+    whole = subprocess.run(["/usr/bin/sudo", "-n", "/usr/bin/tail", "-n", "4000", "/var/log/install.log"],
+                           capture_output=True, text=True, timeout=60).stdout.splitlines()
+    starts = [i for i, line in enumerate(whole) if "MRK_MACOS_POSTINSTALL_PHASE=pre-exec" in line]
+    window = whole[starts[-1]:] if starts else whole[-300:]
+    (evidence / "install-log-window.txt").write_text("\n".join(tail_text("\n".join(window), 600)) + "\n")
+    (evidence / "FAILURE.json").write_text(json.dumps(out, indent=2, sort_keys=True) + "\n")
+
+
 def hex_field(value, size):
     return type(value) is str and re.fullmatch(f"[0-9a-f]{{{size}}}", value) is not None
 
@@ -137,11 +179,17 @@ def carrier_image(role, folder, steps):
     return mount
 
 
-def install(role, folder, steps, expect_success=True):
+def install(role, folder, steps, expect_success=True, evidence=None):
     mount = carrier_image(role, folder, steps)
-    p, row = run(["/usr/bin/sudo", "-n", "/usr/sbin/installer", "-pkg", str(mount / "Install.pkg"), "-target", "/"], 1500)
+    p, row = run(["/usr/bin/sudo", "-n", "/usr/sbin/installer", "-verbose", "-pkg", str(mount / "Install.pkg"),
+                  "-target", "/"], 1500)
     row.update(role=role, expected="success" if expect_success else "refusal")
     steps.append(row)
+    if expect_success and p.returncode != 0 and evidence is not None:
+        try:
+            failure_diagnostics(evidence, role, p)
+        except Exception as error:  # diagnostics must not mask the result
+            row["diagnostics"] = type(error).__name__
     return p.returncode
 
 
@@ -212,7 +260,7 @@ def main():
         previous = fetch("previous", selection["previous"], work, steps)
         upgraded = fetch("next", selection["next"], work, steps)
 
-        need(install("previous", previous, steps) == 0, "previous-install-returned-nonzero")
+        need(install("previous", previous, steps, evidence=evidence) == 0, "previous-install-returned-nonzero")
         before = installed_state()
         result["afterPrevious"] = before
         need((before["release"], before["packageVersion"], before["packageSha256"])
@@ -221,7 +269,7 @@ def main():
         seeded = seed_user_data()
         result["seededFiles"] = len(seeded)
 
-        update_rc = install("next", upgraded, steps)
+        update_rc = install("next", upgraded, steps, evidence=evidence)
         result["updateReturn"] = update_rc
         need(update_rc == 0, "update-returned-nonzero")
         after = installed_state()
