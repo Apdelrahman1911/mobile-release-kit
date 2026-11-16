@@ -91,8 +91,23 @@ Unmaintained dependencies and the GTK notice remain in the all-target lock scan.
   Rust 1.98.1, one job, under a separate 512 MiB compiler cap.
 - An attempt to run dependency unit tests directly via the application package
   was refused by Cargo because dependency dev tests are outside the workspace;
-  it is not reported as a passing test. Full current-lock source checking is a
-  separate final gate, after the original long catalogue check settles.
+  it is not reported as a passing test. Full current-lock and installed-cli source
+  checks subsequently pass with Rust 1.98.1, one job, peak RSS below 3 GiB.
+
+## Additional Store boundary findings (#64)
+
+The Python fixed CLT provider rejected system-protection flags accepted by the
+existing native policy. It now matches that exact mask and compares observed,
+held and named flags on every check; permissions, identities and executable
+selection remain strict. Four flag regressions and 188 provider/source/owner
+tests pass with inert provider/native outcomes, not live peer qualification.
+
+The real protected Xcode resolver refuses this host's root-owned 0775
+`/Applications` ancestor in `local_store_execute.py::_upload_protected`.
+This is an actual host-protection gate, not evidence that tool help or a leaf
+hash grants safe pathname execution. No group-write allowance, chmod, installer
+or helper change was made. Coordinate native tool-selection/installation policy
+and protected-host qualification with the #47–#49 owner before Store acceptance.
 
 ## Integration gates
 

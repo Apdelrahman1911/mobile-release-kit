@@ -301,7 +301,8 @@ class LocalStorePrepareTests(unittest.TestCase):
             if kwargs.get('parent')==Path('/private/tmp'):kwargs['parent']=self.base
             return B.finite_scratch(**kwargs)
         try:
-            with (patch.object(time,'CLOCK_UPTIME_RAW',time.CLOCK_MONOTONIC,create=True),patch.object(_Engine,'local_event',parent_reply),patch.object(S,'sys',SimpleNamespace(platform='darwin')),
+            # Preserve Darwin's raw clock; Linux-only DATA tests need the alias.
+            with (patch.object(time,'CLOCK_UPTIME_RAW',getattr(time,'CLOCK_UPTIME_RAW',time.CLOCK_MONOTONIC),create=True),patch.object(_Engine,'local_event',parent_reply),patch.object(S,'sys',SimpleNamespace(platform='darwin')),
                     patch.object(os,'open',side_effect=opened),patch.object(os,'close',side_effect=closed),patch.object(owner_type,'_begin',begin),patch.object(S,'complete_store_operation',side_effect=complete),patch.object(S,'finite_scratch',side_effect=scratch),patch.object(process,'run_command',side_effect=command),patch.object(subprocess,'Popen',side_effect=AssertionError('no native process'))):
                 code=run_engine(e)
         finally:

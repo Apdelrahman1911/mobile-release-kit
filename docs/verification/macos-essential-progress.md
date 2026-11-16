@@ -20,15 +20,15 @@ are recorded for coordination. Shared consumer interfaces are preserved.
 | Issue | State | Commit | Evidence / remaining verification |
 |---|---|---|---|
 | #45 workspace failure | DIAGNOSTICS/FALLBACK FIXED; ORIGINAL INCIDENT BLOCKED | `0278652e` | Persistent bounded journal, safe error boundary, helper-state render regressions; 2,463 frontend tests and TypeScript checking pass. Original installed exception remains uncaptured. |
-| #46 first connection | STEP DIAGNOSTICS ADDED; ORIGINAL INCIDENT BLOCKED | `1e7c4411` | Two diagnostic tests pass; whole-source check pending. No failing native predicate or first-launch race is proven. |
+| #46 first connection | STEP DIAGNOSTICS ADDED; ORIGINAL INCIDENT BLOCKED | `1e7c4411` | Two diagnostic tests and the whole-source check pass. No failing native predicate or first-launch race is proven. |
 | #17 Git timeout | MACOS INIT DEFECT FIXED; ORIGINAL TIMEOUT BLOCKED | `ff2571cf` | Fixed per-call/phase traces; protected-ancestor regression passes. Broader tests recorded below. |
 | #65 interruption integrity | CORE CRASH MATRIX VERIFIED; GUI GATE OPEN | `f20b9463` | Eight real SIGKILL/restart scenarios across four durable boundaries; broader recovery regressions tracked below. |
 | #66 performance/memory | SOURCE BASELINE + HOT-PATH FIX VERIFIED; APP GATES OPEN | `4266d1c6` | Reproducible Node/SSR fixture, linear path matching, 10,000 controller cycles; installed one-hour/WebView/helper measurements remain open. |
 | #30 macOS security | APP LOCK PATCHED; COORDINATION GATES OPEN | `b8169e10` | Scoped report, 335-command inventory, credential/wire tests; independent helper locks and Tokio pin need coordination. |
 | #50 CLI status | INTENDED GATE DOCUMENTED; GUIDANCE FIXED | `ed423ce6` | Exact UI steps, three actual shared Rust formatter tests and 58 frontend access tests pass; signed installed observation remains open. |
 | #62 Android journeys | REAL FIXTURE COMPILE + VERSION PROPAGATION PASS; UI GATE OPEN | `1bc113bd` | 180 tests, two disposable Gradle builds, actual typed version edit and APK inspection; protected installed/helper journey remains open. |
-| #63 iOS journeys | UNSIGNED REAL FIXTURE/CORE INSPECTION PASS; SIGNED GATE OPEN | issue commit in branch history | Simulator build, unsigned Debug archive, typed version propagation; corrected Mac fixture clocks/private output and descriptor census. |
-| #64 Store journeys | PENDING | — | Credential-free contract tests; real accounts are an external gate. |
+| #63 iOS journeys | UNSIGNED REAL FIXTURE/CORE INSPECTION PASS; SIGNED GATE OPEN | `b18af24f` | Simulator build, unsigned Debug archive, typed version propagation; 63 focused tests. |
+| #64 Store journeys | FIXED PROVIDER FLAG MISMATCH; ACCOUNT/HOST GATES OPEN | issue commit in branch history | 136 network-denied provider contracts, 52 source/owner tests, 52 preparation/recovery tests and 51 frontend tests pass. Protected Xcode qualification refuses this host's writable ancestor. |
 
 ## Evidence policy
 
@@ -83,8 +83,7 @@ final validation). No path, native exception text, request or credential enters
 the diagnostic. A closed output sink preserves the exact original failure and
 introduces no retry. Two isolated Rust tests cover distinct bounded codes and
 failure identity with an unavailable diagnostic sink. The full headless source
-check is also queued under the local compiler cap; its result will be recorded
-before delivery.
+check passes under the local compiler cap; the final source-check receipt is below.
 
 Remaining #46 gate: a trace from the actual first-launch failure, in an authorized
 test installation or the existing app once it contains these diagnostics. No
@@ -162,9 +161,10 @@ as either `stale_revision` or `filesystem_error`. Completed captured-identity
 comparisons now raise a stale conflict consistently during guarded recovery;
 actual IO exceptions and every preservation/finality rule are unchanged.
 
-The broader Store recovery-settlement fixture currently fails its upstream
-inert Play-preparation protocol before recovery starts (18 cases); investigate
-that contract under #64. An alternate `/private/tmp` run also cannot create
+The initial broader Store recovery-settlement fixture failed its upstream
+inert Play-preparation protocol before recovery started (18 cases). The #64
+clock-domain fixture correction resolves this; all 52 preparation/execution/
+reconciliation/recovery tests now pass. An alternate `/private/tmp` run could not create
 set-group-ID fixture modes when its inherited group is unavailable to this
 account. Final canonical private-namespace results are recorded before delivery.
 
@@ -178,7 +178,7 @@ canonical private fixture namespace. The replaced-journal regression also passes
 in eight fresh interpreters with `PYTHONHASHSEED=0..7`, covering different set
 orders. The two real restart tests cover 20 original child invocations, including
 eight SIGKILL/recovery pairs. No project corruption was observed. Store fixture
-protocol failures remain separately assigned to the conditional #64 review.
+protocol failures were subsequently resolved under #64 without production clock changes.
 
 ## #66 performance and memory
 
@@ -206,8 +206,8 @@ pinned-runtime advisory is also recorded for coordinated update/regression.
 No app, helper, installer, Keychain, account, secret value, setting or workflow
 was changed. Ninety credential tests pass plus one filesystem-specific skip;
 seven native-independent wire tests and targeted frontend security tests pass.
-The patched crypto package compiles under Rust 1.98.1. Current-lock whole-source
-checking remains in the final gate; full #30 production approval is not claimed.
+The patched crypto package and current-lock application source compile under
+Rust 1.98.1; full #30 production approval is not claimed.
 
 ## #50 CLI status
 
@@ -219,8 +219,8 @@ an explicit separate option. Live and cached status text now share a pure,
 actually used formatter with three passing Rust tests. Fifty-eight frontend
 access/permission tests pass. See `../macos-cli-read-access.md` for trace and
 steps. No grant, service state, installed app or default permission was changed.
-A signed installed transition observation and final installed-cli feature compile
-remain gates; the former cannot be supplied by inert/controller tests.
+A signed installed transition observation remains a gate; it cannot be supplied
+by inert/controller tests. The installed-cli feature source check passes.
 
 ## #62 Android journeys
 
@@ -246,4 +246,38 @@ Whole-source Rust library check: PASS with Rust 1.98.1, locked dependencies,
 no default features, one job, peak group RSS 2,812,182,528 bytes (<3 GiB). The
 initial one-hour catalogue attempt stopped at its runner deadline and is kept
 separate. The current-lock retry completed in 32m29s after cache reuse. Existing
-compiler warnings remain; the installed-cli feature check is running separately.
+compiler warnings remain. The locked installed-cli feature / `mrk` binary source
+check also passes with one job in 4m46s, peak RSS 2,684,518,400 bytes (<3 GiB).
+Neither command builds a release, installer or distributable application.
+
+## #64 Store journeys
+
+See `macos-functional-journeys.md`. The real account-backed acceptance remains
+blocked by approved candidate/account prerequisites; no account-backed request
+or Store mutation was attempted. A source defect independently reproduced:
+the Python fixed CLT Git provider rejected every Darwin flag, including the
+actual system root's protection flag. Its native provider already permits a
+fixed protection/display mask for root-owned directories and compression for
+the fixed root-owned executable. The Python layer now matches that exact policy
+and additionally compares observed, held and named flags on every check.
+Changed allowed flags, held/named disagreement, unknown/mutable flags, writable
+modes and wrong owners are refused. No native selection, custody, permission,
+mode, identity, finality or timeout check is bypassed.
+
+All 136 credential-free provider contracts pass with socket creation denied.
+All 52 source/owner protocol and real temporary version-edit tests pass, including
+four new flag regressions. All 52 Store preparation/recovery tests and 51 focused
+frontend tests pass. Native raw-clock preservation corrects the Store fixture's
+same clock-epoch mismatch found under #63. APFS refuses creating a 1,025-byte
+symlink target itself; only that unrepresentable subcase is skipped. Escape,
+cycle, malformed-target and the other application refusal tests remain active.
+
+Read-only real `xcrun --run altool --help` passes with original process settlement.
+The broader iOS/stage/metadata run is 92 tests: 90 pass, one filesystem skip and
+one host-qualification failure; it is not an all-green run.
+The protected Xcode resolver's positive qualification is blocked on this host:
+the actual `/Applications` directory is root-owned mode 0775, rejected by
+`local_store_execute.py::_upload_protected` before pending state or credential
+material. Group-writable ancestry is not relaxed. That qualification failure
+and coordinated native/tool-selection policy need owner review before installed
+Store acceptance. No installed tool permissions or helper code were changed.

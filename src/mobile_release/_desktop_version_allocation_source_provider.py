@@ -29,6 +29,17 @@ HELD_SOURCE_FDS = 96 + TOOL_FDS
 assert len(TOOL_PATH.parts) == TOOL_FDS
 
 
+def _tool_flags(info, *, directory):
+    # Match the existing native git_source_flags_macos policy for the fixed
+    # root-owned CLT path. These protection/representation flags grant no write
+    # authority. Mutable/unknown flags remain refused, as do all non-root tools.
+    flags = getattr(info, "st_flags", 0)
+    allowed = (0x00080000 | 0x00100000 | 0x00800000 | 0x00008000
+               if directory else 0x00000020) if sys.platform == "darwin" else 0
+    wire.require(info.st_uid == 0 and not info.st_mode & 0o7022 and flags & ~allowed == 0)
+    return flags
+
+
 @dataclass(frozen=True, slots=True, repr=False)
 class Snapshot:
     identity: tuple[int, ...]
@@ -134,8 +145,16 @@ class HeldProvider:
         # The fixed executable's complete path is system owned. A user-writable
         # prefix cannot gain pathname-exec authority from a leaf hash alone.
         for node in self.reader.nodes:
-            wire.require(node.observed.st_uid == 0 and not node.observed.st_mode & 0o7022
-                         and not getattr(node.observed, "st_flags", 0))
+            self._owner()
+            original = _tool_flags(node.observed, directory=node.directory)
+            held = os.fstat(self.reader._number(node.slot))
+            named = (os.stat("/", follow_symlinks=False) if node.parent is None
+                     else self.reader._stat(node.parent, node.name))
+            # _Reader.terminal checks identities/modes/content metadata, but
+            # its portable identity omits Darwin flags. Retain those originals
+            # explicitly, including when an allowed flag changes on POST.
+            wire.require(_tool_flags(held, directory=node.directory) == original
+                         and _tool_flags(named, directory=node.directory) == original)
         self.reader.terminal()
         wire.require(_file_identity(self.node.observed) == self.selection.tool.identity)
         if hash_file:

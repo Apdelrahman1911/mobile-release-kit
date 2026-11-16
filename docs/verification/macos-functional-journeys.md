@@ -9,7 +9,7 @@ generated debug keys remain outside the source checkout and are not published.
 |---|---|---|
 | #62 Android | Real Gradle debug compile, typed version edit, rebuilt APK inspection, 180 source/adapter tests | Installed app + protected tool/helper path and complete UI journey |
 | #63 iOS | Real unsigned simulator build and Debug archive, core archive inspection, typed version propagation and source/phase tests | Installed app path and signed account-backed archive/export |
-| #64 Store | Pending sequential investigation | Account-backed Store operations outside this task |
+| #64 Store | Fixed CLT flag mismatch; provider/preparation/recovery contracts and read-only altool help | Account-backed journeys and protected Xcode host qualification |
 
 ## #62 Android
 
@@ -90,3 +90,50 @@ The permanent iOS-only regression runs without Xcode or an account.
 Signed archive/export, real credential enrollment/assignment, installed-app
 review/cancellation/recovery, and device execution remain separate verification.
 No Apple account, P12, profile, Store request or installed MRK app was used.
+
+## #64 Store
+
+Real account acceptance in #64 explicitly requires an approved #57 candidate
+and owner approval of each credentialed step. Neither is supplied by this task;
+contract tests and tool help do not prove those journeys. No GitHub App
+registration (#70), provider account, Keychain access, validation/upload,
+submission or Store-mutating workflow was used.
+
+A real macOS compatibility defect was reproduced before a provider call:
+`_desktop_version_allocation_source_provider.HeldProvider._tool` rejected the
+system root's protection flag. It now follows the existing native
+`git_source_flags_macos.rs` mask: only fixed protection/display flags on the
+root-owned CLT ancestors, and compression on the fixed root-owned executable.
+The new checks compare all original, descriptor-held and parent-named flags
+throughout the operation. Unknown/mutable flags, allowed-flag changes, writable
+modes and nonroot tools still refuse. No runtime selector or executable path
+can be nominated by the caller. The native provider itself was not changed.
+
+- 136 provider/lane/inventory/runtime/paired reservation tests pass with live
+  socket creation explicitly denied.
+- 52 source/provider/reservation/edit owner tests pass. Four new regressions
+  cover exact masks, changed originals, held/named disagreement and a complete
+  synthetic compressed-tool dialogue. The project/edit file effects are real
+  disposable files; Git, native receipts and provider responses are inert DATA.
+- 52 preparation/execution/reconciliation/recovery tests pass after preserving
+  the native fixture raw clock. Production clocks and timeouts are unchanged.
+- 51 focused frontend Store tests pass.
+- Real credential-free `xcrun --no-cache --run altool --help` returns zero,
+  advertises the expected command and settles its original process ledger.
+
+The broader iOS/stage/metadata run executes 92 tests: 90 pass, one filesystem
+subcase skips, and one positive native qualification fails on the host gate below.
+It is not reported as a green suite. That blocked positive native
+qualification: actual `/Applications` is root-owned 0775, so the protected tool
+resolver refuses that group-writable ancestor before credentials or pending
+state. See `local_store_execute.py::_upload_protected` and
+`tests/desktop/test_local_ios_store_execute_macos.py`. Do not interpret direct
+tool-help success as protected Store execution permission. No permissions were
+changed, and the refusal is not turned into a passing/ignored qualification.
+The sole filesystem-specific subcase cannot construct an overlong symlink on
+APFS (the kernel returns ENAMETOOLONG); all representable alias attacks run.
+
+Remaining evidence requires an authorized signed installed build, native tool
+selection with protected ancestry, owner test accounts, and explicitly approved
+nonpublic provider actions/readbacks. Installer/helper qualification is
+coordinated with #47–#49, not implemented or integrated here.

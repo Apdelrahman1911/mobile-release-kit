@@ -888,6 +888,59 @@ class VersionAllocationSourceTests(unittest.TestCase):
         self.assertEqual(max(f.tool_reads), provider.STREAM_CHUNK)
         self.assertEqual(f.tool_closed, provider.TOOL_FDS)
 
+    def test_fixed_tool_flags_match_native_masks_without_granting_write_access(self):
+        def info(flags, *, owner=0, mode=0o755):
+            return SimpleNamespace(st_flags=flags, st_uid=owner, st_mode=mode)
+        with patch.object(provider.sys, 'platform', 'darwin'):
+            for directory, allowed in ((True, 0x00080000 | 0x00100000 | 0x00800000 | 0x00008000),
+                                       (False, 0x00000020)):
+                self.assertEqual(provider._tool_flags(info(allowed), directory=directory), allowed)
+                for bit in range(32):
+                    if not (1 << bit) & allowed:
+                        with self.assertRaises(ValueError):
+                            provider._tool_flags(info(1 << bit), directory=directory)
+                for bad in (info(0, owner=os.geteuid() or 501), info(0, mode=0o775)):
+                    with self.assertRaises(ValueError):
+                        provider._tool_flags(bad, directory=directory)
+        with patch.object(provider.sys, 'platform', 'linux'), self.assertRaises(ValueError):
+            provider._tool_flags(info(0x00100000), directory=True)
+
+    def test_fixed_tool_allowed_flag_change_after_command_refuses_and_closes(self):
+        f = self.fixture
+        # Synthetic CLT stat data only; no real tool or filesystem flag changes.
+        def change(run):
+            f.tool_stats[1] = SimpleNamespace(**{**vars(f.tool_stats[1]), 'st_flags': 0x00100000})
+        f.after_command = change
+        with f.mocks(), patch.object(provider.sys, 'platform', 'darwin'), self.assertRaises(ValueError):
+            source.run_owned(f.CONTROL, f.OUTPUT, f.initial(), started=f.now, runtime_dir='/inert/runtime')
+        self.assertEqual(len(f.calls), 1)
+        self.assertEqual(f.tool_closed, provider.TOOL_FDS)
+        self.assertFalse(any('finished' in frame for frame in f.frames))
+
+    def test_fixed_compressed_tool_completes_same_original_protocol(self):
+        f = self.fixture
+        f.tool_stats[-1].st_flags = 0x00000020
+        with f.mocks(), patch.object(provider.sys, 'platform', 'darwin'):
+            source.run_owned(f.CONTROL, f.OUTPUT, f.initial(), started=f.now, runtime_dir='/inert/runtime')
+        self.assertEqual(len(f.calls), 7)
+        self.assertEqual(f.tool_closed, provider.TOOL_FDS)
+        self.assertTrue(any('finished' in frame for frame in f.frames))
+
+    def test_fixed_tool_held_named_flag_disagreement_refuses_before_command(self):
+        f = self.fixture
+        original_stat = f._stat
+        def changed(path, **kwargs):
+            row = original_stat(path, **kwargs)
+            if kwargs.get('dir_fd') == f.TOOL_FIRST:
+                return SimpleNamespace(**{**vars(row), 'st_flags': 0x00100000})
+            return row
+        with f.mocks(), patch.object(os, 'stat', changed), \
+                patch.object(provider.sys, 'platform', 'darwin'), self.assertRaises(ValueError):
+            source.run_owned(f.CONTROL, f.OUTPUT, f.initial(), started=f.now, runtime_dir='/inert/runtime')
+        self.assertEqual(f.calls, [])
+        self.assertEqual(f.tool_closed, provider.TOOL_FDS)
+        self.assertFalse(any('finished' in frame for frame in f.frames))
+
     def test_ordinary_local_source_argv_and_environment_keep_the_legacy_default(self):
         # Command-spec DATA only; no Invocation or native admission is forged.
         observed = object.__new__(local_release_source.LocalSourceObservation)

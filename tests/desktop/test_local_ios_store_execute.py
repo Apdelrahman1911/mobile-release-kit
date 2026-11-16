@@ -1,5 +1,6 @@
 """Actual saved iOS Execute/input/source/journal/files, inert native/ASC only."""
 import copy
+import errno
 import hashlib
 import json
 import os
@@ -365,7 +366,12 @@ class IOSStoreAliasTests(unittest.TestCase):
                 if index:self.doCleanups()
                 case,nomination,_=self.fixture();nomination.unlink()
                 target={'escape':'../../../../outside/altool','cycle':'altool','large':'x'*1025,'malformed':'../../../SharedFrameworks/../\t/altool'}[kind]
-                nomination.symlink_to(target)
+                try:
+                    nomination.symlink_to(target)
+                except OSError as error:
+                    if kind == 'large' and error.errno == errno.ENAMETOOLONG:
+                        self.skipTest('Host refuses overlong symlink targets before application inspection')
+                    raise
                 t,e,events,calls,_=case.f.run_original(_execute=True)
                 self.assertIsNone(t['result']);self.assertEqual(len(calls),7);self.assertEqual(events,['lease-ready'])
                 self.assertEqual(case.f.current_phase(),'prepared');self.assertFalse(e.input._material_read)
