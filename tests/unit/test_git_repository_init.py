@@ -8,11 +8,13 @@ from contextlib import ExitStack
 import errno
 import hashlib
 import os
+import stat
 from pathlib import Path
 import subprocess
 import tempfile
 import time
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from mobile_release import git_repository_init as init
@@ -22,6 +24,30 @@ from mobile_release import git_service as core
 CONFIG = b"[core]\n\trepositoryformatversion = 0\n\tfilemode = true\n\tbare = false\n\tlogallrefupdates = true\n"
 CONFIG_QUERY = (b"core.repositoryformatversion\n0\0core.filemode\ntrue\0"
                 b"core.bare\nfalse\0core.logallrefupdates\ntrue\0")
+
+
+class AncestorFlagsTests(unittest.TestCase):
+    def info(self, flags, uid=0):
+        return SimpleNamespace(st_dev=1, st_ino=2, st_mode=stat.S_IFDIR | 0o755,
+                               st_uid=uid, st_gid=0, st_flags=flags)
+
+    def test_darwin_protected_ancestors_are_retained_but_never_project_candidates(self):
+        with patch.object(init.sys, "platform", "darwin"):
+            for flags in (0x80000, 0x100000, 0x800000, 0x8000, 0x988000):
+                with self.subTest(flags=flags):
+                    self.assertEqual(init.ancestor_directory(self.info(flags))[-1], flags)
+                    with self.assertRaises(init.InitError): init.directory(self.info(flags))
+            self.assertNotEqual(init.ancestor_directory(self.info(0)), init.ancestor_directory(self.info(0x100000)))
+            self.assertEqual(init.ancestor_directory(self.info(0x8000, uid=501))[-1], 0x8000)
+
+    def test_mutability_flags_and_nonroot_system_flags_remain_refused(self):
+        with patch.object(init.sys, "platform", "darwin"):
+            for flags, uid in ((0x2, 0), (0x4, 0), (0x20000, 0), (0x20, 0),
+                               (0x100000, 501), (0x80000, 501), (0x800000, 501)):
+                with self.subTest(flags=flags, uid=uid), self.assertRaises(init.InitError):
+                    init.ancestor_directory(self.info(flags, uid))
+        with patch.object(init.sys, "platform", "linux"), self.assertRaises(init.InitError):
+            init.ancestor_directory(self.info(0x100000))
 
 
 class FakeInit:

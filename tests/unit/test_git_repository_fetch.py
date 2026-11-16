@@ -473,13 +473,20 @@ class FetchTests(unittest.TestCase):
             repository.apply_fetch(review, owner, expected_digest="0" * 64)
         self.assertEqual(self.fake.private, [])
 
-    def test_casefold_collision_and_target_directory_refuse_before_remote(self):
-        (self.root / ".git/refs/remotes/origin/MAIN").write_text(OLD + "\n")
+    def test_casefold_collision_refuses_before_remote_on_case_sensitive_filesystem(self):
+        alias = self.root / ".git/refs/remotes/origin/MAIN"
+        try:
+            fd = os.open(alias, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        except FileExistsError:
+            self.skipTest("A distinct case-folded ref requires a case-sensitive filesystem")
+        with os.fdopen(fd, "w") as stream:
+            stream.write(OLD + "\n")
         with self.assertRaises(fetch.FetchError) as raised:
             self.prepare()
         self.assertEqual(raised.exception.reason, "fetch-ref-parent")
         self.assertEqual(self.fake.private, [])
-        (self.root / ".git/refs/remotes/origin/MAIN").unlink()
+
+    def test_target_directory_refuses_before_remote(self):
         (self.root / ".git" / REF).unlink()
         (self.root / ".git" / REF).mkdir(mode=0o700)
         with self.assertRaises(fetch.FetchError):

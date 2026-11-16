@@ -183,6 +183,57 @@ class GitCliTests(unittest.TestCase):
                     "statusSha256": native_report(case)["statusSha256"]})
                 self.assertEqual(j.app_calls, 1)
 
+    def test_per_call_trace_separates_original_return_from_validation_failure(self):
+        def malformed(number, result):
+            if number == 2:
+                return subprocess.CompletedProcess(result.args, 0, b'private response is invalid', b'')
+            return result
+        output = io.StringIO()
+        with self.journey(change=malformed) as j, redirect_stderr(output):
+            with self.assertRaises(ValueError):
+                self.invoke(j)
+            self.assertTrue(j.cli.calls.failed and j.cli.joined)
+            self.assertIsNone(j.cli.calls.inflight)
+        rows = [json.loads(line.split('=', 1)[1]) for line in output.getvalue().splitlines()
+                if line.startswith('MRK_GIT_CLI_TRACE=')]
+        returned = [r for r in rows if r['event'] == 'call-return']
+        self.assertEqual([r['ordinal'] for r in returned], [0, 1, 2])
+        self.assertEqual(returned[-1]['command'], 'git-index-status')
+        self.assertEqual(returned[-1]['returncode'], 0)
+        self.assertIn('worker-failure', [r['event'] for r in rows])
+        self.assertNotIn('call-exception', [r['event'] for r in rows])
+        self.assertNotIn('private response', output.getvalue())
+        self.assertLess(len(rows), 40)
+        for row in rows:
+            self.assertEqual(set(row), {'event', 'ordinal', 'command', 'elapsedMs', 'remainingMs', 'returncode', 'phase'})
+            self.assertGreaterEqual(row['elapsedMs'], 0)
+            self.assertLessEqual(row['remainingMs'], 120_000)
+
+    def test_call_exception_remains_inflight_and_trace_never_claims_a_return(self):
+        output = io.StringIO()
+        with self.journey(thrown=2) as j, redirect_stderr(output):
+            with self.assertRaises(ValueError):
+                self.invoke(j)
+            self.assertEqual(j.cli.calls.inflight, 2)
+            self.assertFalse(j.cli.calls.returned)
+        rows = [json.loads(line.split('=', 1)[1]) for line in output.getvalue().splitlines()
+                if line.startswith('MRK_GIT_CLI_TRACE=')]
+        self.assertTrue(any(r['event'] == 'call-exception' and r['ordinal'] == 2 for r in rows))
+        self.assertFalse(any(r['event'] == 'call-return' and r['ordinal'] == 2 for r in rows))
+        self.assertNotIn('inert original', output.getvalue())
+
+    def test_unavailable_trace_sink_does_not_change_success_or_original_clock(self):
+        class Closed:
+            def write(self, value):
+                raise BrokenPipeError('private sink detail')
+            def flush(self):
+                raise BrokenPipeError('private sink detail')
+        with self.journey() as j, redirect_stderr(Closed()):
+            result = self.invoke(j)
+            self.assertEqual(result.returncode, 0)
+            self.assertTrue(j.cli.calls.returned and j.cli.joined)
+            self.assertEqual(len(j.calls), 8)
+
     def test_original_read_prepare_apply_history_and_instance_mismatch_never_replays(self):
         for number, field in ((0, "selection"), (1, "origin"), (2, "historyAvailable"), (2, "review"),
                               (3, "prepareOperationId"), (4, "applyOperationId"), (7, "instance")):
@@ -318,7 +369,8 @@ class GitCliTests(unittest.TestCase):
                     code = M._run(A, BINDING, 501, 20, "inert", j.root,
                         {"MRK_MACOS_NATIVE_SCOPE": M.GIT_SCOPE}, scope=G.scope(case))
                 self.assertEqual((code, stdout.getvalue(), events), (1, "", ["app-return", "close"]), stderr.getvalue())
-                diagnostic = json.loads(stderr.getvalue())
+                diagnostic = json.loads("\n".join(line for line in stderr.getvalue().splitlines()
+                    if not line.startswith("MRK_GIT_CLI_TRACE=")))
                 self.assertEqual((diagnostic["reason"], diagnostic["appReturncode"]), ("app-return", 1))
                 self.assertTrue(diagnostic["originalCallReturned"] and diagnostic["laterCasesStopped"])
                 self.assertEqual(diagnostic["invocationFinality"], "no-pending-invocation")

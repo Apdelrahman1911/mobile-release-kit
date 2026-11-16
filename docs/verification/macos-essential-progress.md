@@ -20,8 +20,8 @@ are recorded for coordination. Shared consumer interfaces are preserved.
 | Issue | State | Commit | Evidence / remaining verification |
 |---|---|---|---|
 | #45 workspace failure | DIAGNOSTICS/FALLBACK FIXED; ORIGINAL INCIDENT BLOCKED | `0278652e` | Persistent bounded journal, safe error boundary, helper-state render regressions; 2,463 frontend tests and TypeScript checking pass. Original installed exception remains uncaptured. |
-| #46 first connection | STEP DIAGNOSTICS ADDED; ORIGINAL INCIDENT BLOCKED | issue commit in branch history | Two diagnostic tests pass; whole-source check pending. No failing native predicate or first-launch race is proven. |
-| #17 Git timeout | PENDING | — | Preserve the original 120-second bound; diagnose calls/driver phases. |
+| #46 first connection | STEP DIAGNOSTICS ADDED; ORIGINAL INCIDENT BLOCKED | `1e7c4411` | Two diagnostic tests pass; whole-source check pending. No failing native predicate or first-launch race is proven. |
+| #17 Git timeout | MACOS INIT DEFECT FIXED; ORIGINAL TIMEOUT BLOCKED | issue commit in branch history | Fixed per-call/phase traces; protected-ancestor regression passes. Broader tests recorded below. |
 | #65 interruption integrity | PENDING | — | Synthetic project fixtures only; installed GUI termination remains an external gate. |
 | #66 performance/memory | PENDING | — | Reproducible test-environment measurements; physical Mac gates separated. |
 | #30 macOS security | PENDING | — | Credentials/IPC/privilege review; coordinate native helper/installer findings. |
@@ -90,3 +90,48 @@ Remaining #46 gate: a trace from the actual first-launch failure, in an authoriz
 test installation or the existing app once it contains these diagnostics. No
 installed app was changed, and no speculative retry or deadline increase was
 implemented. Helper registration/lifecycle code remains owned by #47–#49.
+
+## #17 investigation
+
+The historical `GitCli(Checked)` timeout still has no original call return or
+first driver exception. The driver caught worker exceptions and retained only
+a failure boolean. Added fixed per-call entry/return/exception records with
+elapsed/remaining budget, phase waits, worker failure and final thread join.
+Arguments, paths, output and exception messages are excluded. An unreturned
+call remains in flight; diagnostics never retry, renew the 120-second endpoint,
+or invent settlement. Three new actual-driver regressions distinguish response
+validation failure from a lost call return and verify a closed trace sink.
+
+Broader portable testing reproduced a separate actual macOS defect:
+`git_repository_init.directory` rejected every nonzero Darwin flag while walking
+system ancestors. Real `/` and `/Users` carry `SF_NOUNLINK`, so initialization
+failed before Git dispatch. The read-only ancestor check now uses the same
+fixed protection/display mask as `git_source_flags_macos.rs`, and includes the
+exact flags in its revision comparisons. Project/candidate leaves still require
+zero flags; mutable flags, unknown flags and nonroot system flags remain refused.
+This is not claimed to explain the historical `git-index-cli` timeout.
+
+Initial focused results: 16 driver tests, 27 initialization tests and 2,463
+frontend tests pass; three stock-Git initialization tests have explicit
+Linux-only guards. Of 88 macOS Git driver/roster tests, 87 pass and the source
+projection fixture refuses OS-added extended attributes. No installer/custody
+check was weakened to make that fixture pass. Portable real-Git tests use a
+physical private temporary namespace, because the system temporary spelling
+contains a symlink. Final broader results are recorded before delivery.
+
+Remaining #17 gate: trace the original installed Git journey and complete its
+11 native groups after the independent installation prerequisite is resolved.
+Those groups require an authorized installed/test application; this task neither
+builds a release nor changes the installed app. No timeout increase was made.
+
+Final #17 checks: the broad corrected-path run exercised 584 tests: 570 passed,
+three Linux-only cases skipped, ten initialization tests failed against the
+pre-fix module loaded when that long run started, and one fixture failed because
+case-insensitive APFS cannot create distinct `main` and `MAIN` files. The ten
+initialization failures pass in the fresh affected run. The case-folding fixture
+now uses exclusive creation and explicitly skips only the impossible distinct
+case collision; its directory-refusal check is a separate test on every host.
+The fresh affected run covers initialization, fetch and the real driver code.
+The 205-test desktop Git run's ten errors were the same initialization defect;
+its affected initialization group also passes after the fix. Full outputs are
+retained as separate runs; these are not presented as one post-fix green run.

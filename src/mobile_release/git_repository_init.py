@@ -17,6 +17,7 @@ import os
 from pathlib import Path
 import re
 import stat
+import sys
 import time
 
 from . import git_repository_read as read
@@ -49,10 +50,20 @@ def _hash(value):
                                     ensure_ascii=True).encode("ascii")).hexdigest()
 
 
-def directory(info):
+def directory(info, *, _allowed_flags=0):
     _need(stat.S_ISDIR(info.st_mode) and info.st_dev > 0 and info.st_ino > 0
-          and getattr(info, "st_flags", 0) == 0)
+          and getattr(info, "st_flags", 0) & ~_allowed_flags == 0)
     return (info.st_dev, info.st_ino, info.st_mode, info.st_uid, info.st_gid)
+
+
+def ancestor_directory(info):
+    # Same Darwin ancestor mask as git_source_flags_macos.rs. These system
+    # protections/display flags do not authorize a writable project/candidate.
+    # Capture flags in the ancestry revision too: an allowed flag change is
+    # still a changed original and cannot pass the later comparison.
+    allowed = (0x00080000 | 0x00100000 | 0x00800000 | 0x00008000
+               if info.st_uid == 0 else 0x00008000) if sys.platform == "darwin" else 0
+    return (*directory(info, _allowed_flags=allowed), getattr(info, "st_flags", 0))
 
 
 def names(path):
@@ -121,7 +132,8 @@ def absence(root, private=None):
         private.check()
     rows = []
     for index, path in enumerate((root, *root.parents)):
-        before = directory(path.lstat())
+        classify = directory if index == 0 else ancestor_directory
+        before = classify(path.lstat())
         # Native SourceBook separately proves physical protected ancestry,
         # including its fixed /private/tmp alias. Do not mistake that original
         # sticky system parent for a project-owned/writable metadata leaf.
@@ -137,7 +149,7 @@ def absence(root, private=None):
             for name in entries:
                 if name.lower().startswith(PRIVATE_PREFIX):
                     _need(private is not None and name == private.outer.path.name, "recovery-required")
-        _need(directory(path.lstat()) == before, "stale-observation")
+        _need(classify(path.lstat()) == before, "stale-observation")
         rows.append((str(path), before))
     if private is not None:
         private.check()

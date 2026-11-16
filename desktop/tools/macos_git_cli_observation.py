@@ -84,12 +84,14 @@ def origin(v):
 
 def _phase(c, calls, number):
     names, _ = phases(calls.case)
+    calls.trace("phase-wait", phase=number)
     while True:
         calls.check()
         rows = c.native.read()
         if rows is not None:
             _need(len(rows) <= number + 1 and all(v.get("phase") == names[i] for i, v in enumerate(rows)), "git-cli-phase-order")
             if len(rows) == number + 1:
+                calls.trace("phase-ready", phase=number)
                 return rows[-1]
         calls.wait()
 

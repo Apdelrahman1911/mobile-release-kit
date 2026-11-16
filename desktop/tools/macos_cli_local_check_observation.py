@@ -13,6 +13,7 @@ import os
 import re
 import stat
 import subprocess
+import sys
 import threading
 import time
 
@@ -233,6 +234,35 @@ class Calls:
             need(original_end is None, "cli-unexpected-original-end")
         self.next, self.inflight, self.closed, self.failed = 0, None, False, False
         self.results, self.returned = [], False
+        self.trace_started = start
+
+    def trace(self, event, *, returncode=None, phase=None):
+        """Bounded fixed DATA, emitted before a blocking call can lose its return.
+
+        Never print argv, response bytes, exception text or fixture paths. This
+        channel is evidence only: a failed write cannot affect original custody.
+        """
+        if self.case not in GIT_CLI.CASES:
+            return
+        try:
+            if event not in ("call-enter", "call-return", "call-exception", "phase-wait",
+                             "phase-ready", "worker-failure", "worker-return", "app-enter",
+                             "app-return", "app-exception", "thread-joined", "thread-unjoined"):
+                return
+            now = self.clock()
+            ordinal = self.inflight if self.inflight is not None else self.next
+            verbs = ("scope", "prepare", "status", "start", "status", "cancel", "scope", "status")
+            prefix = "git-index" if self.case == GIT_CLI.INDEX else "git-repository"
+            row = {"event": event, "ordinal": ordinal,
+                   "command": prefix + "-" + verbs[ordinal] if 0 <= ordinal < self.count else "complete",
+                   "elapsedMs": max(0, min(1_000_000, int((now - self.trace_started) * 1000))),
+                   "remainingMs": max(0, min(120_000, int((self.success_end - now) * 1000))),
+                   "returncode": returncode if type(returncode) is int and -2**31 <= returncode < 2**31 else None,
+                   "phase": phase if type(phase) is int and 0 <= phase <= 5 else None}
+            sys.stderr.write("MRK_GIT_CLI_TRACE=" + json.dumps(row, sort_keys=True, separators=(",", ":")) + "\n")
+            sys.stderr.flush()
+        except Exception:
+            pass
 
     def application_timeout(self):
         if self.case not in GIT_CLI.CASES:
@@ -340,13 +370,19 @@ def _call(c, run_owned, env, state, calls, number, args, kind, *, receipt=False)
     c.current_cli()
     argv = [CLI, *args, "--json"]
     timeout = calls.claim(number)
-    result = run_owned(argv, environ=env, cwd=state, timeout=timeout, capture=True,
-                       text=False, output_limit=OUTPUT_LIMIT, cancellation=None)
+    calls.trace("call-enter")
+    try:
+        result = run_owned(argv, environ=env, cwd=state, timeout=timeout, capture=True,
+                           text=False, output_limit=OUTPUT_LIMIT, cancellation=None)
+    except BaseException:
+        calls.trace("call-exception")
+        raise
     # Only the original normal return is retained. Exception leaves the
     # claim in flight; no later call or fixture close can replace it.
     need(type(result) is subprocess.CompletedProcess and type(result.args) is list and result.args == argv
          and type(result.returncode) is int and type(result.stdout) is bytes and type(result.stderr) is bytes
          and len(result.stdout) + len(result.stderr) <= OUTPUT_LIMIT, "cli-call-original")
+    calls.trace("call-return", returncode=result.returncode)
     calls.returned_call(number, result)
     calls.check()  # The preclaimed original may return, but cannot advance after STOP.
     c.current_cli()
@@ -465,15 +501,21 @@ def invoke(f, run_owned, argv, env, state):
                 BACKUP.journey(c, calls, lambda number, args, kind, **kw:
                     _call(c, run_owned, environment, state, calls, number, args, kind, **kw))
         except BaseException:
+            calls.trace("worker-failure")
             calls.close(failed=True)  # Fixed failure only, no secret exception retention.
+        else:
+            calls.trace("worker-return")
     c.thread = threading.Thread(target=worker, name="mrk-installed-cli-fixture", daemon=False)
     started = False
     try:
         c.thread.start()
         started = True
+        calls.trace("app-enter")
         result = run_owned(argv, environ=environment, cwd=state, timeout=calls.application_timeout(),
                            capture=True, text=False, output_limit=2 * 1024 * 1024)
+        calls.trace("app-return", returncode=result.returncode if type(result) is subprocess.CompletedProcess else None)
     except BaseException:
+        calls.trace("app-exception")
         calls.close(failed=True)
         raise
     finally:
@@ -485,6 +527,7 @@ def invoke(f, run_owned, argv, env, state):
             c.joined = not c.thread.is_alive() and calls.clock() < calls.hard_end
         if not started or not c.joined or calls.inflight is not None:
             calls.failed = True
+        calls.trace("thread-joined" if c.joined else "thread-unjoined")
         # Existing run_cases alone clears Fixtures.inflight after THIS returns.
     # A genuinely returned failed Git app can precede its first Allow. Preserve
     # that exact result only after the original waiting thread joined, with no
