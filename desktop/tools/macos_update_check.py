@@ -107,8 +107,23 @@ def fetch(role, row, work, steps):
     return package
 
 
+def root_staged(role, package):
+    """The bundled installer refuses a package whose file or folders are not
+    root-owned (protection-other-owner), so stage a root-owned read-only copy,
+    as the owner's install did under /private/var/tmp."""
+    folder = Path(f"/private/var/tmp/mrk-update-check-{role}")
+    staged = folder / "Install.pkg"
+    for argv in (["/bin/mkdir", "-m", "0755", str(folder)], ["/bin/cp", str(package), str(staged)],
+                 ["/usr/sbin/chown", "-R", "root:wheel", str(folder)], ["/bin/chmod", "0444", str(staged)]):
+        need(subprocess.run(["/usr/bin/sudo", "-n"] + argv, capture_output=True, timeout=300).returncode == 0,
+             f"{role}-root-staging")
+    need(digest(staged) == digest(package), f"{role}-root-staging-digest")
+    return staged
+
+
 def install(role, package, steps, expect_success=True):
-    p, row = run(["/usr/bin/sudo", "-n", "/usr/sbin/installer", "-pkg", str(package), "-target", "/"], 1500)
+    staged = root_staged(role, package)
+    p, row = run(["/usr/bin/sudo", "-n", "/usr/sbin/installer", "-pkg", str(staged), "-target", "/"], 1500)
     row.update(role=role, expected="success" if expect_success else "refusal")
     steps.append(row)
     return p.returncode
