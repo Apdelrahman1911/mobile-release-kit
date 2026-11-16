@@ -794,7 +794,7 @@ class OriginalLifetimeDataTests(unittest.TestCase):
             with self.subTest(rounds=rounds, directory=directory, reads=len(blocks)), \
                  patch.object(subject, "_FD", return_value=slot), \
                  patch.object(subject.os, "fstat", return_value=data), patch.object(subject.os, "stat", return_value=data), \
-                 patch.object(subject.os, "getxattr", side_effect=OSError(errno.ENODATA, "inert")), \
+                 patch.object(subject.os, "getxattr", side_effect=OSError(errno.ENODATA, "inert"), create=True), \
                  patch.object(subject.os, "lseek", return_value=0), patch.object(subject.os, "read", side_effect=blocks):
                 record = tools._open_record(11, "inert", directory=directory)
                 if not directory:
@@ -846,7 +846,7 @@ class OriginalLifetimeDataTests(unittest.TestCase):
         tools._credentials = ((1234,) * 3, (1234,) * 3)
         data = observed(inode=50, mode=stat.S_IFDIR | 0o755)
         with patch.object(subject.os, "fstat", return_value=data), patch.object(subject.os, "stat", return_value=data), \
-             patch.object(subject.os, "getxattr", side_effect=OSError(errno.ENODATA, "inert")), \
+             patch.object(subject.os, "getxattr", create=True, side_effect=OSError(errno.ENODATA, "inert")), \
              patch.object(subject.os, "getresuid", return_value=tools._credentials[0], create=True), \
              patch.object(subject.os, "getresgid", return_value=tools._credentials[1], create=True), \
              patch.object(subject.os, "open", side_effect=AssertionError("no native ancestry acquisition")) as opened:
@@ -880,14 +880,14 @@ class OriginalLifetimeDataTests(unittest.TestCase):
 
     def test_fixed_acl_and_capability_observations_require_explicit_absence(self):
         tools = inert_tools()
-        with patch.object(subject.os, "getxattr", side_effect=OSError(errno.ENODATA, "inert")) as attrs:
+        with patch.object(subject.os, "getxattr", create=True, side_effect=OSError(errno.ENODATA, "inert")) as attrs:
             tools._absent_attributes(17, directory=True)
         self.assertEqual([call.args for call in attrs.call_args_list],
                          [(17, "system.posix_acl_access"), (17, "security.capability"), (17, "system.posix_acl_default")])
         for result in (b"", b"grant-data"):
-            with patch.object(subject.os, "getxattr", return_value=result), self.assertRaises(subject.AndroidToolError):
+            with patch.object(subject.os, "getxattr", create=True, return_value=result), self.assertRaises(subject.AndroidToolError):
                 tools._absent_attributes(17, directory=False)
-        with patch.object(subject.os, "getxattr", side_effect=OSError(errno.ENOTSUP, "inert")), \
+        with patch.object(subject.os, "getxattr", create=True, side_effect=OSError(errno.ENOTSUP, "inert")), \
              self.assertRaises(subject.AndroidToolError):
             tools._absent_attributes(17, directory=False)
 

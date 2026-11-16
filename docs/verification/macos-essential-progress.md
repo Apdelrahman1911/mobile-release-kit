@@ -25,8 +25,8 @@ are recorded for coordination. Shared consumer interfaces are preserved.
 | #65 interruption integrity | CORE CRASH MATRIX VERIFIED; GUI GATE OPEN | `f20b9463` | Eight real SIGKILL/restart scenarios across four durable boundaries; broader recovery regressions tracked below. |
 | #66 performance/memory | SOURCE BASELINE + HOT-PATH FIX VERIFIED; APP GATES OPEN | `4266d1c6` | Reproducible Node/SSR fixture, linear path matching, 10,000 controller cycles; installed one-hour/WebView/helper measurements remain open. |
 | #30 macOS security | APP LOCK PATCHED; COORDINATION GATES OPEN | `b8169e10` | Scoped report, 335-command inventory, credential/wire tests; independent helper locks and Tokio pin need coordination. |
-| #50 CLI status | INTENDED GATE DOCUMENTED; GUIDANCE FIXED | issue commit in branch history | Exact UI steps, three actual shared Rust formatter tests and 58 frontend access tests pass; signed installed observation remains open. |
-| #62 Android journeys | PENDING | — | macOS fixtures; no personal device, account or real signing material. |
+| #50 CLI status | INTENDED GATE DOCUMENTED; GUIDANCE FIXED | `ed423ce6` | Exact UI steps, three actual shared Rust formatter tests and 58 frontend access tests pass; signed installed observation remains open. |
+| #62 Android journeys | REAL FIXTURE COMPILE + VERSION PROPAGATION PASS; UI GATE OPEN | issue commit in branch history | 180 tests, two disposable Gradle builds, actual typed version edit and APK inspection; protected installed/helper journey remains open. |
 | #63 iOS journeys | PENDING | — | Test-only unsigned fixtures; account/hardware/signed acceptance gates recorded. |
 | #64 Store journeys | PENDING | — | Credential-free contract tests; real accounts are an external gate. |
 
@@ -221,3 +221,12 @@ access/permission tests pass. See `../macos-cli-read-access.md` for trace and
 steps. No grant, service state, installed app or default permission was changed.
 A signed installed transition observation and final installed-cli feature compile
 remain gates; the former cannot be supplied by inert/controller tests.
+
+## #62 Android journeys
+
+See `macos-functional-journeys.md`. A real Java Android debug fixture builds with
+existing public toolchains, including after the actual typed core version edit;
+SDK inspection verifies the edited version in the APK. All 180 focused tests
+pass. A test-host compatibility defect in inert Linux xattr mocks is corrected.
+No MRK release, installed app, protected tool registry or real project was changed.
+Full installed UI/native/helper and signed acceptance remain separate gates.
