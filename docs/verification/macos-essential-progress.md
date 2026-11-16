@@ -158,6 +158,17 @@ Remaining #17 gate: trace the original installed Git journey and complete its
 Those groups require an authorized installed/test application; this task neither
 builds a release nor changes the installed app. No timeout increase was made.
 
+Reopened evidence recovered the exact original job log (86,817 bytes), matching
+SHA-256 `3d7ee0d62851b4ea90536b95be53f436a7496c6d1f1df79397f516ab15163708`.
+The original step measurements include 20.062240s initial read wait, 29.020745s
+Prepare and 35.279288s terminal/Apply observation. Checked is pending at the
+whole-case deadline with 5.675875s elapsed in that step. The earlier work has
+consumed almost all the case budget; the log still contains neither a return
+for the pending call nor its first exception. No retained artifacts are listed
+for that run. This narrows profiling but does not identify or eliminate the
+original cause. The optimized runtime SHA2 dependency was already present at
+the failing source; no speculative hashing change or larger timeout was made.
+
 Final #17 checks: the broad corrected-path run exercised 584 tests: 570 passed,
 three Linux-only cases skipped, ten initialization tests failed against the
 pre-fix module loaded when that long run started, and one fixture failed because
