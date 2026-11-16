@@ -75,6 +75,21 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          # Current hosted images no longer ship rustup. Bootstrap the official
+          # rustup-init only when absent, verified against its published SHA-256;
+          # the pinned seal binary digest below remains the decisive check.
+          if [ ! -x /Users/runner/.cargo/bin/rustup ]; then
+            work="$(/usr/bin/mktemp -d "$RUNNER_TEMP/rustup.XXXXXXXX")"
+            base=https://static.rust-lang.org/rustup/archive/1.29.0/aarch64-apple-darwin
+            /usr/bin/curl --proto '=https' --tlsv1.2 -sSfL -o "$work/rustup-init" "$base/rustup-init"
+            expected="$(/usr/bin/curl --proto '=https' --tlsv1.2 -sSfL "$base/rustup-init.sha256" | /usr/bin/awk '{print $1}')"
+            [[ "$expected" =~ ^[0-9a-f]{64}$ ]]
+            [[ "$(/usr/bin/shasum -a 256 "$work/rustup-init" | /usr/bin/awk '{print $1}')" == "$expected" ]]
+            /bin/chmod 0755 "$work/rustup-init"
+            /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME=/Users/runner \
+              CARGO_HOME=/Users/runner/.cargo RUSTUP_HOME=/Users/runner/.rustup \
+              "$work/rustup-init" -y --no-modify-path --default-toolchain none --profile minimal
+          fi
           /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin HOME=/Users/runner \
             CARGO_HOME=/Users/runner/.cargo RUSTUP_HOME=/Users/runner/.rustup \
             /Users/runner/.cargo/bin/rustup toolchain install 1.98.1 \
