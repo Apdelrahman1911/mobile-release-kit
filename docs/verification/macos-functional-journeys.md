@@ -171,3 +171,17 @@ Remaining evidence requires an authorized signed installed build, native tool
 selection with protected ancestry, owner test accounts, and explicitly approved
 nonpublic provider actions/readbacks. Installer/helper qualification is
 coordinated with #47–#49, not implemented or integrated here.
+
+Reopened #64 traced the writable-ancestor refusal through both implementations:
+`local_store_execute.py::_upload_protected` and
+`installed_runtime_macos.rs::metadata`, called by `Book::open`, both require
+root ownership and reject mode bits `0o7022`. It is not a Python-only policy
+mismatch. Accepting stock group-writable application ancestry would require a
+reviewed native execution/installation policy, not deleting the Python check.
+No such change was made in the independently owned installer/helper area.
+The fresh combined Store group runs 70 tests: 69 pass and one APFS overlong-link
+case skips. The separate 10-test real-Mac resolver group has nine passes and the
+same one genuine positive-qualification failure (mode 0775, before resolver
+dispatch); credential-free altool help returns and settles successfully.
+These failed qualification results remain visible, not skipped or converted
+into acceptance. No account-backed journey was attempted.
