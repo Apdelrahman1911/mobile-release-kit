@@ -12528,10 +12528,10 @@ mod installer {
                     // budget can be corrected from evidence (#49). Never written
                     // when this process's stderr is the worker gate.
                     if !book.worker_stderr_is_gate {
-                        let line=format!("MRK_MACOS_INSTALL_BUDGET_DIAGNOSTIC=reason={};action={:?};openFds={};removalLive={};launcher={};launcherPhase={};live={};records={};control={};generations={};invocations={}\n",
+                        let line=format!("MRK_MACOS_INSTALL_BUDGET_DIAGNOSTIC=reason={};action={:?};openFds={};removalLive={};launcher={};launcherPhase={};live={};records={};control={};evidence={};generations={};invocations={}\n",
                             refusal.reason_data(),action,book.originals.iter().filter(|r|r.fd.is_some()).count(),
                             book.removal_live_reserved,u8::from(launcher.is_some()||launcher_removal.is_some()),
-                            u8::from(creates_launcher_phase),live,records,control_bound,costs.len(),invocation_count);
+                            u8::from(creates_launcher_phase),live,records,control_bound,planned_evidence,costs.len(),invocation_count);
                         if line.len()<=512 {let _=std::io::Write::write_all(&mut std::io::stderr().lock(),line.as_bytes());}
                     }
                     refusal.reason_data()
@@ -23968,6 +23968,9 @@ exec ./mrk-macos-remove --fixture-supervise "$1"
             // is charged in full when it would exceed it.
             assert_eq!(maintenance_live_data(0,0,true,false,0),maintenance_live_data(0,0,false,false,0));
             assert!(MAINTENANCE_RETAINED_ROOTS_LIVE+MAINTENANCE_LAUNCHER_LIVE+phase<=MAINTENANCE_COPY_CHAIN_LIVE);
+            assert_eq!(applications::PHASE_LIMIT,transaction::LAUNCHER_PHASE_EVIDENCE_LIMIT);
+            assert_eq!(fresh_data::JOURNAL_LIMIT+fresh_data::ORIGIN_LIMIT+4*transaction::STATE_LIMIT
+                +applications::PHASE_LIMIT,transaction::STAGE_EVIDENCE_LIMIT);
             // The 96 cap itself is unchanged: 51 held still admits, 52 refuses.
             let edge=maintenance_live_data(51,0,true,false,phase).unwrap();
             assert_eq!(edge,96);
