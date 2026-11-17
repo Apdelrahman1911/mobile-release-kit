@@ -1011,9 +1011,24 @@ fn directory_roster_matches(actual: &[String], entries: &[&str], alternate: Opti
     matches(entries) || alternate.is_some_and(matches)
 }
 fn directory_rosters(path: &Path, uid: u32, mode: u32, entries: &[&str], alternate: Option<&[&str]>, linked: Option<&str>) -> Result<[u64; 6], ()> {
+    directory_scan(path, uid, mode, entries, alternate, linked, None)
+}
+/// The SAME closed scan for a user-selected disposable project root. Its only
+/// difference: instead of no xattrs, the existing strict native reader admits
+/// either none or exactly one bounded macOS `com.apple.macl` access tag (the
+/// OS attaches it when the user selects the folder in the Open panel). Any
+/// other or additional xattr is still refused. Returns the tag's digest.
+fn selected_directory(path: &Path, uid: u32, mode: u32, entries: &[&str]) -> Result<([u64; 6], Option<String>), ()> {
+    let mut tag = None;
+    let identity = directory_scan(path, uid, mode, entries, None, None, Some(&mut tag))?;
+    Ok((identity, tag))
+}
+fn directory_scan(path: &Path, uid: u32, mode: u32, entries: &[&str], alternate: Option<&[&str]>, linked: Option<&str>,
+    mut selected: Option<&mut Option<String>>) -> Result<[u64; 6], ()> {
     // Optional closed-roster DATA is decided within this one original read
     // and close. A generic IO/native/close Err never starts another scan.
     if alternate.is_some() && linked.is_some() { return Err(()); }
+    if selected.is_some() && (alternate.is_some() || linked.is_some()) { return Err(()); }
     if linked.is_some_and(|name| name != "linked.p12" || !entries.contains(&name)) { return Err(()); }
     let before = std::fs::symlink_metadata(path).map_err(|_| ())?;
     if !before.is_dir() || before.uid() != uid || before.mode() & 0o7777 != mode { return Err(()); }
@@ -1023,7 +1038,14 @@ fn directory_rosters(path: &Path, uid: u32, mode: u32, entries: &[&str], alterna
         let original = identity(&before)?;
         if identity(&file.metadata().map_err(|_| ())?)? != original { return Err(()); }
         mrk_macos_installed_native::empty_acl(file.as_fd()).map_err(|_| ())?;
-        mrk_macos_installed_native::no_xattrs(file.as_fd()).map_err(|_| ())?;
+        match selected.as_deref_mut() {
+            None => mrk_macos_installed_native::no_xattrs(file.as_fd()).map_err(|_| ())?,
+            Some(tag) => {
+                let mut bytes = [0u8; 1024];
+                let used = mrk_macos_installed_native::existing_app_macl(file.as_fd(), &mut bytes).map_err(|_| ())?;
+                *tag = (used > 0).then(|| digest(&bytes[..used]));
+            },
+        }
         // Reuse the installed native descriptor reader, not an unowned
         // fdopendir/Drop close. This private fixed roster has at most16 names.
         let mut buffer = vec![0u8;65536]; let mut actual = Vec::new(); let mut eof = false;
@@ -5387,6 +5409,7 @@ fn observer_data_checks() -> bool {
     if !git_read_wait_data_checks() || !git_read_failure_data_checks() || !git_cli_wait_data_checks() { return data_contract_failure!(); }
     if !crate::supervisor::installed_git_read_first_failure_data_check()
         || !git_cli::read_original_failure_data_checks() { return data_contract_failure!(); }
+    if !git_cli::Fixture::selected_root_data_checks() { return data_contract_failure!(); }
     if !project_chooser_data_checks() { return data_contract_failure!(); }
     crate::asset_session::assert_project_selection_gate_contract();
     // SAME inert bodies as the libtest regressions, before any fixture/native

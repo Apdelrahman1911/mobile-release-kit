@@ -2,7 +2,8 @@
 //! not SourceBook/ACK receipts. The outer original additionally compares the
 //! complete bounded Git tree (including every loose-object original).
 use super::super::{
-    directory, file_fact, identity, FileFact, CONFIG, IGNORE_PREFIX, KEEP, SOURCE, VERSION,
+    directory, file_fact, identity, selected_directory, FileFact, CONFIG, IGNORE_PREFIX, KEEP,
+    SOURCE, VERSION,
 };
 use super::Case;
 use std::{
@@ -65,6 +66,10 @@ pub(super) struct After {
     index: FileFact,
     created: Vec<FileFact>,
     git: [u64; 9],
+    // The selected root as first accepted at Finish (complete identity and
+    // optional OS access-tag digest). Every later readback must equal it.
+    root: [u64; 9],
+    root_tag: Option<String>,
 }
 impl Fixture {
     pub(in super::super) fn capture(root: &Path, uid: u32, case: Case) -> Result<Self, ()> {
@@ -150,7 +155,8 @@ impl Fixture {
                 return Err(());
             }
         }
-        for ((p, n), old) in DIRS.iter().zip(&self.dirs) {
+        let (selected, root_tag) = selected_root(root, uid, DIRS[0].1, &self.dirs[0])?;
+        for ((p, n), old) in DIRS.iter().zip(&self.dirs).skip(1) {
             if dir(&root.join(p), uid, n)? != *old {
                 return Err(());
             }
@@ -208,6 +214,8 @@ impl Fixture {
             index,
             created,
             git,
+            root: selected,
+            root_tag,
         })
     }
     pub(super) fn verify_unchanged(&self, root: &Path, uid: u32, after: &After) -> Result<(), ()> {
@@ -230,8 +238,75 @@ impl After {
         for f in &self.created {
             n = n.checked_add(f.sha256.capacity())?;
         }
+        if let Some(tag) = &self.root_tag {
+            n = n.checked_add(tag.capacity())?;
+        }
         Some(n)
     }
+}
+// Selecting this disposable project root in the Open panel makes macOS attach
+// its own `com.apple.macl` access tag to the root (retained installed runs:
+// present on every root that passed OpenProject, absent on every run blocked
+// before the selection). That OS write changes only the root's ctime. The
+// Fixture is captured before OpenProject and stays strictly untagged. At and
+// after Finish the root must be the SAME directory with the SAME roster,
+// empty ACL, mode, owner, link count, size and mtime; only exactly that one
+// bounded tag (via the existing strict native reader) with a strictly later
+// ctime is admitted. Any other xattr, or an untagged ctime change, refuses.
+fn selected_root(root: &Path, uid: u32, names: &[&str], captured: &[u64; 9]) -> Result<([u64; 9], Option<String>), ()> {
+    let before = identity(&std::fs::symlink_metadata(root).map_err(|_| ())?)?;
+    let (actual, tag) = selected_directory(root, uid, 0o700, names)?;
+    if actual.as_slice() != &before[..6]
+        || identity(&std::fs::symlink_metadata(root).map_err(|_| ())?)? != before
+        || !selected_root_successor(captured, &before, tag.is_some())
+    {
+        return Err(());
+    }
+    Ok((before, tag))
+}
+fn selected_root_successor(captured: &[u64; 9], current: &[u64; 9], tagged: bool) -> bool {
+    if tagged {
+        captured[..8] == current[..8] && current[8] > captured[8]
+    } else {
+        captured == current
+    }
+}
+impl Fixture {
+    // Inert DATA (no file, native call or fixture): shared by data-contracts
+    // in the compiled observer and the libtest wrapper below.
+    pub(in super::super) fn selected_root_data_checks() -> bool {
+        let captured = [16_777_234, 131_811_265, 0o40700, 501, 20, 9, 288, 1_000, 1_000];
+        let mut later = captured;
+        later[8] = 2_000;
+        if !selected_root_successor(&captured, &captured, false)
+            || selected_root_successor(&captured, &later, false)
+            || !selected_root_successor(&captured, &later, true)
+            || selected_root_successor(&captured, &captured, true)
+        {
+            return false;
+        }
+        let mut earlier = captured;
+        earlier[8] = 999;
+        if selected_root_successor(&captured, &earlier, true) {
+            return false;
+        }
+        // dev, inode, mode, uid, gid, nlink, size and mtime never change.
+        for field in 0..8 {
+            for tagged in [false, true] {
+                let mut other = later;
+                other[field] = other[field].wrapping_add(1);
+                if selected_root_successor(&captured, &other, tagged) {
+                    return false;
+                }
+            }
+        }
+        true
+    }
+}
+#[cfg(test)]
+#[test]
+fn selected_root_admits_only_the_os_access_tag_ctime_change() {
+    assert!(Fixture::selected_root_data_checks());
 }
 fn dir(path: &Path, uid: u32, names: &[&str]) -> Result<[u64; 9], ()> {
     let before = identity(&std::fs::symlink_metadata(path).map_err(|_| ())?)?;
