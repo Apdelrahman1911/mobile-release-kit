@@ -89,13 +89,60 @@ Mac. This page has no local paths, account data or private identifiers.
   Developer ID Application/Installer P12s, notarizes with a CI notary API key
   and retains the package for 14 days. No such artifact exists: none of the
   1,514 repository artifacts is a companion.
-- A local build cannot replace that step without source changes. The setup
-  binary self-verifies against the exact pinned Developer ID leaf
-  (`MRK_XCODE_SETUP_REQUIREMENT` from the reviewed signing profile), and the
-  producer always notarizes. The pinned Developer ID Application identity and
-  one Developer ID Installer identity are present and valid in the owner's
-  keychain (read-only listing; no key access). Using them can prompt, and
-  notarization is an account action.
+- **Correction (Lead review).** An earlier note here said a local build
+  cannot replace that step without source changes. That was wrong: it treated
+  "the hosted producer always notarizes" as if it meant "local compilation
+  needs source changes". A local test build is possible from unchanged source:
+  - The workflow compiles the setup with an ordinary
+    `cargo build --locked --release --no-default-features --features
+    macos-xcode-setup --target aarch64-apple-darwin --bin
+    mrk-macos-xcode-setup`, before any credential is admitted.
+  - `build.rs` derives `MRK_XCODE_SETUP_REQUIREMENT` from the real pinned
+    SOURCE profile and certificates. Those are fixed inputs; a caller cannot
+    choose them.
+- That exact argv was run locally on committed `8bf29633`, exported with
+  `git archive`:
+  - Rust 1.98.1, Command Line Tools SDK 26.5, jobs 1, under the unchanged
+    3 GiB group RSS cap. Peak was 3,094,298,624 B and the original return
+    was 0.
+  - It used a new private target and a clean user LaunchAgent. No
+    `GITHUB_*`/`RUNNER_*` variable was set and no credential was used.
+  - Artifact: arm64, minos 26.0, system libraries only, sha256
+    `a9249c37…cf8a`.
+  - The embedded requirement is byte-identical to the build.rs derivation:
+    team, leaf SHA-1, Developer ID OIDs and identifier.
+  - With only the linker's ad-hoc signature, verifying against that fixed
+    requirement is refused, as expected. That refusal is not qualification.
+- **Where notarization is enforced.** The setup consumer does not check
+  notarization:
+  - `xcode_self.m`, `macos_xcode_source.rs` and `macos_xcode_carrier.rs`
+    check the signature against the fixed requirement (offline), root
+    ancestry, the exact embedded hooks, and the receipt and BOM.
+  - None of them checks notarization, a ticket or `spctl`.
+  - The hosted `finalize-xcode-setup-package` step requires notary
+    `Accepted` and staples the package. Its signature parser treats the
+    post-staple `Notarization:` line as informational only.
+  - So notarization is a distribution guarantee, not a consumer requirement.
+- **Local test route.** The hosted packaging tool refuses local context by
+  design: `admit()` requires the fixed runner checkout and the hosted
+  ref/event. It was not used or spoofed. Instead, a local test recipe repeats
+  the credential-free component and product steps:
+  - It uses the public stager subcommands
+    `prepare-xcode-setup-scripts/-carrier/-product`.
+  - It uses the same `pkgbuild`, `bsdtar`, `xar` and `productbuild` argv.
+  - It calls the stager's own audit functions, unchanged.
+  - A dry run with the unsigned helper passed every audit. It is labelled
+    not installable and has no signature.
+- **Pending owner-only steps:**
+  - codesign and productsign by Keychain reference to the pinned identities.
+    These may prompt; no key is exported.
+  - A `pkgutil` leaf check.
+  - An owner-run `installer`.
+  - The result is LOCAL: not notarized, not stapled and not
+    hosted-qualified. Signing is not an account action; notarization would
+    be, and is not part of the local route.
+  - The recipe and its evidence are in the private evidence store
+    (`issue64-specialist-20261117/local-test-finalization/`).
 - The companion has no OS ceiling: `mrk_platform` requires macOS 26 or later,
   and the package allows 26.0 or later. The app admits the protected copy by
   its root-protected chain alone, with no receipt. Host Xcode is 27.0 at about
