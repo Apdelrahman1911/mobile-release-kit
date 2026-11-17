@@ -582,6 +582,10 @@ impl LookupBook{
     }
 }
 
+#[cfg(all(test, target_os = "macos"))]
+#[path = "vault_keyring_macos_transport_tests.rs"]
+mod transport_tests;
+
 
 #[cfg(all(test, not(all(target_os = "macos", target_arch = "aarch64", feature = "macos-local-git-acceptance"))))]
 mod tests {

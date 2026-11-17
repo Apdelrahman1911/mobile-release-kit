@@ -134,3 +134,15 @@ integrated commit. Live peer-authentication negatives, Keychain denial/lock,
 installer privilege/signature checks, helper approval/shutdown, and signed
 installed path protection remain separate acceptance evidence. No installed
 security verdict is inferred from static review, data fixtures or compilation.
+
+## Application vault-client continuation (2026-11-17)
+
+[The focused boundary report](verification/macos-issue30-vault-client-2026-11-17.md)
+traces document admission, private key input, helper request, response and
+retirement. Seven new tests exercise the whole production Rust client with real
+anonymous pipes; all 19 client tests pass. Four deliberate private mutations are
+detected. No new application defect is confirmed in this path, and no production
+function changes. Installed peer authentication, Keychain denial and document
+loss remain unexecuted acceptance predicates. No installed app/helper/runtime,
+authority, application/helper dependency lock, workflow, version or setting was
+changed by this continuation.
