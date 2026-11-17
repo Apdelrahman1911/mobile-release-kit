@@ -917,6 +917,30 @@ mod installer {
             check(self.close(n), reason)?;
             self.clock() // Deadline refusal never rewrites a positive close.
         }
+        // Close an original whose ONLY name this process has just unlinked.
+        // A retained existing-app snapshot normally follows the held FD to
+        // close() as a named POST, but an unlinked original has no name left:
+        // that lookup is a guaranteed refusal that marked a successful #49
+        // launcher retirement unknown. Instead the SAME FD must still be the
+        // recorded object, its snapshot must be unchanged through that FD and
+        // the recorded name must be proven absent; only then does the snapshot
+        // retire. Any failed proof still consumes the close and stays unknown.
+        fn close_unlinked(&mut self, n: usize, reason: &'static str) -> Result<()> {
+            if self.originals[n].fd.is_some() && self.originals[n].existing_app_metadata.is_some() {
+                let proven = (|| -> Result<()> {
+                    let parent = self.originals[n].parent.ok_or(reason)?;
+                    let expected = self.identity(n)?;
+                    let actual = Identity::of(&stat::fstat(self.fd(n)?).map_err(|_| reason)?);
+                    check(expected.same_object(actual), reason)?;
+                    self.existing_app_metadata_post(n, reason)?;
+                    let name = self.originals[n].name.clone();
+                    self.absent(parent, &name).map_err(|_| reason)
+                })();
+                self.originals[n].existing_app_metadata = None;
+                if proven.is_err() { let _ = self.close(n); self.unknown = true; return Err(reason); }
+            }
+            self.forward_close(n, reason)
+        }
         // Retire a completed preparation scope before opening the next one.
         // Only its authenticated blank versions original crosses the boundary.
         // POST every live name before any close: a moved child's new parent
@@ -23979,6 +24003,73 @@ exec ./mrk-macos-remove --fixture-supervise "$1"
             book.removal_control_reserved=other;
             maintenance::reserve_removal_original_storage(&mut book,120_000).unwrap();
             book
+        }
+        // Real-filesystem reproduction of the hosted #49 launcher-retirement
+        // refusal: an enrolled bundle root carries an existing-app snapshot,
+        // is unlinked by its own parent FD and must then close as KNOWN.
+        fn unlinked_snapshot_book(root:&std::path::Path)->(super::Install,usize) {
+            use super::*;
+            let _=std::fs::remove_dir_all(root);
+            std::fs::create_dir_all(root.join("Old.app")).unwrap();
+            let flags=OFlag::O_RDONLY|OFlag::O_DIRECTORY|OFlag::O_NOFOLLOW|OFlag::O_CLOEXEC;
+            let mut book=Install::new();
+            let parent:OwnedFd=fcntl::open(root,flags,Mode::empty()).unwrap();
+            let pid=Identity::of(&stat::fstat(&parent).unwrap());
+            book.originals.push(Original{fd:Some(parent),state:State::Owned,role:Role::Reader,parent:None,
+                name:String::new(),identity:Some(pid),existing_app_metadata:None});
+            let child:OwnedFd=fcntl::openat(book.fd(0).unwrap(),"Old.app",flags,Mode::empty()).unwrap();
+            let cid=Identity::of(&stat::fstat(&child).unwrap());
+            book.originals.push(Original{fd:Some(child),state:State::Owned,role:Role::Reader,parent:Some(0),
+                name:"Old.app".into(),identity:Some(cid),existing_app_metadata:None});
+            // The no-MACL snapshot an enrolled launcher root actually carries.
+            book.originals[1].existing_app_metadata=
+                Some(mobile_release_desktop::macos_existing_app_metadata::SnapshotData::from_observed_bytes_data(&[]).unwrap());
+            (book,1)
+        }
+        #[test]
+        fn unlinked_existing_app_original_closes_known_only_after_absence_proof() {
+            use super::*;
+            let base=std::env::temp_dir().join(format!("mrk-unlinked-close-{}",std::process::id()));
+            // Previous behaviour: the named POST inside close() cannot succeed;
+            // the name lookup refuses before any attribute read, on any host.
+            let (mut book,n)=unlinked_snapshot_book(&base.join("old"));
+            unistd::unlinkat(book.fd(0).unwrap(),"Old.app",unistd::UnlinkatFlags::RemoveDir).unwrap();
+            assert_eq!(book.forward_close(n,"launcher-retirement-close"),Err("launcher-retirement-close"));
+            assert!(book.unknown && book.originals[n].state==State::Closed && book.originals[n].fd.is_none());
+            // The same-FD snapshot read admits only a com.apple.macl roster. A
+            // provenance-tagging host (a sandboxed developer tool on macOS 27)
+            // adds an unremovable attribute to every directory it creates, so
+            // the native half runs only where a fresh directory is clean, as
+            // under the root Installer.
+            let (probe,n)=unlinked_snapshot_book(&base.join("probe"));
+            if probe.read_existing_app_metadata(n,"probe").is_err() {
+                eprintln!("skipping native unlinked-close proofs: host tags new directories with extended attributes");
+                drop(probe); let _=std::fs::remove_dir_all(&base); return;
+            }
+            drop(probe);
+            // Fixed: the same unlink closes as known and the snapshot retires.
+            let (mut book,n)=unlinked_snapshot_book(&base.join("new"));
+            unistd::unlinkat(book.fd(0).unwrap(),"Old.app",unistd::UnlinkatFlags::RemoveDir).unwrap();
+            assert_eq!(book.close_unlinked(n,"launcher-retirement-close"),Ok(()));
+            assert!(!book.unknown && book.originals[n].state==State::Closed && book.originals[n].fd.is_none()
+                && book.originals[n].existing_app_metadata.is_none());
+            // A still-named original never retires its snapshot as unlinked.
+            let (mut book,n)=unlinked_snapshot_book(&base.join("named"));
+            assert_eq!(book.close_unlinked(n,"launcher-retirement-close"),Err("launcher-retirement-close"));
+            assert!(book.unknown && book.originals[n].fd.is_none() && book.originals[n].existing_app_metadata.is_none());
+            // A replacement at the recorded name is not absence either.
+            let (mut book,n)=unlinked_snapshot_book(&base.join("replaced"));
+            unistd::unlinkat(book.fd(0).unwrap(),"Old.app",unistd::UnlinkatFlags::RemoveDir).unwrap();
+            std::fs::create_dir(base.join("replaced/Old.app")).unwrap();
+            assert_eq!(book.close_unlinked(n,"launcher-retirement-close"),Err("launcher-retirement-close"));
+            assert!(book.unknown && book.originals[n].fd.is_none());
+            // Originals without a snapshot keep the ordinary forward close.
+            let (mut book,n)=unlinked_snapshot_book(&base.join("plain"));
+            book.originals[n].existing_app_metadata=None;
+            unistd::unlinkat(book.fd(0).unwrap(),"Old.app",unistd::UnlinkatFlags::RemoveDir).unwrap();
+            assert_eq!(book.close_unlinked(n,"launcher-retirement-close"),Ok(()));
+            assert!(!book.unknown && book.originals[n].state==State::Closed);
+            let _=std::fs::remove_dir_all(&base);
         }
         #[test]
         fn maintenance_live_forecast_overlaps_launcher_only_with_retained_roots() {
