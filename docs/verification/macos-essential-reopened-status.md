@@ -8,13 +8,14 @@ remain on `fix/macos-remaining-essential`.
 **Authorization update, 2026-11-16:** the owner authorized installed-app and
 physical-Mac testing, including backed-up state changes and disposable-project
 interruption experiments. Earlier restrictions below describe historical work.
-The real helper-settings experiment now reproduces a fatal workspace screen;
-approval has been restored. Protected app bytes remain unchanged at this
-checkpoint. No other agent's branch, release or workflow was changed.
+The real helper-settings experiment reproduced a fatal workspace screen and
+React 185. The fix in `ded08721` subsequently passed physical installed-app
+helper-return acceptance on 2026-11-17. Original app code and helper approval
+were restored afterward. No other agent's branch, release or workflow changed.
 
 | Issue | Original reported problem fixed? | Root cause eliminated? | Original failure reproduced and verified absent? | Evidence and remaining gate | Status |
 |---|---|---|---|---|---|
-| #45 | Update-depth failure fixed in source; fresh native acceptance pending | Confirmed unchanged Git-selection dispatch during accumulated native status events; dispatch now occurs only on a selection change | Original installed app showed fatal screen and React 185; historical and pre-fix source fail the automated backlog test at cycle 52; corrected source passes 900 cycles / 3,600 deliveries | [Reproduction, fix and regression evidence](macos-essential-45-status-backlog.md); 2,465 frontend tests and build pass; physical-Mac candidate acceptance continues | **Fix verified in WebKit; installed acceptance open** |
+| #45 | Yes, the reproduced fatal workspace defect | Confirmed unchanged Git-selection dispatch during accumulated native status events; dispatch now occurs only on a selection change | Original installed app showed fatal screen and React 185; pre-fix regression fails at cycle 52; fixed source passes 900 cycles / 3,600 deliveries. Physical installed image survives the real OS helper off/on and workspace return | [Complete evidence and limitations](macos-essential-45-status-backlog.md); 2,465 frontend tests and build pass; saved version and navigation pass; refreshed journal empty. Original app code and approval restored. No helper-installation or hosted-release qualification claimed | **Fixed and verified locally; issue open for review** |
 | #46 | No | No failing native predicate or first-launch race identified | No original first-connection failure reproduced | Two phase-diagnostic Rust tests and full source checks prove diagnostics preserve the failure, not that Native inspection succeeds on first launch. An independently built executable cannot satisfy the fixed installed-payload identity proof | **Unresolved** |
 | #17 | Historical Checked timeout not fixed | Historical pending call unknown; separate Darwin ancestor-flags initialization cause was eliminated | Initialization refusal reproduced/fixed; historical `GitCli(Checked)` deadline not reproduced after a fix | 660 Git core/worker tests: 656 pass, four explicit skips. Exact original job log recovered and hash matched; its timings show the case deadline was nearly exhausted before Checked, without an original pending-call return. Eleven installed groups remain open | **Unresolved original timeout** |
 | #65 | Verified for five core write domains; not installed app state/shutdown | No corruption found in the exercised cases. A stale-journal error-classification defect was fixed | Actual disposable writers were killed and fresh processes recovered whole old/new files | Twenty SIGKILL/recovery cases across metadata text, version, images, Android identity and iOS identity; two additional abrupt-exit cases. Original process finality precedes recovery and cleanup. Installed GUI restart, shutdown and power-loss acceptance remain open | **Partially resolved / verified** |
@@ -55,16 +56,15 @@ returned or justify extending the deadline. The source trace preserves that
 distinction. No artifact containing a more precise original failing call is
 available from that run.
 
-## Why original acceptance remains incomplete
+## Historical acceptance limits and current delivery boundary
 
-The original #65/#66 acceptance issues require a qualified #57 installed
-candidate. The original Native inspection and Git observation also require
-the fixed protected installed identity. Building/installing another candidate,
-resetting helper approval, altering the installed app and changing workflows
-are explicitly excluded from this task. No test-only identity bypass was added.
-Source/test binaries and disposable project operations remain permitted and
-are reported separately. Store and signed mobile journeys additionally need
-credentials/accounts/devices that were neither supplied nor accessed here.
+Earlier experiments excluded installed-app changes. That restriction was
+explicitly removed by the owner's 2026-11-16 authorization; it is not a current
+blocker. #45 now has actual installed-app acceptance. Runtime/Git and the other
+assigned issues still need their own remaining verification; a qualified
+installer/cohort is separate from the temporary desktop-image test used for
+#45. No test-only identity bypass was added. Store and signed mobile journeys
+may additionally require available test accounts, credentials or devices.
 
 These are concrete experiment boundaries, not assertions that an unknown bug
 is fixed. No issue is closed and no release readiness is claimed.
@@ -76,7 +76,7 @@ claims that the corresponding original issue is closed.
 
 | Issue | Follow-up commit | Completed work | Outstanding verification |
 |---|---|---|---|
-| #45 | `d36d49b2` | Historical/current React matrix, actual macOS WKWebView approval journey, historical-core and installed-profile cases | Original failure and actual clean helper-approval boundary |
+| #45 | `ded08721` | Confirmed root cause, failing pre-fix regression, fixed 3,600-delivery regression and actual installed helper-return acceptance | Review/integration and hosted delivery excluded by the current task; helper installation is not qualified by this test |
 | #46 | `eef946ee` | Native startup/protected-payload path traced; helper wait rejected as unsupported | Original failing native predicate and first-launch success |
 | #17 | `109e597d` | Exact original job log/hash recovered and step timings analyzed | Pending call/root cause and installed Git groups |
 | #65 | `d902dbf3` | Twelve new actual SIGKILL/recovery cases; 57-test recovery regression group passes | Installed GUI/app state, shutdown and power-loss boundaries |
@@ -87,12 +87,10 @@ claims that the corresponding original issue is closed.
 | #63 | `855d4e35` | Actual version+identity edit → simulator build and unsigned archive/core inspection; 75 tests pass | Installed and signed/device/account journeys |
 | #64 | `dc523f32` | Python/native protection rules compared; 69/70 Store checks pass with one skip; real positive host qualification remains failed | Protected Xcode execution and approved account-backed readbacks |
 
-The source files under `desktop/src`, `desktop/src-tauri` and `src` are identical
-to the previously fully source-checked `2e8f6c1d` tree. New tracked implementation
-in this reopened pass is test infrastructure and disposable fixture coverage;
-no additional production fix is represented as a remedy for an unreproduced
-original incident. The per-issue earlier commits and their exact scope remain
-listed in `macos-essential-progress.md`.
+Before `ded08721`, the reopened work added test infrastructure and disposable
+fixture coverage without another production fix. `ded08721` changes App's Git
+selection dispatch to fix the reproduced #45 failure. The per-issue earlier
+commits and their exact scope remain listed in `macos-essential-progress.md`.
 
 Final shared verification passes all 100 tests in 27.584s, including the actual
 crash/recovery matrix and both buildable version/identity fixtures. Machine-

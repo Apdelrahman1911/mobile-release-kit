@@ -4,10 +4,10 @@ The owner authorized installed-app debugging and controlled native experiments
 on 2026-11-16. Recoverable application and user-state backups were verified
 before the helper approval experiment. The normal helper was restored enabled;
 the unrelated neighboring background item was restored to its original state.
-A temporary signed test update is now installed for acceptance. Verified copies
-of the five original code/signature files are retained for restoration. The
-latest helper approval transition still needs its final state checked after the
-owner unlocks the Mac; do not infer completion from the authentication reply.
+A temporary signed test update completed physical-Mac acceptance on 2026-11-17.
+The original five code/signature files were then restored, with their hashes,
+protected metadata and complete strict deep signature verified. The helper is
+enabled again and the unrelated neighboring background item remains off.
 
 ## Reproduction and confirmed cause
 
@@ -102,24 +102,51 @@ remained responsive across Overview/Build tools navigation and native status
 updates. Read-only inspection of the exact diagnostic storage key found zero
 workspace error records in both existing WebKit stores.
 
-The real Login Items helper toggle opened a Touch ID prompt. The owner reported
-physical approval, but the console subsequently reported a locked screen and
-the window-control tool lost access. The helper's resulting on/off state is
-therefore **not yet verified**. On unlock, check it and restore the original
-enabled state if necessary, return to the workspace, verify the saved-version
-view and navigation, and inspect the error journal again. The unrelated
-neighboring background item must remain off. The owner explicitly requested
-leaving T3 Code's App Management access enabled.
+The real Login Items helper toggle opened a Touch ID prompt. After the owner
+authenticated and unlocked the Mac, its disabled state was observed. It was
+restored to enabled and independently checked enabled again after returning to
+the app. The unrelated neighboring background item stayed off.
 
-## Remaining acceptance
+The **same running installed test session** returned to the workspace without
+a fatal boundary. Overview still displayed the disposable project's saved
+version **1.0.0 / Build 1**. Overview → Build tools → connection details → local
+diagnostics → Overview navigation passed. Explicitly refreshing the local error
+records showed **zero workspace errors**; native runtime availability remained
+available. This is physical OS approval/settings-return evidence in addition to
+the automated controlled helper-DATA transition regression.
 
-The update-depth cause is reproduced, fixed and regression verified. The fresh
-ordinary installed image also passes the initial native/runtime/workspace
-checks above. Final physical helper-return acceptance and original-code
-restoration remain pending. This checkpoint does **not** close the issue or
-claim complete installed-app acceptance. The exact exception from the earliest
-retained November 11 incident was never captured; the new installed reproduction
-supplies current evidence.
+The test image's native helper setup command separately refused its missing
+shipping-identity profile. No successful helper registration/protected-copy
+qualification is claimed from this local image. That refusal was displayed
+normally and did not break the workspace. No installer/helper fix or another
+agent's branch was used to obtain the workspace result.
+
+After acceptance, only the owned, idle test session was retired. All five
+original code/signature files were restored by the closed same-publisher test
+transaction: original hashes, root ownership/modes, empty attribute rosters and
+strict deep signature all passed. Its one-shot job was retired. No project,
+runtime or installation record was changed. T3 Code's App Management access was
+left enabled at the owner's explicit request.
+
+Private output SHA-256 values:
+
+| Evidence | SHA-256 |
+|---|---|
+| Physical helper return, saved version and final state | `4f095dddc6e7aa131981424cc9999b26c3e553e067aaffb0e5ce6db64c74c003` |
+| Refreshed installed diagnostic view | `d0557a776c228fe8a5cb36783428be61150640a8cb4cbfdebbadb3b89c8cde9f` |
+| Original-code restoration verification | `e0fb18d981f722c17740e595def3ccb5b95613490f9dd3435cfbe64f2bef0459` |
+
+## Verdict and delivery boundary
+
+The reproduced workspace update-depth defect is **fixed and verified**, including
+the physical installed-app helper-settings return. Implementation is in
+`ded08721`; original-code restoration is complete. The exact exception from the
+earliest retained November 11 incident was never captured; the newly reproduced
+installed React 185 and before/after regression supply the confirmed cause.
+
+The issue remains open for review. No merge, push, hosted run, production
+installer qualification or release is represented by this local acceptance.
+Those delivery actions are outside the owner's current instructions.
 
 No installer/helper lifecycle implementation was changed. Potential integration
 overlap is limited to two small `App.tsx` locations around Git controller state

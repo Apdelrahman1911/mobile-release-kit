@@ -12,10 +12,10 @@ Local compiles use one job and a 3 GiB aggregate compiler RSS cap.
 Current original-issue verdicts, follow-up commits and remaining gates are in
 [the reopened status matrix](macos-essential-reopened-status.md), with numeric
 receipts in [the reopened checks](macos-essential-reopened-checks.json).
-The #45 update-depth cause is now reproduced and fixed in `ded08721`. Its signed
-ordinary installed image connects and loads the disposable project; final
-helper-return acceptance awaits the Mac being unlocked. #46 and the original
-#17 timeout remain unresolved.
+The #45 update-depth cause is reproduced, fixed in `ded08721` and verified in
+the signed installed test image, including the real OS helper-settings return,
+saved version, navigation and empty error journal. Original app code and helper
+approval were restored. #46 and the original #17 timeout remain unresolved.
 No claim is made that all ten assigned issues are fully resolved and verified.
 
 ## Ownership boundary
@@ -29,7 +29,7 @@ are recorded for coordination. Shared consumer interfaces are preserved.
 
 | Issue | State | Commit | Evidence / remaining verification |
 |---|---|---|---|
-| #45 workspace failure | REPRODUCED ROOT CAUSE FIXED; FINAL PHYSICAL RETURN CHECK PENDING | `ded08721` | [Native status-backlog reproduction and installed checkpoint](macos-essential-45-status-backlog.md): pre-fix React 185 at cycle 52; post-fix 900 cycles / 3,600 deliveries. Frontend: 2,465 passes; TypeScript/Vite pass. Signed installed image: capabilities available, disposable project and navigation pass, no recorded workspace errors. Physical helper transition/restoration awaits unlock. |
+| #45 workspace failure | FIXED AND VERIFIED; ISSUE OPEN FOR REVIEW | `ded08721` | [Before/after regression and installed acceptance](macos-essential-45-status-backlog.md): pre-fix React 185 at cycle 52; post-fix 900 cycles / 3,600 deliveries. Frontend: 2,465 passes; build passes. Physical helper off/on and workspace return pass; saved version 1.0.0 / Build 1; refreshed error journal empty. Original app code restored and helper on. Local acceptance does not certify helper installation or a production release. |
 | #46 first connection | STEP DIAGNOSTICS ADDED; ORIGINAL INCIDENT BLOCKED | `1e7c4411` | Two diagnostic tests and the whole-source check pass. No failing native predicate or first-launch race is proven. |
 | #17 Git timeout | MACOS INIT DEFECT FIXED; ORIGINAL TIMEOUT BLOCKED | `ff2571cf` | Fixed per-call/phase traces; protected-ancestor regression passes. Broader tests recorded below. |
 | #65 interruption integrity | CORE CRASH MATRIX VERIFIED; GUI GATE OPEN | `f20b9463` | Eight real SIGKILL/restart scenarios across four durable boundaries; broader recovery regressions tracked below. |

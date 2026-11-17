@@ -7,8 +7,8 @@
     "rust": "1.98.1"
   },
   "sourceBase": "c52b57a5",
-  "productionSourceUnchangedSince": "2e8f6c1d",
-  "interpretation": "Source/fixture proof; no original installed incident is declared resolved. No signed/account acceptance. Counts overlap across suites; do not sum as unique tests. WK host RSS excludes XPC processes and is not app memory.",
+  "productionSourceUnchangedSince": "ded08721",
+  "interpretation": "Counts overlap across suites and must not be summed. The reproduced #45 workspace defect is fixed and verified in real macOS WebKit and a temporary signed installed image; no hosted, helper-installer or production-release qualification. Other issue statuses retain their stated limits. WK host RSS excludes XPC processes and is not app memory.",
   "checks": [
     {
       "scope": "combined-recovery-identity-version",
@@ -187,7 +187,7 @@
     "sourceCheckPassed": false
   },
   "originalIncidentAcceptance": {
-    "45": "unresolved",
+    "45": "workspace-defect-fixed-and-verified-locally; issue-open-for-review",
     "46": "unresolved",
     "17": "unresolved",
     "65": "partial",
@@ -215,5 +215,30 @@
       "interpretation": "helper control unavailable before reload; intended approval step not reached; not a product crash or passing approval case",
       "outputSha256": "868b1ca4c2ffd584419e5eb6b4839a9a12d35be1c2093fa21a6a539711464c58"
     }
-  ]
+  ],
+  "workspace45": {
+    "fixCommit": "ded08721d26d38d12eb2a001450a5360eb0221a5",
+    "preFixReactError": 185,
+    "preFixFailingCycle": 52,
+    "preFixEventDeliveries": 208,
+    "fixedCycles": 900,
+    "fixedEventDeliveries": 3600,
+    "frontendTestsPassed": 2465,
+    "frontendTestsFailed": 0,
+    "frontendBuildPassed": true,
+    "ordinaryInstalledImageSha256": "bddc1036cd575b312e6d8ce356dd9afd3ed2674fbdf2d516997c1c68847d0af8",
+    "nativeFirstCapabilities": "available",
+    "physicalHelperApprovalTransition": "enabled-disabled-enabled",
+    "savedFixtureVersion": "1.0.0",
+    "savedFixtureBuild": "1",
+    "workspaceNavigationPassed": true,
+    "refreshedWorkspaceErrorRecords": 0,
+    "installedReturnReceiptSha256": "4f095dddc6e7aa131981424cc9999b26c3e553e067aaffb0e5ce6db64c74c003",
+    "installedDiagnosticViewSha256": "d0557a776c228fe8a5cb36783428be61150640a8cb4cbfdebbadb3b89c8cde9f",
+    "originalCodeRestored": true,
+    "originalRestoreFilesVerified": 5,
+    "originalRestoreReceiptSha256": "e0fb18d981f722c17740e595def3ccb5b95613490f9dd3435cfbe64f2bef0459",
+    "helperSetupQualification": "not-certified; local image refused shipping-identity profile",
+    "hostedOrProductionReleaseQualification": false
+  }
 }
