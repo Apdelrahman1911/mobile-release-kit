@@ -344,7 +344,10 @@ class MacOSXcodeHostPreparationTests(unittest.TestCase):
             self.assertIn("self.sdk_alias.as_ref(), crate::ios_toolchain::SDK_COMPONENTS[4]", unit)
             self.assertEqual(unit.count("self.original.fd(alias.parent)?"), 3)
             self.assertEqual(unit.count("AtFlags::AT_SYMLINK_NOFOLLOW"), 2)
-            self.assertEqual(unit.count(point), 4)
+            # Each alias binding has three pre-call points plus one closing
+            # point. Post-use audit additionally re-checks the managed
+            # namespace FIRST, on the same audit clock; it is never dropped.
+            self.assertEqual(unit.count(point), 4 if unit is work else 5)
             first = "Identity::of(&" + before + ") != alias.identity"
             raw = "target.as_os_str().as_bytes() != alias.target.as_os_str().as_bytes()"
             post = "Identity::of(&post) != alias.identity"
@@ -352,6 +355,9 @@ class MacOSXcodeHostPreparationTests(unittest.TestCase):
                          "let post = stat::fstatat", post)]
             self.assertEqual(positions, sorted(positions))
         self.assertIn("self.original.ios_check_after_use(end, &self.audit)?;", audit)
+        managed = "self.check_managed(&mut || ios_audit_point(end, &self.audit))?;"
+        self.assertEqual(audit.count(managed), 1)
+        self.assertLess(audit.index(managed), audit.index("self.original.ios_check_after_use(end, &self.audit)?;"))
         self.assertNotIn("checkpoint(", audit)
         self.assertNotIn("ios_audit_point(", work)
         self.assertIn("s.st_mode & 0o7022 != 0", runtime)
