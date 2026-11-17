@@ -1,0 +1,56 @@
+{
+  "schemaVersion": 1,
+  "scope": "Lead-owned macOS issues; local verification is separate from hosted delivery and merge",
+  "sourceBase": "906eeb3d",
+  "sharedEnvironment": "Reserved for the external Specialist until an explicit handoff; no Lead installed test has started",
+  "issues": {
+    "45": {
+      "status": "verified-fixed-locally; issue remains open for delivery review",
+      "rootCause": "confirmed: same-controller React state dispatches during native status backlogs caused update-depth failure",
+      "fixCommit": "ded08721d26d38d12eb2a001450a5360eb0221a5",
+      "review": {
+        "selectionDispatch": "The synchronous controller reference is updated before dispatch; unchanged selections do not dispatch",
+        "rapidProjectABA": "Both intents update the synchronous reference, preserving the final project and the per-project draft controllers",
+        "connectionLoss": "The same synchronization path transitions to null and invalidates availability without changing original operation custody",
+        "diagnostics": "Bounded local records; hostile exception getters, unavailable storage, failure storms and listener teardown retain the original failure semantics",
+        "sourceChangesRequired": false
+      },
+      "freshTests": {
+        "command": "node --experimental-strip-types --test tests/workspace-diagnostics.test.mjs",
+        "tests": 8,
+        "passed": 8,
+        "failed": 0,
+        "skipped": 0
+      },
+      "retainedRegression": {
+        "beforeFix": "React 185 at 52 cycles / 208 native event deliveries",
+        "beforeFixLogSha256": "1e613605f74c5a6fea6a6219eee465db041fb30184c27e1d2b07dd6e6645c5ee",
+        "afterFix": "900 cycles / 3600 deliveries; project drafts and rapid ABA preserved; helper approval return passes",
+        "nativeAndDiagnosticsPassed": 10,
+        "nativeAndDiagnosticsLogSha256": "ecbce3cf3e7abbfc9880bdd7093f19fab22bffa09813bcf1aa4c88342b144e71",
+        "fullFrontendPassed": 2465
+      },
+      "retainedInstalledAcceptance": {
+        "sourceCommit": "ded08721d26d38d12eb2a001450a5360eb0221a5",
+        "actualHelperOffOnAndWorkspaceReturn": true,
+        "savedVersionAndNavigationPreserved": true,
+        "workspaceErrorsAfterRefresh": 0,
+        "helperReturnReceiptSha256": "4f095dddc6e7aa131981424cc9999b26c3e553e067aaffb0e5ce6db64c74c003",
+        "refreshedDiagnosticsViewSha256": "d0557a776c228fe8a5cb36783428be61150640a8cb4cbfdebbadb3b89c8cde9f",
+        "originalRestorationReceiptSha256": "e0fb18d981f722c17740e595def3ccb5b95613490f9dd3435cfbe64f2bef0459",
+        "allThreeReceiptHashesIndependentlyMatched": true,
+        "restorationDescribes": "The completed #45 test transaction; later Specialist-owned #17 overlays have their own state",
+        "helperInstallationQualified": false
+      },
+      "remaining": [
+        "The earliest historical exception text was not captured; the later installed React 185 reproduction and regression establish the verified defect",
+        "Hosted evidence, merge and release acceptance remain distinct delivery requirements; no close, merge or publication is claimed"
+      ]
+    },
+    "65": { "status": "in-progress", "next": "Extend actual core interruption evidence to installed GUI restart and recovery with disposable projects" },
+    "66": { "status": "pending", "next": "Physical-Mac startup, idle, large-project and one-hour measurements after exclusive environment handoff" },
+    "50": { "status": "pending", "next": "Installed CLI explicit grant, revoke and expiry acceptance after environment handoff" },
+    "62": { "status": "pending", "next": "Installed Android journey with identity/version changes and actual APK inspection" },
+    "63": { "status": "pending", "next": "Installed iOS simulator/archive and available signed export; coordinate protected Xcode dependencies with Specialist" }
+  }
+}
