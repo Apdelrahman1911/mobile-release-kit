@@ -32,45 +32,80 @@ Mac. This page has no local paths, account data or private identifiers.
 - Pending: the installed 120 s run with the fixed observer, the app's return
   and an independent readback. These need an owner-authenticated swap.
 
-## #46 First runtime connection "unavailable" (unresolved)
+## #46 First runtime connection "unavailable" (unresolved; not reproduced)
 
-- During the first launch of the fresh 0.1.4 install, macOS attached
-  `com.apple.macl` to the outer installed app bundle about 1.2 s after the
-  payload process started. That is within the startup runtime inspection,
-  which reads that bundle's tag and identity, ctime included. The unified log
-  does not name the writer.
-- A tag landing while the bundle is held maps to `Identity`, a different
-  message from the one observed. It maps to the observed `Native` only inside
-  the stat-stability window of one native read. This is a timed coincidence
-  that also explains why no later start reproduces, but it is **not a proven
-  cause**. No code was changed.
+- The observed text is produced only when the startup inspection itself
+  returns `Native`. A failure in the later preparation step has a different
+  message. The 0.1.4 code differs from the current code here only by the
+  phase diagnostic.
+- During the first launch of the fresh 0.1.4 install, macOS attached its
+  standard `com.apple.macl` tag to the outer installed bundle about 1.2 s after
+  the payload started. The same two-entry tag is on nearly every launched app
+  bundle in `/Applications`. Never-launched bundles have none. The installation
+  itself had finished 15 minutes earlier. The unified log names no writer.
+- This correlation is weak evidence for `Native`. With the actual code, a tag
+  landing during inspection maps to `Native` only within a few system calls
+  inside one native read. Anywhere else it maps to `Identity` or to a
+  preparation refusal, and neither was observed. A disposable bundle launched
+  from an agent process got no tag, so the timing could not be recreated without
+  writing into `/Applications`, which was not done.
+- Diagnostic gap: an app launched by LaunchServices has stdout and stderr on
+  `/dev/null`, which was verified on a disposable app. The phase line from
+  `1e7c4411` is written to stderr, so an ordinary owner first launch discards
+  it. Only a launch that captures stderr would keep it. Changing the visible
+  message would change texts pinned by the UI decoder, so that is a Lead/owner
+  decision.
+- No code was changed. The root cause is still unknown.
 
-## #64 Protected Xcode resolver and `/Applications` (decision; no code change)
+## #64 Protected Xcode resolver and `/Applications` (boundary kept)
 
-- Stock macOS `/Applications` is `root:admin 0775` with the Apple `sunlnk`
-  flag. The native `metadata()` predicate (`mode & 0o7022 == 0`) and Python
-  `_upload_protected` refuse it, so Xcode resolution fails on every standard
-  Mac.
-- Decision: this is a policy defect for this one fixed system ancestor. Admin
-  group members can already sudo. The resolver already admits a user-owned
-  `Xcode.app` alias there. Every lower component must still be root-owned and
-  not group- or world-writable, and is held by FD with rechecks.
-- Proposed narrow rule, pending owner/Lead approval because it relaxes an
-  ownership check: accept only the held `/Applications` child of `/`, with
-  exactly uid 0, gid admin, mode 0775, flags as held, empty ACL and no xattrs.
-  All other ancestors keep the strict rule. Lead-owned #63 uses the same chain.
-- Real-account Store/GitHub journeys remain blocked on accounts and owner
-  approval.
+- The earlier proposal to relax `/Applications` is **withdrawn**. Stock
+  `/Applications` (on this host: `root:admin 0775`, `sunlnk`, no ACL, no sticky
+  bit) lets any process running as the logged-in admin user rename or replace
+  entries without a password. Later steps run tools by path, so a swap after
+  admission is detected only after use, not prevented. The refusal is a real
+  boundary.
+- The app's selection is correct. The protected copy at
+  `/Library/MobileReleaseKitDeveloper/Xcode.app` is chosen whenever it is
+  present. `/Applications` is used only when that copy is absent, and then it is
+  refused. The Python and fastlane consumers apply the same predicate, and the UI
+  already points users to the signed Prepare Xcode companion.
+- On this host the protected copy is absent, so the refusal is the designed
+  outcome. The remedy is an owner-run companion install, which the docs qualify
+  on macOS 26 only. This host runs macOS 27.0.
+- The 26.3 Xcode pin applies only to CLI `preflight` and to a desktop warning
+  badge. The installed archive check and the companion accept any well-formed
+  version, so host Xcode 27.0 is not an extra installed gate.
+- `90f61a50` is a test-only fix. The structural test that pins this boundary had
+  been failing at an outdated count since a managed-copy re-check was added, so
+  its `/Applications` pins never ran. They run again now. Dropping the re-check
+  or relaxing `0o7022` makes the test fail.
+- Real-account Store and GitHub journeys were not run: they need accounts and
+  owner approval.
 
-## #30 Dependency recheck on `6dbd9543`
+## #30 Dependency recheck and IPC client review
 
-- cargo-audit 0.23.0 with a freshly fetched advisory DB (1,509 advisories,
-  unchanged since 2026-11-16). App lock: 0 vulnerabilities. Unsound: tokio
-  1.48.0 (RUSTSEC-2026-0386), rustix 1.1.5, glib 0.18.5. The
-  `macos-android-register` and `macos-desktop-image` locks still pin vulnerable
-  `ctutils 0.4.2`; those belong to their owners.
+- `cargo-audit 0.23.0`, offline, advisory DB `02e2517f`, `--no-yanked`. These
+  categories are reported exactly. Zero vulnerabilities does **not** mean the app
+  has no security defects.
+  - App lock: 0 vulnerabilities (ctutils 0.4.4). 9 unmaintained. 3 unsound:
+    tokio 1.48.0 (RUSTSEC-2026-0386), rustix 1.1.5 (RUSTSEC-2026-0486), glib
+    0.18.5 (RUSTSEC-2024-0429). Yanked status was not checked.
+  - `macos-android-register` and `macos-desktop-image` locks still pin
+    vulnerable ctutils 0.4.2 (RUSTSEC-2026-0385). They belong to their owners
+    and were not edited.
 - The vendored `secret-service` and `zbus` crates' own lockfiles report
-  ctutils/bytes/crossbeam-epoch advisories. Those locks are not used for the
-  app build, which resolves them through the clean app lock. They are recorded
-  for the next vendoring refresh.
-- Installed security checks remain pending.
+  advisories, but the app build does not use them. They are recorded for the
+  next vendoring refresh.
+- Android registration XPC client (`5066468f`, tests only):
+  - An unconfigured signing profile leaves the peer requirement empty. The
+    original gate then reports the service unavailable.
+  - The client installs exactly one requirement before `resume`.
+  - On this macOS, an ad-hoc peer answers when no requirement is set. Under the
+    app's requirement template with synthetic identity values the same peer is
+    refused (4102), and an empty requirement raises an exception.
+- The vault helper is started from a fixed path with a cleared environment. The
+  helper verifies its parent by exact cdhash. That side is helper-owned and was
+  reviewed only.
+- Still open: installed authentication, Keychain denial and peer checks. They
+  need the owner.
