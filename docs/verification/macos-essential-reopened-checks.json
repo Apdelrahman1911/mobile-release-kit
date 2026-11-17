@@ -216,6 +216,29 @@
       "outputSha256": "868b1ca4c2ffd584419e5eb6b4839a9a12d35be1c2093fa21a6a539711464c58"
     }
   ],
+  "firstConnection46": {
+    "status": "unresolved; original failure not reproduced",
+    "installedSource": "ac506bb3aa663b1389f21d2cc2ff4b9b21ad96e3",
+    "normalLaunches": 2,
+    "directProtectedEntryLaunches": 6,
+    "freshWebKitLaunches": 4,
+    "firstRuntimeAvailable": 8,
+    "reloads": 0,
+    "originalWebKitFilesRestored": 22,
+    "nativeInstallationReset": false,
+    "originalFailureReproduced": false,
+    "rootCauseIdentified": false,
+    "originalIncidentFixVerified": false,
+    "preparedArtifactId": 13821079751,
+    "preparedArtifactBytes": 254100139,
+    "preparedArtifactSha256": "412c467c0c67da282d57981d46984b46c8c77423ff16e70eef54ad5acb0a9530",
+    "preparedArtifactServiceDigestVerified": true,
+    "matchingCompletedRemovalCarrierAvailable": false,
+    "withdrawnMeasurements": [
+      "three initial catalogue durations: polling driver overwrote timestamp",
+      "filesystem trace errno counts: formatter fields not validated"
+    ]
+  },
   "workspace45": {
     "fixCommit": "ded08721d26d38d12eb2a001450a5360eb0221a5",
     "preFixReactError": 185,
