@@ -559,7 +559,7 @@ class RuntimePreparationTests(unittest.TestCase):
                      "NUL.txt", "com1", "LPT9.log", "file\x00name"):
             self.assertFalse(preparation._safe_name(name), repr(name))
         with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
+            root = Path(temporary).resolve()
             parent = root
             for _ in range(15):
                 parent = parent / "a"
@@ -576,7 +576,7 @@ class RuntimePreparationTests(unittest.TestCase):
 
     def test_manifest_entry_reservation_empty_directories_and_case_collisions(self):
         with tempfile.TemporaryDirectory() as temporary:
-            root = Path(temporary)
+            root = Path(temporary).resolve()
             (root / "one").write_bytes(b"1")
             (root / "two").write_bytes(b"2")
             with patch.object(preparation, "MAX_ENTRIES", 2):
@@ -602,7 +602,7 @@ class RuntimePreparationTests(unittest.TestCase):
 
     def test_deterministic_preparation_is_inspection_only_and_preserves_existing_output(self):
         with tempfile.TemporaryDirectory() as temporary:
-            base = Path(temporary)
+            base = Path(temporary).resolve()
             source = base / "source"
             package = source / "src/mobile_release"
             package.mkdir(parents=True)
@@ -651,14 +651,19 @@ class RuntimePreparationTests(unittest.TestCase):
         current_only = (
             "project_recovery_bootstrap.py", "github_preflight_bootstrap.py",
             "ios_archive_bootstrap.py", "github_release_bootstrap.py", "artifact_inspection_bootstrap.py", "github_setup_bootstrap.py", "github_history_bootstrap.py", "local_release_history_bootstrap.py",
-            "github_auth_bootstrap.py", "tool_acquisition_bootstrap.py",
+            "github_auth_bootstrap.py", "github_device_bootstrap.py", "tool_acquisition_bootstrap.py",
+            "git_read_bootstrap.py", "git_local_bootstrap.py", "git_remote_bootstrap.py", "git_remote_helper_bootstrap.py",
+            "git_push_bootstrap.py", "git_push_helper_bootstrap.py", "android_upload_key_bootstrap.py",
         )
         self.assertEqual(preparation.CURRENT_BOOTSTRAPS, (*preparation.BOOTSTRAPS, *current_only))
+        # Every first-party bootstrap is either always current or in exactly one
+        # explicit opt-in composition (Store, Apple provisioning, observation).
         self.assertEqual(set(preparation.CURRENT_BOOTSTRAPS) | {preparation.STORE_BOOTSTRAP,
-                             preparation.STORE_PREPARE_BOOTSTRAP, preparation.STORE_EXECUTE_BOOTSTRAP, preparation.STORE_RECONCILE_BOOTSTRAP},
+                             preparation.STORE_PREPARE_BOOTSTRAP, preparation.STORE_EXECUTE_BOOTSTRAP, preparation.STORE_RECONCILE_BOOTSTRAP,
+                             preparation.APPLE_PROVISIONING_BOOTSTRAP, *preparation.GIT_OBSERVATION_BOOTSTRAPS},
                          {path.name for path in (_SOURCE / "desktop").glob("*_bootstrap.py")})
         with tempfile.TemporaryDirectory() as temporary:
-            base = Path(temporary)
+            base = Path(temporary).resolve()
             source = base / "source"
             package = source / "src/mobile_release"
             package.mkdir(parents=True)
@@ -763,7 +768,7 @@ class RuntimePreparationTests(unittest.TestCase):
 
     def test_payload_capacity_refuses_before_creating_any_generated_output(self):
         with tempfile.TemporaryDirectory() as temporary:
-            base = Path(temporary)
+            base = Path(temporary).resolve()
             source = base / "source"
             source.mkdir()
             runtime = base / "runtime"
@@ -782,7 +787,7 @@ class RuntimePreparationTests(unittest.TestCase):
 
     def test_missing_edit_bootstrap_preserves_inputs_before_any_output_write(self):
         with tempfile.TemporaryDirectory() as temporary:
-            base = Path(temporary)
+            base = Path(temporary).resolve()
             source = base / "source"
             package = source / "src/mobile_release"
             package.mkdir(parents=True)
@@ -805,7 +810,7 @@ class RuntimePreparationTests(unittest.TestCase):
     def test_missing_or_invalid_github_inputs_refuse_before_any_output_write(self):
         for failure in (*preparation.BOOTSTRAPS, "ca", "empty-ca", "large-ca"):
             with self.subTest(failure=failure), tempfile.TemporaryDirectory() as temporary:
-                base = Path(temporary)
+                base = Path(temporary).resolve()
                 source = base / "source"
                 package = source / "src/mobile_release"
                 package.mkdir(parents=True)
@@ -844,7 +849,8 @@ class StoreRuntimeCompositionTests(unittest.TestCase):
         (package / "tooling.py").write_bytes((_SOURCE / "src/mobile_release/tooling.py").read_bytes())
         (source / "desktop").mkdir()
         for name in (*preparation.CURRENT_BOOTSTRAPS, preparation.STORE_BOOTSTRAP,
-                     preparation.STORE_PREPARE_BOOTSTRAP, preparation.STORE_EXECUTE_BOOTSTRAP, preparation.STORE_RECONCILE_BOOTSTRAP, preparation.GITHUB_CA_NAME):
+                     preparation.STORE_PREPARE_BOOTSTRAP, preparation.STORE_EXECUTE_BOOTSTRAP, preparation.STORE_RECONCILE_BOOTSTRAP,
+                     preparation.APPLE_PROVISIONING_BOOTSTRAP, preparation.GITHUB_CA_NAME):
             (source / "desktop" / name).write_bytes(b"inert first-party payload\n")
         (runtime / "python/bin").mkdir(parents=True)
         (runtime / "python/bin/python3").write_bytes(b"inert Python\n")
@@ -867,7 +873,7 @@ class StoreRuntimeCompositionTests(unittest.TestCase):
     def test_complete_composition_preserves_bytes_and_only_fixed_executable_roles(self):
         for target in ("aarch64-apple-darwin", "x86_64-apple-darwin"):
             with self.subTest(target=target), tempfile.TemporaryDirectory() as temporary:
-                source, runtime, component = self.fixture(Path(temporary), history=True)
+                source, runtime, component = self.fixture(Path(temporary).resolve(), history=True)
                 if target == "aarch64-apple-darwin":
                     # Actual retained/copy/POST tree above the former 2048 cap;
                     # larger maximum row counts are checked by bounded parsers.
@@ -887,8 +893,12 @@ class StoreRuntimeCompositionTests(unittest.TestCase):
                              for path in preparation.files(component, max_files=preparation.MAC_MAX_FILES,
                                                           max_entries=preparation.MAC_MAX_ENTRIES)}
                 (component / "unused").mkdir()  # Valid empty supplier directory, not output.
-                result = preparation.prepare_current(source, runtime, target, history_provider=True,
-                                                      store_component=component)
+                old_mask = os.umask(0o077)  # As the real current stager caller.
+                try:
+                    result = preparation.prepare_current(source, runtime, target, history_provider=True,
+                                                          store_component=component)
+                finally:
+                    os.umask(old_mask)
                 encoded = (runtime / "manifest.json").read_bytes()
                 self.assertEqual(result["manifestSha256"], hashlib.sha256(encoded).hexdigest())
                 self.assertEqual(result["qualification"], "prepared-not-native-verified")
@@ -921,7 +931,7 @@ class StoreRuntimeCompositionTests(unittest.TestCase):
         for case in ("platform", "missing", "missing-execute", "missing-reconcile", "tooling", "changed-gemfile", "changed-lock", "missing-component-lock", "new-core-requirement", "invalid-core-roster", "wrapper", "entry-mode", "link", "case",
                      "invalid-directory", "depth", "file-limit", "byte-limit", "existing-store", "overlap"):
             with self.subTest(case=case), tempfile.TemporaryDirectory() as temporary:
-                source, runtime, component = self.fixture(Path(temporary))
+                source, runtime, component = self.fixture(Path(temporary).resolve())
                 target = "x86_64-unknown-linux-gnu" if case == "platform" else "aarch64-apple-darwin"
                 if case == "missing": (component / "ca.pem").unlink()
                 if case == "missing-execute": (source / "desktop" / preparation.STORE_EXECUTE_BOOTSTRAP).unlink()
@@ -938,7 +948,12 @@ class StoreRuntimeCompositionTests(unittest.TestCase):
                 if case == "wrapper": (component / "bin/bundle").write_bytes(b"#!/usr/bin/env sh\n")
                 if case == "entry-mode": (component / "bin/ruby").chmod(0o644)
                 if case == "link": (component / "linked").symlink_to(component / "ca.pem")
-                if case == "case": (component / "CA.pem").write_bytes(b"collision")
+                if case == "case":
+                    if (component / "CA.pem").exists():
+                        # A case-insensitive volume (default APFS) cannot even
+                        # hold the colliding pair; it would overwrite ca.pem.
+                        self.skipTest("case-insensitive fixture volume")
+                    (component / "CA.pem").write_bytes(b"collision")
                 if case == "invalid-directory": (component / "unsafe.").mkdir()
                 if case == "depth":
                     nested = component.joinpath(*(["deep"] * preparation.MAX_PATH_PARTS), "file")
@@ -964,7 +979,7 @@ class StoreRuntimeCompositionTests(unittest.TestCase):
     def test_changed_original_and_copied_bytes_cannot_receive_manifest(self):
         for case in ("input-during-copy", "tooling-input-during-copy", "output-during-inventory", "core-roster-after-observation"):
             with self.subTest(case=case), tempfile.TemporaryDirectory() as temporary:
-                source, runtime, component = self.fixture(Path(temporary))
+                source, runtime, component = self.fixture(Path(temporary).resolve())
                 original = preparation.read_checked
                 changed = []
                 def read(path, *, limit):
