@@ -43,19 +43,28 @@ Mac. This page has no local paths, account data or private identifiers.
   the payload started. The same two-entry tag is on nearly every launched app
   bundle in `/Applications`. Never-launched bundles have none. The installation
   itself had finished 15 minutes earlier. The unified log names no writer.
-- This correlation is weak evidence for `Native`. With the actual code, a tag
-  landing during inspection maps to `Native` only within a few system calls
-  inside one native read. Anywhere else it maps to `Identity` or to a
-  preparation refusal, and neither was observed. A disposable bundle launched
-  from an agent process got no tag, so the timing could not be recreated without
-  writing into `/Applications`, which was not done.
-- Diagnostic gap: an app launched by LaunchServices has stdout and stderr on
-  `/dev/null`, which was verified on a disposable app. The phase line from
-  `1e7c4411` is written to stderr, so an ordinary owner first launch discards
-  it. Only a launch that captures stderr would keep it. Changing the visible
-  message would change texts pinned by the UI decoder, so that is a Lead/owner
-  decision.
-- No code was changed. The root cause is still unknown.
+- Correction (later the same day): calling this correlation "weak" was
+  wrong. In a race emulation, the real native macl reader ran inside
+  Book-like identity rechecks. 27.6–30.3% of single metadata changes that
+  landed during the held-entry checks mapped to `Native`, and the rest to
+  `Identity` (3 trials of 20,000 changes, clean launchd context). The real Book
+  does more identity-only work while it holds the entry, so its ratio is lower
+  and was not measured. The overlap is plausible, but it is not proven.
+- A new, uniquely named ad-hoc bundle in `/Applications`, launched once through
+  LaunchServices from a clean user LaunchAgent, got no tag. The real native
+  reader admitted every cycle. The 0.1.4 tag landed on a root-owned,
+  Developer ID-signed bundle. Creating it needs private-key use or root, so it
+  was not reproduced. The probe was removed after its evidence was saved.
+- Diagnostic loss fixed (`a7f046a7`): an app launched by LaunchServices has
+  stdout and stderr on `/dev/null`, so the stderr step line from `1e7c4411` was
+  discarded on ordinary first launches. The same fixed step code is now
+  appended to the visible reason after the unchanged category sentence. The
+  error code, retryability, category and finality are unchanged, and UI
+  observers still match the category. `protected-application` is split into
+  fixed sub-steps, and `protected-entry-attributes` isolates the outer-bundle
+  macl window. This fixes the observability gap, not the runtime cause.
+- The root cause is still unknown, and no retry or fix was added. Next evidence:
+  one fresh install containing `a7f046a7` and the visible step on first launch.
 
 ## #64 Protected Xcode resolver and `/Applications` (boundary kept)
 
@@ -73,6 +82,37 @@ Mac. This page has no local paths, account data or private identifiers.
 - On this host the protected copy is absent, so the refusal is the designed
   outcome. The remedy is an owner-run companion install, which the docs qualify
   on macOS 26 only. This host runs macOS 27.0.
+- The companion's existing producer path is the `xcode-setup-companion`
+  operation of the hosted installed-candidate workflow. It runs on a macOS 26
+  runner, only on the `verify/desktop-macos-xcode-setup` branch (absent on the
+  remote now), in the `macos-developer-id` environment. It signs with CI-held
+  Developer ID Application/Installer P12s, notarizes with a CI notary API key
+  and retains the package for 14 days. No such artifact exists: none of the
+  1,514 repository artifacts is a companion.
+- A local build cannot replace that step without source changes. The setup
+  binary self-verifies against the exact pinned Developer ID leaf
+  (`MRK_XCODE_SETUP_REQUIREMENT` from the reviewed signing profile), and the
+  producer always notarizes. The pinned Developer ID Application identity and
+  one Developer ID Installer identity are present and valid in the owner's
+  keychain (read-only listing; no key access). Using them can prompt, and
+  notarization is an account action.
+- The companion has no OS ceiling: `mrk_platform` requires macOS 26 or later,
+  and the package allows 26.0 or later. The app admits the protected copy by
+  its root-protected chain alone, with no receipt. Host Xcode is 27.0 at about
+  4.0 GB, and the data volume has about 13 GB free.
+- Concrete next step (Lead/owner, in order):
+  1. Push the reviewed head to the absent `verify/desktop-macos-xcode-setup`
+     branch, no force.
+  2. Dispatch `operation=xcode-setup-companion`,
+     `target=aarch64-apple-darwin`.
+  3. Download the artifact and check `pkgutil --check-signature` and
+     `spctl -a -t install`.
+  4. The owner runs `sudo /usr/sbin/installer -pkg "Prepare Xcode.pkg" -target /`.
+     This is the macOS 27 qualification step.
+  5. The Specialist re-runs the resolver read-only against
+     `/Library/MobileReleaseKitDeveloper/Xcode.app`.
+
+  No agent push, dispatch, signing or root step was taken.
 - The 26.3 Xcode pin applies only to CLI `preflight` and to a desktop warning
   badge. The installed archive check and the companion accept any well-formed
   version, so host Xcode 27.0 is not an extra installed gate.

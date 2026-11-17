@@ -30,7 +30,7 @@ are recorded for coordination. Shared consumer interfaces are preserved.
 | Issue | State | Commit | Evidence / remaining verification |
 |---|---|---|---|
 | #45 workspace failure | FIXED AND VERIFIED; ISSUE OPEN FOR REVIEW | `ded08721` | [Before/after regression and installed acceptance](macos-essential-45-status-backlog.md): pre-fix React 185 at cycle 52; post-fix 900 cycles / 3,600 deliveries. Frontend: 2,465 passes; build passes. Physical helper off/on and workspace return pass; saved version 1.0.0 / Build 1; refreshed error journal empty. Original app code restored and helper on. Local acceptance does not certify helper installation or a production release. |
-| #46 first connection | UNRESOLVED; EIGHT ACTUAL STARTS DID NOT REPRODUCE | `1e7c4411` | [Installed first-connection probes](macos-essential-46-first-launch.md): original signed app available on all eight starts, including four fresh-WebKit cases, without reload. Original native failure predicate remains unknown; fresh native installation is not certified. |
+| #46 first connection | UNRESOLVED; EIGHT ACTUAL STARTS DID NOT REPRODUCE; STEP NOW VISIBLE ON ORDINARY LAUNCH | `1e7c4411`, `a7f046a7` | [Installed first-connection probes](macos-essential-46-first-launch.md): original signed app available on all eight starts, including four fresh-WebKit cases, without reload. Original native failure predicate remains unknown; fresh native installation is not certified. |
 | #17 Git timeout | ACTIVE; RUNTIME STARTUP CANDIDATE VERIFIED, ORIGINAL TIMEOUT UNRESOLVED | `c69b6038`, `8a2ec558`, `5b2d7026` | Exact helper startup has 64 source compiles before and zero after; 30 strict runtime-preparation/composition tests pass, with one unrepresentable APFS subcase skipped. Native original-120-second acceptance remains open. |
 | #65 interruption integrity | CORE CRASH MATRIX VERIFIED; GUI GATE OPEN | `f20b9463` | Eight real SIGKILL/restart scenarios across four durable boundaries; broader recovery regressions tracked below. |
 | #66 performance/memory | SOURCE BASELINE + HOT-PATH FIX VERIFIED; APP GATES OPEN | `4266d1c6` | Reproducible Node/SSR fixture, linear path matching, 10,000 controller cycles; installed one-hour/WebView/helper measurements remain open. |
@@ -146,6 +146,52 @@ bypassed. The retained first-launch record still has no exact native errno or
 failed predicate. OS provenance/metadata overlap, allocation and interrupted
 native IO remain hypotheses, not established causes. Neither arbitrary retries
 nor a timeout change were introduced. Original #46 remains unresolved.
+
+### #46 diagnostic loss on ordinary launches (2026-11-17, `a7f046a7`)
+
+The step line above goes to stderr. An ordinary owner launch goes through
+LaunchServices, which puts the app's stderr on `/dev/null` (checked with
+`lsof` on a disposable launched bundle). So the step was discarded on exactly
+the first launches #46 is about. The retained ac506 acceptance record has only
+the category sentence; it predates the step diagnostics.
+
+`a7f046a7` appends the same fixed step code to the public reason after the
+unchanged category sentence, for example "Installed Mac runtime native or data
+inspection could not finish. Inspection step: protected-entry-attributes." The
+reason already reaches the runtime notice and the Environment page. The error
+code, retryability, category text, failure/finality and stderr line are
+unchanged. UI observers match the category with `contains`, so their fixed
+reason codes still resolve. `protected-application` (about 20 native sites) is
+split into fixed sub-steps: profile, install root, bundle open, entry
+attributes, payload attributes, binary and code group. A separate
+`runtime-root-attributes` step is added too. This fixes the diagnostic loss
+only. It is not a fix for the #46 runtime cause.
+
+Controlled probes (sanitized evidence is kept locally):
+
+- A new, uniquely named ad-hoc bundle was created in `/Applications` and launched
+  once through LaunchServices from a clean user LaunchAgent. It received no
+  `com.apple.macl` or any other attribute during a 35-second tight poll. The
+  real `mrk_existing_app_macl`, compiled from `native.m`, admitted every cycle.
+  The ac506 tag landed on a root-owned, Developer ID-signed bundle. Creating
+  that tag needs a team-signed, root-installed launch context, which needs
+  private-key use or root, so it was not reproduced. The probe was removed
+  after its evidence was saved.
+- Race emulation: the real `mrk_existing_app_macl` ran between Book-like
+  open/identity/name rechecks on a tag-free directory. A writer made 20,000
+  ctime-only changes at random times. In 3 trials, 27.6–30.3% of detected
+  changes mapped to Native and the rest to Identity. A concurrent OS tag write
+  during the held-entry checks therefore maps to the observed Native message
+  with non-negligible probability. The real Book holds the entry across more
+  identity-only work, so its ratio is lower and was not measured.
+
+The macl-overlap hypothesis is therefore plausible but unproven. In ac506 the
+tag's ctime is 1.21 s after the payload start, which overlaps the expected
+first inspection. The first failing predicate is still not identified, so no
+source fix or retry was added. The next evidence needed is one fresh install of
+a build containing `a7f046a7`, with the visible step recorded on first launch.
+`protected-entry-attributes` would confirm the overlap; any other step refutes
+it for that occurrence.
 
 ## #17 investigation
 
