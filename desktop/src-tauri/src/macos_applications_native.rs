@@ -303,6 +303,15 @@ impl Observation {
             current.hold_matching(book,&self.current.index(),row.published_identity,false)?;
             book.forward_close(current.bundle.ok_or("launcher-original-missing")?,
                 "launcher-parent-bundle-close")?;
+            // The joined worker retired the predecessor this parent held
+            // before GO and published the verified launcher above at its name.
+            // Settle that held original now through its own FD (#49); a later
+            // named close would compare it against the new occupant.
+            if let Some(old) = self.operation.bundle {
+                check(book.originals[old].parent == Some(self.operation.applications)
+                    && book.originals[old].name == launcher::APPLICATIONS_NAME,"launcher-parent-old-binding")?;
+                book.close_retired(old,RetiredName::Replaced,"launcher-parent-old-bundle-close")?;
+            }
             current.parent_post(book)?;
         }
         // Use the exact generation whose staging area the worker was allowed
@@ -1880,7 +1889,9 @@ impl Retirement {
             && expected.mode == u32::from(actual.st_mode) && expected.uid == actual.st_uid
             && expected.gid == actual.st_gid && actual.st_flags == 0, "launcher-retirement-unlinked-original")?;
         refresh_removed_parent(book, parent, before, &remaining)?;
-        book.forward_close(original, "launcher-retirement-close")?;
+        // The name is gone; an enrolled bundle root's snapshot is proven
+        // through the same FD plus absence instead of a named POST (#49).
+        book.close_unlinked(original, "launcher-retirement-close")?;
         book.persist(parent, false)?;
         workspace.post(book)
     }

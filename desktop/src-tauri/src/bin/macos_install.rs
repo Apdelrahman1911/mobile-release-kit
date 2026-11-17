@@ -142,6 +142,8 @@ mod installer {
         fn same_object(self, other: Self) -> bool { self.dev == other.dev && self.ino == other.ino
             && self.mode & 0o170000 == other.mode & 0o170000 && self.uid == other.uid && self.gid == other.gid }
     }
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum RetiredName { Unlinked, Replaced }
     struct Original { fd: Option<OwnedFd>, state: State, role: Role, parent: Option<usize>, name: String, identity: Option<Identity>,
         // Native-only first snapshot on an authenticated recorded app root.
         // Kept with the original through renames/posts/closes, never serialized.
@@ -179,6 +181,9 @@ mod installer {
     enum FreshPreparationPhase { None, HandlesRetired, StorageRebased }
     struct Install {
         originals: Vec<Original>, creations: Vec<Creation>, end: Instant, unknown: bool,
+        // First closed reason a close() turned unknown without returning an
+        // error of its own. Diagnostic DATA only; never a finality input.
+        close_refusal: Option<&'static str>,
         // Fixed bounded native-only mappings enrolled after complete generation
         // audit. Never read from worker DATA or persisted as new authority.
         legacy_volumes: [Option<mobile_release_desktop::macos_persistent_identity::LegacyVolumeBindingData>;
@@ -249,6 +254,35 @@ mod installer {
     fn payload_depth_data(path:&str,depth:usize,directory:bool)->bool {
         safe_macos_install_path(path) && depth==path.bytes().filter(|b|*b==b'/').count()
             && depth<=if directory{PAYLOAD_DIRECTORY_DEPTH_LIMIT}else{PAYLOAD_DIRECTORY_DEPTH_LIMIT+1}
+    }
+    // Maintenance admission's live-descriptor forecast above the originals
+    // already held (#49). The payload copier's recursive source+target chain
+    // (two per depth level) is fully forward-closed before stage_payload
+    // returns, and the Applications launcher is staged/published/retired only
+    // after that (publish_before_state/finish_after_state). The launcher peak
+    // therefore overlaps only the four retained payload roots (stage, app,
+    // runtime, release) plus the unchanged non-recursive core slack, never
+    // the recursive chain. Summing both peaks refused every enrolled-launcher
+    // Update holding >29 originals (observed: 31 held, forecast 98 > 96).
+    // Launcher removal keeps the previous summed forecast unchanged.
+    const MAINTENANCE_COPY_CHAIN_LIVE:u64=2*PAYLOAD_DIRECTORY_DEPTH_LIMIT as u64;
+    const MAINTENANCE_CORE_LIVE:u64=12+1;
+    const MAINTENANCE_RETAINED_ROOTS_LIVE:u64=4;
+    const MAINTENANCE_LAUNCHER_LIVE:u64=20;
+    fn maintenance_live_data(held:u64,removal_live:u64,launcher:bool,launcher_removal:bool,
+        launcher_phase_live:u64)->Option<u64> {
+        if launcher && launcher_removal {return None;}
+        let transient=if launcher {
+            MAINTENANCE_COPY_CHAIN_LIVE.max(MAINTENANCE_RETAINED_ROOTS_LIVE.checked_add(MAINTENANCE_LAUNCHER_LIVE)?
+                .checked_add(launcher_phase_live)?)
+        } else if launcher_removal {
+            if launcher_phase_live!=0 {return None;}
+            MAINTENANCE_COPY_CHAIN_LIVE.checked_add(MAINTENANCE_LAUNCHER_LIVE)?
+        } else {
+            if launcher_phase_live!=0 {return None;}
+            MAINTENANCE_COPY_CHAIN_LIVE
+        };
+        held.checked_add(MAINTENANCE_CORE_LIVE)?.checked_add(transient)?.checked_add(removal_live)
     }
     // Audits use inventory-absolute depth, unlike the separate launcher copier's
     // local recursion depth. This fixed subtree begins three levels below app.
@@ -584,6 +618,7 @@ mod installer {
     impl Install {
         fn new() -> Self {
             Self { originals: Vec::new(), creations: Vec::new(), end: Instant::now()+Duration::from_secs(120), unknown:false,
+                close_refusal:None,
                 legacy_volumes:[None;mobile_release_desktop::macos_install_maintenance::PREDECESSOR_LIMIT+1],
                 worker_deadline:None,worker_stderr_is_gate:false,worker_go_eof:false,payload_written:0,payload_write_calls:0,launcher_writes:applications::WriteCounts::default(),launcher_effects:None,
                 removal_live_reserved:0,removal_control_reserved:0,removal_original_storage_reserved:0,removal_snapshot_capture:None,removal_snapshot_work_reserved:false,archived_install_reserved:false,removal_payload_plan:None,removal_observation_control:None,removal_observation_reserved:0,removal_archive_scan:None,
@@ -877,16 +912,54 @@ mod installer {
                 State::Owned => {
                     r.state = State::Closing;
                     let result = r.fd.take().map(unistd::close);
-                    if !record_close_result(r, result) { self.unknown = true; }
+                    if !record_close_result(r, result) { self.unknown = true;
+                        self.close_refusal.get_or_insert("original-close-result-unknown"); }
                 }
-                State::Closed | State::NoHandle => {}, _ => self.unknown = true,
+                State::Closed | State::NoHandle => {},
+                _ => { self.unknown = true; self.close_refusal.get_or_insert("original-close-state-unknown"); }
             }
-            if !metadata_ok { self.unknown=true; }
+            if !metadata_ok { self.unknown=true; self.close_refusal.get_or_insert("original-close-snapshot-name"); }
             !self.unknown
         }
         fn forward_close(&mut self, n: usize, reason: &'static str) -> Result<()> {
             check(self.close(n), reason)?;
             self.clock() // Deadline refusal never rewrites a positive close.
+        }
+        // Close an original whose recorded name no longer names it: either
+        // this process just unlinked its ONLY name, or a joined writer retired
+        // it and published a different object at that name. A retained
+        // existing-app snapshot normally follows the held FD to close() as a
+        // named POST, which is a guaranteed refusal in both shapes and marked
+        // successful #49 updates unknown. Instead the SAME FD must still be
+        // the recorded object, its snapshot must be unchanged through that FD
+        // and the recorded name must be proven absent (Unlinked) or occupied
+        // by a different object (Replaced); only then does the snapshot
+        // retire. Any failed proof still consumes the close and stays unknown.
+        fn close_retired(&mut self, n: usize, retired: RetiredName, reason: &'static str) -> Result<()> {
+            if self.originals[n].fd.is_some() && self.originals[n].existing_app_metadata.is_some() {
+                let proven = (|| -> Result<()> {
+                    let parent = self.originals[n].parent.ok_or(reason)?;
+                    let expected = self.identity(n)?;
+                    let actual = Identity::of(&stat::fstat(self.fd(n)?).map_err(|_| reason)?);
+                    check(expected.same_object(actual), reason)?;
+                    self.existing_app_metadata_post(n, reason)?;
+                    let name = self.originals[n].name.clone();
+                    match retired {
+                        RetiredName::Unlinked => self.absent(parent, &name).map_err(|_| reason),
+                        RetiredName::Replaced => {
+                            let named = Identity::of(&self.named(Some(parent), &name).map_err(|_| reason)?);
+                            check(!expected.same_object(named) && !actual.same_object(named), reason)
+                        }
+                    }
+                })();
+                self.originals[n].existing_app_metadata = None;
+                if proven.is_err() { let _ = self.close(n); self.unknown = true;
+                    self.close_refusal.get_or_insert(reason); return Err(reason); }
+            }
+            self.forward_close(n, reason)
+        }
+        fn close_unlinked(&mut self, n: usize, reason: &'static str) -> Result<()> {
+            self.close_retired(n, RetiredName::Unlinked, reason)
         }
         // Retire a completed preparation scope before opening the next one.
         // Only its authenticated blank versions original crosses the boundary.
@@ -12481,9 +12554,10 @@ mod installer {
                 .and_then(|n|n.checked_add(restore_originals as u64))
                 .and_then(|n|n.checked_add((conservation.as_ref().map_or(0,|v|v.future_originals()) as u64).checked_mul(4)?))
                 .ok_or("maintenance-original-bound")?;
-            let live = book.originals.iter().filter(|r| r.fd.is_some()).count() as u64 + 2 * 16 + 12 + 1
-                + book.removal_live_reserved as u64 + if launcher.is_some() || launcher_removal.is_some() {20} else {0}
-                + if creates_launcher_phase {applications::PHASE_LIVE_QUOTE} else {0};
+            let live = maintenance_live_data(book.originals.iter().filter(|r| r.fd.is_some()).count() as u64,
+                book.removal_live_reserved as u64,launcher.is_some(),launcher_removal.is_some(),
+                if creates_launcher_phase {applications::PHASE_LIVE_QUOTE} else {0})
+                .ok_or("maintenance-budget-live-fds")?;
             let control_bound=if action==ActionData::FreshInstall && conservation.is_some()
                 && book.fresh_preparation_phase==FreshPreparationPhase::HandlesRetired {
                 check(history.is_none() && !book.worker_stderr_is_gate,"fresh-preparation-storage-phase")?;
@@ -12493,7 +12567,19 @@ mod installer {
                     .ok_or("fresh-preparation-storage-memory")?
             }else{control_bound};
             let budget=transaction::BudgetData::checked_with_reason_data(&costs, invocation_count, planned_evidence, control_bound, records, live)
-                .map_err(transaction::BudgetRefusalData::reason_data)?;
+                .map_err(|refusal|{
+                    // Failure-only finite scalars (no paths/names) so a refused
+                    // budget can be corrected from evidence (#49). Never written
+                    // when this process's stderr is the worker gate.
+                    if !book.worker_stderr_is_gate {
+                        let line=format!("MRK_MACOS_INSTALL_BUDGET_DIAGNOSTIC=reason={};action={:?};openFds={};removalLive={};launcher={};launcherPhase={};live={};records={};control={};evidence={};generations={};invocations={}\n",
+                            refusal.reason_data(),action,book.originals.iter().filter(|r|r.fd.is_some()).count(),
+                            book.removal_live_reserved,u8::from(launcher.is_some()||launcher_removal.is_some()),
+                            u8::from(creates_launcher_phase),live,records,control_bound,planned_evidence,costs.len(),invocation_count);
+                        if line.len()<=512 {let _=std::io::Write::write_all(&mut std::io::stderr().lock(),line.as_bytes());}
+                    }
+                    refusal.reason_data()
+                })?;
             if restore_originals!=0 {
                 reserve_removal_original_storage(book,usize::try_from(records).map_err(|_|"restore-recovery-future-originals")?)?;
             }
@@ -13770,7 +13856,7 @@ mod installer {
                 // Do not call new(): that would create a second 120s budget.
                 // The legacy-only Instant field is an inert marker here and
                 // cannot select a worker clock or its private result transport.
-                Self { originals: Vec::new(), creations: Vec::new(), end: Instant::now(), unknown:false,
+                Self { originals: Vec::new(), creations: Vec::new(), end: Instant::now(), unknown:false, close_refusal:None,
                     legacy_volumes:[None;mobile_release_desktop::macos_install_maintenance::PREDECESSOR_LIMIT+1],
                     worker_deadline:Some(deadline),worker_stderr_is_gate:stderr_is_gate,worker_go_eof:false,
                     fresh_birth_control_reserved:false,fresh_outputs:None,fresh_preparation_phase:FreshPreparationPhase::None,
@@ -15246,6 +15332,22 @@ mod installer {
                 u8::from(originals),u8::from(native),u8::from(timely),u8::from(unknown));
             (line.len() <= 256).then_some(line)
         }
+        // Failure-only diagnostic DATA for the shape the refusal line above
+        // withholds (an original, the deadline or a native producer is not
+        // settled). It carries closed flags and the static reason hash only,
+        // never a refusal claim, a path or a receipt, so a nonzero completed
+        // exit is never silent in the Installer log.
+        fn completed_unsettled_line_data(reason: Option<&'static str>, exit: i32, writer_exit: Option<i32>,
+            flags: [bool;8]) -> Option<String> {
+            let [originals,native,timely,unknown,native_settled,published,exported,command]=flags;
+            if !matches!(exit,1|20) || (originals && timely && native_settled) { return None; }
+            let digest = hash(reason.unwrap_or("completed-original-finality-refused").as_bytes());
+            let writer = match writer_exit { Some(0)=>"0",Some(1)=>"1",Some(20)=>"20",Some(_)=>"other",None=>"none" };
+            let line = format!("MRK_MACOS_INSTALL_COMPLETED_UNSETTLED=reasonSha256={digest};exit={exit};writer={writer};originals={};native={};timely={};unknown={};nativeSettled={};published={};exported={};command={}\n",
+                u8::from(originals),u8::from(native),u8::from(timely),u8::from(unknown),u8::from(native_settled),
+                u8::from(published),u8::from(exported),u8::from(command));
+            (line.len() <= 320).then_some(line)
+        }
         #[cfg(test)]
         pub(super) fn completed_failure_diagnostic_data_checks() {
             // Pure diagnostic formatting only: no native/Installer/FD execution.
@@ -15289,7 +15391,19 @@ mod installer {
             for invalid in [0,2,-1,101] {assert!(completed_failure_line_data(None,invalid,true,true,true,false,true).is_none());}
             for (originals,timely,settled) in [(false,true,true),(true,false,true),(true,true,false)] {
                 assert!(completed_failure_line_data(None,1,originals,true,timely,false,settled).is_none());
+                // Exactly the withheld shapes gain the closed unsettled line.
+                let line=completed_unsettled_line_data(Some("worker-self-image"),20,Some(20),
+                    [originals,true,timely,false,settled,true,false,true]).unwrap();
+                assert!(line.starts_with(&format!("MRK_MACOS_INSTALL_COMPLETED_UNSETTLED=reasonSha256={};exit=20;writer=20;",hash(b"worker-self-image"))));
+                assert!(line.contains(&format!("originals={};",u8::from(originals))) && line.contains(&format!("timely={};",u8::from(timely)))
+                    && line.contains(&format!("nativeSettled={};",u8::from(settled))) && line.ends_with("published=1;exported=0;command=1\n"));
+                assert!(line.is_ascii() && line.len()<=320 && !line.contains("worker-self-image"));
             }
+            assert!(completed_unsettled_line_data(None,1,None,[true,true,true,false,true,false,false,false]).is_none());
+            for invalid in [0,2,-1,101] {assert!(completed_unsettled_line_data(None,invalid,Some(7),[false;8]).is_none());}
+            let longest=completed_unsettled_line_data(Some("/private/example-not-an-output"),20,Some(7),[false;8]).unwrap();
+            assert!(longest.contains(";writer=other;") && !longest.contains("/private/") && longest.len()<=320);
+            assert!(completed_unsettled_line_data(None,1,None,[false;8]).unwrap().contains(";writer=none;"));
         }
         fn completed_exit_data(writer_exit: Option<i32>, published: bool, exported: bool,
             originals: bool, native: bool, command_kernel_retained: bool, timely: bool,
@@ -21714,7 +21828,14 @@ exec ./mrk-macos-remove --fixture-supervise "$1"
                 if !reinstall_settled || !producer_settled {self.retain_unresolved_reinstall();}
                 if !resume_settled || !resume_ready_settled {self.retain_unresolved_removal_resume();}
                 if !removal_settled || !live_ready_settled {self.retain_unresolved_removal_source();}
-                if native_settled { self.parent_book_settled = self.book.settle_originals(); }
+                if native_settled {
+                    self.parent_book_settled = self.book.settle_originals();
+                    // A silent close refusal otherwise reaches the completed
+                    // diagnostic as the generic finality reason only.
+                    if !self.parent_book_settled {
+                        if let Some(reason) = self.book.close_refusal { self.note(reason); }
+                    }
+                }
                 else {
                     self.note("producer-native-finality-unknown");
                     self.book.unknown = true;
@@ -22423,6 +22544,11 @@ exec ./mrk-macos-remove --fixture-supervise "$1"
                 completed_reason_data(parent.errors.first().copied(),writer_reason),exit,
                 originals,native,timely,unknown,native_settled) {
                 // One bounded best-effort write; no retry, panic, or success-path output.
+                let _ = std::io::Write::write(&mut std::io::stderr().lock(),line.as_bytes());
+            } else if let Some(line) = completed_unsettled_line_data(
+                completed_reason_data(parent.errors.first().copied(),writer_reason),exit,writer_exit,
+                [originals,native,timely,unknown,native_settled,published,exported,
+                    parent.command_gate_kernel_retained && parent.command.is_some()]) {
                 let _ = std::io::Write::write(&mut std::io::stderr().lock(),line.as_bytes());
             }
             exit
@@ -23904,6 +24030,131 @@ exec ./mrk-macos-remove --fixture-supervise "$1"
             book.removal_control_reserved=other;
             maintenance::reserve_removal_original_storage(&mut book,120_000).unwrap();
             book
+        }
+        // Real-filesystem reproduction of the hosted #49 launcher-retirement
+        // refusal: an enrolled bundle root carries an existing-app snapshot,
+        // is unlinked by its own parent FD and must then close as KNOWN.
+        fn unlinked_snapshot_book(root:&std::path::Path)->(super::Install,usize) {
+            use super::*;
+            let _=std::fs::remove_dir_all(root);
+            std::fs::create_dir_all(root.join("Old.app")).unwrap();
+            let flags=OFlag::O_RDONLY|OFlag::O_DIRECTORY|OFlag::O_NOFOLLOW|OFlag::O_CLOEXEC;
+            let mut book=Install::new();
+            let parent:OwnedFd=fcntl::open(root,flags,Mode::empty()).unwrap();
+            let pid=Identity::of(&stat::fstat(&parent).unwrap());
+            book.originals.push(Original{fd:Some(parent),state:State::Owned,role:Role::Reader,parent:None,
+                name:String::new(),identity:Some(pid),existing_app_metadata:None});
+            let child:OwnedFd=fcntl::openat(book.fd(0).unwrap(),"Old.app",flags,Mode::empty()).unwrap();
+            let cid=Identity::of(&stat::fstat(&child).unwrap());
+            book.originals.push(Original{fd:Some(child),state:State::Owned,role:Role::Reader,parent:Some(0),
+                name:"Old.app".into(),identity:Some(cid),existing_app_metadata:None});
+            // The no-MACL snapshot an enrolled launcher root actually carries.
+            book.originals[1].existing_app_metadata=
+                Some(mobile_release_desktop::macos_existing_app_metadata::SnapshotData::from_observed_bytes_data(&[]).unwrap());
+            (book,1)
+        }
+        #[test]
+        fn unlinked_existing_app_original_closes_known_only_after_absence_proof() {
+            use super::*;
+            let base=std::env::temp_dir().join(format!("mrk-unlinked-close-{}",std::process::id()));
+            // Previous behaviour: the named POST inside close() cannot succeed;
+            // the name lookup refuses before any attribute read, on any host.
+            let (mut book,n)=unlinked_snapshot_book(&base.join("old"));
+            unistd::unlinkat(book.fd(0).unwrap(),"Old.app",unistd::UnlinkatFlags::RemoveDir).unwrap();
+            assert_eq!(book.forward_close(n,"launcher-retirement-close"),Err("launcher-retirement-close"));
+            assert!(book.unknown && book.originals[n].state==State::Closed && book.originals[n].fd.is_none());
+            assert_eq!(book.close_refusal,Some("original-close-snapshot-name"));
+            // The parent's held predecessor after the writer published a new
+            // occupant at the same name failed the same named POST silently.
+            let (mut book,n)=unlinked_snapshot_book(&base.join("old-replaced"));
+            unistd::unlinkat(book.fd(0).unwrap(),"Old.app",unistd::UnlinkatFlags::RemoveDir).unwrap();
+            std::fs::create_dir(base.join("old-replaced/Old.app")).unwrap();
+            assert!(!book.settle_originals() && book.unknown);
+            assert_eq!(book.close_refusal,Some("original-close-snapshot-name"));
+            // The same-FD snapshot read admits only a com.apple.macl roster. A
+            // provenance-tagging host (a sandboxed developer tool on macOS 27)
+            // adds an unremovable attribute to every directory it creates, so
+            // the native half runs only where a fresh directory is clean, as
+            // under the root Installer.
+            let (probe,n)=unlinked_snapshot_book(&base.join("probe"));
+            if probe.read_existing_app_metadata(n,"probe").is_err() {
+                eprintln!("skipping native unlinked-close proofs: host tags new directories with extended attributes");
+                drop(probe); let _=std::fs::remove_dir_all(&base); return;
+            }
+            drop(probe);
+            // Fixed: the same unlink closes as known and the snapshot retires.
+            let (mut book,n)=unlinked_snapshot_book(&base.join("new"));
+            unistd::unlinkat(book.fd(0).unwrap(),"Old.app",unistd::UnlinkatFlags::RemoveDir).unwrap();
+            assert_eq!(book.close_unlinked(n,"launcher-retirement-close"),Ok(()));
+            assert!(!book.unknown && book.originals[n].state==State::Closed && book.originals[n].fd.is_none()
+                && book.originals[n].existing_app_metadata.is_none());
+            // A still-named original never retires its snapshot as unlinked.
+            let (mut book,n)=unlinked_snapshot_book(&base.join("named"));
+            assert_eq!(book.close_unlinked(n,"launcher-retirement-close"),Err("launcher-retirement-close"));
+            assert!(book.unknown && book.originals[n].fd.is_none() && book.originals[n].existing_app_metadata.is_none());
+            assert_eq!(book.close_refusal,Some("launcher-retirement-close"));
+            // A replacement at the recorded name is not absence either.
+            let (mut book,n)=unlinked_snapshot_book(&base.join("replaced"));
+            unistd::unlinkat(book.fd(0).unwrap(),"Old.app",unistd::UnlinkatFlags::RemoveDir).unwrap();
+            std::fs::create_dir(base.join("replaced/Old.app")).unwrap();
+            assert_eq!(book.close_unlinked(n,"launcher-retirement-close"),Err("launcher-retirement-close"));
+            assert!(book.unknown && book.originals[n].fd.is_none());
+            // ...but it is exactly the parent's retired-and-replaced shape.
+            let (mut book,n)=unlinked_snapshot_book(&base.join("parent-replaced"));
+            unistd::unlinkat(book.fd(0).unwrap(),"Old.app",unistd::UnlinkatFlags::RemoveDir).unwrap();
+            std::fs::create_dir(base.join("parent-replaced/Old.app")).unwrap();
+            assert_eq!(book.close_retired(n,RetiredName::Replaced,"launcher-parent-old-bundle-close"),Ok(()));
+            assert!(!book.unknown && book.originals[n].state==State::Closed && book.close_refusal.is_none());
+            // Replaced never accepts an absent name or the same object.
+            let (mut book,n)=unlinked_snapshot_book(&base.join("parent-absent"));
+            unistd::unlinkat(book.fd(0).unwrap(),"Old.app",unistd::UnlinkatFlags::RemoveDir).unwrap();
+            assert!(book.close_retired(n,RetiredName::Replaced,"launcher-parent-old-bundle-close").is_err() && book.unknown);
+            let (mut book,n)=unlinked_snapshot_book(&base.join("parent-same"));
+            assert!(book.close_retired(n,RetiredName::Replaced,"launcher-parent-old-bundle-close").is_err() && book.unknown);
+            // Originals without a snapshot keep the ordinary forward close.
+            let (mut book,n)=unlinked_snapshot_book(&base.join("plain"));
+            book.originals[n].existing_app_metadata=None;
+            unistd::unlinkat(book.fd(0).unwrap(),"Old.app",unistd::UnlinkatFlags::RemoveDir).unwrap();
+            assert_eq!(book.close_unlinked(n,"launcher-retirement-close"),Ok(()));
+            assert!(!book.unknown && book.originals[n].state==State::Closed);
+            let _=std::fs::remove_dir_all(&base);
+        }
+        #[test]
+        fn maintenance_live_forecast_overlaps_launcher_only_with_retained_roots() {
+            use super::*;
+            let phase=applications::PHASE_LIVE_QUOTE;
+            // No launcher: unchanged historical forecast held+2*16+12+1.
+            assert_eq!(maintenance_live_data(10,0,false,false,0),Some(10+2*16+12+1));
+            assert_eq!(maintenance_live_data(10,3,false,false,0),Some(10+2*16+12+1+3));
+            // Launcher removal: unchanged historical summed forecast.
+            assert_eq!(maintenance_live_data(10,3,false,true,0),Some(10+2*16+12+1+20+3));
+            // Hosted #49 evidence: an enrolled-launcher Update holding 31
+            // originals was refused at 98. The launcher peak (4 retained
+            // roots+20+phase) lies within the closed recursive copy chain.
+            let update=maintenance_live_data(31,0,true,false,phase).unwrap();
+            assert_eq!(update,31+12+1+2*16);
+            let one=transaction::GenerationCostData{files:1,bytes:1};
+            assert!(transaction::BudgetData::checked_with_reason_data(&[one],1,0,0,0,update).is_ok());
+            assert_eq!(31+2*16+12+1+20+phase,98); // the previous refused forecast
+            // The launcher never shrinks the forecast below the copy chain and
+            // is charged in full when it would exceed it.
+            assert_eq!(maintenance_live_data(0,0,true,false,0),maintenance_live_data(0,0,false,false,0));
+            assert!(MAINTENANCE_RETAINED_ROOTS_LIVE+MAINTENANCE_LAUNCHER_LIVE+phase<=MAINTENANCE_COPY_CHAIN_LIVE);
+            assert_eq!(applications::PHASE_LIMIT,transaction::LAUNCHER_PHASE_EVIDENCE_LIMIT);
+            assert_eq!(fresh_data::JOURNAL_LIMIT+fresh_data::ORIGIN_LIMIT+4*transaction::STATE_LIMIT
+                +applications::PHASE_LIMIT,transaction::STAGE_EVIDENCE_LIMIT);
+            // The 96 cap itself is unchanged: 51 held still admits, 52 refuses.
+            let edge=maintenance_live_data(51,0,true,false,phase).unwrap();
+            assert_eq!(edge,96);
+            assert!(transaction::BudgetData::checked_with_reason_data(&[one],1,0,0,0,edge).is_ok());
+            assert_eq!(transaction::BudgetData::checked_with_reason_data(&[one],1,0,0,0,
+                maintenance_live_data(52,0,true,false,phase).unwrap()).unwrap_err().reason_data(),"maintenance-budget-live-fds");
+            // Impossible shapes and overflow refuse instead of under-charging.
+            assert_eq!(maintenance_live_data(0,0,true,true,0),None);
+            assert_eq!(maintenance_live_data(0,0,false,false,phase),None);
+            assert_eq!(maintenance_live_data(0,0,false,true,phase),None);
+            assert_eq!(maintenance_live_data(u64::MAX,0,true,false,phase),None);
+            assert_eq!(maintenance_live_data(0,u64::MAX,false,false,0),None);
         }
         #[test]
         fn fresh_memory_retirement_preserves_records_and_capacity_and_real_growth_boundaries() {

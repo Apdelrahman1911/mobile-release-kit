@@ -1,0 +1,70 @@
+name: Desktop macOS in-place update check
+
+# Disposable hosted check for #49: install the previous signed package, seed
+# per-user data, install the next signed package over it with the standard
+# Installer, verify the update and data preservation, then verify that the
+# previous package is refused as a downgrade. Uses no signing credentials.
+# Path filters: push a follow-up commit after creating the branch (new-branch
+# diffs against main exceed the 300-file path-filter window).
+on:
+  push:
+    branches:
+      - verify/desktop-macos-update-check
+    paths:
+      - .github/workflows/desktop-macos-update-check.yml
+      - desktop/macos-installed-inputs/update-check-selection.json
+      - desktop/tools/macos_update_check.py
+
+permissions:
+  contents: read
+  actions: read
+
+concurrency:
+  group: desktop-macos-update-check-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  update-check:
+    if: github.repository == 'Apdelrahman1911/mobile-release-kit' && github.ref == 'refs/heads/verify/desktop-macos-update-check'
+    runs-on: macos-26
+    timeout-minutes: 45
+    env:
+      BASH_ENV: ''
+      ENV: ''
+    steps:
+      - name: Admit only a fresh hosted Apple Silicon macOS 26 runner
+        shell: bash
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: |
+          set -euo pipefail
+          [[ "$RUNNER_ENVIRONMENT" == github-hosted && "$RUNNER_OS" == macOS && "$RUNNER_ARCH" == ARM64 ]]
+          [[ "$(/usr/bin/sw_vers -productVersion)" == 26.* && "$(/usr/bin/id -u)" != 0 ]]
+          [[ ! -e "/Library/Application Support/MobileReleaseKit" && ! -e "$HOME/Library/Application Support/dev.mobile-release-kit.desktop" ]]
+
+      - name: Check out the exact source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Run the update check
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          umask 077
+          work="$(mktemp -d "$RUNNER_TEMP/mrk-update-check.XXXXXXXX")"
+          echo "MRK_UPDATE_WORK=$work" >> "$GITHUB_ENV"
+          /usr/bin/python3 -I -B desktop/tools/macos_update_check.py \
+            --selection desktop/macos-installed-inputs/update-check-selection.json --work "$work"
+
+      - name: Retain bounded update evidence
+        if: ${{ !cancelled() && env.MRK_UPDATE_WORK != '' }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: macos-update-check-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.MRK_UPDATE_WORK }}/evidence
+          if-no-files-found: warn
+          retention-days: 30

@@ -46,7 +46,7 @@ def closure_output(text):
     lines = text.splitlines()
     S.D.need(len(lines) == 1 and lines[0].startswith('shlibs:Depends='), 'Dependency result differs')
     value = lines[0].split('=', 1)[1]
-    S.controls('0.1.4-1', value, 0)
+    S.controls('0.1.5-1', value, 0)
     return value
 
 
@@ -100,7 +100,7 @@ def assemble(config, receipt_path, receipt_sha, work):
     S.D.need('ID=ubuntu\n' in release and 'VERSION_ID="24.04"\n' in release, 'Ubuntu 24.04 required')
     S.D.need(os.getuid() == os.geteuid() != 0, 'Unprivileged assembly required')
     receipt = S.pinned_json(receipt_path, receipt_sha)
-    S.D.need(receipt['schemaVersion'] == 1 and receipt['version'] == '0.1.4', 'Receipt version differs')
+    S.D.need(receipt['schemaVersion'] == 1 and receipt['version'] == '0.1.5', 'Receipt version differs')
     for name in ('sourceCommit', 'sourceTree'):
         S.D.need(len(receipt[name]) == 40 and all(c in '0123456789abcdef' for c in receipt[name]), 'Source identity differs')
     rows = source_binding(receipt)
@@ -111,7 +111,7 @@ def assemble(config, receipt_path, receipt_sha, work):
         S.D.bound(S.SOURCE / name, row)
     for name in ('compiler_files_sha256', 'prepared_files_sha256', 'manifest_sha256', 'protocol_sha256', 'desktop_notice_files_sha256'):
         S.D.need(config[name] == receipt[name], 'Build receipt binding differs')
-    S.D.need(config['version'] == '0.1.4-1', 'Package version differs')
+    S.D.need(config['version'] == '0.1.5-1', 'Package version differs')
     S.D.need(not work.exists() and work.is_absolute(), 'Fresh absolute assembly directory required')
     parent = work.parent.stat()
     S.D.need(parent.st_uid == os.geteuid() and stat.S_IMODE(parent.st_mode) & 0o077 == 0, 'Private parent required')
@@ -122,7 +122,7 @@ def assemble(config, receipt_path, receipt_sha, work):
     work.mkdir(mode=0o700)
     (work / 'debian').mkdir()
     (work / 'debian/control').write_text('Source: mobile-release-kit-desktop\nSection: devel\nPriority: optional\nMaintainer: Mobile Release Kit contributors <noreply@github.com>\n\nPackage: mobile-release-kit-desktop\nArchitecture: amd64\nDescription: nonshipping validation assembly\n')
-    (work / 'debian/shlibs.local').write_text('libssl 3 mobile-release-kit-desktop (= 0.1.4-1)\nlibcrypto 3 mobile-release-kit-desktop (= 0.1.4-1)\n')
+    (work / 'debian/shlibs.local').write_text('libssl 3 mobile-release-kit-desktop (= 0.1.5-1)\nlibcrypto 3 mobile-release-kit-desktop (= 0.1.5-1)\n')
     args = dict(config)
     for key in ('compiled', 'compiler_files', 'runtime', 'prepared_artifact', 'prepared_files', 'desktop_notices', 'desktop_notice_files'):
         args[key] = Path(args[key])
@@ -154,7 +154,7 @@ def assemble(config, receipt_path, receipt_sha, work):
     S.D.need(before == {str(p): digest(p) for p in paths}, 'ELF inputs changed')
     # Normalize only the newly created package archive root, never an installed runtime.
     os.chmod(args['output'], 0o755)
-    artifact = work / 'mobile-release-kit-desktop_0.1.4-1_amd64.deb'
+    artifact = work / 'mobile-release-kit-desktop_0.1.5-1_amd64.deb'
     run = bounded_command(['dpkg-deb', '--root-owner-group', '--build', str(args['output']), str(artifact)], work, 'assembly-original')
     (work / 'assembly.stdout').write_text(run.stdout)
     (work / 'assembly.stderr').write_text(run.stderr)

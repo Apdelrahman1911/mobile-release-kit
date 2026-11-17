@@ -213,7 +213,7 @@ def prepare(work,commit,tree):
  prepared=work/'prepared-files.json';save(prepared,roster(kit));nf=work/'notice-files.json';save(nf,roster(notices))
  staging=dict(runtime=str(runtime),prepared_artifact=str(kit),prepared_files=str(prepared),prepared_files_sha256=sha(prepared),desktop_notices=str(notices),desktop_notice_files=str(nf),desktop_notice_files_sha256=sha(nf),manifest_sha256=sha(runtime/'manifest.json'),protocol_sha256=sha(SOURCE/'src/mobile_release/_desktop_engine.py'),version='0.1.4-1')
  paths={'rustc':rust/'bin/rustc','cargo':rust/'bin/cargo','node':node/'bin/node','npm':node/'lib/node_modules/npm/bin/npm-cli.js'}
- receipt=json.loads((work/'source.json').read_text());receipt.update(schemaVersion=1,version='0.1.4')
+ receipt=json.loads((work/'source.json').read_text());receipt.update(schemaVersion=1,version='0.1.5')
  plan=dict(receipt=receipt,staging=staging,tools={k:row(v) for k,v in paths.items()},cargoHome=env['CARGO_HOME'],dependencyFiles=dependency_files)
  A.source_binding(receipt);save(work/'plan.json',plan)
  print(sha(work/'plan.json'))

@@ -9,7 +9,7 @@ use std::collections::BTreeSet;
 use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use crate::{macos_install_maintenance::{ActionData, ReleaseData, ReleaseSetData, PREDECESSOR_LIMIT},
-    macos_install_record::{DirectoryIdentity, CONTROL_LIMIT, FILE_LIMIT, ORIGINAL_LIMIT, PAYLOAD_LIMIT}, protocol::strict_json};
+    macos_install_record::{DirectoryIdentity, CONTROL_LIMIT, FILE_LIMIT, INVENTORY_LIMIT, ORIGINAL_LIMIT, PAYLOAD_LIMIT}, protocol::strict_json};
 
 pub const STATE_LIMIT: usize = 16 * 1024;
 pub const INTENT_LIMIT: usize = 16 * 1024;
@@ -20,6 +20,17 @@ pub const REQUEST_EXPORT_LIMIT: usize = 64 * 1024;
 pub const PRODUCER_CONTROL_LIMIT: usize = crate::macos_install_producer::DESCRIPTOR_LIMIT
     + crate::macos_install_producer::SIGNATURE_LIMIT;
 pub const INVOCATION_LIMIT: usize = 64;
+/// Launcher publication phase receipt retained in an invocation's stage.
+/// The installer's Applications PHASE_LIMIT is tested equal to this value.
+pub const LAUNCHER_PHASE_EVIDENCE_LIMIT: usize = 4096;
+/// Evidence retained in one invocation's stage that maintenance re-reads,
+/// hashes and charges in evidence_bytes (#49): four phase receipts (each read
+/// under STATE_LIMIT), the fresh output origin and enrollment journal, and
+/// one launcher publication phase. Each file keeps its own read limit; the
+/// aggregate control and storage caps still bound the sum. The fresh output
+/// ORIGIN_LIMIT (INTENT_LIMIT) and JOURNAL_LIMIT (INVENTORY_LIMIT) are tested
+/// equal; plain names keep this closed DATA independently compilable.
+pub const STAGE_EVIDENCE_LIMIT: usize = 4 * STATE_LIMIT + INTENT_LIMIT + INVENTORY_LIMIT + LAUNCHER_PHASE_EVIDENCE_LIMIT;
 /// Physical storage for current, retained and incoming generations together.
 /// Each generation still has its own PAYLOAD_LIMIT. Include the existing
 /// bounded control allowance for persisted evidence; this is a quota, never
@@ -1110,8 +1121,12 @@ impl BudgetData {
             payload_files = payload_files.checked_add(generation.files).ok_or(B::Arithmetic)?;
         }
         // Includes each unique result alongside its linked records, even when
-        // its fixed parent is Application Support rather than the install root.
-        let evidence_bound = (invocation_count as u64).checked_mul((INTENT_LIMIT + STATE_LIMIT + CAPSULE_LIMIT + REQUEST_EXPORT_LIMIT) as u64)
+        // its fixed parent is Application Support rather than the install root,
+        // and the bounded evidence retained in each invocation's stage. Fresh
+        // installs retain an output journal there (up to JOURNAL_LIMIT); before
+        // #49 it was charged but not allowed, refusing every later Update.
+        let evidence_bound = (invocation_count as u64).checked_mul((INTENT_LIMIT + STATE_LIMIT + CAPSULE_LIMIT
+            + REQUEST_EXPORT_LIMIT + STAGE_EVIDENCE_LIMIT) as u64)
             .ok_or(B::Arithmetic)?;
         // The pair is persisted outside payload/record hashes, but occupies
         // actual storage in every current/retained generation. Reserve its full
@@ -2147,7 +2162,8 @@ mod tests {
         assert!(BudgetData::checked_data(&[payload],1,record_and_result,0,2,2).is_ok());
         let too_large = GenerationCostData { files:1, bytes:payload.bytes+1 };
         assert!(BudgetData::checked_data(&[too_large],1,record_and_result,0,2,2).is_err());
-        assert!(BudgetData::checked_data(&[one],1,record_and_result+1,0,2,2).is_err());
+        assert!(BudgetData::checked_data(&[one],1,record_and_result+STAGE_EVIDENCE_LIMIT as u64,0,2,2).is_ok());
+        assert!(BudgetData::checked_data(&[one],1,record_and_result+STAGE_EVIDENCE_LIMIT as u64+1,0,2,2).is_err());
         // Signed control bytes cannot evade the aggregate merely by living
         // outside versions/<release>. The payload-only accessor stays truthful.
         let nine = PREDECESSOR_LIMIT + 1;
@@ -2177,6 +2193,30 @@ mod tests {
         assert!(BudgetData::checked_data(&[GenerationCostData { files: 1, bytes: PAYLOAD_LIMIT }, one], 1,0,0,0,0).is_ok());
         assert!(BudgetData::checked_data(&[GenerationCostData { files: u64::MAX, bytes: 0 }], 1,0,0,0,0).is_err());
         assert!(BudgetData::checked_data(&[], 1,0,0,0,0).is_err());
+    }
+    #[test]
+    fn evidence_bound_admits_retained_stage_evidence_per_invocation() {
+        use BudgetRefusalData as B;
+        let one = GenerationCostData {files:1,bytes:1};
+        let records = (INTENT_LIMIT + STATE_LIMIT + CAPSULE_LIMIT + REQUEST_EXPORT_LIMIT) as u64;
+        let stage = STAGE_EVIDENCE_LIMIT as u64;
+        assert_eq!(stage, 4 * STATE_LIMIT as u64 + INTENT_LIMIT as u64 + INVENTORY_LIMIT as u64 + 4096);
+        assert_eq!(crate::macos_fresh_recovery::ORIGIN_LIMIT, INTENT_LIMIT);
+        assert_eq!(crate::macos_fresh_recovery::JOURNAL_LIMIT, INVENTORY_LIMIT);
+        // #49: fresh history (records + phases + output journal) plus the
+        // planned Update records/results for two invocations.
+        let journal = 1_500_000u64;
+        let fresh_history = (INTENT_LIMIT + STATE_LIMIT + CAPSULE_LIMIT) as u64 + 4 * STATE_LIMIT as u64
+            + INTENT_LIMIT as u64 + journal + 4096;
+        let planned = fresh_history + (INTENT_LIMIT + STATE_LIMIT + CAPSULE_LIMIT) as u64 + 2 * REQUEST_EXPORT_LIMIT as u64;
+        assert!(planned > 2 * records); // the previous bound refused it
+        assert!(BudgetData::checked_with_reason_data(&[one],2,planned,0,0,0).is_ok());
+        // The widened bound is still exact and per invocation.
+        for n in [1usize, 2, INVOCATION_LIMIT] {
+            let bound = n as u64 * (records + stage);
+            assert!(BudgetData::checked_with_reason_data(&[one],n,bound,0,0,0).is_ok());
+            assert_eq!(BudgetData::checked_with_reason_data(&[one],n,bound+1,0,0,0).unwrap_err(),B::Evidence);
+        }
     }
     #[test]
     fn update_storage_and_first_refusal_preserve_individual_limits() {
