@@ -457,7 +457,7 @@ class InitializationRoutingTests(unittest.TestCase):
                     params.update(draft=draft(), toolingRepository=REPOSITORY, toolingSha=SHA)
                 requests = iter([request(0, "open", params), request(1, "prepare", {"revision": REVISION,
                     "intent": "recover" if intent == "initialize" else "initialize"}) if wrong_intent else request(1, "discard", {})])
-                control = SimpleNamespace(acquire=lambda: None, idle=lambda: None,
+                control = SimpleNamespace(reserved=None, acquire=lambda: None, idle=lambda: None,
                     request=lambda *_args: next(requests), closed=False)
                 control.close = lambda: setattr(control, "closed", True)
                 class RoutingLease(SimpleNamespace):
