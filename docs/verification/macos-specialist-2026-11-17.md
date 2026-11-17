@@ -147,19 +147,29 @@ Mac. This page has no local paths, account data or private identifiers.
   and the package allows 26.0 or later. The app admits the protected copy by
   its root-protected chain alone, with no receipt. Host Xcode is 27.0 at about
   4.0 GB, and the data volume has about 13 GB free.
-- Concrete next step (Lead/owner, in order):
-  1. Push the reviewed head to the absent `verify/desktop-macos-xcode-setup`
-     branch, no force.
-  2. Dispatch `operation=xcode-setup-companion`,
-     `target=aarch64-apple-darwin`.
-  3. Download the artifact and check `pkgutil --check-signature` and
-     `spctl -a -t install`.
-  4. The owner runs `sudo /usr/sbin/installer -pkg "Prepare Xcode.pkg" -target /`.
-     This is the macOS 27 qualification step.
-  5. The Specialist re-runs the resolver read-only against
-     `/Library/MobileReleaseKitDeveloper/Xcode.app`.
+- Next steps. There are two separate routes, and only the second one produces a
+  qualified artifact:
+  - **Local test route** (unqualified; enough for local acceptance on this Mac):
+    1. The owner, while present, runs the reviewed private finalization recipe.
+       It first re-checks the pinned source manifest, then signs with
+       codesign/productsign through the Keychain, then runs the `pkgutil` leaf
+       check.
+    2. The owner runs `installer` on that LOCAL package.
+    3. The Specialist re-runs the resolver read-only against
+       `/Library/MobileReleaseKitDeveloper/Xcode.app`.
 
-  No agent push, dispatch, signing or root step was taken.
+    The result is not notarized and not hosted-qualified. It must not be
+    distributed.
+  - **Hosted distribution route** (qualified; needed before any release claim):
+    1. Push the reviewed head to the absent `verify/desktop-macos-xcode-setup`
+       branch, no force.
+    2. Dispatch `operation=xcode-setup-companion` with
+       `target=aarch64-apple-darwin`.
+    3. Download the artifact and check `pkgutil --check-signature` and
+       `spctl -a -t install`.
+    4. The owner installs it and the resolver is re-checked as above.
+
+  No agent push, dispatch, signing or root step was taken on either route.
 - The 26.3 Xcode pin applies only to CLI `preflight` and to a desktop warning
   badge. The installed archive check and the companion accept any well-formed
   version, so host Xcode 27.0 is not an extra installed gate.
