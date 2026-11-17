@@ -1096,7 +1096,7 @@ pub(crate) fn assert_installed_assessment_failure_contract() {
     tests::assert_failure_contract();
 }
 
-#[cfg(test)]
+#[cfg(all(test, not(all(target_os = "macos", target_arch = "aarch64", feature = "macos-local-git-acceptance"))))]
 mod tests {
     // Only fictional in-memory DTOs and fixed errors. Never construct/call a
     // Supervisor, runtime, child, file reader, native parser, keyring or service.

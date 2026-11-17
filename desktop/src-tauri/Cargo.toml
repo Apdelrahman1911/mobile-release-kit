@@ -125,6 +125,9 @@ macos-installed-removal-abrupt-fixture = ["macos-installed-remover", "mrk-macos-
 macos-installed-removal-observer = ["macos-installed-remover"]
 # Explicit engineering observer controls; absent from every shipping profile.
 macos-installed-observation = ["mrk-macos-installed-native/installed-observation"]
+# Only the existing debug observer test reads this separate local namespace.
+# It never borrows a GitHub source/run identity or enables a shipping control.
+macos-local-git-acceptance = ["desktop-shell", "custom-protocol", "macos-installed-observation"]
 windows-installed-observation = ["mrk-windows-installed-native/windows-installed-observation"]
 
 [dependencies]

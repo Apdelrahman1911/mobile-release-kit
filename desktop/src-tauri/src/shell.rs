@@ -6157,6 +6157,11 @@ fn builder() -> tauri::Builder<tauri::Wry> {
             #[cfg(all(target_os = "windows", target_arch = "x86_64", target_env = "msvc"))]
             owned_windows::before_webview(&startup)?;
             let window = window.build()?;
+            // The local acceptance owner starts this nonshipping test through
+            // a LaunchAgent. Request ordinary OS focus; the observer must still
+            // obtain its original-window witness from the actual native event.
+            #[cfg(all(test, debug_assertions, target_os = "macos", target_arch = "aarch64", feature = "macos-local-git-acceptance"))]
+            window.set_focus()?;
             #[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),not(feature="macos-android-registration-helper")))]
             if let Some(dispatcher)=crate::saved_command_owner::AndroidServiceDispatcher::original_main(window.clone()){
                 let _=document.bind_android_service_dispatcher(dispatcher);

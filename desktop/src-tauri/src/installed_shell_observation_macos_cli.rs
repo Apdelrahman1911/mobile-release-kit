@@ -41,13 +41,18 @@ pub(super) fn application_for(uid: u32, name: &str) -> Option<PathBuf> {
     if uid == 0 || user.uid.as_raw() != uid || !user.dir.is_absolute() {
         return None;
     }
-    let (s, r, a) = (
-        option_env!("GITHUB_SHA")?,
-        option_env!("GITHUB_RUN_ID")?,
-        option_env!("GITHUB_RUN_ATTEMPT")?,
-    );
-    let tag = super::digest(format!("{s}/{r}/{a}/{name}").as_bytes());
-    let home = user.dir.join(format!(".c-{}", &tag[..12]));
+    #[cfg(feature = "macos-local-git-acceptance")]
+    let home = super::local_git_acceptance::current()?.application_home(&user.dir, name)?;
+    #[cfg(not(feature = "macos-local-git-acceptance"))]
+    let home = {
+        let (s, r, a) = (
+            option_env!("GITHUB_SHA")?,
+            option_env!("GITHUB_RUN_ID")?,
+            option_env!("GITHUB_RUN_ATTEMPT")?,
+        );
+        let tag = super::digest(format!("{s}/{r}/{a}/{name}").as_bytes());
+        user.dir.join(format!(".c-{}", &tag[..12]))
+    };
     let app = home.join("Library/Application Support/dev.mobile-release-kit.desktop");
     if app.join("service-v1/s").as_os_str().len() >= 104
         || std::env::var_os("HOME").as_deref() != Some(home.as_os_str())

@@ -31,7 +31,7 @@ are recorded for coordination. Shared consumer interfaces are preserved.
 |---|---|---|---|
 | #45 workspace failure | FIXED AND VERIFIED; ISSUE OPEN FOR REVIEW | `ded08721` | [Before/after regression and installed acceptance](macos-essential-45-status-backlog.md): pre-fix React 185 at cycle 52; post-fix 900 cycles / 3,600 deliveries. Frontend: 2,465 passes; build passes. Physical helper off/on and workspace return pass; saved version 1.0.0 / Build 1; refreshed error journal empty. Original app code restored and helper on. Local acceptance does not certify helper installation or a production release. |
 | #46 first connection | UNRESOLVED; EIGHT ACTUAL STARTS DID NOT REPRODUCE | `1e7c4411` | [Installed first-connection probes](macos-essential-46-first-launch.md): original signed app available on all eight starts, including four fresh-WebKit cases, without reload. Original native failure predicate remains unknown; fresh native installation is not certified. |
-| #17 Git timeout | MACOS INIT DEFECT FIXED; ORIGINAL TIMEOUT BLOCKED | `ff2571cf` | Fixed per-call/phase traces; protected-ancestor regression passes. Broader tests recorded below. |
+| #17 Git timeout | ACTIVE; RUNTIME STARTUP CANDIDATE VERIFIED, ORIGINAL TIMEOUT UNRESOLVED | `c69b6038`, `8a2ec558`, `5b2d7026` | Exact helper startup has 64 source compiles before and zero after; 30 strict runtime-preparation/composition tests pass, with one unrepresentable APFS subcase skipped. Native original-120-second acceptance remains open. |
 | #65 interruption integrity | CORE CRASH MATRIX VERIFIED; GUI GATE OPEN | `f20b9463` | Eight real SIGKILL/restart scenarios across four durable boundaries; broader recovery regressions tracked below. |
 | #66 performance/memory | SOURCE BASELINE + HOT-PATH FIX VERIFIED; APP GATES OPEN | `4266d1c6` | Reproducible Node/SSR fixture, linear path matching, 10,000 controller cycles; installed one-hour/WebView/helper measurements remain open. |
 | #30 macOS security | APP LOCK PATCHED; COORDINATION GATES OPEN | `b8169e10` | Scoped report, 335-command inventory, credential/wire tests; independent helper locks and Tokio pin need coordination. |
@@ -211,6 +211,90 @@ because that namespace inherits a different group; the final run uses the
 canonical private test directory with the account's original group. No group,
 ownership or source check was relaxed. The separately recorded macOS source
 projection/extended-attribute qualification and 11 installed groups remain gates.
+
+### 2026-11-17 runtime startup candidate and local native investigation
+
+The owner explicitly authorized one Claude Opus 5.5 / High worker for #17.
+It used its own checkout; the parent continued native work and independently
+reviewed and cherry-picked only the three scoped commits above. No release or
+main branch was changed, and nothing was pushed.
+
+The original installed CPython 3.14.7 has no standard-library bytecode. Each
+owned command starts three fresh isolated C/A/W interpreters; their actual
+startup compiles the same 64 stdlib modules. The measured GitRead / Prepare /
+Apply sequences contain 13 / 18 / 24 Git commands. Repeated compilation is a
+verified performance defect, but the exact historical first driver exception
+is still unknown. The recovered original log cannot distinguish an exhausted
+phase wait, a refused command admission, or a short command deadline.
+
+`c69b6038` derives checked-hash bytecode for that closed stdlib roster, retains
+all original source, and refuses incoming supplier bytecode. The stager
+independently recompiles and compares every byte. Both sides use a deterministic
+reference-free marshal tree because plain marshal output depends on import
+history and interning. The real isolated helper accepts all 64 generated caches
+and compiles zero stdlib sources. No command policy, deadline, finality or
+existing resource bound changed. Two rounds of the same 55 real Git commands
+on disposable runtime copies fell from 46.9 / 39.6s to 17.5 / 16.3s; those are
+mechanism measurements, not the original installed acceptance case.
+
+Independent physical-Mac checks with the actual pinned interpreter pass all
+16 bytecode tests. The complete runtime preparation and composition group also
+passes strictly: 30 tests, zero failures/errors, one APFS case-collision subcase
+skipped. No xattr exception was used. Existing ignored generated source caches
+were preserved outside the checkout before the final source-only roster check.
+The composition exercises real source capture, preparation, full roster and
+manifest checks, independent rederivation, Store recheck and final staging.
+It does not invent signed producer identities or qualify an installer.
+
+The nonshipping local native observer uses a source/tree-bound namespace and
+no GitHub run identity. Its original-runtime build and native DATA checks pass
+with one compiler job and a hard 3 GiB aggregate RSS cap. The latest focus-aware
+build completed in 384.825s, peak 3,120,578,560 bytes; its DATA checks also pass.
+The installed acceptance has not reached Git yet. Early attempts refused
+T3-attributed fixture metadata; the ordinary clean LaunchAgent creation context
+passes the same checks. Temporary owner-approved Accessibility access is needed
+for both the payload and its signed Python responsible process. A mixed
+ordinary/observer app layout was corrected to the observer's exact native
+framework roster without relaxing admission. Native capabilities and catalogue
+then succeed, but the observer waits for its original-window witness while the
+LaunchAgent-started app remains inactive. A local-only own-window focus request
+is being tested; no witness or success flag is fabricated. All attempts retain
+the 120-second case endpoint and distinguish incomplete app results from
+containment. All disposable fixtures and partial output are preserved.
+
+The original ordinary app was restored between experiments: all five original
+code hashes, modes, root ownership, empty attribute rosters, framework roster
+and strict deep signature were independently verified. The actual installed
+runtime remains unchanged. A private comparison candidate adds only the 64
+stdlib caches and a corresponding manifest, preserving every original runtime
+file including core.zip. The native OLD-to-NEW journey, original first driver
+failure, and eleven installed Git groups remain outstanding. #17 is unresolved.
+
+The focus-aware local observer reached real installed Git execution with the
+original runtime and unchanged 120-second case deadline. Six actual CLI calls
+returned, including the status/cancel calls at Checked; about 30 seconds remained.
+This did not reproduce the historical Checked timeout. The next original read
+settled successfully, but exposed an independent observer assertion defect:
+it expected an unchanged referenceRevision after staging, although the read
+facet hashes the entire observation revision into that token. The observer now
+requires a changed token for either fixed mutation. Its exact change/result
+checks and complete unrelated-file/reference readback remain in force. A real
+owned-Git regression proves staging changes both revision tokens while leaving
+HEAD and every ref byte unchanged: one test passes on installed CPython 3.14.7,
+without skips, in 27.63 seconds. The repaired full native journey is pending;
+this observer correction does not explain the historical timeout.
+
+The fresh complete Git rerun covers 661 tests on Homebrew CPython 3.14.6:
+657 pass, four explicit platform/filesystem cases skip, zero failures/errors
+(710.00 seconds). This includes the new real staging/reference-token regression.
+The corrected observer also builds under the 3 GiB cap (peak 2,342,666,240 bytes)
+and passes its native DATA contracts. Its actual installed original-runtime
+journey exhausts the unchanged 120-second budget with four CLI returns. The
+first driver error is cli-phase-deadline while waiting for terminal, before
+status call 4 dispatch. The native observer is still in GitCli(Terminal), with
+23.84s read wait and 31.82s preparation already spent. This reproduces cumulative
+deadline exhaustion on the real Mac, but at a different step from the original
+historical Checked failure. Cache-enabled installed acceptance remains pending.
 
 ## #65 interruption integrity
 

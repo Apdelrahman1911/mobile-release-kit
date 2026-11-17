@@ -96,8 +96,16 @@ fn support(home: &Path) -> Option<PathBuf> {
         .then(|| home.join("Library/Application Support"))
 }
 pub(super) fn fixture_root(home: &Path, case: Case) -> Option<PathBuf> {
-    let (s, r, a) = tuple()?;
-    Some(support(home)?.join(format!("mrk-macos-aqua-{s}-{r}-{a}-{}", case.scope())))
+    #[cfg(feature = "macos-local-git-acceptance")]
+    {
+        support(home)?; // Preserve the existing complete selection-path bound.
+        super::local_git_acceptance::current()?.fixture_root(home, case.scope())
+    }
+    #[cfg(not(feature = "macos-local-git-acceptance"))]
+    {
+        let (s, r, a) = tuple()?;
+        Some(support(home)?.join(format!("mrk-macos-aqua-{s}-{r}-{a}-{}", case.scope())))
+    }
 }
 pub(crate) struct Registration {
     control: Arc<Control>,
@@ -671,8 +679,13 @@ impl Observation {
                         if v.read_count==0 {
                             v.revision=Some(p.result["observation"]["revision"].as_str().ok_or(ReadCheck::ResultSchema)?.into());
                             v.references=Some(p.result["referenceRevision"].as_str().ok_or(ReadCheck::ReferenceRevision)?.into());
-                        }else if (c.case==Case::Branch&&p.result["referenceRevision"].as_str()==v.references.as_deref())
-                            ||(c.case==Case::Index&&p.result["referenceRevision"].as_str()!=v.references.as_deref()){return Err(ReadCheck::ReferenceRevision);}
+                        // The read facet binds referenceRevision to the whole
+                        // observation revision as well as its copied refs.
+                        // Staging changes that observation even with identical
+                        // refs. Both fixed mutations must invalidate the token;
+                        // read_result and the file readback still prove the
+                        // exact intended delta and preserve every unrelated ref.
+                        }else if p.result["referenceRevision"].as_str()==v.references.as_deref(){return Err(ReadCheck::ReferenceRevision);}
                         v.read_count+=1;Ok(Some(if v.read_count==1{Step::Allow}else{Step::Revoke}))
                     })();
                     match checked {

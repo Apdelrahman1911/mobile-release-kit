@@ -187,6 +187,25 @@ class OwnedReadTests(unittest.TestCase):
         self.assertEqual(detached.tracking.state, "detached")
         self.assertIsNone(detached.observation.branch)
 
+    def test_real_stage_changes_reference_token_without_changing_any_reference(self):
+        self.commit_text("one\n")
+        self.write_text("untracked.txt", "inert untracked text\n")
+        before = self.reader().observe()
+        refs = {p.relative_to(self.root / ".git"): p.read_bytes()
+                for p in (self.root / ".git/refs").rglob("*") if p.is_file()}
+        head = (self.root / ".git/HEAD").read_bytes()
+        self.git("add", "--", "untracked.txt")
+        after = self.reader().observe()
+        self.assertNotEqual(after.observation.revision, before.observation.revision)
+        self.assertNotEqual(after.reference_revision, before.reference_revision)
+        self.assertEqual(after.observation.head, before.observation.head)
+        self.assertEqual(after.observation.branch, before.observation.branch)
+        self.assertEqual((self.root / ".git/HEAD").read_bytes(), head)
+        self.assertEqual({p.relative_to(self.root / ".git"): p.read_bytes()
+                          for p in (self.root / ".git/refs").rglob("*") if p.is_file()}, refs)
+        self.assertEqual([(p.path, p.index, p.worktree) for p in after.observation.changes],
+                         [("untracked.txt", "A", " ")])
+
     def test_real_config_policy_refusal_runs_only_safe_no_includes_census(self):
         self.git("config", "--local", "include.path", str(self.base / "absent-never-opened"))
         before = self.calls

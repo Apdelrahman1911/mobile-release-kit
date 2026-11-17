@@ -18,6 +18,10 @@ use vault::upload_key::cli as backup_cli;
 use super::owned_macos::observation::{observed_panel, observe_panel_action, prepare_open_input,
     ObservedPanel, OpenAction, OpenActionBody, OpenRecheckBody, OpenProgress, OpenRelease, PanelAction, PreparedOpenInput};
 
+#[cfg(feature = "macos-local-git-acceptance")]
+#[path = "installed_shell_observation_macos_local_git.rs"]
+mod local_git_acceptance;
+
 #[path = "installed_shell_observation_macos_ios.rs"]
 pub(crate) mod ios;
 #[path = "installed_shell_observation_macos_identity.rs"]
@@ -3867,6 +3871,12 @@ impl Observation {
             "originalRelayJoined":r.relay_joined,"actualExit":r.actual_exit,
             "scope":if self.case.functional_entry().is_some() { FUNCTIONAL_SCOPE }
                 else { "programmatic genuine controls; no Store, release, distribution or physical-device evidence" }});
+        #[cfg(feature = "macos-local-git-acceptance")]
+        {
+            let local = local_git_acceptance::current()?;
+            report["localAcceptance"] = json!({"environment":"local-Mac-not-Actions",
+                "baseCommit":local.base_commit,"workingTreeSha256":local.tree_sha256,"id":local.id});
+        }
         if let Some(c)=&self.git_push {report["gitPush"]=r.git_push.as_ref()?.report(c)?;}
         if let Some(c)=&self.git_upstream {report["gitUpstream"]=r.git_upstream.as_ref()?.report(c)?;}
         if let Some(c)=&self.git_cli {report["gitCli"]=r.git_cli.as_ref()?.report(c)?;}
@@ -4446,6 +4456,24 @@ fn ios_alternate_roster(case: ios::Case) -> Option<&'static [&'static str]> {
     ios::Case::ALL[..5].contains(&case).then_some(UNSIGNED_IOS_ROSTER)
 }
 fn route(case: Case) -> Option<(PathBuf,u32)> {
+    #[cfg(feature = "macos-local-git-acceptance")]
+    {
+        let Case::GitCli(c) = case else { return None; };
+        local_git_acceptance::current()?;
+        let expected = Path::new(crate::macos_install_paths::PAYLOAD_EXECUTABLE);
+        if std::env::current_exe().ok()? != expected || !mrk_macos_installed_native::main_thread()
+            || !git_cli::admitted() { return None; }
+        let uid = mrk_macos_installed_native::real_user().ok()?;
+        let user = nix::unistd::User::from_uid(nix::unistd::Uid::from_raw(uid)).ok()??;
+        if uid == 0 || user.uid.as_raw() != uid { return None; }
+        let root = git_cli::fixture_root(&user.dir, c)?;
+        directory(&root, uid, 0o700, &[c.name(), "state"]).ok()?;
+        Some((root, uid))
+    }
+    #[cfg(not(feature = "macos-local-git-acceptance"))]
+    hosted_route(case)
+}
+fn hosted_route(case: Case) -> Option<(PathBuf,u32)> {
     let (source,run,attempt) = (option_env!("GITHUB_SHA")?,option_env!("GITHUB_RUN_ID")?,option_env!("GITHUB_RUN_ATTEMPT")?);
     let decimal = |s: &str| !s.is_empty() && s.len() <= 20 && !s.starts_with('0') && s.bytes().all(|b| b.is_ascii_digit());
     // The reviewed invocation owner checks its actual hosted source/ref/run

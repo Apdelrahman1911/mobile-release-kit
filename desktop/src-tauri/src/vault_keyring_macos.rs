@@ -583,7 +583,7 @@ impl LookupBook{
 }
 
 
-#[cfg(test)]
+#[cfg(all(test, not(all(target_os = "macos", target_arch = "aarch64", feature = "macos-local-git-acceptance"))))]
 mod tests {
     use super::*;
     fn local_request()->RequestEnvelope {RequestEnvelope::Local(local::Request{
