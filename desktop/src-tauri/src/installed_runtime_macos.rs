@@ -368,8 +368,12 @@ fn installed_code_layout() -> Result<crate::macos_install_record::CodeLayout> {
 pub(crate) enum AdmissionFailure { Stopped, Deadline, Bounds, Native, Ownership, Inventory, Identity, AlreadyUsed, Unknown }
 // Public fixed categories only: no path, request, syscall prose or credential.
 // Report the returned inspection category without changing its owner/finality.
-fn runtime_inspection_error(failure: AdmissionFailure) -> BridgeError {
-    BridgeError::unavailable(match failure {
+// The fixed step is appended so an ordinary (stderr-less) launch keeps it.
+fn runtime_inspection_error(failure: AdmissionFailure, phase: inspection_phase::Phase) -> BridgeError {
+    BridgeError::unavailable(&phase.visible_reason(runtime_inspection_category(failure)))
+}
+fn runtime_inspection_category(failure: AdmissionFailure) -> &'static str {
+    match failure {
         AdmissionFailure::Stopped => "Installed Mac runtime inspection stopped before completion.",
         AdmissionFailure::Deadline => "Installed Mac runtime inspection exceeded its deadline.",
         AdmissionFailure::Bounds => "Installed Mac runtime inspection exceeded its resource limit.",
@@ -379,9 +383,31 @@ fn runtime_inspection_error(failure: AdmissionFailure) -> BridgeError {
         AdmissionFailure::Identity => "Installed Mac runtime original file identity could not be confirmed.",
         AdmissionFailure::AlreadyUsed => "Installed Mac runtime inspection was already used.",
         AdmissionFailure::Unknown => "Installed Mac runtime original custody could not be confirmed.",
-    })
+    }
 }
 type Result<T> = std::result::Result<T, AdmissionFailure>;
+#[cfg(test)]
+#[test]
+fn runtime_inspection_error_keeps_category_and_code_and_shows_fixed_step() {
+    // #46: the ordinary-launch reason must carry the step without changing the
+    // public error code, the exact category sentence or retryability.
+    use inspection_phase::Phase;
+    let failures = [AdmissionFailure::Stopped, AdmissionFailure::Deadline, AdmissionFailure::Bounds, AdmissionFailure::Native,
+        AdmissionFailure::Ownership, AdmissionFailure::Inventory, AdmissionFailure::Identity, AdmissionFailure::AlreadyUsed,
+        AdmissionFailure::Unknown];
+    for failure in failures {
+        let category = runtime_inspection_category(failure);
+        let plain = BridgeError::unavailable(category);
+        for phase in Phase::ALL {
+            let error = runtime_inspection_error(failure, phase);
+            assert_eq!((error.code.as_str(), error.retryable), (plain.code.as_str(), plain.retryable));
+            assert!(error.message.starts_with(category));
+            assert!(error.message.ends_with(&format!(" Inspection step: {}.", phase.code())));
+        }
+    }
+    assert_eq!(runtime_inspection_error(AdmissionFailure::Native, Phase::ProtectedEntryAttributes).message,
+        "Installed Mac runtime native or data inspection could not finish. Inspection step: protected-entry-attributes.");
+}
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum CloseOutcome { Settled, Unknown }
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -1262,6 +1288,8 @@ impl Book {
     // capability. FixedSupport uses the SAME retained Contents ancestor.
     fn protected_app_once(&mut self, end: Instant, stop: &watch::Receiver<bool>) -> Result<ProtectedApp> {
         if !self.inspection_ready() { return Err(AdmissionFailure::AlreadyUsed); }
+        // Diagnostic DATA only: callers outside inspect() never report it.
+        self.inspection_phase = inspection_phase::Phase::ProtectedProfile;
         let layout=installed_code_layout()?;
         // Fixed support/seal callers retain their existing small quote. Full
         // runtime inspection reserves its larger ledger before entering here.
@@ -1271,19 +1299,25 @@ impl Book {
         let executable = Path::new(crate::macos_install_paths::PAYLOAD_EXECUTABLE);
         if std::env::current_exe().map_err(native_error)? != executable { return Err(AdmissionFailure::Ownership); }
         // Explicit retained role indices, never "payload.parent == install".
+        self.inspection_phase = inspection_phase::Phase::ProtectedInstallRoot;
         let install = self.chain(Path::new(crate::macos_install_paths::INSTALL_ROOT), end, stop)?;
+        self.inspection_phase = inspection_phase::Phase::ProtectedBundleOpen;
         let entry = self.open(Some(install), crate::macos_install_paths::APP_NAME, true, end, stop)?;
         let outer_contents = self.open(Some(entry), "Contents", true, end, stop)?;
         let helpers = self.open(Some(outer_contents), "Helpers", true, end, stop)?;
         let payload = self.open(Some(helpers), crate::macos_install_paths::PAYLOAD_NAME, true, end, stop)?;
+        self.inspection_phase = inspection_phase::Phase::ProtectedEntryAttributes;
         self.installed_attributes(entry,end,stop)?;
+        self.inspection_phase = inspection_phase::Phase::ProtectedPayloadAttributes;
         self.installed_attributes(payload,end,stop)?;
+        self.inspection_phase = inspection_phase::Phase::ProtectedBinary;
         let contents = self.open(Some(payload), "Contents", true, end, stop)?;
         let app_parent = self.open(Some(contents), "MacOS", true, end, stop)?;
         let binary = self.open(Some(app_parent), "mobile-release-kit-desktop", false, end, stop)?;
         let id = self.records[binary].identity.ok_or(AdmissionFailure::Identity)?;
         if id.gid != 0 || id.mode & 0o7777 != 0o555 { return Err(AdmissionFailure::Ownership); }
         native::no_xattrs(self.fd(binary)?.as_fd()).map_err(native_error)?;
+        self.inspection_phase = inspection_phase::Phase::ProtectedCodeGroup;
         self.fixed_code_group(outer_contents,contents,layout,end,stop)?;
         Ok(ProtectedApp { install, entry, payload, contents })
     }
@@ -1299,6 +1333,7 @@ impl Book {
         let root = self.chain(&selection.cwd, end, stop)?;
         let id = self.records[root].identity.ok_or(AdmissionFailure::Identity)?;
         if id.gid != 0 || id.mode & 0o7777 != 0o555 { return Err(AdmissionFailure::Ownership); }
+        self.inspection_phase = inspection_phase::Phase::RuntimeRootAttributes;
         native::no_xattrs(self.fd(root)?.as_fd()).map_err(native_error)?;
         self.inspection_phase = inspection_phase::Phase::ManifestOpen;
         let manifest = self.open(Some(root), "manifest.json", false, end, stop)?;
@@ -1521,7 +1556,10 @@ macro_rules! slots {
                 book.inspect(selection, end, stop).map_err(|failure| {
                     // Fixed step only. Diagnostics cannot change failure/finality;
                     // an unavailable sink is ignored and no retry is introduced.
-                    runtime_inspection_error(book.inspection_phase.report(failure, &mut std::io::stderr()))
+                    // The same step is also kept in the visible public reason,
+                    // because LaunchServices discards an ordinary app's stderr.
+                    let phase = book.inspection_phase;
+                    runtime_inspection_error(phase.report(failure, &mut std::io::stderr()), phase)
                 })?;
                 Ok(VerifiedRuntime { python: selection.python.clone(), bootstrap: selection.bootstrap.clone(), core: selection.core.clone(), cwd: selection.cwd.clone() })
             }
