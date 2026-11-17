@@ -5,10 +5,12 @@ Select this class explicitly. It does not qualify installation or native custody
 from __future__ import annotations
 
 import hashlib
+import importlib.machinery
 import importlib.util
 import io
 import json
 import marshal
+import os
 from pathlib import Path
 import stat
 import sys
@@ -152,6 +154,374 @@ class MacCoreBytecodeDataTests(unittest.TestCase):
         self.stager.current_core_matches(self.zip_bytes(generated), projection, macos_command_bytecode=True)
         for path, original in originals:
             self.assertEqual(preparation._state(preparation._ordinary(path)), original)
+
+
+# The real C/A/W helper import (bootstrap plus _native_process._abi_types(),
+# pure ctypes types, no library load), with NOTHING imported first (sys is
+# builtin). Run under -v: the interpreter itself reports every source
+# compilation and every accepted cache from its very start, including the
+# encodings bootstrap that precedes -c, so no Python-level hook can miss one.
+_CLOSURE_PROBE = r'''
+import sys
+sys.path.insert(0, sys.argv[1])
+from mobile_release._command_process import helper_main
+from mobile_release import _native_process
+_native_process._abi_types()
+'''
+
+
+def _import_events(stderr: bytes, library: Path) -> tuple[set[str], set[str]]:
+    """(stdlib sources compiled, stdlib sources whose cache was accepted) from -v."""
+    root, compiled, cached = str(library) + os.sep, set(), set()
+    for line in stderr.decode("utf-8", "surrogateescape").splitlines():
+        if line.startswith("# code object from ") and not line.startswith("# code object from '"):
+            path = line[len("# code object from "):]
+            if path.startswith(root) and path.endswith(".py"):
+                compiled.add(path[len(root):])
+        elif line.startswith("# ") and " matches " in line:
+            path = line.rsplit(" matches ", 1)[1]
+            if path.startswith(root) and path.endswith(".py"):
+                cached.add(path[len(root):])
+    return compiled, cached
+
+
+_DERIVE_PROBE = r'''
+import importlib.util, json, os, sys
+spec = importlib.util.spec_from_file_location("p", sys.argv[1])
+p = importlib.util.module_from_spec(spec); spec.loader.exec_module(p)
+if sys.argv[2] == "noisy":
+    # ctypes/inspect/typing/weakref live code holds interned qualnames equal
+    # to string constants of the same sources: plain marshal.dumps diverged.
+    import ctypes, inspect, typing, weakref, functools, dataclasses, subprocess, tempfile, shutil, json.decoder
+lib = os.path.dirname(os.__file__)
+sources = {p.STDLIB_ROOT + n: open(os.path.join(lib, n), "rb").read() for n in p.COMMAND_STDLIB_BYTECODE_FILES}
+rows = p._checked_stdlib_bytecode(frozenset(sources), sources)
+print(json.dumps({name: body.hex() for name, body in rows}))
+'''
+
+
+class MacStdlibBytecodeDataTests(unittest.TestCase):
+    """#17: stdlib command-startup bytecode derivation and independent rederivation."""
+    def setUp(self):
+        spec = importlib.util.spec_from_file_location(
+            "mac_stdlib_bytecode_stager_data", _SOURCE / "desktop/tools/stage_macos_installed.py")
+        self.stager = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(self.stager)
+        # Inert code objects; the actual-compiler test below uses real sources.
+        self.sources = {preparation.STDLIB_ROOT + name: b"def inert():\n    return %d\n" % index
+                        for index, name in enumerate(sorted(preparation.COMMAND_STDLIB_BYTECODE_FILES))}
+        self.supplier = {"python/bin/python3": (b"inert-executable", 0o555),
+                         preparation.STDLIB_ROOT + "unrelated.py": (b"# not in the startup roster\n", 0o444),
+                         **{name: (content, 0o444) for name, content in self.sources.items()}}
+
+    @staticmethod
+    def profile(*, version=(3, 14, 7), optimized=0, implementation="cpython", tag="cpython-314"):
+        # Only the fixed profile predicates are substituted; every code object is
+        # still produced by this host's real compile()/marshal for BOTH sides.
+        return SimpleNamespace(version_info=version, flags=SimpleNamespace(optimize=optimized),
+                               implementation=SimpleNamespace(name=implementation, cache_tag=tag))
+
+    def derive(self, supplier=None, sources=None):
+        supplier = self.supplier if supplier is None else supplier
+        with patch.object(preparation, "sys", self.profile()):
+            return preparation._checked_stdlib_bytecode(frozenset(supplier), self.sources if sources is None else sources)
+
+    def verify(self, files, supplier=None):
+        with patch.object(self.stager, "sys", self.profile()):
+            return self.stager.current_stdlib_bytecode_matches(files, self.supplier if supplier is None else supplier)
+
+    def test_both_rosters_are_identical_and_name_only_source_loaded_modules(self):
+        self.assertEqual(preparation.COMMAND_STDLIB_BYTECODE_FILES, self.stager.CURRENT_COMMAND_STDLIB_BYTECODE_FILES)
+        self.assertEqual((preparation.STDLIB_ROOT, preparation.STDLIB_CACHE_TAG),
+                         (self.stager.CURRENT_STDLIB_ROOT, self.stager.CURRENT_STDLIB_CACHE_TAG))
+        self.assertEqual(len(preparation.COMMAND_STDLIB_BYTECODE_FILES), 64)
+        # Frozen modules never read bytecode; adding them would be dead payload.
+        for frozen in ("os.py", "io.py", "abc.py", "codecs.py", "stat.py", "posixpath.py", "genericpath.py",
+                       "ntpath.py", "_collections_abc.py", "zipimport.py", "importlib/_bootstrap.py",
+                       "importlib/_bootstrap_external.py", "importlib/machinery.py"):
+            self.assertNotIn(frozen, preparation.COMMAND_STDLIB_BYTECODE_FILES)
+        self.assertEqual(preparation.stdlib_bytecode_name("json/decoder.py"),
+                         "python/lib/python3.14/json/__pycache__/decoder.cpython-314.pyc")
+        self.assertEqual(preparation.stdlib_bytecode_name("typing.py"),
+                         "python/lib/python3.14/__pycache__/typing.cpython-314.pyc")
+        with self.assertRaises(preparation.PreparationError):
+            preparation.stdlib_bytecode_name("os.py")
+
+    @unittest.skipIf(sys.platform != "darwin" or sys.implementation.name != "cpython" or sys.version_info[:2] != (3, 14),
+                     "the closed helper closure is defined for the Mac CPython 3.14 runtime")
+    def test_roster_is_exactly_the_real_helper_source_import_closure(self):
+        # A NEW stdlib import in the helper closure must update both rosters;
+        # otherwise every owned command silently recompiles it again (#17).
+        import subprocess
+        library = Path(os.__file__).parent
+        with tempfile.TemporaryDirectory() as empty:
+            result = subprocess.run([sys.executable, "-I", "-S", "-B", "-v", "-X", "pycache_prefix=" + empty, "-c",
+                                     _CLOSURE_PROBE, str(_SOURCE / "src")], capture_output=True, check=True, timeout=60)
+            self.assertEqual(os.listdir(empty), [])
+        compiled, cached = _import_events(result.stderr, library)
+        self.assertEqual(cached, set())  # Empty prefix: every stdlib import is a source compile.
+        self.assertIn("encodings/__init__.py", compiled)  # Startup, before -c, is observed too.
+        # A full interpreter with the _zstd extension continues into one more
+        # module; the signed runtime refuses compression.zstd before it.
+        optional = {"compression/zstd/_zstdfile.py"} if importlib.util.find_spec("_zstd") else set()
+        self.assertEqual(compiled - optional, set(preparation.COMMAND_STDLIB_BYTECODE_FILES))
+
+    def test_every_derived_byte_is_independently_rederived_and_sources_are_retained(self):
+        rows = self.derive()
+        self.assertEqual(rows, self.derive())
+        self.assertEqual(len(rows), 64)
+        files = {**self.supplier, **{name: (body, 0o600) for name, body in rows}}
+        self.assertEqual(self.verify(files), {name for name, _ in rows})
+        for name, body in rows:
+            source = name.replace("/__pycache__", "").replace(".cpython-314.pyc", ".py")
+            content = self.sources[source]
+            self.assertEqual(body[:4], importlib.util.MAGIC_NUMBER)
+            self.assertEqual(body[4:8], (3).to_bytes(4, "little"))  # Hash-based AND checked.
+            self.assertEqual(body[8:16], importlib.util.source_hash(content))
+            self.assertEqual(marshal.loads(body[16:]).co_filename, source)  # Logical, reproducible.
+            self.assertEqual(files[source], self.supplier[source])
+
+    def test_importer_uses_checked_bytecode_and_never_runs_a_stale_one(self):
+        rows = dict(self.derive())
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            for name, content in {**self.sources, **rows}.items():
+                path = root / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(content if name in self.sources else rows[name])
+            source = root / preparation.STDLIB_ROOT / "json/decoder.py"
+            loader = importlib.machinery.SourceFileLoader("mrk_inert_decoder", str(source))
+            with patch.object(importlib.machinery.SourceFileLoader, "source_to_code",
+                              side_effect=AssertionError("recompiled despite valid bytecode")):
+                code = loader.get_code("mrk_inert_decoder")
+            self.assertEqual(code.co_filename, str(source))  # Importer rebinds the logical name.
+            source.write_bytes(b"def inert():\n    return 'changed'\n")
+            compiled = []
+            original = importlib.machinery.SourceFileLoader.source_to_code
+            def recompile(loader_self, data, path, *args, **kwargs):
+                compiled.append(path)
+                return original(loader_self, data, path, *args, **kwargs)
+            with patch.object(importlib.machinery.SourceFileLoader, "source_to_code", recompile), \
+                    patch.object(sys, "dont_write_bytecode", True):
+                stale = importlib.machinery.SourceFileLoader("mrk_inert_decoder", str(source)).get_code("mrk_inert_decoder")
+            self.assertEqual(compiled, [str(source)])
+            self.assertIn("changed", stale.co_consts[0].co_consts)
+
+    def test_independent_verifier_refuses_every_malformed_stale_or_substituted_entry(self):
+        # A docstring and assert make optimized code genuinely differ.
+        decoder = "python/lib/python3.14/json/decoder.py"
+        self.sources[decoder] = b'"""Inert."""\nassert len(__name__) > 0\ndef inert():\n    return 1\n'
+        self.supplier[decoder] = (self.sources[decoder], 0o444)
+        rows = dict(self.derive())
+        target = "python/lib/python3.14/json/__pycache__/decoder.cpython-314.pyc"
+        sibling = "python/lib/python3.14/json/__pycache__/encoder.cpython-314.pyc"
+        body = rows[target]
+        content = self.sources["python/lib/python3.14/json/decoder.py"]
+        def recompiled(**kwargs):
+            code = compile(content, kwargs.get("filename", "python/lib/python3.14/json/decoder.py"), "exec",
+                           dont_inherit=True, optimize=kwargs.get("optimize", 0))
+            return preparation._tree_marshal(marshal.dumps(code))
+        faults = {
+            "missing-bytecode": lambda f: f.pop(target),
+            "extra-foreign-bytecode": lambda f: f.update({"python/lib/python3.14/__pycache__/foreign.cpython-314.pyc": (body, 0o600)}),
+            "extra-optimized-name": lambda f: f.update({target[:-4] + ".opt-1.pyc": (body, 0o600)}),
+            "legacy-pyo": lambda f: f.update({"python/lib/python3.14/json/decoder.pyo": (body, 0o600)}),
+            "path-substitution": lambda f: f.update({target: f[sibling], sibling: f[target]}),
+            "stale-source": lambda f: f.update({"python/lib/python3.14/json/decoder.py": (content + b"# edited\n", 0o444)}),
+            "foreign-code": lambda f: f.update({target: (body[:16] + preparation._tree_marshal(
+                marshal.dumps(compile("x = 99", "python/lib/python3.14/json/decoder.py", "exec"))), 0o600)}),
+            "untreed-same-code": lambda f: f.update({target: (body[:16] + marshal.dumps(marshal.loads(body[16:])), 0o600)}),
+            "trailing-bytes": lambda f: f.update({target: (body + b"N", 0o600)}),
+            "wrong-magic": lambda f: f.update({target: (b"0000" + body[4:], 0o600)}),
+            "timestamp-pyc": lambda f: f.update({target: (body[:4] + (0).to_bytes(4, "little") + body[8:], 0o600)}),
+            "unchecked-hash": lambda f: f.update({target: (body[:4] + (1).to_bytes(4, "little") + body[8:], 0o600)}),
+            "wrong-source-hash": lambda f: f.update({target: (body[:8] + b"0" * 8 + body[16:], 0o600)}),
+            "optimized-code": lambda f: f.update({target: (body[:16] + recompiled(optimize=2), 0o600)}),
+            "absolute-co-filename": lambda f: f.update({target: (body[:16] + recompiled(filename="/build/json/decoder.py"), 0o600)}),
+            "truncated": lambda f: f.update({target: (body[:-1], 0o600)}),
+        }
+        for fault, change in faults.items():
+            with self.subTest(fault=fault):
+                files = {**self.supplier, **{name: (value, 0o600) for name, value in rows.items()}}
+                supplier = dict(self.supplier)
+                change(files)
+                if fault == "stale-source":
+                    supplier["python/lib/python3.14/json/decoder.py"] = files["python/lib/python3.14/json/decoder.py"]
+                with self.assertRaises(self.stager.Refused):
+                    self.verify(files, supplier)
+
+    def test_tree_marshal_is_identity_free_value_preserving_and_fails_closed_on_both_sides(self):
+        shared = "shared-" + "x" * 300
+        code = compile(f"a = {shared!r}\nb = {shared!r}\nc = (1, 2.5, -7, 10 ** 40, b'raw', {{'k'}}, ..., None)\n"
+                       "def f(x, *, y=None):\n    return x[1:2], sys\n", "python/lib/python3.14/inert.py", "exec",
+                       dont_inherit=True, optimize=0)
+        raw = marshal.dumps(code)
+        tree = preparation._tree_marshal(raw)
+        self.assertEqual(self.stager.current_tree_marshal(raw), tree)  # Two independent implementations.
+        self.assertNotEqual(tree, raw)
+        self.assertEqual(preparation._tree_marshal(tree), tree)  # Fixed point.
+        self.assertEqual(marshal.loads(tree), code)
+        # Exactly the process-state differences are erased: identity sharing,
+        # FLAG_REF and intern marks. Values and types are not.
+        text = "".join(["CFUNCTYPE.<locals>", ".CFunctionType"])
+        twin = "".join(["CFUNCTYPE.<locals>", ".CFunctionType"])
+        self.assertIsNot(text, twin)
+        variants = [marshal.dumps((text, text)), marshal.dumps((text, twin)),
+                    marshal.dumps((sys.intern(text), twin))]
+        self.assertGreater(len(set(variants)), 1)
+        for implementation in (preparation._tree_marshal, self.stager.current_tree_marshal):
+            self.assertEqual(len({implementation(v) for v in variants}), 1)
+            self.assertNotEqual(implementation(marshal.dumps((text, b"x"))), implementation(marshal.dumps((text, "x"))))
+            self.assertNotEqual(implementation(marshal.dumps(1)), implementation(marshal.dumps(1.0)))
+        bad = {
+            "truncated": tree[:-1], "trailing": tree + b"N", "empty": b"",
+            "unknown-type": b"?" + tree[1:], "dangling-reference": b"r" + (0).to_bytes(4, "little"),
+            "flagged-reference": b"\xf2" + (0).to_bytes(4, "little"),
+            "invalid-long": b"l" + (0).to_bytes(4, "little"),
+            "oversized-sequence": b"(" + (1 << 30).to_bytes(4, "little"),
+            "too-deep": b")\x01" * 200 + b"N",
+        }
+        for fault, stream in bad.items():
+            with self.subTest(fault=fault):
+                with self.assertRaises(preparation.PreparationError):
+                    preparation._tree_marshal(stream)
+                with self.assertRaises(self.stager.Refused):
+                    self.stager.current_tree_marshal(stream)
+
+    def test_incoming_bytecode_missing_sources_and_wrong_compiler_fail_closed_on_both_sides(self):
+        incoming = dict(self.supplier, **{"python/lib/python3.14/__pycache__/typing.cpython-314.pyc": (b"cached", 0o444)})
+        missing = {k: v for k, v in self.supplier.items() if k != "python/lib/python3.14/typing.py"}
+        for supplier in (incoming, missing, dict(self.supplier, **{"python/lib/python3.14/x.pyo": (b"o", 0o444)})):
+            with self.subTest(roster=sorted(set(supplier) ^ set(self.supplier))):
+                with self.assertRaises(preparation.PreparationError):
+                    self.derive(supplier, {k: v for k, v in self.sources.items() if k in supplier})
+                with self.assertRaises(self.stager.Refused):
+                    self.verify(dict(supplier), supplier)
+        with self.assertRaises(preparation.PreparationError):  # Foreign/non-python supplier entry.
+            self.derive(dict(self.supplier, **{"tools/gh": (b"x", 0o555)}))
+        with self.assertRaises(preparation.PreparationError):  # Malformed original source.
+            self.derive(sources=dict(self.sources, **{"python/lib/python3.14/typing.py": b"def broken(:\n"}))
+        with patch.object(preparation, "MAX_STDLIB_BYTECODE_BYTES", 64), self.assertRaises(preparation.PreparationError):
+            self.derive()
+        for profile in (self.profile(version=(3, 14, 6)), self.profile(optimized=1),
+                        self.profile(implementation="other"), self.profile(tag="cpython-313")):
+            with self.subTest(profile=profile):
+                with patch.object(preparation, "sys", profile), self.assertRaises(preparation.PreparationError):
+                    preparation._checked_stdlib_bytecode(frozenset(self.supplier), self.sources)
+                with patch.object(self.stager, "sys", profile), self.assertRaises(self.stager.Refused):
+                    self.stager.current_stdlib_bytecode({k: v for k, v in self.supplier.items()})
+
+    def test_writer_creates_only_new_cache_entries_and_restores_read_only_supplier_modes(self):
+        rows = self.derive()
+        with tempfile.TemporaryDirectory() as temporary:
+            runtime = Path(temporary) / "runtime"
+            for name, content in self.sources.items():
+                path = runtime / name
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_bytes(content)
+                path.chmod(0o444)
+            parents = sorted({p for name in self.sources for p in (runtime / name).parents if runtime / "python" in (p, *p.parents)},
+                             key=lambda p: -len(p.parts))
+            for directory in parents:
+                directory.chmod(0o555)
+            before = {name: preparation._state(preparation._ordinary(runtime / name)) for name in self.sources}
+            directory_before = {d: (d.stat().st_ino, d.stat().st_mode) for d in parents}
+            old = os.umask(0o077)
+            try:
+                preparation._write_stdlib_bytecode(runtime, rows)
+            finally:
+                os.umask(old)
+            for name, body in rows:
+                path = runtime / name
+                self.assertEqual(path.read_bytes(), body)
+                self.assertEqual(stat.S_IMODE(path.stat().st_mode), 0o600)
+                self.assertEqual(stat.S_IMODE(path.parent.stat().st_mode), 0o555)
+            self.assertEqual({d: (d.stat().st_ino, d.stat().st_mode) for d in parents}, directory_before)
+            self.assertEqual({name: preparation._state(preparation._ordinary(runtime / name)) for name in self.sources}, before)
+            # A second creation never adopts or overwrites the existing cache.
+            with self.assertRaises(preparation.PreparationError):
+                preparation._write_stdlib_bytecode(runtime, rows)
+            self.assertEqual(stat.S_IMODE((runtime / preparation.STDLIB_ROOT).stat().st_mode), 0o555)
+            with self.assertRaises(preparation.PreparationError):
+                preparation._write_stdlib_bytecode(runtime, [("python/lib/python3.14/typing.cpython-314.pyc", b"x")])
+            for directory in (runtime, *parents, *{(runtime / n).parent for n, _ in rows}):
+                directory.chmod(0o700)
+
+    @unittest.skipIf(sys.implementation.name != "cpython" or sys.version_info[:3] != (3, 14, 7),
+                     "requires the original fixed CPython 3.14.7 DATA compiler")
+    def test_derived_bytes_are_independent_of_process_import_history(self):
+        # Plain marshal.dumps follows live process state (FLAG_REF refcounts,
+        # merging with live interned strings): ctypes/inspect/typing/weakref
+        # diverged under a noisy history. The tree form must not.
+        import subprocess
+        outputs = []
+        for history in ("clean", "noisy"):
+            result = subprocess.run([sys.executable, "-I", "-S", "-B", "-c", _DERIVE_PROBE,
+                                     str(_SOURCE / "desktop/tools/prepare_runtime.py"), history],
+                                    capture_output=True, check=True, timeout=120)
+            outputs.append(json.loads(result.stdout))
+        self.assertEqual(len(outputs[0]), 64)
+        self.assertEqual(outputs[0], outputs[1])
+        library = Path(os.__file__).resolve().parent
+        supplier = {preparation.STDLIB_ROOT + n: ((library / n).read_bytes(), 0o444)
+                    for n in preparation.COMMAND_STDLIB_BYTECODE_FILES}
+        # This process has already imported unittest/zipfile/... (noisiest).
+        self.assertEqual({k: v.hex() for k, v in self.stager.current_stdlib_bytecode(supplier).items()}, outputs[0])
+
+    @unittest.skipIf(sys.implementation.name != "cpython" or sys.version_info[:3] != (3, 14, 7),
+                     "requires the original fixed CPython 3.14.7 DATA compiler")
+    def test_actual_compiler_derives_and_independently_verifies_the_actual_supplier_stdlib(self):
+        library = Path(os.__file__).resolve().parent
+        sources, supplier = {}, {"python/bin/python3": (b"inert-executable", 0o555)}
+        for name in sorted(preparation.COMMAND_STDLIB_BYTECODE_FILES):
+            content = preparation.read_checked(library / name, limit=preparation.MAX_STDLIB_BYTECODE_BYTES)
+            sources[preparation.STDLIB_ROOT + name] = content
+            supplier[preparation.STDLIB_ROOT + name] = (content, 0o444)
+        rows = preparation._checked_stdlib_bytecode(frozenset(supplier), sources)
+        self.assertLessEqual(sum(len(body) for _, body in rows), preparation.MAX_STDLIB_BYTECODE_BYTES)
+        files = {**supplier, **{name: (body, 0o600) for name, body in rows}}
+        self.assertEqual(self.stager.current_stdlib_bytecode_matches(files, supplier), {name for name, _ in rows})
+        for name, body in rows:
+            self.assertEqual(importlib.util.source_hash(sources[marshal.loads(body[16:]).co_filename]), body[8:16])
+
+    @unittest.skipIf(sys.platform != "darwin" or sys.implementation.name != "cpython" or sys.version_info[:3] != (3, 14, 7),
+                     "the real helper start is defined for the Mac CPython 3.14.7 runtime")
+    def test_real_helper_interpreter_loads_every_derived_cache_and_compiles_no_stdlib_source(self):
+        # The actual -I -S -B helper start, observed by the interpreter's own
+        # -v import events: the derived rows (relocated only by the standard
+        # pycache_prefix lookup) are accepted for every roster module and no
+        # stdlib source is compiled; without them all 64 are compiled.
+        import subprocess
+        library = Path(os.__file__).parent
+        sources, supplier = {}, {"python/bin/python3": (b"inert-executable", 0o555)}
+        for name in sorted(preparation.COMMAND_STDLIB_BYTECODE_FILES):
+            content = (library / name).read_bytes()
+            sources[preparation.STDLIB_ROOT + name] = content
+            supplier[preparation.STDLIB_ROOT + name] = (content, 0o444)
+        rows = dict(preparation._checked_stdlib_bytecode(frozenset(supplier), sources))
+        events = {}
+        with tempfile.TemporaryDirectory() as temporary:
+            for state in ("without", "with"):
+                prefix = Path(temporary) / state
+                prefix.mkdir()
+                if state == "with":
+                    for name in preparation.COMMAND_STDLIB_BYTECODE_FILES:
+                        parent, _, leaf = name.rpartition("/")
+                        target = prefix / str(library / parent).lstrip(os.sep) / (leaf[:-3] + ".cpython-314.pyc")
+                        target.parent.mkdir(parents=True, exist_ok=True)
+                        target.write_bytes(rows[preparation.stdlib_bytecode_name(name)])
+                before = sorted(p.relative_to(prefix) for p in prefix.rglob("*"))
+                result = subprocess.run([sys.executable, "-I", "-S", "-B", "-v", "-X", "pycache_prefix=" + str(prefix),
+                                         "-c", _CLOSURE_PROBE, str(_SOURCE / "src")],
+                                        capture_output=True, check=True, timeout=60)
+                self.assertEqual(sorted(p.relative_to(prefix) for p in prefix.rglob("*")), before)
+                events[state] = _import_events(result.stderr, library)
+        roster = set(preparation.COMMAND_STDLIB_BYTECODE_FILES)
+        optional = {"compression/zstd/_zstdfile.py"} if importlib.util.find_spec("_zstd") else set()
+        self.assertEqual(events["without"][1], set())
+        self.assertEqual(events["without"][0] - optional, roster)
+        self.assertEqual(events["with"][1], roster)
+        self.assertEqual(events["with"][0] - optional, set())
 
 
 class RuntimePreparationTests(unittest.TestCase):

@@ -45,6 +45,35 @@ COMMAND_BYTECODE_FILES = frozenset({
     "mobile_release/_store_lane_contract.py", "mobile_release/cancellation.py",
     "mobile_release/errors.py", "mobile_release/owned_process.py",
 })
+# Every owned command starts three fresh `-I -S -B` C/A/W helper interpreters.
+# The signed supplier stdlib is source-only and read-only, so without bytecode
+# each helper recompiled this whole closure on every Git command (#17). This is
+# the EXACT closed set of stdlib sources the signed runtime compiles for
+# `from mobile_release._command_process import helper_main` plus the pure
+# `_native_process._abi_types()` (its sole nested stdlib import, ctypes).
+# bz2/lzma/compression.zstd are compiled by shutil's optional imports even
+# though their absent extensions then refuse them. Frozen modules (os, io,
+# abc, codecs, stat, posixpath, ...) never read a .pyc and are absent.
+STDLIB_ROOT = "python/lib/python3.14/"
+STDLIB_CACHE_TAG = "cpython-314"
+COMMAND_STDLIB_BYTECODE_FILES = frozenset({
+    "__future__.py", "_opcode_metadata.py", "_py_warnings.py", "_weakrefset.py", "annotationlib.py",
+    "ast.py", "bisect.py", "bz2.py", "collections/__init__.py", "compression/__init__.py",
+    "compression/_common/__init__.py", "compression/_common/_streams.py", "compression/zstd/__init__.py",
+    "contextlib.py", "copy.py",
+    "copyreg.py", "ctypes/__init__.py", "ctypes/_endian.py", "ctypes/_layout.py", "dataclasses.py",
+    "dis.py", "encodings/__init__.py", "encodings/aliases.py", "encodings/utf_8.py", "enum.py",
+    "fnmatch.py", "functools.py", "glob.py", "hashlib.py", "importlib/__init__.py", "inspect.py",
+    "json/__init__.py", "json/decoder.py", "json/encoder.py", "json/scanner.py", "keyword.py",
+    "linecache.py", "locale.py", "lzma.py", "opcode.py", "operator.py", "pathlib/__init__.py", "pathlib/_os.py",
+    "random.py", "re/__init__.py", "re/_casefix.py", "re/_compiler.py", "re/_constants.py",
+    "re/_parser.py", "reprlib.py", "selectors.py", "shutil.py", "signal.py", "struct.py",
+    "subprocess.py", "sysconfig/__init__.py", "tempfile.py", "threading.py", "token.py", "tokenize.py",
+    "types.py", "typing.py", "warnings.py", "weakref.py",
+})
+# Measured closure: ~1.5MiB source, ~1.7MiB derived. A fixed small ceiling;
+# no existing runtime/inventory/manifest/entry bound is enlarged for it.
+MAX_STDLIB_BYTECODE_BYTES = 4 * 1024 * 1024
 BOOTSTRAPS = (
     "engine_bootstrap.py", "config_edit_bootstrap.py", "github_connection_bootstrap.py",
     "environment_bootstrap.py", "offline_preflight_bootstrap.py", "android_build_bootstrap.py",
@@ -310,6 +339,204 @@ def _checked_core_bytecode(core: list[tuple[str, bytes]]) -> list[tuple[str, byt
     return sorted(result)
 
 
+def stdlib_bytecode_name(name: str) -> str:
+    """Fixed PEP 3147 location beside one roster source, relative to the runtime."""
+    if name not in COMMAND_STDLIB_BYTECODE_FILES:
+        raise PreparationError("Stdlib bytecode is limited to the fixed command startup roster")
+    parent, _, leaf = name.rpartition("/")
+    return STDLIB_ROOT + (parent + "/" if parent else "") + "__pycache__/" + leaf[:-3] + "." + STDLIB_CACHE_TAG + ".pyc"
+
+
+_TREE_REF = 0x80
+_TREE_FIXED = {ord("N"): 0, ord("F"): 0, ord("T"): 0, ord("S"): 0, ord("."): 0, ord("i"): 4, ord("g"): 8, ord("y"): 16}
+_TREE_SIZED = {ord("s"): ord("s"), ord("u"): ord("u"), ord("t"): ord("u"), ord("a"): ord("a"), ord("A"): ord("a")}
+_TREE_SHORT = {ord("z"): ord("z"), ord("Z"): ord("z")}
+_TREE_SEQUENCES = frozenset(map(ord, "(<>["))
+
+
+def _tree_marshal(data: bytes) -> bytes:
+    """Re-emit one marshal stream as a reference-free, uninterned tree.
+
+    marshal.dumps output follows live process state: FLAG_REF bits follow
+    reference counts, and a string constant equal to an already interned live
+    string is merged with it (shared and interned) only in that process. The
+    tree form keeps every value and type and drops only object identity and
+    intern marks, so it depends on the code alone. Loading it yields an equal
+    code object (code construction re-interns names). Every byte must parse.
+    """
+    if type(data) is not bytes or not 0 < len(data) <= MAX_STDLIB_BYTECODE_BYTES:
+        raise PreparationError("Stdlib bytecode tree input is outside its bound")
+    position, table, emitted = 0, [], 0
+
+    def take(count: int) -> bytes:
+        nonlocal position
+        if position + count > len(data):
+            raise PreparationError("Stdlib bytecode tree input is truncated")
+        position += count
+        return data[position - count:position]
+
+    def value(depth: int) -> bytes:
+        nonlocal emitted
+        if depth > 100:
+            raise PreparationError("Stdlib bytecode tree input is too deep")
+        head = take(1)[0]
+        kind = head & ~_TREE_REF
+        if kind == ord("r"):
+            index = int.from_bytes(take(4), "little")
+            if head & _TREE_REF or index >= len(table) or table[index] is None:
+                raise PreparationError("Stdlib bytecode tree reference is invalid")
+            out = table[index]
+        else:
+            slot = None
+            if head & _TREE_REF:
+                slot = len(table)
+                table.append(None)
+            if kind in _TREE_FIXED:
+                out = bytes((kind,)) + take(_TREE_FIXED[kind])
+            elif kind == ord("l"):
+                size = take(4)
+                digits = abs(int.from_bytes(size, "little", signed=True))
+                if not 0 < digits <= 1 << 16:
+                    raise PreparationError("Stdlib bytecode tree integer is invalid")
+                out = b"l" + size + take(2 * digits)
+            elif kind in _TREE_SIZED:
+                size = take(4)
+                out = bytes((_TREE_SIZED[kind],)) + size + take(int.from_bytes(size, "little"))
+            elif kind in _TREE_SHORT:
+                size = take(1)
+                out = bytes((_TREE_SHORT[kind],)) + size + take(size[0])
+            elif kind == ord(")"):
+                size = take(1)
+                out = b")" + size + b"".join(value(depth + 1) for _ in range(size[0]))
+            elif kind in _TREE_SEQUENCES:
+                size = take(4)
+                count = int.from_bytes(size, "little")
+                if count > len(data):
+                    raise PreparationError("Stdlib bytecode tree sequence is invalid")
+                out = bytes((kind,)) + size + b"".join(value(depth + 1) for _ in range(count))
+            elif kind == ord(":"):
+                out = b":" + b"".join(value(depth + 1) for _ in range(3))
+            elif kind == ord("c"):
+                # argcount..flags, then code, consts, names, localsplusnames,
+                # localspluskinds, filename, name, qualname, firstlineno,
+                # linetable, exceptiontable: the fixed 3.14 code layout.
+                header = take(20)
+                fields = b"".join(value(depth + 1) for _ in range(8))
+                line = take(4)
+                out = b"c" + header + fields + line + value(depth + 1) + value(depth + 1)
+            else:
+                raise PreparationError("Stdlib bytecode tree type is not admitted")
+            if slot is not None:
+                table[slot] = out
+        emitted += len(out)
+        if emitted > 8 * MAX_STDLIB_BYTECODE_BYTES:
+            raise PreparationError("Stdlib bytecode tree expansion exceeds its bound")
+        return out
+
+    result = value(0)
+    if position != len(data):
+        raise PreparationError("Stdlib bytecode tree input has trailing bytes")
+    return result
+
+
+def _checked_stdlib_bytecode(supplier: frozenset[str] | set[str],
+                             sources: dict[str, bytes]) -> list[tuple[str, bytes]]:
+    """Derive the command startup stdlib bytecode from captured supplier .py bytes.
+
+    The supplier must be source-only: any incoming __pycache__/.pyc/.pyo is
+    refused, never adopted. Sources stay unchanged; only new checked-hash files
+    are produced, with the runtime-relative logical co_filename (the importer
+    rebinds it to the actual path). The stager independently recompiles all.
+    """
+    _require_core_compiler()
+    if sys.implementation.cache_tag != STDLIB_CACHE_TAG:
+        raise PreparationError("Stdlib bytecode requires the fixed CPython 3.14 cache tag")
+    if (type(supplier) not in (set, frozenset) or not supplier or len(supplier) > MAC_MAX_FILES
+            or any(type(name) is not str or not name.startswith("python/") or not _safe_runtime_path(name)
+                   for name in supplier)):
+        raise PreparationError("Stdlib bytecode requires the original admitted supplier roster")
+    if any("__pycache__" in name.split("/") or name.lower().endswith((".pyc", ".pyo")) for name in supplier):
+        raise PreparationError("Supplier must be source-only; incoming bytecode is never adopted")
+    expected = {STDLIB_ROOT + name for name in COMMAND_STDLIB_BYTECODE_FILES}
+    if (type(sources) is not dict or set(sources) != expected or not expected <= supplier
+            or any(type(content) is not bytes for content in sources.values())):
+        raise PreparationError("Stdlib bytecode lacks the fixed command startup source roster")
+    size = sum(len(content) for content in sources.values())
+    if size > MAX_STDLIB_BYTECODE_BYTES:
+        raise PreparationError("Stdlib startup sources exceed their fixed byte bound")
+    result, size = [], 0
+    for name in sorted(COMMAND_STDLIB_BYTECODE_FILES):
+        logical, target = STDLIB_ROOT + name, stdlib_bytecode_name(name)
+        if target in supplier:
+            raise PreparationError("Stdlib bytecode target collides with a supplier entry")
+        content = sources[logical]
+        try:
+            code = compile(content, logical, "exec", dont_inherit=True, optimize=0)
+            hashed = importlib.util.source_hash(content)
+            stream = _tree_marshal(marshal.dumps(code))
+            body = importlib.util.MAGIC_NUMBER + (3).to_bytes(4, "little") + hashed + stream
+            loaded = marshal.loads(stream)
+        except (SyntaxError, ValueError, TypeError, EOFError) as error:
+            raise PreparationError("Stdlib source could not produce checked-hash bytecode") from error
+        if (_tree_marshal(stream) != stream or type(loaded) is not type(code) or loaded != code
+                or loaded.co_filename != logical):
+            raise PreparationError("Derived stdlib bytecode differs from its original source")
+        size += len(body)
+        if size > MAX_STDLIB_BYTECODE_BYTES:
+            raise PreparationError("Derived stdlib bytecode exceeds its fixed byte bound")
+        result.append((target, body))
+    return result
+
+
+def _write_stdlib_bytecode(runtime: Path, rows: list[tuple[str, bytes]]) -> None:
+    """Create only new __pycache__ entries; the supplier tree keeps every original.
+
+    A source-only supplier directory may be read-only. Its owner mode is opened
+    for exactly this exclusive creation and restored; the new cache directory
+    takes the parent's original mode. Inode/mode identity is rechecked after.
+    """
+    groups: dict[str, list[tuple[str, bytes]]] = {}
+    for name, body in rows:
+        directory, _, leaf = name.rpartition("/")
+        if not directory.endswith("/__pycache__") or not leaf.endswith("." + STDLIB_CACHE_TAG + ".pyc"):
+            raise PreparationError("Stdlib bytecode has an unexpected destination")
+        groups.setdefault(directory, []).append((leaf, body))
+    for directory, leaves in sorted(groups.items()):
+        cache = runtime / directory
+        parent = cache.parent
+        before = _ordinary(parent, directory=True)
+        try:
+            cache.lstat()
+        except FileNotFoundError:
+            pass
+        else:
+            raise PreparationError("Stdlib bytecode directory already exists")
+        mode = stat.S_IMODE(before.st_mode)
+        os.chmod(parent, mode | stat.S_IRWXU)
+        try:
+            os.mkdir(cache, 0o700)
+            for leaf, body in leaves:
+                fd = os.open(cache / leaf, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+                try:
+                    view = memoryview(body)
+                    while view:
+                        count = os.write(fd, view)
+                        if count <= 0:
+                            raise PreparationError("Stdlib bytecode write made no progress")
+                        view = view[count:]
+                    os.fsync(fd)
+                finally:
+                    os.close(fd)
+                if read_checked(cache / leaf, limit=len(body)) != body:
+                    raise PreparationError("Stdlib bytecode readback differs")
+            os.chmod(cache, mode)
+        finally:
+            os.chmod(parent, mode)
+        after = _ordinary(parent, directory=True)
+        if (after.st_dev, after.st_ino, after.st_mode) != (before.st_dev, before.st_ino, before.st_mode):
+            raise PreparationError("Supplier directory identity changed during stdlib bytecode creation")
+
+
 def _store_tooling_names(body: bytes) -> tuple[str, ...]:
     """Pure roster for captured selected-core DATA; no imported core or IO."""
     if type(body) is not bytes or not body or len(body)>MAX_CORE_BYTES:
@@ -488,8 +715,13 @@ def _prepare(source: Path, runtime: Path, target: str, *, current: bool,
     if type(macos_command_bytecode) is not bool or macos_command_bytecode and (
             not current or target != "aarch64-apple-darwin" or not history_provider or store_component is None):
         raise PreparationError("Core bytecode requires the explicit current ARM Mac Store/provider composition")
+    stdlib_entries = 0
     if macos_command_bytecode:
         _require_core_compiler()
+        # Generated files plus their new __pycache__ directories, reserved in
+        # the SAME existing entry/file limits before any output is created.
+        stdlib_entries = len(COMMAND_STDLIB_BYTECODE_FILES) + len(
+            {stdlib_bytecode_name(name).rsplit("/", 1)[0] for name in COMMAND_STDLIB_BYTECODE_FILES})
     if type(fetch_observation) is not bool or fetch_observation and not current_mac:
         raise PreparationError("Fetch observation is a fixed current Mac input only")
     if fetch_observation:
@@ -527,7 +759,7 @@ def _prepare(source: Path, runtime: Path, target: str, *, current: bool,
     if history_provider:
         # The existing incremental inventory bounds every entry before the
         # closed root/one-provider roster is inspected; no new eager listdir.
-        provider_paths = files(runtime, reserve_entries=len(bootstrap_names) + 3, max_files=file_limit, max_entries=entry_limit)
+        provider_paths = files(runtime, reserve_entries=len(bootstrap_names) + 3 + stdlib_entries, max_files=file_limit, max_entries=entry_limit)
         relative = [path.relative_to(runtime).as_posix() for path in provider_paths]
         if ({name.split("/", 1)[0] for name in relative} != {"python", "tools"}
                 or [name for name in relative if not name.startswith("python/")] != ["tools/gh"]):
@@ -548,10 +780,30 @@ def _prepare(source: Path, runtime: Path, target: str, *, current: bool,
     _root(executable.parent)
     # Every fixed entry point, the core ZIP and the fixed CA are payload. Their
     # presence/digests do not qualify an owner, TLS, or native execution custody.
-    generated_payloads = len(bootstrap_names) + 2
+    generated_payloads = len(bootstrap_names) + 2 + len(COMMAND_STDLIB_BYTECODE_FILES if macos_command_bytecode else ())
     # Reserve every generated payload and the final manifest before any write.
     # This is only publisher preparation, not runtime-custody admission.
     preadmitted = provider_paths if provider_paths is not None else files(runtime, reserve_entries=generated_payloads + 1, max_files=file_limit, max_entries=entry_limit)
+    stdlib: list[tuple[str, bytes]] = []
+    stdlib_sources: list[tuple[Path, tuple[int, ...]]] = []
+    if macos_command_bytecode:
+        # Capture and derive before ANY output; incoming bytecode is refused.
+        # The python/ payload is the supplier; the provider is tools/gh alone.
+        supplier_names = frozenset(name for name in (path.relative_to(runtime).as_posix() for path in preadmitted)
+                                   if name.startswith("python/"))
+        captured: dict[str, bytes] = {}
+        remaining = MAX_STDLIB_BYTECODE_BYTES
+        for name in sorted(COMMAND_STDLIB_BYTECODE_FILES):
+            relative = STDLIB_ROOT + name
+            if relative not in supplier_names:
+                raise PreparationError("Stdlib bytecode lacks the fixed command startup source roster")
+            path = runtime / relative
+            original = _state(_ordinary(path))
+            content = read_checked(path, limit=remaining)
+            remaining -= len(content)
+            captured[relative] = content
+            stdlib_sources.append((path, original))
+        stdlib = _checked_stdlib_bytecode(supplier_names, captured)
     store = _store_inputs(store_component, source, runtime) if store_component is not None else None
     store_rows = _store_output_rows(store) if store else ()
     store_files = len(store_rows)
@@ -563,6 +815,7 @@ def _prepare(source: Path, runtime: Path, target: str, *, current: bool,
         names = {path.relative_to(runtime).as_posix() for path in preadmitted}
         names.update("store/" + row[0] for row in store_rows)
         names.update((*bootstrap_names, "core.zip", GITHUB_CA_NAME, "manifest.json"))
+        names.update(name for name, _ in stdlib)
         entries = set(names)
         for name in names:
             entries.update(parent.as_posix() for parent in Path(name).parents if parent != Path("."))
@@ -605,7 +858,7 @@ def _prepare(source: Path, runtime: Path, target: str, *, current: bool,
         # containing stager independently keeps the same512MiB total ceiling.
         quote = (sum(_ordinary(path).st_size for path in preadmitted) + size + MAX_FILES * 2048
                  + sum(len(content) for _, content in bootstraps) + len(github_ca) + manifest_limit
-                 + (store[3] if store else 0))
+                 + sum(len(content) for _, content in stdlib) + (store[3] if store else 0))
         if quote > total_limit:
             raise PreparationError("Current provider leaves no room for complete runtime resources")
     if provider is not None:
@@ -615,6 +868,7 @@ def _prepare(source: Path, runtime: Path, target: str, *, current: bool,
         provider_digest = digest(read_checked(provider, limit=128 * 1024 * 1024))
         provider_expected = {path.relative_to(runtime).as_posix() for path in preadmitted}
         provider_expected.update((*bootstrap_names, "core.zip", GITHUB_CA_NAME))
+        provider_expected.update(name for name, _ in stdlib)
         if store:
             provider_expected.update("store/" + row[0] for row in store_rows)
     if store:
@@ -631,6 +885,11 @@ def _prepare(source: Path, runtime: Path, target: str, *, current: bool,
             info.external_attr = (stat.S_IFREG | 0o644) << 16
             info.compress_type = zipfile.ZIP_DEFLATED
             archive.writestr(info, content)
+    if stdlib:
+        _write_stdlib_bytecode(runtime, stdlib)
+        for path, original in stdlib_sources:
+            if _state(_ordinary(path)) != original:
+                raise PreparationError("Stdlib startup source changed during bytecode derivation")
     inventory = []
     total = 0
     for path in files(runtime, reserve_entries=1, max_files=file_limit, max_entries=entry_limit,

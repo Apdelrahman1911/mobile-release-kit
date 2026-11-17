@@ -162,6 +162,28 @@ CURRENT_COMMAND_BYTECODE_FILES = frozenset({
   "mobile_release/_store_lane_contract.py", "mobile_release/cancellation.py",
   "mobile_release/errors.py", "mobile_release/owned_process.py",
 })
+# Independent copy of the closed C/A/W helper stdlib startup closure (#17):
+# every stdlib source the signed runtime compiles for helper_main plus
+# _native_process._abi_types() (including shutil's refused optional bz2/lzma/
+# zstd imports); frozen modules never read bytecode. Relative to the stdlib.
+CURRENT_STDLIB_ROOT = "python/lib/python3.14/"
+CURRENT_STDLIB_CACHE_TAG = "cpython-314"
+CURRENT_COMMAND_STDLIB_BYTECODE_FILES = frozenset({
+  "__future__.py", "_opcode_metadata.py", "_py_warnings.py", "_weakrefset.py", "annotationlib.py",
+  "ast.py", "bisect.py", "bz2.py", "collections/__init__.py", "compression/__init__.py",
+  "compression/_common/__init__.py", "compression/_common/_streams.py", "compression/zstd/__init__.py",
+  "contextlib.py", "copy.py",
+  "copyreg.py", "ctypes/__init__.py", "ctypes/_endian.py", "ctypes/_layout.py", "dataclasses.py",
+  "dis.py", "encodings/__init__.py", "encodings/aliases.py", "encodings/utf_8.py", "enum.py",
+  "fnmatch.py", "functools.py", "glob.py", "hashlib.py", "importlib/__init__.py", "inspect.py",
+  "json/__init__.py", "json/decoder.py", "json/encoder.py", "json/scanner.py", "keyword.py",
+  "linecache.py", "locale.py", "lzma.py", "opcode.py", "operator.py", "pathlib/__init__.py", "pathlib/_os.py",
+  "random.py", "re/__init__.py", "re/_casefix.py", "re/_compiler.py", "re/_constants.py",
+  "re/_parser.py", "reprlib.py", "selectors.py", "shutil.py", "signal.py", "struct.py",
+  "subprocess.py", "sysconfig/__init__.py", "tempfile.py", "threading.py", "token.py", "tokenize.py",
+  "types.py", "typing.py", "warnings.py", "weakref.py",
+})
+CURRENT_STDLIB_BYTECODE_BYTES = 4 * 1024 * 1024
 LEGACY_MAX_FILES = 2048
 MAX_FILES = 16384
 MAX_ENTRIES = 32768
@@ -1943,6 +1965,126 @@ def current_preparer(captured):
   return module
 
 
+def current_tree_marshal(data):
+  """Independent reference-free, uninterned re-emission of one marshal stream.
+
+  marshal.dumps follows live process state (reference counts, and merging a
+  constant with an equal live interned string). This form drops only object
+  identity and intern marks; every value, type and length byte stays.
+  """
+  need(type(data) is bytes and 0 < len(data) <= CURRENT_STDLIB_BYTECODE_BYTES, "current-stdlib-tree-input")
+  fixed = {b"N": 0, b"F": 0, b"T": 0, b"S": 0, b".": 0, b"i": 4, b"g": 8, b"y": 16}
+  plain = {b"s": b"s", b"u": b"u", b"t": b"u", b"a": b"a", b"A": b"a"}
+  reader, references, total = io.BytesIO(data), [], [0]
+
+  def read(count):
+    raw = reader.read(count)
+    need(len(raw) == count, "current-stdlib-tree-truncated")
+    return raw
+
+  def item(depth):
+    need(depth <= 100, "current-stdlib-tree-depth")
+    first = read(1)[0]
+    kind, shared = bytes((first & 0x7F,)), bool(first & 0x80)
+    if kind == b"r":
+      index = int.from_bytes(read(4), "little")
+      need(not shared and index < len(references) and references[index] is not None, "current-stdlib-tree-reference")
+      result = references[index]
+    else:
+      if shared:
+        slot = len(references)
+        references.append(None)
+      if kind in fixed:
+        result = kind + read(fixed[kind])
+      elif kind == b"l":
+        count = read(4)
+        digits = abs(int.from_bytes(count, "little", signed=True))
+        need(0 < digits <= 65536, "current-stdlib-tree-integer")
+        result = kind + count + read(2 * digits)
+      elif kind in plain:
+        count = read(4)
+        result = plain[kind] + count + read(int.from_bytes(count, "little"))
+      elif kind in (b"z", b"Z"):
+        count = read(1)
+        result = b"z" + count + read(count[0])
+      elif kind == b")":
+        count = read(1)
+        result = kind + count + b"".join(item(depth + 1) for _ in range(count[0]))
+      elif kind in (b"(", b"[", b"<", b">"):
+        count = read(4)
+        need(int.from_bytes(count, "little") <= len(data), "current-stdlib-tree-sequence")
+        result = kind + count + b"".join(item(depth + 1) for _ in range(int.from_bytes(count, "little")))
+      elif kind == b":":
+        result = kind + item(depth + 1) + item(depth + 1) + item(depth + 1)
+      elif kind == b"c":
+        # CPython 3.14 code: five int32 fields, code, consts, names,
+        # localsplusnames, localspluskinds, filename, name, qualname,
+        # firstlineno, linetable, exceptiontable.
+        head = read(20)
+        body = b"".join(item(depth + 1) for _ in range(8))
+        line = read(4)
+        result = kind + head + body + line + item(depth + 1) + item(depth + 1)
+      else:
+        need(False, "current-stdlib-tree-type")
+      if shared:
+        references[slot] = result
+    total[0] += len(result)
+    need(total[0] <= 8 * CURRENT_STDLIB_BYTECODE_BYTES, "current-stdlib-tree-expansion")
+    return result
+
+  result = item(0)
+  need(reader.tell() == len(data), "current-stdlib-tree-trailing")
+  return result
+
+
+def current_stdlib_bytecode(supplier):
+  """Rederive every expected stdlib .pyc from the admitted supplier .py bytes.
+
+  Never imports, loads or accepts packaged/cached bytecode. The supplier itself
+  must be source-only; the result is compared byte-for-byte by the caller.
+  """
+  need(sys.implementation.name == "cpython" and sys.version_info[:3] == (3, 14, 7)
+     and sys.flags.optimize == 0 and sys.implementation.cache_tag == CURRENT_STDLIB_CACHE_TAG,
+     "current-stdlib-bytecode-compiler")
+  need(type(supplier) is dict and all(type(name) is str and name.startswith("python/") for name in supplier)
+     and not any("__pycache__" in name.split("/") or name.lower().endswith((".pyc", ".pyo")) for name in supplier),
+     "current-stdlib-source-only-supplier")
+  expected, sources = {}, 0
+  for name in sorted(CURRENT_COMMAND_STDLIB_BYTECODE_FILES):
+    source = CURRENT_STDLIB_ROOT + name
+    need(source in supplier and type(supplier[source][0]) is bytes, "current-stdlib-bytecode-source-roster")
+    content = supplier[source][0]
+    sources += len(content)
+    need(sources <= CURRENT_STDLIB_BYTECODE_BYTES, "current-stdlib-bytecode-byte-bound")
+    parent, _, leaf = name.rpartition("/")
+    target = (CURRENT_STDLIB_ROOT + (parent + "/" if parent else "") + "__pycache__/"
+              + leaf[:-3] + "." + CURRENT_STDLIB_CACHE_TAG + ".pyc")
+    need(target not in supplier and target not in expected, "current-stdlib-bytecode-collision")
+    code = compile(content, source, "exec", dont_inherit=True, optimize=0)
+    stream = current_tree_marshal(marshal.dumps(code))
+    need(marshal.loads(stream) == code, "current-stdlib-tree-value")
+    generated = (importlib.util.MAGIC_NUMBER + (3).to_bytes(4, "little")
+                 + importlib.util.source_hash(content) + stream)
+    expected[target] = generated
+  need(sum(map(len, expected.values())) <= CURRENT_STDLIB_BYTECODE_BYTES, "current-stdlib-bytecode-byte-bound")
+  return expected
+
+
+def current_stdlib_bytecode_matches(files, supplier):
+  """Every present stdlib bytecode entry must be exactly one rederived row.
+
+  Exact roster equality refuses missing, extra, stale, renamed or foreign
+  bytecode; FULL byte equality covers header flags, source hash and code.
+  """
+  expected = current_stdlib_bytecode({name: value for name, value in supplier.items() if name.startswith("python/")})
+  present = {name for name in files if name.startswith("python/")
+             and ("__pycache__" in name.split("/") or name.lower().endswith((".pyc", ".pyo")))}
+  need(present == set(expected), "current-stdlib-bytecode-roster")
+  for name, generated in expected.items():
+    need(type(files[name]) is tuple and files[name][0] == generated, "current-stdlib-bytecode-correspondence")
+  return set(expected)
+
+
 def current_core_matches(body, projection, *, macos_command_bytecode=False):
   expected = {name[len("src/"):]: content for name, (content, _) in projection.items()
         if name.startswith("src/mobile_release/")}
@@ -2008,6 +2150,10 @@ def current_runtime_files(runtime, projection, supplier, *, target=ARM_TARGET, h
      "current-store-input-collision")
   bootstraps = CURRENT_BOOTSTRAPS | observation_bootstraps | ({"local_store_preflight_bootstrap.py", "local_store_prepare_bootstrap.py", "local_store_execute_bootstrap.py", "local_store_reconcile_bootstrap.py", "apple_provisioning_bootstrap.py"} if store_rows else set())
   required = set(preadmitted) | set(expected_store) | bootstraps | {"core.zip", "github-ca.pem", "manifest.json"}
+  if macos_command_bytecode:
+    generated = current_stdlib_bytecode_matches(files, supplier)
+    need(not generated & required, "current-stdlib-bytecode-collision")
+    required |= generated
   need(set(files) == required, "current-runtime-complete-roster")
   for name, value in preadmitted.items():
     need(files[name] == value, "current-supplier-changed")
