@@ -4,7 +4,7 @@ Fresh disposable runner only. Installs the selected previous signed package,
 seeds per-user application data, installs the selected next signed package over
 it with the standard Installer, then verifies:
   * both Installer runs returned 0 and the installed state names the next release;
-  * the installed app and CLI report the next version;
+  * the installed app reports the next version and the installed CLI still runs;
   * every seeded user-data file is byte-identical after the update;
   * re-installing the previous package is refused (downgrade) and changes nothing.
 No signing credential is used. Evidence holds no user content or secrets.
@@ -278,7 +278,10 @@ def main():
              == (selection["next"]["release"], selection["next"]["packageVersion"],
                  selection["next"]["packageSha256"]), "updated-installed-identity")
         need(after["bundleShortVersion"] == selection["next"]["packageVersion"], "updated-bundle-version")
-        need(after["cliReturn"] == 0 and selection["next"]["packageVersion"] in after["cliVersionLine"], "updated-cli-version")
+        # The installed CLI reports its observation protocol, not the package
+        # version; the version itself is proven by state, bundle and receipt.
+        need(after["cliReturn"] == 0 and after["cliVersionLine"].startswith("mrk ")
+             and after["cliVersionLine"] == before["cliVersionLine"], "updated-cli-runs")
         preserved = manifest()
         result["userDataPreserved"] = preserved == seeded
         need(preserved == seeded, "user-data-changed-by-update")
