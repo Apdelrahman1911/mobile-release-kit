@@ -123,7 +123,17 @@ class CandidatePartsWorkflowTests(unittest.TestCase):
         self.assertIn('None,false,inverse || observed.action==ActionData::SamePackageNoop',installer)
         self.assertIn('if prefix=="app" && depth==0',installer)
         self.assertIn('book.app_attributes(original,"maintenance-renamed-attributes")',installer)
-        self.assertRegex(installer,r'if !metadata_ok\s*\{\s*self\.unknown=true;\s*\}')
+        self.assertRegex(installer,r'if !metadata_ok\s*\{\s*self\.unknown=true;')
+        # #49: a retired (unlinked or replaced) original drops its snapshot only
+        # after same-FD identity, same-FD snapshot and name proofs; any failed
+        # proof still consumes the close and stays unknown.
+        retired=installer[installer.index('fn close_retired('):installer.index('fn close_unlinked(')]
+        for proof in ('expected.same_object(actual)','self.existing_app_metadata_post(n, reason)?',
+                      'RetiredName::Unlinked => self.absent(parent, &name)',
+                      '!expected.same_object(named) && !actual.same_object(named)'):
+            self.assertIn(proof,retired)
+        self.assertLess(retired.index('let proven'),retired.index('existing_app_metadata = None'))
+        self.assertIn('if proven.is_err() { let _ = self.close(n); self.unknown = true;',retired)
         self.assertNotIn('setxattr',source)
 
     def test_existing_launcher_metadata_original_control_flow(self):

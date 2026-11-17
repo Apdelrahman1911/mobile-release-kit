@@ -303,6 +303,15 @@ impl Observation {
             current.hold_matching(book,&self.current.index(),row.published_identity,false)?;
             book.forward_close(current.bundle.ok_or("launcher-original-missing")?,
                 "launcher-parent-bundle-close")?;
+            // The joined worker retired the predecessor this parent held
+            // before GO and published the verified launcher above at its name.
+            // Settle that held original now through its own FD (#49); a later
+            // named close would compare it against the new occupant.
+            if let Some(old) = self.operation.bundle {
+                check(book.originals[old].parent == Some(self.operation.applications)
+                    && book.originals[old].name == launcher::APPLICATIONS_NAME,"launcher-parent-old-binding")?;
+                book.close_retired(old,RetiredName::Replaced,"launcher-parent-old-bundle-close")?;
+            }
             current.parent_post(book)?;
         }
         // Use the exact generation whose staging area the worker was allowed
