@@ -80,6 +80,35 @@
         "installedApplicationTouched": false,
         "realProjectsTouched": false
       },
+      "transportInterruption": {
+        "testFile": "tests/desktop/test_configuration_transport_interruption.py",
+        "sourceSha256": "a48e83fdae5cc2cc98752b4809cba271e29cccc7e583afcee099e3ef68b28013",
+        "scope": "Actual source engine and three pipes; not installed GUI or Rust-channel acceptance",
+        "cases": ["stdin EOF before COMMITTED", "stdin EOF after durable COMMITTED"],
+        "assertions": [
+          "The original EditInput reads exactly one real EOF at its original checkpoint",
+          "Before commit both configuration and gitignore return to old bytes; after commit both retain approved new bytes",
+          "The original typed terminal reports cancellation, clean journal and settled resources",
+          "Original targets retain modes and ownership; rollback restores their inodes; unrelated files retain complete facts",
+          "No transaction namespaces or unexpected files remain and the original child exits zero"
+        ],
+        "negativeControl": "Sending an unexpected actual pipe byte instead of EOF fails both tests even though cancellation and cleanup still settle",
+        "freshTests": {
+          "tests": 79,
+          "passed": 79,
+          "failed": 0,
+          "pythonVersion": "3.14.7",
+          "macOSVersion": "27.0",
+          "architecture": "arm64",
+          "elapsedSeconds": 62.188961791,
+          "stderrSha256": "dab7306186cca609d3894f83a7a4203659031ce3066abf011928cb69544e43dd"
+        },
+        "candidateCoreComparison": "The engine, input owner, transaction, configuration adapter and observation shim are byte-identical to source 11628c1c",
+        "newProductDefectFound": false,
+        "installedApplicationTouched": false,
+        "realProjectsTouched": false,
+        "rootUsed": false
+      },
       "remaining": [
         "Run installed GUI crash, restart and explicit recovery against disposable projects after the Specialist releases the Mac",
         "Do not infer installed acceptance or absence of all integrity defects from these transaction-engine tests"
