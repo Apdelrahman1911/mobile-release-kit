@@ -285,11 +285,11 @@ or product readiness. The separate evidence and signing limitations below remain
 
 The installed app is
 `/Library/Application Support/MobileReleaseKit/Mobile Release Kit.app`.
-The candidate ARM64 runtime path is
-`/Library/Application Support/MobileReleaseKit/versions/macos26-arm64-desktop-01/runtime`
-(x86_64 selects `macos26-x86_64-desktop-01` instead). Both candidates use
-package version `0.1.1`; these names are not public release or native
-installation qualification.
+The current ARM64 runtime path is
+`/Library/Application Support/MobileReleaseKit/versions/macos26-arm64-desktop-05/runtime`
+for package version `0.1.5`. See `macos-install-update-remove.md` for the
+current install, update and removal routes; older `0.1.1` / `desktop-01`
+wording below is historical.
 The historical supplier archive keeps its original label; it does not select the
 current installed release.
 
@@ -468,7 +468,8 @@ leave an exact same-package installation unchanged, restore only a missing app a
 its fixed location, or update an explicitly authorized predecessor. These are not
 general repair or overwrite permissions: modified, partial or unknown trees may
 be refused. Retain partial-installation evidence and unknown files; do not delete
-protected directories to bypass a refusal. Uninstall is not yet available.
+protected directories to bypass a refusal. Removal uses the separate matching
+`Remove.pkg` (`macos-removal.md`).
 
 The presentation contract uses `installMode: verified-package-required` and retains
 `maintenance: unavailable` and `assurance: profile-description-only`. It grants no

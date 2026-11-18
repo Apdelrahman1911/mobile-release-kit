@@ -43,6 +43,7 @@ keep the raw C facade, original desktop image and final signed image hashes
 distinct. No native acceptance or shipping-signing authority follows from this
 SOURCE layout or its inert fixture regressions.
 
+(Historical; the current routes are in `macos-install-update-remove.md`.)
 This source selects candidate package version `0.1.1` with release IDs
 `macos26-arm64-desktop-01` and `macos26-x86_64-desktop-01` for the ordinary
 entry/payload layout. These are not published or qualified releases. The
