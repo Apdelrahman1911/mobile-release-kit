@@ -197,6 +197,7 @@ unsafe extern "C" {
         free_result: *mut c_int, free_errno: *mut c_int) -> c_int;
     fn mrk_no_xattrs(fd: c_int) -> c_int;
     fn mrk_existing_app_macl(fd: c_int, bytes: *mut u8, capacity: usize, used: *mut usize) -> c_int;
+    fn mrk_existing_leaf_provenance(fd: c_int) -> c_int;
     fn mrk_entries(fd: c_int, bytes: *mut u8, capacity: usize, used: *mut usize) -> c_int;
     fn mrk_sync(fd: c_int, file: c_int) -> c_int;
     fn mrk_publish(from: c_int, source: *const c_char, to: c_int, destination: *const c_char) -> c_int;
@@ -286,6 +287,14 @@ pub fn existing_app_macl(fd: BorrowedFd<'_>, bytes: &mut [u8; 1024]) -> io::Resu
     result(unsafe { mrk_existing_app_macl(fd.as_raw_fd(), bytes.as_mut_ptr(), bytes.len(), &mut used) })?;
     if used > bytes.len() { return Err(io::ErrorKind::InvalidData.into()); }
     Ok(used)
+}
+/// Admit an EXISTING enrolled regular payload file with no attributes or with
+/// only macOS's own provenance tag (exact 11-byte version-1 shape). Read only:
+/// it never removes the tag and grants no authority. Incoming or created
+/// objects must keep using `no_xattrs`.
+pub fn existing_leaf_provenance(fd: BorrowedFd<'_>) -> io::Result<()> {
+    // SAFETY: borrowed live descriptor, bounded metadata reads only.
+    result(unsafe { mrk_existing_leaf_provenance(fd.as_raw_fd()) })
 }
 pub fn directory_block(fd: BorrowedFd<'_>, buffer: &mut [u8]) -> io::Result<usize> {
     if buffer.len() != 65536 { return Err(io::ErrorKind::InvalidInput.into()); }
@@ -2885,6 +2894,35 @@ fn evidence_folder_abi_data_check() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn existing_leaf_provenance_admits_only_the_os_tag_on_regular_files() {
+        use std::os::fd::AsFd;
+        let dir = std::env::temp_dir().join(format!("mrk-leaf-provenance-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir(&dir).unwrap();
+        let tag = |path: &std::path::Path, name: &str| assert!(std::process::Command::new("/usr/bin/xattr")
+            .args(["-w", name, "1"]).arg(path).status().unwrap().success());
+        let names = |path: &std::path::Path| String::from_utf8(std::process::Command::new("/usr/bin/xattr")
+            .arg(path).output().unwrap().stdout).unwrap();
+        let open = |path: &std::path::Path| std::fs::File::open(path).unwrap();
+        // A new file carries either nothing or this host's own provenance tag;
+        // both are admitted, and the strict incoming check refuses the tag.
+        let plain = dir.join("plain");
+        std::fs::write(&plain, b"x").unwrap();
+        let host_tags = names(&plain) == "com.apple.provenance\n";
+        assert!(host_tags || names(&plain).is_empty());
+        assert!(existing_leaf_provenance(open(&plain).as_fd()).is_ok());
+        assert_eq!(no_xattrs(open(&plain).as_fd()).is_ok(), !host_tags);
+        // Any other attribute, alone or beside the OS tag, is refused.
+        let other = dir.join("other");
+        std::fs::write(&other, b"x").unwrap();
+        tag(&other, "user.mrk-test");
+        assert!(existing_leaf_provenance(open(&other).as_fd()).is_err());
+        assert!(no_xattrs(open(&other).as_fd()).is_err());
+        // Directories are never payload leaves.
+        assert!(existing_leaf_provenance(open(&dir).as_fd()).is_err());
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
     #[cfg(feature = "installed-observation")]
     #[test]
     fn installed_observation_data_contracts_are_consistent() {

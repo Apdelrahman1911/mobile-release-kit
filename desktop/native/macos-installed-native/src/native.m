@@ -247,6 +247,48 @@ int mrk_existing_app_macl(int fd, uint8_t *bytes, size_t capacity, size_t *used)
     *used = length;
     return 0;
 }
+// Bounded read only. macOS may attach its own provenance tag to an EXISTING
+// enrolled payload file (observed on macOS 27 after an App Management-mediated
+// write), and neither root nor the owner can remove it. Admit exactly zero
+// attributes, or exactly that one OS tag with its 11-byte version-1 shape, on
+// a regular file whose metadata stays unchanged across the read. Never remove,
+// copy or interpret the value. Content stays bound by the caller's inventory
+// hash. Every incoming or created object keeps using mrk_no_xattrs.
+int mrk_existing_leaf_provenance(int fd) {
+    static const char tag[] = "com.apple.provenance";
+    struct stat before, after;
+    if (fstat(fd, &before)) return errno ? errno : EIO;
+    if (!S_ISREG(before.st_mode)) return EPERM;
+    ssize_t names_size = flistxattr(fd, NULL, 0, 0);
+    if (names_size < 0) return errno ? errno : EIO;
+    if (names_size != 0) {
+        char names[sizeof(tag)];
+        uint8_t value[11];
+        if (names_size != sizeof(tag)) return EPERM;
+        ssize_t listed = flistxattr(fd, names, sizeof(names), 0);
+        if (listed < 0) return errno ? errno : EIO;
+        if (listed != sizeof(tag) || memcmp(names, tag, sizeof(tag))) return EPERM;
+        ssize_t size = fgetxattr(fd, tag, NULL, 0, 0, 0);
+        if (size < 0) return errno ? errno : EIO;
+        if (size != (ssize_t)sizeof(value)) return EPERM;
+        ssize_t got = fgetxattr(fd, tag, value, sizeof(value), 0, 0);
+        if (got < 0) return errno ? errno : EIO;
+        if (got != (ssize_t)sizeof(value) || value[0] != 1) return EPERM;
+        listed = flistxattr(fd, names, sizeof(names), 0);
+        if (listed < 0) return errno ? errno : EIO;
+        if (listed != sizeof(tag) || memcmp(names, tag, sizeof(tag))) return EPERM;
+    }
+    if (fstat(fd, &after)) return errno ? errno : EIO;
+    if (before.st_dev != after.st_dev || before.st_ino != after.st_ino
+        || before.st_mode != after.st_mode || before.st_uid != after.st_uid
+        || before.st_gid != after.st_gid || before.st_nlink != after.st_nlink
+        || before.st_size != after.st_size || before.st_flags != after.st_flags
+        || before.st_mtimespec.tv_sec != after.st_mtimespec.tv_sec
+        || before.st_mtimespec.tv_nsec != after.st_mtimespec.tv_nsec
+        || before.st_ctimespec.tv_sec != after.st_ctimespec.tv_sec
+        || before.st_ctimespec.tv_nsec != after.st_ctimespec.tv_nsec) return EPERM;
+    return 0;
+}
 #ifndef MRK_ENTRY_METADATA_ONLY
 // Public bulk attributes are four-byte packed, NOT a padded C struct.
 // The same pure decoder is exercised by the native crate's cfg(test) FFI.

@@ -10871,18 +10871,31 @@ mod installer {
             Ok(*recorded==observed || book.legacy_volumes.iter().flatten()
                 .any(|binding|recorded.matches_legacy_binding_data(&observed,*binding)))
         }
+        // A regular file of an existing recorded generation: zero attributes,
+        // or exactly macOS's own provenance tag, which neither root nor the
+        // owner can remove. The tag is read, never removed or copied; the
+        // inventory hash still binds the bytes. Others stay strictly empty.
+        pub(super) fn existing_leaf_attributes(book:&Install,reader:usize,existing:bool,reason:&'static str)->Result<()> {
+            if existing {native::existing_leaf_provenance(book.fd(reader)?.as_fd()).map_err(|_|reason)?;}
+            else {native::no_xattrs(book.fd(reader)?.as_fd()).map_err(|_|reason)?;}
+            book.clock()
+        }
         pub(super) fn audit_tree(book: &mut Install, root: usize, prefix: &str, index: &installation_record::InventoryIndex<'_>, depth: usize) -> Result<()> {
-            audit_tree_mode(book,root,prefix,index,depth,None)
+            audit_tree_mode(book,root,prefix,index,depth,None,false)
         }
         pub(super) fn audit_launcher_tree(book:&mut Install,root:usize,index:&installation_record::InventoryIndex<'_>)->Result<()> {
             // The independent convenience copy is retired before payload-removal
             // census. Never enroll it in that plan or temporarily suppress a plan.
             check(book.removal_payload_plan.is_none(),"launcher-audit-payload-plan-active")?;
             audit_tree_mode(book,root,mobile_release_desktop::macos_applications_launcher::BUNDLE,
-                index,launcher_inventory_depth_data(),None)
+                index,launcher_inventory_depth_data(),None,false)
         }
+        // `existing` is true only for an already recorded generation reached
+        // through audit_generation_mode with existing-metadata admission. Its
+        // hash-bound regular files may carry macOS's own provenance tag; every
+        // fresh, incoming or launcher walk keeps the zero-attribute check.
         fn audit_tree_mode(book:&mut Install,root:usize,prefix:&str,index:&installation_record::InventoryIndex<'_>,depth:usize,
-            mut resume:Option<&mut RemovalRemainingPlan>)->Result<()> {
+            mut resume:Option<&mut RemovalRemainingPlan>,existing:bool)->Result<()> {
             check(payload_depth_data(prefix,depth,true) && index.directories.contains(prefix), "maintenance-tree-depth")?;
             book.protected(root, true, Some(0o555))?;
             if prefix=="app" && depth==0 || prefix==mobile_release_desktop::macos_applications_launcher::BUNDLE
@@ -10924,7 +10937,7 @@ mod installer {
                 if let Some(entry) = index.files.get(&path) {
                     let reader = book.open(Some(root), &name, false)?;
                     book.protected(reader, false, Some(if entry.executable { 0o555 } else { 0o444 }))?;
-                    native::no_xattrs(book.fd(reader)?.as_fd()).map_err(|_| "maintenance-payload-attributes")?;
+                    existing_leaf_attributes(book,reader,existing,"maintenance-payload-attributes")?;
                     check(book.identity(reader)?.ino == actual[&name]
                         && stat::fstat(book.fd(reader)?).map_err(|_| "maintenance-payload-stat")?.st_flags == 0,
                         "maintenance-payload-original")?;
@@ -10935,7 +10948,7 @@ mod installer {
                 } else {
                     let reader = book.open(Some(root), &name, true)?;
                     check(book.identity(reader)?.ino == actual[&name], "maintenance-payload-original")?;
-                    audit_tree_mode(book,reader,&path,index,depth+1,resume.as_deref_mut())?;
+                    audit_tree_mode(book,reader,&path,index,depth+1,resume.as_deref_mut(),existing)?;
                     book.forward_close(reader, "maintenance-payload-close")?;
                 }
             }
@@ -11003,7 +11016,7 @@ mod installer {
                 if present{wanted.insert("runtime".into());}
                 exact_roster(book,release,&wanted)?;
                 if present{let runtime=book.open(Some(release),"runtime",true)?;
-                    audit_tree_mode(book,runtime,"runtime",&index,0,Some(&mut **plan))?;
+                    audit_tree_mode(book,runtime,"runtime",&index,0,Some(&mut **plan),allow_existing_macl)?;
                     book.forward_close(runtime,"maintenance-runtime-close")?;
                 }else{plan.absent(book,release,"runtime","runtime",true,None,0)?;}
             }else{
@@ -11011,7 +11024,7 @@ mod installer {
                 exact_roster(book, release, &["runtime", installation_record::INVENTORY_NAME, installation_record::RECORD_NAME]
                     .into_iter().map(str::to_owned).collect())?;
                 let runtime = book.open(Some(release), "runtime", true)?;
-                audit_tree(book, runtime, "runtime", &index, 0)?;
+                audit_tree_mode(book, runtime, "runtime", &index, 0, None, allow_existing_macl)?;
                 book.forward_close(runtime, "maintenance-runtime-close")?;
             }
             let app_name = match generation.retained_invocation_data() {
@@ -11042,8 +11055,8 @@ mod installer {
                     book.capture_existing_app_metadata(original,allow_existing_macl,"maintenance-app-attributes")?;
                     if let Some((_,plan))=resume.as_mut(){
                         if generation.retained_invocation_data().is_none(){plan.current_app=Some(book.identity(original)?);}
-                        audit_tree_mode(book,original,"app",&index,0,Some(&mut **plan))?;
-                    }else{audit_tree(book, original, "app", &index, 0)?;} Some(original)
+                        audit_tree_mode(book,original,"app",&index,0,Some(&mut **plan),allow_existing_macl)?;
+                    }else{audit_tree_mode(book, original, "app", &index, 0, None, allow_existing_macl)?;} Some(original)
                 },
             };
             let mut cost = GenerationCostData { files:2, bytes:(raw.len() + descriptor.len()) as u64 };
@@ -17020,7 +17033,9 @@ mod installer {
                 check(book.originals[n].parent==Some(parent) && book.originals[n].name==node.name
                     && Identity::of(&actual)==node.present_data()?.0 && actual.st_flags==node.present_data()?.1 && node.present_data()?.1==0,"removal-payload-node-original")?;
                 book.protected(n,node.directory,Some(if node.directory||node.executable{0o555}else{0o444}))?;
-                native::no_xattrs(book.fd(n)?.as_fd()).map_err(|_|"removal-payload-node-attributes")?;book.check_name(n,true)?;Ok(n)
+                // Removal only deletes recorded installed objects: a regular
+                // file may keep the OS provenance tag, never other metadata.
+                maintenance::existing_leaf_attributes(book,n,!node.directory,"removal-payload-node-attributes")?;book.check_name(n,true)?;Ok(n)
             }
             fn remove_node(&mut self,book:&mut Install,index:usize,parent:usize,keep_root:bool,depth:usize)->Result<()> {
                 check(depth<=17 && (!self.plan.nodes[index].directory || depth<17)
@@ -24052,6 +24067,45 @@ exec ./mrk-macos-remove --fixture-supervise "$1"
             book.originals[1].existing_app_metadata=
                 Some(mobile_release_desktop::macos_existing_app_metadata::SnapshotData::from_observed_bytes_data(&[]).unwrap());
             (book,1)
+        }
+        // R1: macOS 27 left an unremovable com.apple.provenance tag on one
+        // installed payload file. A recorded generation's regular file may
+        // carry exactly that tag; every incoming/fresh/launcher object and any
+        // other attribute is still refused. This host tags files this test
+        // creates, so both branches of the strict check are exercised there.
+        #[test]
+        fn existing_generation_leaf_admits_only_the_os_provenance_tag() {
+            use super::*;
+            let base=std::env::temp_dir().join(format!("mrk-leaf-provenance-{}",std::process::id()));
+            let _=std::fs::remove_dir_all(&base);
+            std::fs::create_dir_all(&base).unwrap();
+            let names=|p:&std::path::Path|String::from_utf8(std::process::Command::new("/usr/bin/xattr")
+                .arg(p).output().unwrap().stdout).unwrap();
+            let open_leaf=|name:&str,extra:Option<&str>|->Install {
+                let path=base.join(name);
+                std::fs::write(&path,b"payload").unwrap();
+                if let Some(tag)=extra {
+                    assert!(std::process::Command::new("/usr/bin/xattr").args(["-w",tag,"1"]).arg(&path)
+                        .status().unwrap().success());
+                }
+                let fd:OwnedFd=fcntl::open(&path,OFlag::O_RDONLY|OFlag::O_NOFOLLOW|OFlag::O_CLOEXEC,Mode::empty()).unwrap();
+                let id=Identity::of(&stat::fstat(&fd).unwrap());
+                let mut book=Install::new();
+                book.originals.push(Original{fd:Some(fd),state:State::Owned,role:Role::Reader,parent:None,
+                    name:name.into(),identity:Some(id),existing_app_metadata:None});
+                book
+            };
+            let book=open_leaf("plain",None);
+            let listed=names(&base.join("plain"));
+            let tagged=listed=="com.apple.provenance\n";
+            assert!(tagged || listed.is_empty(),"unexpected host metadata: {listed}");
+            assert_eq!(maintenance::existing_leaf_attributes(&book,0,true,"leaf"),Ok(()));
+            assert_eq!(maintenance::existing_leaf_attributes(&book,0,false,"leaf").is_ok(),!tagged);
+            let book=open_leaf("other",Some("user.mrk-test"));
+            assert_eq!(maintenance::existing_leaf_attributes(&book,0,true,"leaf"),Err("leaf"));
+            assert_eq!(maintenance::existing_leaf_attributes(&book,0,false,"leaf"),Err("leaf"));
+            drop(book);
+            std::fs::remove_dir_all(&base).unwrap();
         }
         #[test]
         fn unlinked_existing_app_original_closes_known_only_after_absence_proof() {
