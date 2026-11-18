@@ -1,12 +1,20 @@
-"""Hosted in-place update check for the installed macOS app (#49).
+"""Hosted install, update and first-launch check for the installed macOS app.
 
-Fresh disposable runner only. Installs the selected previous signed package,
-seeds per-user application data, installs the selected next signed package over
-it with the standard Installer, then verifies:
+Fresh disposable runner only. Two modes, each on its own fresh runner:
+
+update (#49): installs the selected previous signed package, seeds per-user
+application data, installs the selected next signed package over it with the
+standard Installer, then verifies:
   * both Installer runs returned 0 and the installed state names the next release;
   * the installed app reports the next version and the installed CLI still runs;
   * every seeded user-data file is byte-identical after the update;
-  * re-installing the previous package is refused (downgrade) and changes nothing.
+  * re-installing the previous package is refused (downgrade) and changes nothing;
+  * the updated app launches and shows a window (#45/#46 smoke).
+
+fresh: installs only the next package on a clean runner, launches it for the
+first time (window shown, process alive, no crash report), then reinstalls the
+same package (same-package no-op returns 0 and changes neither the installation
+nor the app data the first launch created), and reopens the app.
 No signing credential is used. Evidence holds no user content or secrets.
 """
 import argparse
@@ -15,6 +23,7 @@ import json
 import os
 import plistlib
 import re
+import signal
 import subprocess
 import sys
 import time
@@ -26,6 +35,21 @@ STATE = Path("/Library/Application Support/MobileReleaseKit")
 APP = STATE / "Mobile Release Kit.app"
 USER_DATA = Path.home() / "Library/Application Support/dev.mobile-release-kit.desktop"
 PACKAGE_ID = "dev.mobile-release-kit.desktop.installed"
+PAYLOAD_PROCESS = "mobile-release-kit-desktop"
+# CoreGraphics window list through the JXA bridge: no Apple Events, no TCC prompt.
+WINDOWS_JXA = """ObjC.import('CoreGraphics');
+function run(argv) {
+  const pid = parseInt(argv[0], 10);
+  const list = ObjC.castRefToObject($.CGWindowListCopyWindowInfo(1 | 16, 0));
+  let count = 0;
+  for (let i = 0; i < list.count; i++) {
+    const w = list.objectAtIndex(i);
+    const owner = w.objectForKey('kCGWindowOwnerPID'), layer = w.objectForKey('kCGWindowLayer');
+    if (owner && layer && owner.intValue === pid && layer.intValue === 0) count++;
+  }
+  return String(count);
+}
+"""
 
 
 class Failed(Exception):
@@ -209,6 +233,80 @@ def installed_state():
             "receiptVersion": receipt_version}
 
 
+def payload_pids():
+    p = subprocess.run(["/usr/bin/pgrep", "-x", PAYLOAD_PROCESS], capture_output=True, text=True, timeout=30)
+    return sorted(int(v) for v in p.stdout.split()) if p.returncode == 0 else []
+
+
+def window_count(pid, work):
+    script = work / "windows.js"
+    if not script.exists():
+        script.write_text(WINDOWS_JXA)
+    p = subprocess.run(["/usr/bin/osascript", "-l", "JavaScript", str(script), str(pid)],
+                       capture_output=True, text=True, timeout=30)
+    return int(p.stdout.strip()) if p.returncode == 0 and p.stdout.strip().isdigit() else None
+
+
+def recent_crashes(minutes=10):
+    names = []
+    for folder in (Path("/Library/Logs/DiagnosticReports"), Path.home() / "Library/Logs/DiagnosticReports"):
+        r = subprocess.run(["/usr/bin/sudo", "-n", "/usr/bin/find", str(folder), "-mmin", f"-{minutes}", "-type", "f"],
+                           capture_output=True, text=True, timeout=60)
+        names += [Path(n).name for n in r.stdout.split()
+                  if PAYLOAD_PROCESS in n or "mrk-macos" in n or "Mobile Release Kit" in n]
+    return sorted(names)
+
+
+def stop_app(pids):
+    for pid in pids:
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+    deadline = time.monotonic() + 20
+    while payload_pids() and time.monotonic() < deadline:
+        time.sleep(1)
+    for pid in payload_pids():
+        os.kill(pid, signal.SIGKILL)
+    time.sleep(2)
+    need(not payload_pids(), "app-did-not-stop")
+
+
+def launch_smoke(label, work, evidence, steps):
+    """Open the installed app as the logged-in runner user and require a live
+    payload process with an on-screen window and no crash report."""
+    need(not payload_pids(), f"{label}-app-already-running")
+    before = set(recent_crashes())
+    started = time.monotonic()
+    p, row = run(["/usr/bin/open", str(APP)], 60)
+    steps.append(dict(row, role=label))
+    need(p.returncode == 0, f"{label}-open-returned-{p.returncode}")
+    pids, windows = [], None
+    while time.monotonic() - started < 90:
+        pids = payload_pids()
+        if pids:
+            windows = window_count(pids[0], work)
+            if windows:
+                break
+        time.sleep(2)
+    first_window = round(time.monotonic() - started, 1) if windows else None
+    time.sleep(15)  # still alive and showing a window after the first paint
+    alive = payload_pids()
+    settled = window_count(alive[0], work) if alive else None
+    shot = evidence / f"screen-{label}.png"
+    subprocess.run(["/usr/sbin/screencapture", "-x", str(shot)], capture_output=True, timeout=60)
+    crashes = sorted(set(recent_crashes()) - before)
+    observed = {"label": label, "processSeen": bool(pids), "secondsToFirstWindow": first_window,
+                "aliveAfterSettle": bool(alive), "windowsAfterSettle": settled, "newCrashReports": crashes,
+                "screenshot": shot.name if shot.exists() else None}
+    if alive:
+        stop_app(alive)
+    need(pids, f"{label}-app-process-not-started")
+    need(not crashes, f"{label}-app-crashed")
+    need(alive and settled, f"{label}-app-window-missing")
+    return observed
+
+
 def seed_user_data():
     files = {
         "settings.json": json.dumps({"fixture": "mrk-update-check", "theme": "dark", "projects": 2}).encode(),
@@ -248,15 +346,20 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--selection", required=True)
     parser.add_argument("--work", required=True)
+    parser.add_argument("--mode", choices=("update", "fresh"), default="update")
     args = parser.parse_args()
     work = Path(args.work)
     evidence = work / "evidence"
     evidence.mkdir(mode=0o700)
-    steps, result = [], {"schemaVersion": 1, "kind": "mrk-macos-update-check-v1", "passed": False}
+    steps, result = [], {"schemaVersion": 1, "kind": "mrk-macos-update-check-v1", "mode": args.mode, "passed": False}
     try:
         selection = load_selection(args.selection)
         result["selection"] = selection
         need(not STATE.exists() and not USER_DATA.exists(), "runner-not-fresh")
+        if args.mode == "fresh":
+            fresh_check(selection, work, evidence, steps, result)
+            result["passed"] = True
+            return 0
         previous = fetch("previous", selection["previous"], work, steps)
         upgraded = fetch("next", selection["next"], work, steps)
 
@@ -294,6 +397,8 @@ def main():
         need((final["release"], final["packageVersion"]) == (after["release"], after["packageVersion"]),
              "downgrade-changed-installation")
         need(manifest() == seeded, "user-data-changed-by-downgrade-attempt")
+        # Last: launching writes the app's own data beside the seeded files.
+        result["launchAfterUpdate"] = launch_smoke("after-update", work, evidence, steps)
         result["passed"] = True
     except (Failed, subprocess.TimeoutExpired, OSError, ValueError, KeyError) as error:
         result["failure"] = str(error)[:200]
@@ -304,9 +409,34 @@ def main():
         except Exception as error:  # evidence capture must not mask the result
             result["logCapture"] = type(error).__name__
         (evidence / "RESULT.json").write_text(json.dumps(result, indent=2, sort_keys=True) + "\n")
-        print(json.dumps({k: result.get(k) for k in ("passed", "failure", "updateReturn", "downgradeReturn",
-                                                     "userDataPreserved")}))
+        print(json.dumps({k: result.get(k) for k in ("mode", "passed", "failure", "updateReturn", "downgradeReturn",
+                                                     "userDataPreserved", "samePackageReturn")}))
     return 0 if result["passed"] else 1
+
+
+def fresh_check(selection, work, evidence, steps, result):
+    row = selection["next"]
+    folder = fetch("next", row, work, steps)
+    need(install("next", folder, steps, evidence=evidence) == 0, "fresh-install-returned-nonzero")
+    state = installed_state()
+    result["afterFreshInstall"] = state
+    need((state["release"], state["packageVersion"], state["packageSha256"])
+         == (row["release"], row["packageVersion"], row["packageSha256"]), "fresh-installed-identity")
+    need(state["bundleShortVersion"] == row["packageVersion"] and state["receiptVersion"] == row["packageVersion"],
+         "fresh-bundle-or-receipt-version")
+    need(state["cliReturn"] == 0 and state["cliVersionLine"].startswith("mrk "), "fresh-cli-runs")
+    result["firstLaunch"] = launch_smoke("first-launch", work, evidence, steps)
+    data = manifest() if USER_DATA.exists() else {}
+    result["appDataFilesAfterFirstLaunch"] = len(data)
+    # Same package again: the no-op route keeps the installation and app data.
+    same_rc = install("same", folder, steps, evidence=evidence)
+    result["samePackageReturn"] = same_rc
+    need(same_rc == 0, "same-package-returned-nonzero")
+    again = installed_state()
+    result["afterSamePackage"] = again
+    need(again == state, "same-package-changed-installation")
+    need((manifest() if USER_DATA.exists() else {}) == data, "same-package-changed-app-data")
+    result["reopen"] = launch_smoke("reopen", work, evidence, steps)
 
 
 if __name__ == "__main__":

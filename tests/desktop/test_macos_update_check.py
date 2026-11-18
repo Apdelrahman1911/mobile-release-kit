@@ -56,5 +56,22 @@ class UpdateCheckSelectionTests(unittest.TestCase):
                          (build["packageVersion"], build["release"]))
 
 
+class LaunchSmokeSourceTests(unittest.TestCase):
+    def test_window_query_uses_no_apple_events_or_privacy_prompts(self):
+        self.assertIn("CGWindowListCopyWindowInfo", M.WINDOWS_JXA)
+        for forbidden in ("tell application", "System Events", "Application(", "doShellScript"):
+            self.assertNotIn(forbidden, M.WINDOWS_JXA)
+
+    def test_both_modes_are_wired_in_the_workflow(self):
+        workflow = (ROOT / ".github/workflows/desktop-macos-update-check.yml").read_text()
+        self.assertIn("mode: [update, fresh]", workflow)
+        self.assertIn('--mode "${{ matrix.mode }}"', workflow)
+        source = (ROOT / "desktop/tools/macos_update_check.py").read_text()
+        self.assertIn('choices=("update", "fresh")', source)
+        # The launch smoke runs only after every user-data comparison in update mode.
+        update = source.split("def main():", 1)[1]
+        self.assertLess(update.index('"user-data-changed-by-downgrade-attempt"'), update.index('launch_smoke("after-update"'))
+
+
 if __name__ == "__main__":
     unittest.main()
