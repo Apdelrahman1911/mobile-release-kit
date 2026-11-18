@@ -164,12 +164,26 @@ def pair_data(stager, predecessor, current_descriptor, old_inventory, new_invent
                           len(stager.MAINTENANCE_GATE_BYTES) + len(stager.REGISTRATION_GATE_BYTES))
 
 
+# Mirrors the native BudgetData admission (macos_install_transaction.rs): each
+# generation keeps its OWN file and payload ceiling, and the current, retained
+# and incoming generations together share a separate storage quota of
+# (PREDECESSOR_LIMIT + 1) payload ceilings plus the bounded control allowance.
+# One generation's ceiling never applies to the retained pair's sum.
+PREDECESSOR_LIMIT = 8
+CONTROL_LIMIT = 128 * 1024 * 1024
+
+
 def aggregate_data(counts, maximum_files, maximum_bytes, gate_bytes):
     need(type(counts) is list and len(counts) == 2 and all(type(v) in (tuple, list) and len(v) == 2
-         and all(type(n) is int and n >= 0 for n in v) for v in counts)
-         and all(type(n) is int and n >= 0 for n in (maximum_files, maximum_bytes, gate_bytes)), "update-aggregate-types")
+         and all(type(n) is int and type(n) is not bool and n >= 0 for n in v) for v in counts)
+         and all(type(n) is int and type(n) is not bool and n >= 0
+                 for n in (maximum_files, maximum_bytes, gate_bytes)), "update-aggregate-types")
+    for files, size in counts:
+        need(0 < files <= maximum_files, "update-generation-exceeds-file-bound")
+        need(size <= maximum_bytes, "update-generation-exceeds-payload-bound")
     files, size = sum(v[0] for v in counts) + 2, sum(v[1] for v in counts) + gate_bytes
-    need(files <= maximum_files and size <= maximum_bytes, "update-retained-pair-exceeds-existing-bound")
+    need(files <= (PREDECESSOR_LIMIT + 1) * maximum_files, "update-retained-pair-exceeds-file-quota")
+    need(size <= (PREDECESSOR_LIMIT + 1) * maximum_bytes + CONTROL_LIMIT, "update-retained-pair-exceeds-storage-quota")
     return {"declaredFiles": files, "declaredBytes": size}
 
 

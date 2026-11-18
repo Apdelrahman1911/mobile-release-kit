@@ -799,12 +799,31 @@ class UpdateDataTests(unittest.TestCase):
                     for entry in reversed(op.entries): op.close(entry)
                 self.assertTrue(all(entry["closed"] for entry in op.entries)); self.assertEqual(op.errors, [])
 
-    def test_two_generation_shared_bound_and_resource_quote_are_not_per_generation(self):
+    def test_generation_bounds_are_individual_with_a_separate_storage_quota(self):
+        limit, files = 512 * 1024 * 1024, 16384
+        storage = 9 * limit + 128 * 1024 * 1024
+        self.assertEqual((DATA.PREDECESSOR_LIMIT, DATA.CONTROL_LIMIT), (8, 128 * 1024 * 1024))
+        # The archived owner pair (#49 budget refusal): each generation is under
+        # its own ceiling while the sum exceeds one ceiling by 78,875,959 bytes.
+        pair = [(7203, 283_826_469), (7230, 331_920_402)]
+        self.assertEqual(sum(v[1] for v in pair) - limit, 78_875_959)
+        self.assertEqual(DATA.aggregate_data(pair, files, limit, 68),
+                         {"declaredFiles": 14_435, "declaredBytes": 615_746_939})
+        # Each generation's own ceiling is exact and still enforced.
+        self.assertEqual(DATA.aggregate_data([(files, limit), (files, limit)], files, limit, 0),
+                         {"declaredFiles": 2 * files + 2, "declaredBytes": 2 * limit})
+        with self.assertRaisesRegex(ValueError, "payload-bound"): DATA.aggregate_data([(1, limit + 1), (1, 1)], files, limit, 0)
+        with self.assertRaisesRegex(ValueError, "file-bound"): DATA.aggregate_data([(files + 1, 1), (1, 1)], files, limit, 0)
+        with self.assertRaisesRegex(ValueError, "file-bound"): DATA.aggregate_data([(0, 1), (1, 1)], files, limit, 0)
+        # The total storage quota is exact, including the gate/metadata charge.
+        self.assertEqual(DATA.aggregate_data([(1, limit), (1, limit)], files, limit, storage - 2 * limit)["declaredBytes"], storage)
+        with self.assertRaisesRegex(ValueError, "storage-quota"):
+            DATA.aggregate_data([(1, limit), (1, limit)], files, limit, storage - 2 * limit + 1)
+        for counts in ([(True, 1), (1, 1)], [(1, 1)], [(1, -1), (1, 1)]):
+            with self.assertRaisesRegex(ValueError, "types"): DATA.aggregate_data(counts, files, limit, 0)
+
+    def test_resource_quote_is_not_per_generation(self):
         limit = 512 * 1024 * 1024
-        self.assertEqual(DATA.aggregate_data([(1, limit - 12), (1, 10)], 4, limit, 2),
-                         {"declaredFiles": 4, "declaredBytes": limit})
-        for counts in ([(1, limit - 11), (1, 10)], [(2, 1), (1, 1)], [(True, 1), (1, 1)]):
-            with self.assertRaises(ValueError): DATA.aggregate_data(counts, 4, limit, 2)
         row = nomination()["targets"][DATA.TARGETS[0]]
         self.assertEqual(DATA.resource_quote_data(row), {"additionalDiskBytes": 300 + limit + 4 * 1024**2,
             "rawPayloadBytes": 6 * limit + 80 * 1024**2, "maximumOriginals": 96})
