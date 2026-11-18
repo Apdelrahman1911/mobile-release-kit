@@ -211,6 +211,13 @@ serde_json = "=1.0.145"
 [target.'cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))'.build-dependencies]
 rustix = { version = "=1.1.5", default-features = false, features = ["std", "fs"] }
 
+# Incremental fingerprinting stable-hashes every const slice of the embedded
+# Android catalogue images (measured on rustc 1.98.1: one catalogue crate took
+# >22 min with incremental and 134 s without). Same code, assertions and
+# overflow checks; only the incremental cache is off. `test` inherits `dev`.
+[profile.dev]
+incremental = false
+
 # Keep complete runtime byte hashing inside the original test admission clocks:
 # optimize the existing hash implementation, never omit checks or widen deadlines.
 [profile.test.package."sha2:0.10.9"]
