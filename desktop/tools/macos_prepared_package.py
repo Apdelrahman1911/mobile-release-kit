@@ -183,6 +183,8 @@ def cohort_data(values):
     return manifest
 
 
+# Matching Remove carrier for the dispatched ordinary Desktop route only.
+REMOVAL_PHASES = ('finalize-remove-package', 'package-remove', 'finalize-remove-image')
 LOCAL_CARRIER_FILES = {
     'producer-root/producer.json': 65536,
     'producer-root/producer.sig': 512,
@@ -410,6 +412,9 @@ def admit_data(values, service, consumer):
         compatible = compatible_harness_data(service.get('compatibility'), manifest['origin'], consumer)
     elif 'compatibility' in service:
         need(consumer['source'] != manifest['origin']['source'], 'prepared-harness-unnecessary')
+        # A held ordinary Desktop comparison is never decorative: the later
+        # harness-only consumer must repeat the complete ancestry/file proof.
+        compatible = compatible_harness_data(service['compatibility'], manifest['origin'], consumer)
     compiled = None
     if 'compiledObserver' in service:
         need(bool(native), 'prepared-observer-originals')
@@ -1272,7 +1277,7 @@ def main():
     """Fixed hosted entry; no arbitrary checkout, command or Installer path."""
     import argparse
     parser = argparse.ArgumentParser()
-    parser.add_argument('phase', choices=('producer-attempt', 'observer-attempt', 'image-attempt', 'select', 'export', 'hydrate', 'package-install', 'finalize-image', 'candidate'))
+    parser.add_argument('phase', choices=('producer-attempt', 'observer-attempt', 'image-attempt', 'select', 'export', 'hydrate', 'package-install', 'finalize-image', 'candidate', *REMOVAL_PHASES))
     parser.add_argument('--target', required=True, choices=TARGETS)
     parser.add_argument('--producer-source')
     parser.add_argument('--producer-run')
@@ -1393,10 +1398,18 @@ def main():
                 work=work, output=work / 'candidate', candidate_carrier=True, installed_passive_carrier=False), prepared=binding)
             print(json.dumps(result, sort_keys=True))
             return 0
-        need(args.phase == 'package-install' or environment['GITHUB_EVENT_NAME'] == 'push' and binding.same_source, 'prepared-cross-source-install-only')
+        # The matching Remove carrier is emitted only after this same job's
+        # fresh package-install owner returned 0 for the dispatched Desktop route.
+        need(args.phase == 'package-install' or args.phase in REMOVAL_PHASES and environment['GITHUB_EVENT_NAME'] == 'workflow_dispatch'
+             and not native_origin(environment)
+             or environment['GITHUB_EVENT_NAME'] == 'push' and binding.same_source, 'prepared-cross-source-install-only')
         operation = helper.Operation(owner, built_root, work, args.phase, environment, stager, target=args.target, prepared=binding)
         operation.execute()
-        if environment['GITHUB_EVENT_NAME'] == 'workflow_dispatch':
+        if environment['GITHUB_EVENT_NAME'] == 'workflow_dispatch' and args.phase in REMOVAL_PHASES:
+            print(json.dumps(dict(schemaVersion=1, scope='prepared-input-matching-removal-carrier', phase=args.phase,
+                producer=binding.origin, consumer=binding.consumer, removalExecuted=False,
+                originalClosesKnown=operation.receipt['originalClosesKnown']), sort_keys=True))
+        elif environment['GITHUB_EVENT_NAME'] == 'workflow_dispatch':
             # This distinct stdout observation never becomes a V2 candidate.
             print(json.dumps(dict(schemaVersion=1, scope='prepared-input-fresh-installer-observation',
                 producer=binding.origin, consumer=binding.consumer, installed=True, productReady=False,
@@ -1419,7 +1432,7 @@ def admit_host(helper, environment, args):
         return helper.admit(environment, target=args.target, phase='package-install')
     # Diagnostic-only current harness. Never change the actual event/source or
     # let ordinary helper.admit accept dispatch/artifact claims as push evidence.
-    need(args.phase in ('producer-attempt', 'observer-attempt', 'image-attempt', 'select', 'hydrate', 'package-install') and environment.get('GITHUB_EVENT_NAME') == 'workflow_dispatch',
+    need(args.phase in ('producer-attempt', 'observer-attempt', 'image-attempt', 'select', 'hydrate', 'package-install', *REMOVAL_PHASES) and environment.get('GITHUB_EVENT_NAME') == 'workflow_dispatch',
          'prepared-dispatch-install-only')
     machine, arch, _ = helper.build_profile(args.target)
     source = environment.get('GITHUB_SHA')

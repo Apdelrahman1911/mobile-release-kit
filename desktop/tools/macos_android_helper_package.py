@@ -5946,6 +5946,10 @@ class Operation:
                   or (self.phase == "finalize-image"
                       and self.environment.get("GITHUB_REF") in ("refs/heads/verify/desktop-macos-installed", CANDIDATE_REF))
                   or (self.phase == "finalize-remove-image" and self.removal
+                      and self.prepared_binding is not None
+                      and self.environment.get("GITHUB_EVENT_NAME") == "workflow_dispatch"
+                      and self.environment.get("GITHUB_REF") == CANDIDATE_REF)
+                  or (self.phase == "finalize-remove-image" and self.removal
                       and self.candidate_removal_context is not None and self.candidate_removal_root is not None
                       and self.environment.get("GITHUB_EVENT_NAME") == "workflow_dispatch"
                       and self.environment.get("GITHUB_REF") == "refs/heads/task/ci-simplification-20261015"

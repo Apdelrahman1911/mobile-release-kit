@@ -1410,6 +1410,21 @@ class CandidateWorkflowTests(unittest.TestCase):
                     self.assertEqual(step['with']['overwrite'], False)
                     self.assertEqual(step['with']['retention-days'], 7)
                     self.assertIn('${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}', step['with']['name'])
+                elif step['name'] == 'Retain removal construction diagnostics':
+                    # Bounded owner results only: no package, key, keychain or log.
+                    self.assertEqual({p.rsplit('/',1)[1] for p in paths},
+                        {'remove-scripts-result.json','remove-package-prepare.json',
+                         'remove-package-finalization.status','remove-package-finalization.stdout',
+                         'package-remove.status','package-remove.stdout',
+                         'remove-image-finalization.status','remove-image-finalization.stdout',
+                         'android-helper-finalize-remove-package.json','android-helper-package-remove.json',
+                         'android-helper-finalize-remove-image.json'})
+                    self.assertTrue(all(p.startswith('${{ steps.work.outputs.root }}/') for p in paths))
+                elif step['name'] == 'Retain the matching notarized removal image for the owner':
+                    self.assertEqual(paths, ['${{ steps.work.outputs.root }}/remove-distribution-final/MobileReleaseKit-Remove.dmg'])
+                    self.assertEqual(step['if'], "steps.remove_image.outcome == 'success'")
+                    self.assertEqual(step['with']['if-no-files-found'], 'error')
+                    self.assertEqual(step['with']['overwrite'], False)
                 else:
                     self.assertEqual(step['name'],'Retain only authenticated files for the owner local installation')
                     self.assertEqual(len(paths),6)
