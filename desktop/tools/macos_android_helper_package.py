@@ -3305,9 +3305,13 @@ class Operation:
         self.owner, self.checkout, self.work = owner, checkout, work
         if prepared is not None:
             from desktop.tools.macos_prepared_package import PreparedBinding
-            need(type(prepared) is PreparedBinding and phase in ("package-install", "finalize-image")
+            # Matching Remove construction: same-source only, manual dispatch on
+            # the candidate ref, after this job's own fresh package-install.
+            need(type(prepared) is PreparedBinding and phase in ("package-install", "finalize-image") + REMOVE_PHASES
                  and prepared.origin["target"] == target
-                 and (phase == "package-install" or prepared.same_source), "prepared-fixed-owner-purpose")
+                 and (phase == "package-install" or prepared.same_source)
+                 and (phase not in REMOVE_PHASES or environment.get("GITHUB_EVENT_NAME") == "workflow_dispatch"
+                      and environment.get("GITHUB_REF") == CANDIDATE_REF), "prepared-fixed-owner-purpose")
             prepared.finalization_environment(environment)  # Exact current caller, no env mutation.
         self.candidate_removal_context = None
         self.candidate_removal_inputs = []
@@ -6683,7 +6687,9 @@ class Operation:
         receipt = self.original(self.work_entry, self.package_receipt_name, "final-package-receipt", 16384, (0o600,))
         receipt_body = self.read(receipt)
         value = final_package_receipt(receipt_body,
-                                      self.environment if self.prepared_binding is None else self.prepared_binding.finalization_environment(self.environment),
+                                      # A Remove P is finalized earlier in THIS run; the producer's P is not.
+                                      self.environment if self.prepared_binding is None or self.removal
+                                      else self.prepared_binding.finalization_environment(self.environment),
                                       self.target, self.installer_selection,
                                       self.installer_profile_sha, digest(profile_body), len(body), digest(body),
                                       self.image_release, digest(self.read(self.release_entry)), remove=self.removal,
