@@ -5,7 +5,11 @@ name: Desktop macOS in-place update check
 # signed package over it with the standard Installer, verify the update and data
 # preservation, refuse the previous package as a downgrade, then launch the app.
 # fresh: install only the next package, launch it for the first time, reinstall
-# the same package (no-op) and reopen it. Uses no signing credentials.
+# the same package (no-op) and reopen it. remove: install the next package,
+# seed per-user data, open the app, run the matching notarized Remove.pkg with
+# the standard Installer (confirming only the exact quit sheet), require the
+# app, launcher and process gone and the seeded data unchanged, then reinstall
+# and relaunch. Uses no signing credentials.
 # Path filters: push a follow-up commit after creating the branch (new-branch
 # diffs against main exceed the 300-file path-filter window).
 on:
@@ -31,7 +35,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        mode: [update, fresh]
+        mode: [update, fresh, remove]
     if: github.repository == 'Apdelrahman1911/mobile-release-kit' && github.ref == 'refs/heads/verify/desktop-macos-update-check'
     runs-on: macos-26
     timeout-minutes: 45
