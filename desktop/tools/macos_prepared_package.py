@@ -1267,10 +1267,18 @@ PREPARED_FAILURE_CODES = frozenset({
 def failure_data(error, phase, operation):
     reason = error.args[0] if type(error) is ValueError and len(error.args) == 1 else None
     known = type(reason) is str and reason in PREPARED_FAILURE_CODES
-    return dict(kind='prepared-checkpoint-failure', phase=phase,
+    record = dict(kind='prepared-checkpoint-failure', phase=phase,
         reason=reason if known else 'unclassified', diagnosticOnly=True,
         resourceAdmission=getattr(operation, 'prepared_resource_facts', None),
         allocatorReclamation=getattr(operation, 'prepared_allocator_facts', None))
+    if phase in REMOVAL_PHASES:
+        # Removal construction only: the helper's static refusal identifier,
+        # never free text, paths or values.
+        refused = isinstance(error, ValueError) or type(error).__name__ == 'Refused'
+        code = error.args[0] if refused and len(error.args) == 1 else None
+        record['helperReason'] = code if type(code) is str and re.fullmatch(r'[a-z][a-z0-9-]{0,95}', code) else None
+        record['helperRefusalType'] = type(error).__name__ if refused else 'other'
+    return record
 
 
 def main():
