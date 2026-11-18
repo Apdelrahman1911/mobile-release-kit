@@ -22505,10 +22505,10 @@ exec ./mrk-macos-remove --fixture-supervise "$1"
                 (EntryKind::Removal,[_,completed]) if completed.starts_with('/') => (completed,false),
                 (EntryKind::RemovalResume,[_,flag,completed]) if flag=="--resume" && completed.starts_with('/')
                     => (completed,true),
-                _=>return 1,
+                _=>return removal_refused_early(Some("removal-arguments"),false),
             };
             let mut parent=match Deadline::from_entry(started).and_then(Parent::new) {
-                Ok(parent)=>parent,Err(_)=>return 1,
+                Ok(parent)=>parent,Err(error)=>return removal_refused_early(Some(error),resume),
             };
             // No live-to-absent retry, renewed deadline, new process, or Install
             // export success. Both paths retain their actual receipt in Parent.
@@ -22535,6 +22535,13 @@ exec ./mrk-macos-remove --fixture-supervise "$1"
                 let _ = std::io::Write::write(&mut std::io::stderr().lock(),line.as_bytes());
             }
             if finality {0}else{1}
+        }
+        // A refusal before any run is entered (argument shape, deadline or
+        // parent setup): the same hashed line, originals never settled.
+        fn removal_refused_early(reason:Option<&'static str>,resume:bool)->i32 {
+            let line=removal_failure_line_data(reason,resume,false);
+            let _ = std::io::Write::write(&mut std::io::stderr().lock(),line.as_bytes());
+            1
         }
         // Postinstall must supply ONLY the genuinely qualified completed outer
         // package field. A fixed spelling/UID/mount is not producer authority.
