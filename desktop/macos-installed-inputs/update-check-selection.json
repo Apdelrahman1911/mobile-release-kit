@@ -9,16 +9,16 @@
     "release": "macos26-arm64-desktop-04"
   },
   "next": {
-    "runId": "44364360304",
-    "artifactId": "14463448036",
-    "carrierArtifactId": "14463379666",
-    "packageSha256": "580ce7309015d2bf39e809eb08baf7ad7d916f46ed5e6a48e60beabff503c410",
+    "runId": "44388004836",
+    "artifactId": "14474663057",
+    "carrierArtifactId": "14474174831",
+    "packageSha256": "9bdefe4426c3d71c344c7eeeb694edb8e17496b4a5abdcc11dd66f750521781a",
     "packageVersion": "0.1.5",
     "release": "macos26-arm64-desktop-05"
   },
   "removal": {
-    "runId": "44381799553",
-    "artifactId": "14465816011",
-    "imageSha256": "58bf87df967581b6f34984832b0c98fe754f30976aa88561c3af981990786b73"
+    "runId": "44404703264",
+    "artifactId": "14475796508",
+    "imageSha256": "34bfc27e74bae2fda7a01f11b2415e2224c1c083865367299d20ebc4778f67ca"
   }
 }
