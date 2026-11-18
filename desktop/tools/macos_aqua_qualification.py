@@ -6793,9 +6793,20 @@ def _gate_installation(body, status, binding, environment, stage, selection, anc
         "applicationLaunched": False, "guiSaveQualified": False, "aquaGate": "required-separate-actual-session",
         "qualification": "engineering-install-observed-not-runtime-or-GUI-acceptance"}
     need(set(value) == set(fixed) | {"invocation", "nonrootReadbackFileCount", "originalInstallerResult", "installerResultExport",
-                                   "installationMetadata", "maintenanceGate", "registrationReservation"}, "gate-installation-keys")
+                                   "installationMetadata", "maintenanceGate", "registrationReservation", "freshConservation"},
+         "gate-installation-keys")
     for key, expected in fixed.items():
         _exact(value[key], expected)
+    # Writer field since the fresh-install recovery change: null, or the named
+    # reference with private content explicitly unavailable. Never a census claim.
+    conservation = value["freshConservation"]
+    need(conservation is None or type(conservation) is dict
+         and set(conservation) == {"reference", "protectedPhysicalCensus", "physicalCensusComplete"}
+         and type(conservation["reference"]) is dict and set(conservation["reference"]) == {"invocation", "receiptSha256"}
+         and stage.maintenance_hex(conservation["reference"]["invocation"], 32)
+         and stage.maintenance_hex(conservation["reference"]["receiptSha256"], 64)
+         and conservation["protectedPhysicalCensus"] == "unavailable"
+         and conservation["physicalCensusComplete"] is False, "gate-installation-fresh-conservation")
     # This is semantic validation by the current pinned parser, NOT the raw
     # exported original's byte encoding, SHA or future finality. Its exception
     # remains the same original object. No v1 or generic-success fallback.

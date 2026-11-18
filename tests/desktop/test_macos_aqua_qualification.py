@@ -9626,6 +9626,7 @@ def shipping_gate_installation_data(stage, binding=BINDING, *, action="fresh-ins
                             "exclusionObserved": False, "workerFinalityEstablished": False},
         "registrationReservation": {"state": "protected-permanent-reservation-data-correspondence", "bytes": len(stage.REGISTRATION_GATE_BYTES),
                                     "exclusionObserved": False, "workerFinalityEstablished": False},
+        "freshConservation": None,
         "producerSignatureAuthority": "native-parent-and-application-checks-separate", "historicalOuterExit": "unverified",
         "applicationLaunched": False, "guiSaveQualified": False, "aquaGate": "required-separate-actual-session",
         "qualification": "engineering-install-observed-not-runtime-or-GUI-acceptance"}
@@ -9795,6 +9796,10 @@ class ShippingGateControlWiringDataTests(unittest.TestCase):
                         return M._gate_installation(stage.canonical(observed), status, binding, environment, stage, selected, originals)
                     with self.subTest(target=target, action=action, retained=retained):
                         self.assertEqual(invoke(), value)
+                        conserved = deepcopy(value); conserved['freshConservation'] = {
+                            "reference": {"invocation": "1" * 32, "receiptSha256": "2" * 64},
+                            "protectedPhysicalCensus": "unavailable", "physicalCensusComplete": False}
+                        self.assertEqual(invoke(conserved), conserved)
                         self.assertNotEqual(value['installerResultExport']['sha256'], M.digest(stage.canonical(value['originalInstallerResult']) + b'\n'))
                         self.assertNotEqual(value['installerResultExport']['bytes'], len(stage.canonical(value['originalInstallerResult']) + b'\n'))
                         if action in ("same-package-noop", "restore-fixed-app"):
@@ -9877,6 +9882,14 @@ class ShippingGateControlWiringDataTests(unittest.TestCase):
                     lambda row: row['registrationReservation'].update(exclusionObserved=True),
                     lambda row: row['registrationReservation'].update(exclusionObserved=0),
                     lambda row: row['registrationReservation'].update(workerFinalityEstablished=True),
+                    lambda row: row.pop('freshConservation'),
+                    lambda row: row.update(freshConservation={}),
+                    lambda row: row.update(freshConservation={"reference": {"invocation": "1" * 32, "receiptSha256": "2" * 64},
+                        "protectedPhysicalCensus": "complete", "physicalCensusComplete": False}),
+                    lambda row: row.update(freshConservation={"reference": {"invocation": "1" * 32, "receiptSha256": "2" * 64},
+                        "protectedPhysicalCensus": "unavailable", "physicalCensusComplete": True}),
+                    lambda row: row.update(freshConservation={"reference": {"invocation": "x", "receiptSha256": "2" * 64},
+                        "protectedPhysicalCensus": "unavailable", "physicalCensusComplete": False}),
                     lambda row: row['installerResultExport'].update(bytes=1),
                     lambda row: row['installerResultExport'].update(finalityBasis='receipt-only'),
                     lambda row: row['installerResultExport']['identity'].__setitem__(3, 0),
