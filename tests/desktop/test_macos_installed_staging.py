@@ -7779,6 +7779,17 @@ sys.exit(status)
         with self.assertRaises(TOOL.Refused):
             TOOL.removal_package_receipt_data(TOOL.canonical(updated),
                 **dict(arguments, expected_workflow=TOOL._CANDIDATE_FINAL_IMAGE_WORKFLOW))
+        # The candidate carrier's own same-run Remove emission: accepted only for
+        # its exact workflow and binding, never with a product/harness split.
+        carrier = copy.deepcopy(successful)
+        carrier["workflow"] = TOOL._CANDIDATE_FINAL_IMAGE_WORKFLOW
+        carrier_args = dict(arguments, expected_workflow=TOOL._CANDIDATE_FINAL_IMAGE_WORKFLOW)
+        self.assertEqual(TOOL.removal_package_receipt_data(TOOL.canonical(carrier), **carrier_args), carrier["removalDistribution"])
+        for changed_args in (arguments, dict(carrier_args, binding=dict(arguments["binding"], productSource="a" * 40)),
+                             dict(carrier_args, binding=dict(arguments["binding"], runId="456")),
+                             dict(carrier_args, expected_workflow=TOOL._INSTALLED_FINAL_IMAGE_WORKFLOW)):
+            with self.assertRaises(TOOL.Refused):
+                TOOL.removal_package_receipt_data(TOOL.canonical(carrier), **changed_args)
         for mutation in ("old-source", "other-run", "install-phase", "pending", "close", "role", "return-bool", "credential", "context", "false-completion", "image-name", "extra"):
             changed = copy.deepcopy(successful)
             if mutation == "old-source": changed["imageSourceCommit"] = "b" * 40

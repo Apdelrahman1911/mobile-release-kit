@@ -2801,7 +2801,10 @@ def removal_package_receipt_data(body, *, selection, binding, package, descripto
     "developerIdOrNotarizationQualified", "productReady", "finalPackageReceiptSha256", "removalDistribution", "directStagerIOPending",
     "cleanupErrors", "imageSourceCommit", "imageReleaseId", "imageReleaseSourceSha256"), "remove-owner-fields")
   workflow = _PREVIEW_FINAL_IMAGE_WORKFLOW if expected_workflow is None else expected_workflow
-  need(workflow in (_PREVIEW_FINAL_IMAGE_WORKFLOW, _UPDATE_FINAL_IMAGE_WORKFLOW, _CANDIDATE_REMOVE_WORKFLOW), "remove-owner-workflow")
+  # The candidate carrier emits its matching Remove P in the same run as the
+  # signed Install P; productSource stays exclusive to the candidate-consume split.
+  need(workflow in (_PREVIEW_FINAL_IMAGE_WORKFLOW, _UPDATE_FINAL_IMAGE_WORKFLOW, _CANDIDATE_FINAL_IMAGE_WORKFLOW,
+                    _CANDIDATE_REMOVE_WORKFLOW), "remove-owner-workflow")
   product_source = removal_product_source(binding, workflow)
   need(type(value["schemaVersion"]) is int and value["schemaVersion"] == 1 and value["phase"] == "package-remove"
      and value["target"] == selection.target and value["source"] == value["workflowSource"] == binding["source"]

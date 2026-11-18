@@ -9934,9 +9934,15 @@ class Operation:
         input_root = installed_root if candidate else self.directory(self.work_entry, "input", "remove-installed-input")
         inventory_entry = self.original(input_root, self.stager.INSTALLATION_INVENTORY_NAME, "remove-installed-inventory", self.stager.INVENTORY_BYTES, (0o444,))
         inventory = self.read(inventory_entry)
-        remover_path = self.work / "resume-carrier" / self.stager.REMOVER_NAME if candidate else self.work / "input/app" / self.stager.REMOVER
+        # A prepared carrier hydrates only the inventory into input/; its app
+        # tree is the scripts/input copy that hydration fully audited against
+        # the signed package. Both digests are still required below.
+        prepared_tree = self.prepared_binding is not None and not candidate
+        remover_path = (self.work / "resume-carrier" / self.stager.REMOVER_NAME if candidate
+                        else self.work / ("scripts/input/app" if prepared_tree else "input/app") / self.stager.REMOVER)
         parts = [self.stager.REMOVER_NAME] if candidate else ("app/" + self.stager.REMOVER).split("/")
-        remover_root = self.descend(input_root, tuple(parts[:-1]))
+        remover_base = (self.descend(self.work_entry, ("scripts", "input")) if prepared_tree else input_root)
+        remover_root = self.descend(remover_base, tuple(parts[:-1]))
         remover_entry = self.original(remover_root, parts[-1], "remove-signed-installed-program", self.stager.REMOVER_BYTES, (0o555,))
         program = self.read(remover_entry)
         need(digest(program) == expected_remover and digest(inventory) == inventory_hash, "remove-original-source-digests")
