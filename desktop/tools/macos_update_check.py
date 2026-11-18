@@ -1,6 +1,6 @@
 """Hosted install, update and first-launch check for the installed macOS app.
 
-Fresh disposable runner only. Two modes, each on its own fresh runner:
+Fresh disposable runner only. Three modes, each on its own fresh runner:
 
 update (#49): installs the selected previous signed package, seeds per-user
 application data, installs the selected next signed package over it with the
@@ -15,6 +15,12 @@ fresh: installs only the next package on a clean runner, launches it for the
 first time (window shown, process alive, no crash report), then reinstalls the
 same package (same-package no-op returns 0 and changes neither the installation
 nor the app data the first launch created), and reopens the app.
+
+remove: installs the next package, seeds user data, opens the app, runs the
+matching notarized Remove.pkg from its read-only image and confirms the app's
+own removal sheet; then requires Installer 0, no app, launcher or process left
+and every seeded user-data file unchanged; then reinstalls the same package and
+launches it again.
 No signing credential is used. Evidence holds no user content or secrets.
 """
 import argparse
@@ -127,7 +133,14 @@ def hex_field(value, size):
 
 def load_selection(path):
     data = json.loads(Path(path).read_text())
-    need(set(data) == {"schemaVersion", "previous", "next"} and data["schemaVersion"] == 1, "selection-shape")
+    need(set(data) in ({"schemaVersion", "previous", "next"}, {"schemaVersion", "previous", "next", "removal"})
+         and data["schemaVersion"] == 1, "selection-shape")
+    if "removal" in data:
+        # The matching Remove carrier produced by the carrier run for "next".
+        row = data["removal"]
+        need(set(row) == {"runId", "artifactId", "imageSha256"}
+             and re.fullmatch(r"[1-9][0-9]{0,19}", row["runId"]) and re.fullmatch(r"[1-9][0-9]{0,19}", row["artifactId"])
+             and hex_field(row["imageSha256"], 64), "selection-removal-fields")
     for role in ("previous", "next"):
         row = data[role]
         need(set(row) == {"runId", "artifactId", "carrierArtifactId", "packageSha256", "packageVersion", "release"}, f"selection-{role}")
@@ -346,7 +359,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--selection", required=True)
     parser.add_argument("--work", required=True)
-    parser.add_argument("--mode", choices=("update", "fresh"), default="update")
+    parser.add_argument("--mode", choices=("update", "fresh", "remove"), default="update")
     args = parser.parse_args()
     work = Path(args.work)
     evidence = work / "evidence"
@@ -356,8 +369,8 @@ def main():
         selection = load_selection(args.selection)
         result["selection"] = selection
         need(not STATE.exists() and not USER_DATA.exists(), "runner-not-fresh")
-        if args.mode == "fresh":
-            fresh_check(selection, work, evidence, steps, result)
+        if args.mode in ("fresh", "remove"):
+            (fresh_check if args.mode == "fresh" else remove_check)(selection, work, evidence, steps, result)
             result["passed"] = True
             return 0
         previous = fetch("previous", selection["previous"], work, steps)
@@ -410,7 +423,8 @@ def main():
             result["logCapture"] = type(error).__name__
         (evidence / "RESULT.json").write_text(json.dumps(result, indent=2, sort_keys=True) + "\n")
         print(json.dumps({k: result.get(k) for k in ("mode", "passed", "failure", "updateReturn", "downgradeReturn",
-                                                     "userDataPreserved", "samePackageReturn")}))
+                                                     "userDataPreserved", "samePackageReturn", "removeReturn",
+                                                     "reinstallReturn")}))
     return 0 if result["passed"] else 1
 
 
@@ -422,8 +436,10 @@ def fresh_check(selection, work, evidence, steps, result):
     result["afterFreshInstall"] = state
     need((state["release"], state["packageVersion"], state["packageSha256"])
          == (row["release"], row["packageVersion"], row["packageSha256"]), "fresh-installed-identity")
-    need(state["bundleShortVersion"] == row["packageVersion"] and state["receiptVersion"] == row["packageVersion"],
-         "fresh-bundle-or-receipt-version")
+    # Install.pkg is a scripts-only package (PackageInfo + Scripts, no Payload),
+    # so macOS records no pkgutil receipt; the protected state is the record.
+    need(state["bundleShortVersion"] == row["packageVersion"], "fresh-bundle-version")
+    need(state["receiptVersion"] is None, "fresh-unexpected-package-receipt")
     need(state["cliReturn"] == 0 and state["cliVersionLine"].startswith("mrk "), "fresh-cli-runs")
     result["firstLaunch"] = launch_smoke("first-launch", work, evidence, steps)
     data = manifest() if USER_DATA.exists() else {}
@@ -437,6 +453,143 @@ def fresh_check(selection, work, evidence, steps, result):
     need(again == state, "same-package-changed-installation")
     need((manifest() if USER_DATA.exists() else {}) == data, "same-package-changed-app-data")
     result["reopen"] = launch_smoke("reopen", work, evidence, steps)
+
+
+SHEET_JXA = """function run(argv) {
+  const se = Application('System Events');
+  const matches = se.processes.whose({unixId: Number(argv[0])});
+  if (matches.length !== 1) return 'no-process';
+  const proc = matches[0];
+  for (const w of proc.windows()) {
+    const sheets = w.sheets();
+    if (sheets.length !== 1) continue;
+    const sheet = sheets[0];
+    const names = sheet.buttons().map(b => b.name());
+    const texts = sheet.staticTexts().map(t => t.value());
+    if (names.length !== 2 || names.indexOf('Cancel') < 0 || names.indexOf('Continue and Quit') < 0) return 'unexpected:' + names.join('|');
+    if (!texts.some(t => t === 'Quit and prepare to remove Mobile Release Kit?')) return 'unexpected-text';
+    if (argv[1] === 'click') { sheet.buttons.byName('Continue and Quit').click(); return 'clicked'; }
+    return 'present';
+  }
+  return 'absent';
+}
+"""
+LAUNCHER = Path("/Applications/Mobile Release Kit.app")
+
+
+def removal_image(row, work, steps):
+    """Download the notarized Remove carrier and mount it read-only, as the
+    owner would open it; the package runs only from the mounted image."""
+    target = work / "removal"
+    target.mkdir(mode=0o700)
+    archive = target / "remove.zip"
+    with open(archive, "wb") as out:
+        p = subprocess.run(["gh", "api", f"repos/{REPOSITORY}/actions/artifacts/{row['artifactId']}/zip"],
+                           stdout=out, stderr=subprocess.PIPE, timeout=900)
+    need(p.returncode == 0, "removal-download")
+    with zipfile.ZipFile(archive) as z:
+        need(z.namelist() == ["MobileReleaseKit-Remove.dmg"], "removal-artifact-members")
+        z.extract("MobileReleaseKit-Remove.dmg", target)
+    archive.unlink()
+    image = target / "MobileReleaseKit-Remove.dmg"
+    need(digest(image) == row["imageSha256"], "removal-image-digest")
+    p, r1 = run(["/usr/sbin/spctl", "-a", "-vv", "-t", "open", "--context", "context:primary-signature", str(image)], 120)
+    steps.append(dict(r1, role="removal-image-gatekeeper"))
+    need(p.returncode == 0 and "Notarized Developer ID" in (p.stdout + p.stderr), "removal-image-gatekeeper")
+    p, r2 = run(["/usr/bin/hdiutil", "attach", "-readonly", "-nobrowse", "-noautoopen", "-plist", str(image)], 300, check=True)
+    steps.append(dict(r2, role="removal-image-attach"))
+    mounts = [e["mount-point"] for e in plistlib.loads(p.stdout.encode())["system-entities"] if e.get("mount-point")]
+    need(len(mounts) == 1, "removal-image-mount")
+    mount = Path(mounts[0])
+    package = mount / "Remove.pkg"
+    need(package.is_file(), "removal-image-roster")
+    p, r3 = run(["/usr/sbin/pkgutil", "--check-signature", str(package)], 120)
+    steps.append(dict(r3, role="removal-package-signature"))
+    need(p.returncode == 0 and "Developer ID Installer" in p.stdout and "trusted by the Apple notary service" in p.stdout,
+         "removal-package-signature")
+    return mount, sorted(os.listdir(mount))
+
+
+def remove_check(selection, work, evidence, steps, result):
+    """Fresh install, launch, live removal through the matching Remove.pkg
+    (confirming the app's own sheet), then reinstall and launch again."""
+    need("removal" in selection, "selection-has-no-removal-carrier")
+    row = selection["next"]
+    folder = fetch("next", row, work, steps)
+    mount, roster = removal_image(selection["removal"], work, steps)
+    result["removalImageRoster"] = roster
+    need(install("next", folder, steps, evidence=evidence) == 0, "remove-baseline-install-returned-nonzero")
+    state = installed_state()
+    result["afterInstall"] = state
+    need((state["release"], state["packageVersion"], state["packageSha256"])
+         == (row["release"], row["packageVersion"], row["packageSha256"]), "remove-baseline-identity")
+    seeded = seed_user_data()
+    result["seededFiles"] = len(seeded)
+    # The live route asks the running app to confirm; open it first.
+    p, r = run(["/usr/bin/open", str(APP)], 60)
+    steps.append(dict(r, role="remove-launch"))
+    need(p.returncode == 0, "remove-launch-returned-nonzero")
+    started = time.monotonic()
+    pids = []
+    while time.monotonic() - started < 90 and not (pids and window_count(pids[0], work)):
+        time.sleep(2)
+        pids = payload_pids()
+    need(pids, "remove-app-not-running")
+    time.sleep(10)
+    script = work / "sheet.js"
+    script.write_text(SHEET_JXA)
+    log = open(evidence / "remove-installer.log", "w")
+    installer = subprocess.Popen(["/usr/bin/sudo", "-n", "/usr/sbin/installer", "-verbose", "-pkg",
+                                  str(mount / "Remove.pkg"), "-target", "/"], stdout=log, stderr=subprocess.STDOUT, text=True)
+    sheet, clicked_at = [], None
+    try:
+        deadline = time.monotonic() + 240
+        while time.monotonic() < deadline and installer.poll() is None:
+            live = payload_pids()
+            if live and clicked_at is None:
+                q = subprocess.run(["/usr/bin/osascript", "-l", "JavaScript", str(script), str(live[0]), "probe"],
+                                   capture_output=True, text=True, timeout=30)
+                state_text = (q.stdout.strip() or ("error:" + q.stderr.strip()[-160:]))
+                if not sheet or sheet[-1] != state_text:
+                    sheet.append(state_text)
+                if state_text == "present":
+                    subprocess.run(["/usr/sbin/screencapture", "-x", str(evidence / "screen-removal-sheet.png")],
+                                   capture_output=True, timeout=60)
+                    q = subprocess.run(["/usr/bin/osascript", "-l", "JavaScript", str(script), str(live[0]), "click"],
+                                       capture_output=True, text=True, timeout=30)
+                    sheet.append(q.stdout.strip() or ("error:" + q.stderr.strip()[-160:]))
+                    if q.stdout.strip() == "clicked":
+                        clicked_at = time.monotonic()
+            time.sleep(2)
+        if installer.poll() is None:
+            installer.kill()
+            result["removeTimedOut"] = True
+        installer.wait(timeout=60)
+    finally:
+        log.close()
+        result["removalSheet"] = sheet[-12:]
+    result["removeReturn"] = installer.returncode
+    steps.append({"argv": ["installer", "-pkg", "Remove.pkg"], "returncode": installer.returncode, "role": "remove"})
+    need(clicked_at is not None, "removal-sheet-not-confirmed")
+    need(installer.returncode == 0, "remove-returned-nonzero")
+    time.sleep(5)
+    remaining = {"app": APP.exists(), "launcher": LAUNCHER.exists(), "process": bool(payload_pids())}
+    result["afterRemoval"] = remaining
+    need(not any(remaining.values()), "removal-left-app-objects")
+    kept = manifest()
+    result["userDataPreservedByRemoval"] = all(kept.get(k) == v for k, v in seeded.items())
+    need(result["userDataPreservedByRemoval"], "user-data-changed-by-removal")
+    subprocess.run(["/usr/bin/hdiutil", "detach", str(mount)], capture_output=True, timeout=120)
+    # Reinstall after confirmed removal with the matching installer.
+    rc = install("reinstall", folder, steps, evidence=evidence)
+    result["reinstallReturn"] = rc
+    need(rc == 0, "reinstall-returned-nonzero")
+    again = installed_state()
+    result["afterReinstall"] = again
+    need((again["release"], again["packageVersion"], again["packageSha256"])
+         == (row["release"], row["packageVersion"], row["packageSha256"]), "reinstall-identity")
+    need(all(manifest().get(k) == v for k, v in seeded.items()), "user-data-changed-by-reinstall")
+    result["launchAfterReinstall"] = launch_smoke("after-reinstall", work, evidence, steps)
 
 
 if __name__ == "__main__":

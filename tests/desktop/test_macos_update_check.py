@@ -67,10 +67,35 @@ class LaunchSmokeSourceTests(unittest.TestCase):
         self.assertIn("mode: [update, fresh]", workflow)
         self.assertIn('--mode "${{ matrix.mode }}"', workflow)
         source = (ROOT / "desktop/tools/macos_update_check.py").read_text()
-        self.assertIn('choices=("update", "fresh")', source)
+        self.assertIn('choices=("update", "fresh", "remove")', source)
         # The launch smoke runs only after every user-data comparison in update mode.
         update = source.split("def main():", 1)[1]
         self.assertLess(update.index('"user-data-changed-by-downgrade-attempt"'), update.index('launch_smoke("after-update"'))
+
+    def test_remove_mode_confirms_only_the_exact_sheet_and_checks_before_reinstall(self):
+        self.assertIn("'Continue and Quit'", M.SHEET_JXA)
+        self.assertIn("'Quit and prepare to remove Mobile Release Kit?'", M.SHEET_JXA)
+        self.assertIn("names.length !== 2", M.SHEET_JXA)
+        source = (ROOT / "desktop/tools/macos_update_check.py").read_text().split("def remove_check(", 1)[1]
+        order = [source.index(marker) for marker in ('"removal-sheet-not-confirmed"', '"remove-returned-nonzero"',
+                 '"removal-left-app-objects"', '"user-data-changed-by-removal"', 'install("reinstall"',
+                 '"user-data-changed-by-reinstall"', 'launch_smoke("after-reinstall"')]
+        self.assertEqual(order, sorted(order))
+
+    def test_removal_selection_is_optional_and_strict(self):
+        import tempfile
+        base = json.loads((ROOT / "desktop/macos-installed-inputs/update-check-selection.json").read_text())
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "selection.json"
+            for removal, ok in ((None, True), ({"runId": "1", "artifactId": "2", "imageSha256": "a" * 64}, True),
+                                ({"runId": "1", "artifactId": "2"}, False)):
+                value = dict(base) if removal is None else dict(base, removal=removal)
+                path.write_text(json.dumps(value))
+                if ok:
+                    M.load_selection(path)
+                else:
+                    with self.assertRaises(M.Failed):
+                        M.load_selection(path)
 
 
 if __name__ == "__main__":
