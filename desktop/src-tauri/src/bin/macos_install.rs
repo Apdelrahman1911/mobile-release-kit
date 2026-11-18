@@ -15345,6 +15345,14 @@ mod installer {
                 u8::from(originals),u8::from(native),u8::from(timely),u8::from(unknown));
             (line.len() <= 256).then_some(line)
         }
+        // Removal counterpart of the refusal line above: a nonzero live or
+        // resume removal is never silent in the Installer log. Closed flags and
+        // the static reason hash only; never a path, receipt or removal claim.
+        fn removal_failure_line_data(reason: Option<&'static str>, resume: bool, originals: bool) -> String {
+            let digest = hash(reason.unwrap_or("removal-finality-refused").as_bytes());
+            format!("MRK_MACOS_REMOVAL_REFUSED=reasonSha256={digest};resume={};originals={}\n",
+                u8::from(resume),u8::from(originals))
+        }
         // Failure-only diagnostic DATA for the shape the refusal line above
         // withholds (an original, the deadline or a native producer is not
         // settled). It carries closed flags and the static reason hash only,
@@ -15383,6 +15391,10 @@ mod installer {
             assert_eq!(completed_reason_data(None,Some("deadline")),Some("deadline"));
             assert_eq!(completed_reason_data(None,Some("/private/not-a-public-diagnostic")),Some("other-original-refusal"));
             assert_eq!(completed_reason_data(None,None),None);
+            let removal=removal_failure_line_data(Some("removal-peer-exit-required"),false,true);
+            assert!(removal.starts_with("MRK_MACOS_REMOVAL_REFUSED=reasonSha256=") && removal.ends_with(";resume=0;originals=1\n")
+                && removal.contains(&hash(b"removal-peer-exit-required")) && removal.len() <= 160);
+            assert!(removal_failure_line_data(None,true,false).contains(&hash(b"removal-finality-refused")));
             // Real maintenance/launcher failures must survive the same closed
             // worker vocabulary and final diagnostic route. Prefixes alone are
             // not admission: a plausible private/user-derived label stays closed.
@@ -22516,6 +22528,11 @@ exec ./mrk-macos-remove --fixture-supervise "$1"
                 let Some((name,bytes))=effects else{return 1;};
                 if let Err(error)=removal_fixture_export(&parent.book,&name,&bytes) {parent.note(error);return 1;}
                 return if parent.errors.is_empty() && parent.removal_finality_data(){0}else{1};
+            }
+            if !finality {
+                let line=removal_failure_line_data(parent.errors.first().copied(),resume,originals);
+                // One bounded best-effort write; no retry, panic, or success-path output.
+                let _ = std::io::Write::write(&mut std::io::stderr().lock(),line.as_bytes());
             }
             if finality {0}else{1}
         }
