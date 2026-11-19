@@ -6354,7 +6354,7 @@ def distribution_mount_data(stdout, stderr, returncode, mountpoint):
        and type(row.get("dev-entry")) is str and re.fullmatch(r"/dev/disk[0-9]{1,5}(?:s[0-9]{1,3})?", row["dev-entry"]),
        "distribution-attach-entity")
     if "volume-kind" in row:
-      need("mount-point" in row and type(row["volume-kind"]) is str and row["volume-kind"] == "hfs",
+      need("mount-point" in row and type(row["volume-kind"]) is str and row["volume-kind"] in ("apfs", "hfs"),
          "distribution-attach-entity")
     if "mount-point" in row:
       need(row["mount-point"] == str(mountpoint) and row.get("potentially-mountable") is True,
