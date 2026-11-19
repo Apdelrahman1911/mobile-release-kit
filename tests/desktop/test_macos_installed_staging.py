@@ -3882,6 +3882,7 @@ sys.exit(status)
             TOOL.PAYLOAD_INFO: ((inputs / "Info.plist").read_bytes(), 0o644),
             "Contents/PkgInfo": (b"APPL????", 0o644), TOOL.PAYLOAD_CONTENTS + "PkgInfo": (b"APPL????", 0o644),
             "Contents/Resources/icon.png": (b"inert icon", 0o644), TOOL.PAYLOAD_CONTENTS + "Resources/icon.png": (b"inert icon", 0o644),
+            TOOL.THIRD_PARTY_NOTICES: (b"inert notices", 0o644),
             "Contents/_CodeSignature/CodeResources": (b"INERT outer seal", 0o644),
             TOOL.PAYLOAD_CONTENTS + "_CodeSignature/CodeResources": (b"INERT inner seal", 0o644)}
         if role == "ordinary-image":
@@ -19136,7 +19137,8 @@ class MacNormalPreviewData(unittest.TestCase):
                     "Contents/Info.plist": ((TOOL.DESKTOP / "macos-installed-inputs/EntryInfo.plist").read_bytes(), 0o644),
                     TOOL.PAYLOAD_INFO: ((TOOL.DESKTOP / "macos-installed-inputs/Info.plist").read_bytes(), 0o644),
                     "Contents/PkgInfo": (b"APPL????", 0o644), TOOL.PAYLOAD_CONTENTS + "PkgInfo": (b"APPL????", 0o644),
-                    "Contents/Resources/icon.png": (icon, 0o644), TOOL.PAYLOAD_CONTENTS + "Resources/icon.png": (icon, 0o644)}
+                    "Contents/Resources/icon.png": (icon, 0o644), TOOL.PAYLOAD_CONTENTS + "Resources/icon.png": (icon, 0o644),
+                    TOOL.THIRD_PARTY_NOTICES: (TOOL.third_party_notices(), 0o644)}
                 expected.update({TOOL.PAYLOAD_RELATIVE + "/" + name: value for name, value in support.files.items()})
                 if role == "ordinary-image":
                     expected[TOOL.DESKTOP_IMAGE] = (artifact_body, 0o755)
@@ -19767,6 +19769,7 @@ class MacNormalPreviewData(unittest.TestCase):
                "Contents/Info.plist": (entry_info, 0o644), TOOL.PAYLOAD_INFO: (info, 0o644),
                "Contents/PkgInfo": (b"APPL????", 0o644), TOOL.PAYLOAD_CONTENTS + "PkgInfo": (b"APPL????", 0o644),
                "Contents/Resources/icon.png": (b"icon-data", 0o644), TOOL.PAYLOAD_CONTENTS + "Resources/icon.png": (b"icon-data", 0o644),
+               TOOL.THIRD_PARTY_NOTICES: (b"notices-data", 0o644),
                "Contents/_CodeSignature/CodeResources": (b"signature-data", 0o644),
                TOOL.PAYLOAD_CONTENTS + "_CodeSignature/CodeResources": (b"payload-signature-data", 0o644)}
         support = android_support_fixture()

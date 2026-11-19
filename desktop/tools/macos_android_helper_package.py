@@ -9013,8 +9013,12 @@ class Operation:
         need(label in ("distribution", "observation") and (not self.removal or label == "distribution"), "package-image-fixed-label")
         path = self.work / self.image_directory / (self.image_filename if label == "distribution" else "MobileReleaseKit-Observation.dmg")
         identifier = self.image_identifier if label == "distribution" else "dev.mobile-release-kit.desktop.observation"
+        # APFS: the hidden sidecars keep only UF_HIDDEN. HFS+ would surface that
+        # flag as a synthesized com.apple.FinderInfo attribute, and every
+        # readback requires attribute-free originals. Installer and removal
+        # admit read-only local "apfs" and "hfs" images alike.
         self.package_call(label + "-create", ["/usr/bin/hdiutil", "create", "-srcfolder", str(self.work / root["name"]),
-            "-fs", "HFS+", "-format", "UDZO", "-volname", "MobileReleaseKit", str(path)], timeout=180)
+            "-fs", "APFS", "-format", "UDZO", "-volname", "MobileReleaseKit", str(path)], timeout=180)
         self.package_post()
         self.package_normalize_created_image(path, label)
         # Only this fresh task-owned image is signed. SOURCE selects the exact
