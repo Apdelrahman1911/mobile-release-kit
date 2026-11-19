@@ -30,6 +30,10 @@ static int confirmation_original(MRKRemovalConfirmation *b) {
     return b && pthread_main_np()==1 && b->pid==getpid() && b->uid==getuid()
         && b->uid!=0 && b->gid==getgid() && getuid()==geteuid() && getgid()==getegid();
 }
+// Removal window, in lockstep with macos_remove_protocol WORK_NS/HARD_NS and
+// the installer's REMOVAL_TOTAL: 290 s work plus the 10 s settlement.
+#define MRK_REMOVAL_WORK_NS UINT64_C(290000000000)
+#define MRK_REMOVAL_HARD_NS UINT64_C(300000000000)
 int mrk_removal_monotonic(uint64_t *now) {
     struct timespec sample;
     if(!now)return 0;*now=0;
@@ -67,8 +71,8 @@ size_t mrk_removal_confirmation_bytes(void) {
 }
 void *mrk_removal_confirmation_reserve(uint64_t start,uint64_t work,uint64_t hard) {
     if(pthread_main_np()!=1 || getuid()==0 || getuid()!=geteuid() || getgid()!=getegid()
-        || start==0 || work<start || hard<start || work-start!=UINT64_C(110000000000)
-        || hard-start!=UINT64_C(120000000000) || hard>((UINT64_C(1)<<61)-1))return NULL;
+        || start==0 || work<start || hard<start || work-start!=MRK_REMOVAL_WORK_NS
+        || hard-start!=MRK_REMOVAL_HARD_NS || hard>((UINT64_C(1)<<61)-1))return NULL;
     MRKRemovalConfirmation *b=calloc(1,sizeof(*b));
     if(!b)return NULL;
     b->start=start;b->work=work;b->hard=hard;b->pid=getpid();b->uid=getuid();b->gid=getgid();
@@ -859,7 +863,7 @@ void *mrk_removal_peer_new(const mrk_removal_peer_inputs *input){
     if(!input||input->version!=1||(input->role!=MRK_REMOVE_PARENT&&input->role!=MRK_REMOVE_APP)
         ||getuid()!=geteuid()||getgid()!=getegid()||(input->role==MRK_REMOVE_PARENT?(getuid()!=0||getgid()!=0):getuid()==0)
         ||!input->start||input->work<input->start||input->hard<input->start
-        ||input->work-input->start!=UINT64_C(110000000000)||input->hard-input->start!=UINT64_C(120000000000)
+        ||input->work-input->start!=MRK_REMOVAL_WORK_NS||input->hard-input->start!=MRK_REMOVAL_HARD_NS
         ||input->hard>((UINT64_C(1)<<61)-1)||!p_nonzero(input->request_id,16)
         ||!input->installed||!input->installed_size||input->installed_size>65536
         ||!input->remove||!input->remove_size||input->remove_size>16384
