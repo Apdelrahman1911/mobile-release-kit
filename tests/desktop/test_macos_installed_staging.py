@@ -13422,7 +13422,13 @@ class MacInstalledData(unittest.TestCase):
         encoded = lambda rows: TOOL.plistlib.dumps({"system-entities": rows})
         self.assertEqual(TOOL.distribution_mount_data(encoded([row]), b"", 0, mount), "/dev/disk99s1")
         self.assertEqual(TOOL.distribution_mount_data(encoded([dict(row, **{"volume-kind": "hfs"})]), b"", 0, mount), "/dev/disk99s1")
-        for kind in ("apfs", "HFS", "unknown", "", True, 1, ["hfs"], {"kind": "hfs"}):
+        self.assertEqual(TOOL.distribution_mount_data(encoded([dict(row, **{"volume-kind": "apfs", "content-hint": "41504653-0000-11AA-AA11-00306543ECAC"})]), b"", 0, mount), "/dev/disk99s1")
+        apfs = [{"dev-entry": "/dev/disk98", "potentially-mountable": False, "content-hint": "GUID_partition_scheme", "unmapped-content-hint": "GUID_partition_scheme"},
+            {"dev-entry": "/dev/disk98s1", "potentially-mountable": False, "content-hint": "Apple_APFS", "unmapped-content-hint": "7C3457EF-0000-11AA-AA11-00306543ECAC"},
+            {"dev-entry": "/dev/disk99", "potentially-mountable": False, "content-hint": "EF57347C-0000-11AA-AA11-00306543ECAC", "unmapped-content-hint": "EF57347C-0000-11AA-AA11-00306543ECAC"},
+            {"dev-entry": "/dev/disk99s1", "potentially-mountable": True, "content-hint": "41504653-0000-11AA-AA11-00306543ECAC", "unmapped-content-hint": "41504653-0000-11AA-AA11-00306543ECAC", "volume-kind": "apfs", "mount-point": str(mount)}]
+        self.assertEqual(TOOL.distribution_mount_data(encoded(apfs), b"", 0, mount), "/dev/disk99s1")
+        for kind in ("APFS", "HFS", "apfs ", "unknown", "", True, 1, ["hfs"], {"kind": "hfs"}):
             with self.subTest(volumeKind=kind), self.assertRaisesRegex(TOOL.Refused, "^distribution-attach-entity$"):
                 TOOL.distribution_mount_data(encoded([dict(row, **{"volume-kind": kind})]), b"", 0, mount)
         unmounted = {"dev-entry": "/dev/disk99", "potentially-mountable": False, "volume-kind": "hfs"}
