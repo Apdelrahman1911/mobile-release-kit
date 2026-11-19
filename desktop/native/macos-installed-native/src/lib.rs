@@ -3047,6 +3047,11 @@ mod tests {
         block.resize(65536, 0); // Native API returns count, not filled byte length.
         assert_eq!(decode(&block, 3, 65536), (0, expected.len(), expected));
         assert_eq!(decode(&block, 0, 65536), (0, 0, Vec::new()));
+        // A socket (VSOCK) is reported as DT_SOCK, never as a regular file.
+        let socket = record(6, 0x3_0000_0004, b"s");
+        let mut wanted = 0x3_0000_0004u64.to_ne_bytes().to_vec(); wanted.push(12);
+        wanted.extend_from_slice(&1u16.to_ne_bytes()); wanted.extend_from_slice(b"s");
+        assert_eq!(decode(&socket, 1, 65536), (0, wanted.len(), wanted));
         // Extra legal alignment padding after the name remains outside attr_length.
         let mut padded = file.clone(); padded.resize(56, 0); padded[..4].copy_from_slice(&56u32.to_ne_bytes());
         assert_eq!(decode(&padded, 1, 65536).0, 0);
@@ -3064,7 +3069,7 @@ mod tests {
             (24, &(-1i32).to_ne_bytes()), (24, &4i32.to_ne_bytes()), (24, &i32::MAX.to_ne_bytes()),
             (28, &1u32.to_ne_bytes()), (28, &257u32.to_ne_bytes()), (28, &256u32.to_ne_bytes()),
             (32, &0u32.to_ne_bytes()), (32, &3u32.to_ne_bytes()), (32, &4u32.to_ne_bytes()),
-            (32, &6u32.to_ne_bytes()), (32, &7u32.to_ne_bytes()), (32, &8u32.to_ne_bytes()),
+            (32, &7u32.to_ne_bytes()), (32, &8u32.to_ne_bytes()),
             (32, &u32::MAX.to_ne_bytes()), (36, &0u64.to_ne_bytes()),
             (44, b"/"), (45, b"\0"), (47, b"x"),
         ];
