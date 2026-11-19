@@ -56,10 +56,14 @@ struct RemovalClockData {
     last_parent:AtomicU64,last_uptime:AtomicU64,
     parent_first:AtomicU64,work_stopped:AtomicBool,invalid:AtomicBool,
 }
+// Removal window, in lockstep with macos_remove_protocol WORK_NS/HARD_NS and
+// the installer's REMOVAL_TOTAL: 290 s work plus the 10 s settlement.
+const REMOVAL_WORK_NS:u64=290_000_000_000;
+const REMOVAL_HARD_NS:u64=300_000_000_000;
 impl RemovalClockData {
     fn from_samples(start:u64,work:u64,hard:u64,u0:u64,p0:u64,p1:u64,u1:u64)->Option<Self>{
-        if start==0 || work.checked_sub(start)!=Some(110_000_000_000)
-            || hard.checked_sub(start)!=Some(120_000_000_000) || hard>FIRST_MASK
+        if start==0 || work.checked_sub(start)!=Some(REMOVAL_WORK_NS)
+            || hard.checked_sub(start)!=Some(REMOVAL_HARD_NS) || hard>FIRST_MASK
             || u0==0 || u0>u1 || u1>FIRST_MASK || p0<start || p0>p1 || p1>=work {return None;}
         let uptime_work=u0.checked_add(work.checked_sub(p1)?)?;
         let uptime_hard=u0.checked_add(hard.checked_sub(p1)?)?;
@@ -1156,22 +1160,22 @@ mod tests {
         // Pure fixed-cutoff DATA, with deliberately DISTINCT clock origins.
         // No native proof, clock sample, peer or service is manufactured here.
         let p=800_000_000_000;let u=3_000_000_000;
-        let make=||RemovalClockData::from_samples(p,p+110_000_000_000,p+120_000_000_000,u,p+100,p+110,u+20).unwrap();
-        let clock=make();assert_eq!(clock.uptime_work,u+110_000_000_000-110);
-        assert_eq!(clock.uptime_hard,u+120_000_000_000-110);
+        let make=||RemovalClockData::from_samples(p,p+290_000_000_000,p+300_000_000_000,u,p+100,p+110,u+20).unwrap();
+        let clock=make();assert_eq!(clock.uptime_work,u+290_000_000_000-110);
+        assert_eq!(clock.uptime_hard,u+300_000_000_000-110);
         assert!(clock.observe_samples(p+110,u+20,u+100,p+200,u+120));
         assert_eq!(clock.parent_first.load(Ordering::SeqCst),0);assert!(clock.work_allowed());
         // Actual Parent W (including sleep with almost no UPTIME advance)
         // irreversibly stops work, but permits known consuming cleanup to H.
         for (before,after) in [(u+21,u+22),(u+109_999_999_900,u+109_999_999_920)]{
-            let expiry=make();assert!(expiry.observe_samples(p+110,u+20,before,p+110_000_000_000,after));
-            assert_eq!(expiry.parent_first.load(Ordering::SeqCst),p+110_000_000_000);
+            let expiry=make();assert!(expiry.observe_samples(p+110,u+20,before,p+290_000_000_000,after));
+            assert_eq!(expiry.parent_first.load(Ordering::SeqCst),p+290_000_000_000);
             assert!(!expiry.work_allowed());assert!(expiry.cleanup_allowed());
-            assert!(expiry.observe_samples(p+110_000_000_000,after,after+1,p+110_000_000_001,after+2));
+            assert!(expiry.observe_samples(p+290_000_000_000,after,after+1,p+290_000_000_001,after+2));
             assert!(!expiry.work_allowed());assert!(expiry.cleanup_allowed());
-            assert!(!expiry.observe_samples(p+110_000_000_001,after+2,after+3,p+120_000_000_000,after+4));
+            assert!(!expiry.observe_samples(p+290_000_000_001,after+2,after+3,p+300_000_000_000,after+4));
             assert!(!expiry.cleanup_allowed());
-            assert!(!expiry.observe_samples(p+120_000_000_000,after+4,after+5,p+120_000_000_001,after+6));
+            assert!(!expiry.observe_samples(p+300_000_000_000,after+4,after+5,p+300_000_000_001,after+6));
         }
         // The supplemental own projection contracts work/hard independently;
         // it never fabricates a Parent-domain first-F or permits resumed work.
@@ -1195,10 +1199,10 @@ mod tests {
             assert!(!bad.cleanup_allowed());
             assert!(!bad.observe_samples(p+110,u+20,u+100,p+200,u+120));
         }
-        for args in [(0,110_000_000_000,120_000_000_000,u,p,p,u+1),
-            (p,p+110_000_000_001,p+120_000_000_000,u,p,p,u+1),
-            (p,p+110_000_000_000,p+120_000_000_000,u,p+110_000_000_000,p+110_000_000_000,u+1),
-            (p,p+110_000_000_000,p+120_000_000_000,FIRST_MASK-1,p,p,FIRST_MASK)]{
+        for args in [(0,290_000_000_000,300_000_000_000,u,p,p,u+1),
+            (p,p+290_000_000_001,p+300_000_000_000,u,p,p,u+1),
+            (p,p+290_000_000_000,p+300_000_000_000,u,p+290_000_000_000,p+290_000_000_000,u+1),
+            (p,p+290_000_000_000,p+300_000_000_000,FIRST_MASK-1,p,p,FIRST_MASK)]{
             assert!(RemovalClockData::from_samples(args.0,args.1,args.2,args.3,args.4,args.5,args.6).is_none());
         }
         // A known Parent STOP overlays non-success without an own first-F.
