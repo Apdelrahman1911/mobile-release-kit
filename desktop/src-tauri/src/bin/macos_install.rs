@@ -13525,7 +13525,13 @@ mod installer {
         struct Held { original: usize, mount: MountData, readonly: bool, directory: bool }
         impl Held {
             fn post(&self, book: &Install) -> Result<()> {
-                book.check_name(self.original,true)?;
+                // "/" and "/Volumes" are shared OS directories: any mount or
+                // unmount changes their times/links. Same object and mount;
+                // the read-only distribution and its files stay exact.
+                let original=&book.originals[self.original];
+                let shared=self.directory && !self.readonly && (original.parent.is_none()
+                    || original.name=="Volumes" && original.parent.is_some_and(|p|book.originals[p].parent.is_none()));
+                book.check_name(self.original,!shared)?;
                 check(MountData::read(book,self.original)? == self.mount,"producer-source-mount-changed")?;
                 if self.readonly {
                     check(readonly_distribution(&self.mount.kind,self.mount.flags),"producer-distribution-writable")?;
@@ -14779,7 +14785,10 @@ mod installer {
         impl RemovalOriginals {
             fn post(&self, book: &Install) -> Result<()> {
                 self.input.post(book)?;
-                for n in self.code { book.check_name(n,true)?; }
+                // Slots 0-2 are /, /Library and Application Support: shared,
+                // macOS-owned parents whose times/links other processes may
+                // change. Same object only; every product original is exact.
+                for (slot,n) in self.code.into_iter().enumerate() { book.check_name(n,slot>=3)?; }
                 for (n,raw) in self.installed_pair.iter().zip(&self.installed_raw) {
                     maintenance::held_bytes(book,*n,raw)?;
                 }

@@ -259,6 +259,22 @@ static int p_same(const struct stat *a,const struct stat *b){
         &&a->st_mtimespec.tv_sec==b->st_mtimespec.tv_sec&&a->st_mtimespec.tv_nsec==b->st_mtimespec.tv_nsec
         &&a->st_ctimespec.tv_sec==b->st_ctimespec.tv_sec&&a->st_ctimespec.tv_nsec==b->st_ctimespec.tv_nsec;
 }
+// "/", "/Library" and "/Library/Application Support" are macOS-owned and
+// shared: other processes may add entries (times/links change) while this
+// peer runs. They keep the same object, type, mode, owner, group and flags;
+// every product-owned borrowed original stays exact (p_same).
+static int p_system_parent(unsigned slot){return slot<3;}
+static int p_system_parent_same(const struct stat *a,const struct stat *b){
+    return a->st_dev==b->st_dev&&a->st_ino==b->st_ino&&a->st_mode==b->st_mode
+        &&a->st_uid==b->st_uid&&a->st_gid==b->st_gid&&a->st_flags==b->st_flags;
+}
+// macOS marks / and /Library SF_NOUNLINK (system-only flag) and installs
+// Application Support root:admin 0755; the Rust admission admits exactly
+// this for system ancestors (never group/other writable: mode is pinned).
+static int p_owner_flags_ok(unsigned slot,const struct stat *st){
+    if(!p_system_parent(slot))return st->st_uid==0&&st->st_gid==0&&st->st_flags==0;
+    return st->st_uid==0&&(st->st_flags&~(uint32_t)(SF_NOUNLINK|SF_RESTRICTED))==0;
+}
 static int p_directory_same_identity(const struct stat *a,const struct stat *b){
     return a->st_dev==b->st_dev&&a->st_ino==b->st_ino&&a->st_mode==b->st_mode
         &&a->st_uid==b->st_uid&&a->st_gid==b->st_gid&&a->st_nlink==b->st_nlink&&a->st_flags==b->st_flags;
@@ -296,7 +312,8 @@ static int p_borrowed_post(MRKRemovalPeer *b){
     if(!b->sources_ready)return 1;
     for(unsigned i=0;i<MRK_REMOVE_PEER_BORROWED;i++){
         struct stat now={0};int fd=b->input.borrowed[i];
-        if(fstat(fd,&now)!=0||!p_same(&b->borrowed[i],&now)||fcntl(fd,F_GETFD)!=FD_CLOEXEC)return p_fail(b,3,0);
+        if(fstat(fd,&now)!=0||!(p_system_parent(i)?p_system_parent_same(&b->borrowed[i],&now):p_same(&b->borrowed[i],&now))
+            ||fcntl(fd,F_GETFD)!=FD_CLOEXEC)return p_fail(b,3,0);
         if(i<15&&!p_fd_path(fd,p_code_paths[i]))return p_fail(b,4,0);
         if(i==17&&!p_fd_path(fd,P_REQUESTS))return p_fail(b,4,0);
         if(i==18&&!p_fd_path(fd,b->request_path))return p_fail(b,4,0);
@@ -375,8 +392,8 @@ static int p_source(MRKRemovalPeer *b,PeerCall *s){
     uint64_t code_bytes=0;
     for(unsigned i=0;good&&i<MRK_REMOVE_PEER_BORROWED;i++){
         int fd=b->input.borrowed[i];struct stat *st=&b->borrowed[i];struct statfs fs;
-        good=fd>=3&&fstat(fd,st)==0&&fcntl(fd,F_GETFD)==FD_CLOEXEC&&st->st_uid==0&&st->st_gid==0
-            &&st->st_flags==0&&st->st_nlink>0&&st->st_size>=0
+        good=fd>=3&&fstat(fd,st)==0&&fcntl(fd,F_GETFD)==FD_CLOEXEC&&p_owner_flags_ok(i,st)
+            &&st->st_nlink>0&&st->st_size>=0
             &&fstatfs(fd,&fs)==0&&(fs.f_flags&MNT_LOCAL)&&strcmp(fs.f_fstypename,"apfs")==0;
         for(unsigned j=0;good&&j<i;j++)if(fd==b->input.borrowed[j])good=0;
         if(!good)break;
