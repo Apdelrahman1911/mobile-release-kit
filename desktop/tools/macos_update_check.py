@@ -285,7 +285,83 @@ def stop_app(pids):
     need(not payload_pids(), "app-did-not-stop")
 
 
-def launch_smoke(label, work, evidence, steps):
+UI_JXA = """function run(argv) {
+  const se = Application('System Events');
+  const matches = se.processes.whose({unixId: Number(argv[0])});
+  if (matches.length !== 1) return JSON.stringify({error: 'no-process'});
+  const wins = matches[0].windows();
+  if (wins.length < 1) return JSON.stringify({error: 'no-window'});
+  const all = wins[0].entireContents();
+  const label = (e) => { for (const k of ['name', 'title', 'description']) { try { const v = e[k](); if (typeof v === 'string' && v) return v; } catch (x) {} } return ''; };
+  const role = (e) => { try { return e.role(); } catch (x) { return ''; } };
+  if (argv[1] === 'click') {
+    const preferred = ['AXLink', 'AXButton', 'AXRadioButton', 'AXTab', 'AXMenuItem'];
+    for (const pass of [true, false]) {
+      for (const e of all) {
+        if (label(e) !== argv[2] || preferred.includes(role(e)) !== pass) continue;
+        try { e.click(); return JSON.stringify({clicked: argv[2], role: role(e)}); } catch (x) {}
+      }
+    }
+    return JSON.stringify({error: 'not-found'});
+  }
+  const texts = [];
+  for (const e of all) {
+    if (role(e) !== 'AXStaticText') continue;
+    try { const v = e.value(); if (typeof v === 'string' && v.trim()) texts.push(v.trim()); } catch (x) {}
+    if (texts.length >= 600) break;
+  }
+  return JSON.stringify({texts: texts});
+}
+"""
+RUNTIME_AVAILABLE_TEXT, RUNTIME_UNAVAILABLE_TEXT = "Bundled runtime", "Runtime unavailable"
+WORKSPACE_ERROR_MARKERS = ("Maximum update depth", "Minified React error", "Something went wrong")
+CLI_STATUS_GUIDANCE = "CLI / AI access"
+
+
+def ui_query(pid, work, *args, timeout=90):
+    """Read-only accessibility query of the app's first window (texts), or
+    one click on a named navigation element. Never types or grants anything."""
+    script = work / "ui.js"
+    if not script.exists():
+        script.write_text(UI_JXA)
+    try:
+        p = subprocess.run(["/usr/bin/osascript", "-l", "JavaScript", str(script), str(pid), *args],
+                           capture_output=True, text=True, timeout=timeout)
+    except subprocess.TimeoutExpired:
+        return {"error": "timeout"}
+    try:
+        value = json.loads(p.stdout.strip())
+        return value if type(value) is dict else {"error": "shape"}
+    except ValueError:
+        return {"error": f"osascript-{p.returncode}"}
+
+
+def first_launch_observe(pid, work, evidence, label):
+    """#45/#46/#50 evidence from the live first launch: workspace texts, the
+    Build tools runtime card, and the installed CLI's read-access refusal."""
+    overview = ui_query(pid, work, "texts")
+    navigate = ui_query(pid, work, "click", "Build tools")
+    time.sleep(6)
+    tools = ui_query(pid, work, "texts")
+    texts = (overview.get("texts") or []) + (tools.get("texts") or [])
+    shot = evidence / f"screen-{label}-build-tools.png"
+    subprocess.run(["/usr/sbin/screencapture", "-x", str(shot)], capture_output=True, timeout=60)
+    card = tools.get("texts") or []
+    runtime = ("unavailable" if RUNTIME_UNAVAILABLE_TEXT in card else
+               "bundled" if RUNTIME_AVAILABLE_TEXT in card else "not-observed")
+    try:
+        cli = subprocess.run([str(APP / "Contents/MacOS/mrk"), "status", "--json"], capture_output=True, text=True, timeout=60)
+        status = {"returncode": cli.returncode, "guidance": CLI_STATUS_GUIDANCE in (cli.stdout + cli.stderr)}
+    except subprocess.TimeoutExpired:
+        status = {"returncode": None, "guidance": False}
+    return {"overviewTexts": len(overview.get("texts") or []), "overviewError": overview.get("error"),
+            "navigate": navigate, "buildToolsTexts": len(card), "buildToolsError": tools.get("error"),
+            "runtimeCard": runtime, "workspaceErrorMarkers": sorted({m for m in WORKSPACE_ERROR_MARKERS
+                                                                     for t in texts if m in t}),
+            "cliStatus": status, "screenshot": shot.name if shot.exists() else None}
+
+
+def launch_smoke(label, work, evidence, steps, observe=None):
     """Open the installed app as the logged-in runner user and require a live
     payload process with an on-screen window and no crash report."""
     need(not payload_pids(), f"{label}-app-already-running")
@@ -308,10 +384,13 @@ def launch_smoke(label, work, evidence, steps):
     settled = window_count(alive[0], work) if alive else None
     shot = evidence / f"screen-{label}.png"
     subprocess.run(["/usr/sbin/screencapture", "-x", str(shot)], capture_output=True, timeout=60)
+    ui = observe(alive[0], work, evidence, label) if observe and alive and settled else None
     crashes = sorted(set(recent_crashes()) - before)
     observed = {"label": label, "processSeen": bool(pids), "secondsToFirstWindow": first_window,
                 "aliveAfterSettle": bool(alive), "windowsAfterSettle": settled, "newCrashReports": crashes,
                 "screenshot": shot.name if shot.exists() else None}
+    if ui is not None:
+        observed["ui"] = ui
     if alive:
         stop_app(alive)
     need(pids, f"{label}-app-process-not-started")
@@ -441,7 +520,14 @@ def fresh_check(selection, work, evidence, steps, result):
     need(state["bundleShortVersion"] == row["packageVersion"], "fresh-bundle-version")
     need(state["receiptVersion"] is None, "fresh-unexpected-package-receipt")
     need(state["cliReturn"] == 0 and state["cliVersionLine"].startswith("mrk "), "fresh-cli-runs")
-    result["firstLaunch"] = launch_smoke("first-launch", work, evidence, steps)
+    result["firstLaunch"] = launch_smoke("first-launch", work, evidence, steps, observe=first_launch_observe)
+    ui = result["firstLaunch"].get("ui") or {}
+    # A missing accessibility read is recorded as not-observed, never a pass;
+    # only a definite unavailable card, error marker or wrong CLI refusal fails.
+    need(ui.get("runtimeCard") != "unavailable", "fresh-first-launch-runtime-unavailable")
+    need(not ui.get("workspaceErrorMarkers"), "fresh-first-launch-workspace-error")
+    need(ui.get("cliStatus", {}).get("returncode") == 3 and ui.get("cliStatus", {}).get("guidance"),
+         "fresh-cli-status-guidance")
     data = manifest() if USER_DATA.exists() else {}
     result["appDataFilesAfterFirstLaunch"] = len(data)
     # Same package again: the no-op route keeps the installation and app data.

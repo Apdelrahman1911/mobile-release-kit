@@ -98,5 +98,53 @@ class LaunchSmokeSourceTests(unittest.TestCase):
                         M.load_selection(path)
 
 
+
+class FirstLaunchObservationTests(unittest.TestCase):
+    """#45/#46/#50 first-launch evidence; no app, osascript or CLI runs."""
+
+    def test_ui_script_only_reads_or_clicks_a_named_element(self):
+        for forbidden in ("keystroke", "doShellScript", "setValue", "value =", ".value(", "delete", "privilege"):
+            if forbidden == ".value(":
+                self.assertEqual(M.UI_JXA.count(".value("), 1)  # the single static-text read
+                continue
+            self.assertNotIn(forbidden, M.UI_JXA)
+        self.assertIn("e.click()", M.UI_JXA)
+        self.assertIn("AXStaticText", M.UI_JXA)
+
+    def observe(self, overview, tools, cli_rc=3, cli_text="... CLI / AI access ..."):
+        from unittest import mock
+        replies = iter([overview, {"clicked": "Build tools", "role": "AXLink"}, tools])
+        cli = mock.Mock(returncode=cli_rc, stdout=cli_text, stderr="")
+        with tempfile.TemporaryDirectory() as folder, \
+             mock.patch.object(M, "ui_query", side_effect=lambda *a, **k: next(replies)), \
+             mock.patch.object(M.time, "sleep"), \
+             mock.patch.object(M.subprocess, "run", return_value=cli):
+            return M.first_launch_observe(123, Path(folder), Path(folder), "first-launch")
+
+    def test_runtime_card_classification(self):
+        ok = self.observe({"texts": ["Get your app ready."]}, {"texts": ["CORE RUNTIME", "Bundled runtime", "available"]})
+        self.assertEqual((ok["runtimeCard"], ok["workspaceErrorMarkers"], ok["cliStatus"]),
+                         ("bundled", [], {"returncode": 3, "guidance": True}))
+        bad = self.observe({"texts": []}, {"texts": ["CORE RUNTIME", "Runtime unavailable"]})
+        self.assertEqual(bad["runtimeCard"], "unavailable")
+        unseen = self.observe({"error": "timeout"}, {"error": "no-window"})
+        self.assertEqual((unseen["runtimeCard"], unseen["overviewError"]), ("not-observed", "timeout"))
+
+    def test_workspace_error_and_cli_guidance_are_recorded(self):
+        value = self.observe({"texts": ["Minified React error #185"]}, {"texts": ["Bundled runtime"]},
+                             cli_rc=0, cli_text="{}")
+        self.assertEqual(value["workspaceErrorMarkers"], ["Minified React error"])
+        self.assertEqual(value["cliStatus"], {"returncode": 0, "guidance": False})
+
+    def test_fresh_check_enforces_only_definite_failures(self):
+        source = (ROOT / "desktop/tools/macos_update_check.py").read_text()
+        fresh = source[source.index("def fresh_check"):source.index("SHEET_JXA = ")]
+        for reason in ('"fresh-first-launch-runtime-unavailable"', '"fresh-first-launch-workspace-error"',
+                       '"fresh-cli-status-guidance"'):
+            self.assertIn(reason, fresh)
+        self.assertIn('observe=first_launch_observe', fresh)
+        self.assertIn('!= "unavailable"', fresh)
+
+
 if __name__ == "__main__":
     unittest.main()
