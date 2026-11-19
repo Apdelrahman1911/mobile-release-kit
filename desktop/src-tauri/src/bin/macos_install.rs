@@ -15379,6 +15379,13 @@ mod installer {
             format!("MRK_MACOS_REMOVAL_REFUSED=reasonSha256={digest};resume={};originals={}\n",
                 u8::from(resume),u8::from(originals))
         }
+        // Failure-only companion of the removal refusal line: the native peer's
+        // own first closed failure code (a small fixed integer from
+        // removal_coordinator.m), never its timestamp, a path or a receipt.
+        fn removal_peer_native_line_data(native_first: Option<(u32,u64)>) -> Option<String> {
+            native_first.filter(|(code,_)|(1..=99).contains(code))
+                .map(|(code,_)|format!("MRK_MACOS_REMOVAL_PEER_NATIVE=code={code}\n"))
+        }
         // Failure-only diagnostic DATA for the shape the refusal line above
         // withholds (an original, the deadline or a native producer is not
         // settled). It carries closed flags and the static reason hash only,
@@ -15421,6 +15428,10 @@ mod installer {
             assert!(removal.starts_with("MRK_MACOS_REMOVAL_REFUSED=reasonSha256=") && removal.ends_with(";resume=0;originals=1\n")
                 && removal.contains(&hash(b"removal-peer-exit-required")) && removal.len() <= 160);
             assert!(removal_failure_line_data(None,true,false).contains(&hash(b"removal-finality-refused")));
+            assert_eq!(removal_peer_native_line_data(Some((13,17))).as_deref(),Some("MRK_MACOS_REMOVAL_PEER_NATIVE=code=13\n"));
+            assert_eq!(removal_peer_native_line_data(None),None);
+            assert_eq!(removal_peer_native_line_data(Some((0,5))),None);
+            assert_eq!(removal_peer_native_line_data(Some((100,5))),None);
             assert!(removal_current_flags_data(1,0x0010_0000) && removal_current_flags_data(2,0x0008_0000)
                 && removal_current_flags_data(1,0) && removal_current_flags_data(2,0x0018_0000));
             for slot in 3..15 {assert!(removal_current_flags_data(slot,0) && !removal_current_flags_data(slot,0x0010_0000));}
@@ -22565,6 +22576,9 @@ exec ./mrk-macos-remove --fixture-supervise "$1"
                 let line=removal_failure_line_data(parent.errors.first().copied(),resume,originals);
                 // One bounded best-effort write; no retry, panic, or success-path output.
                 let _ = std::io::Write::write(&mut std::io::stderr().lock(),line.as_bytes());
+                if let Some(native)=removal_peer_native_line_data(parent.removal_peer_native_first) {
+                    let _ = std::io::Write::write(&mut std::io::stderr().lock(),native.as_bytes());
+                }
             }
             if finality {0}else{1}
         }
