@@ -371,16 +371,21 @@ def launch_smoke(label, work, evidence, steps, observe=None):
     p, row = run(["/usr/bin/open", str(APP)], 60)
     steps.append(dict(row, role=label))
     need(p.returncode == 0, f"{label}-open-returned-{p.returncode}")
-    pids, windows = [], None
+    pids, windows, samples = [], None, []
     while time.monotonic() - started < 90:
         pids = payload_pids()
         if pids:
+            samples.append(resource_sample(pids[0], started, "startup"))
             windows = window_count(pids[0], work)
             if windows:
                 break
         time.sleep(2)
     first_window = round(time.monotonic() - started, 1) if windows else None
-    time.sleep(15)  # still alive and showing a window after the first paint
+    for _ in range(15):  # still alive and showing a window after the first paint
+        time.sleep(1)
+        live = payload_pids()
+        if live:
+            samples.append(resource_sample(live[0], started, "idle"))
     alive = payload_pids()
     settled = window_count(alive[0], work) if alive else None
     shot = evidence / f"screen-{label}.png"
@@ -388,6 +393,7 @@ def launch_smoke(label, work, evidence, steps, observe=None):
     ui = observe(alive[0], work, evidence, label) if observe and alive and settled else None
     crashes = sorted(set(recent_crashes()) - before)
     observed = {"label": label, "processSeen": bool(pids), "secondsToFirstWindow": first_window,
+                "resources": resource_summary(samples),
                 "aliveAfterSettle": bool(alive), "windowsAfterSettle": settled, "newCrashReports": crashes,
                 "screenshot": shot.name if shot.exists() else None}
     if ui is not None:
@@ -398,6 +404,111 @@ def launch_smoke(label, work, evidence, steps, observe=None):
     need(not crashes, f"{label}-app-crashed")
     need(alive and settled, f"{label}-app-window-missing")
     return observed
+
+
+def resource_sample(pid, started, phase):
+    """RSS (KiB) and CPU (%) of the app process and all its descendants (#66)."""
+    p = subprocess.run(["/bin/ps", "-A", "-o", "pid=,ppid=,rss=,%cpu="], capture_output=True, text=True, timeout=30)
+    rows = {}
+    for line in p.stdout.splitlines():
+        parts = line.split()
+        if len(parts) == 4:
+            try:
+                rows[int(parts[0])] = (int(parts[1]), int(parts[2]), float(parts[3]))
+            except ValueError:
+                continue
+    tree, grew = {pid}, True
+    while grew:
+        grew = False
+        for child, (parent, _rss, _cpu) in rows.items():
+            if parent in tree and child not in tree:
+                tree.add(child)
+                grew = True
+    present = [rows[q] for q in tree if q in rows]
+    return {"t": round(time.monotonic() - started, 1), "phase": phase, "processes": len(present),
+            "rssKiB": sum(r[1] for r in present), "cpuPercent": round(sum(r[2] for r in present), 1),
+            "appRssKiB": rows[pid][1] if pid in rows else None}
+
+
+def resource_summary(samples):
+    idle = [s for s in samples if s["phase"] == "idle"]
+    return {"samples": len(samples), "peakRssKiB": max((s["rssKiB"] for s in samples), default=None),
+            "idleRssKiB": idle[-1]["rssKiB"] if idle else None,
+            "idleAppRssKiB": idle[-1]["appRssKiB"] if idle else None,
+            "idleMeanCpuPercent": round(sum(s["cpuPercent"] for s in idle) / len(idle), 1) if idle else None,
+            "peakProcesses": max((s["processes"] for s in samples), default=None),
+            "method": "ps rss/%cpu of the app process tree; startup every 2 s until the first window, then 15 x 1 s idle"}
+
+
+def json_files_intact():
+    """Every JSON file in the app data parses: no partial write survived (#65)."""
+    broken = []
+    for path in sorted(USER_DATA.rglob("*.json")) if USER_DATA.exists() else []:
+        if path.is_file() and not path.is_symlink():
+            try:
+                json.loads(path.read_bytes())
+            except ValueError:
+                broken.append(str(path.relative_to(USER_DATA)))
+    return broken
+
+
+def kill_and_relaunch(label, work, evidence, steps, when):
+    """#65: SIGKILL the app (as a crash would: the app only, no cleanup) during
+    startup or at idle, then require an intact data folder and a normal relaunch."""
+    need(not payload_pids(), f"{label}-app-already-running")
+    before = manifest() if USER_DATA.exists() else {}
+    p, row = run(["/usr/bin/open", str(APP)], 60)
+    steps.append(dict(row, role=label + "-open"))
+    need(p.returncode == 0, f"{label}-open-returned-{p.returncode}")
+    started, pids = time.monotonic(), []
+    while time.monotonic() - started < 90 and not pids:
+        time.sleep(0.25)
+        pids = payload_pids()
+    need(pids, f"{label}-app-process-not-started")
+    if when == "startup":
+        time.sleep(1.0)
+    else:
+        while time.monotonic() - started < 90 and not window_count(pids[0], work):
+            time.sleep(1)
+        time.sleep(5)
+        before = manifest() if USER_DATA.exists() else {}
+    killed_at = round(time.monotonic() - started, 1)
+    for pid in payload_pids():
+        os.kill(pid, signal.SIGKILL)
+    deadline = time.monotonic() + 20
+    while payload_pids() and time.monotonic() < deadline:
+        time.sleep(0.5)
+    need(not payload_pids(), f"{label}-app-survived-sigkill")
+    time.sleep(2)
+    after = manifest() if USER_DATA.exists() else {}
+    broken = json_files_intact()
+    observed = {"killedAfterSeconds": killed_at, "when": when, "brokenJsonFiles": broken,
+                "dataUnchangedByIdleKill": after == before if when == "idle" else None}
+    need(not broken, f"{label}-partial-app-data")
+    if when == "idle":
+        need(after == before, f"{label}-idle-kill-changed-app-data")
+    observed["relaunch"] = launch_smoke(label + "-relaunch", work, evidence, steps)
+    need(not json_files_intact(), f"{label}-relaunch-partial-app-data")
+    return observed
+
+
+def installed_signature_check(steps):
+    """#30: the installed app's own signature and Gatekeeper assessment."""
+    out = {}
+    p, r = run(["/usr/bin/codesign", "--verify", "--strict", "--deep", "-vv", str(APP)], 300)
+    steps.append(dict(r, role="installed-codesign"))
+    out["codesignStrictDeep"] = p.returncode
+    p, r = run(["/usr/sbin/spctl", "-a", "-vv", "-t", "exec", str(APP)], 120)
+    steps.append(dict(r, role="installed-gatekeeper"))
+    text = p.stdout + p.stderr
+    out["gatekeeper"] = {"returncode": p.returncode, "notarizedDeveloperId": "Notarized Developer ID" in text,
+                         "lines": tail_text(text, 6)}
+    p, r = run(["/usr/bin/codesign", "-d", "--entitlements", "-", "--xml", str(APP)], 60)
+    out["entitlementsBytes"] = len(p.stdout)
+    p, r = run(["/usr/bin/codesign", "-dv", str(APP)], 60)
+    flags = re.search(r"flags=0x[0-9a-f]+\(([^)]*)\)", p.stderr)
+    out["codeFlags"] = flags.group(1) if flags else None
+    return out
 
 
 def seed_user_data():
@@ -540,6 +651,15 @@ def fresh_check(selection, work, evidence, steps, result):
     need(again == state, "same-package-changed-installation")
     need((manifest() if USER_DATA.exists() else {}) == data, "same-package-changed-app-data")
     result["reopen"] = launch_smoke("reopen", work, evidence, steps)
+    # Additional coverage after every earlier fact is recorded: interruption
+    # (#65), then the installed app's signature and Gatekeeper result (#30).
+    result["interruption"] = {"startup": kill_and_relaunch("kill-startup", work, evidence, steps, "startup"),
+                              "idle": kill_and_relaunch("kill-idle", work, evidence, steps, "idle")}
+    security = result["installedSignature"] = installed_signature_check(steps)
+    need(security["codesignStrictDeep"] == 0, "installed-app-codesign")
+    need(security["gatekeeper"]["returncode"] == 0 and security["gatekeeper"]["notarizedDeveloperId"],
+         "installed-app-gatekeeper")
+    need("runtime" in (security["codeFlags"] or ""), "installed-app-not-hardened-runtime")
 
 
 SHEET_JXA = """function run(argv) {

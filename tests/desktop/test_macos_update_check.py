@@ -110,6 +110,27 @@ class LaunchSmokeSourceTests(unittest.TestCase):
         self.assertTrue(any(d.startswith(".config/gh/") for d in M.DECOY_FILES))
         self.assertNotIn(M.DECOY_SERVICE, M.KEYCHAIN_SERVICES)
 
+    def test_fresh_mode_adds_interruption_resources_and_signature_after_existing_checks(self):
+        source = (ROOT / "desktop/tools/macos_update_check.py").read_text()
+        fresh = source.split("def fresh_check(", 1)[1].split("\ndef ", 1)[0].split("\nSHEET_JXA", 1)[0]
+        order = [fresh.index(m) for m in ('launch_smoke("reopen"', 'kill_and_relaunch("kill-startup"',
+                 'kill_and_relaunch("kill-idle"', "installed_signature_check(", '"installed-app-codesign"',
+                 '"installed-app-gatekeeper"', '"installed-app-not-hardened-runtime"')]
+        self.assertEqual(order, sorted(order))
+        kill = source.split("def kill_and_relaunch(", 1)[1].split("\ndef ", 1)[0]
+        self.assertIn("signal.SIGKILL", kill)
+        for marker in ('-partial-app-data"', '-idle-kill-changed-app-data"', '-app-survived-sigkill"', "launch_smoke(label + \"-relaunch\""):
+            self.assertIn(marker, kill)
+        smoke = source.split("def launch_smoke(", 1)[1].split("\ndef ", 1)[0]
+        self.assertIn('"resources": resource_summary(samples)', smoke)
+        # Resources are recorded, never a pass/fail budget (owner decision, #66).
+        self.assertNotIn("Rss", smoke.split("need(", 1)[1] if "need(" in smoke else "")
+        summary = M.resource_summary([{"t": 1, "phase": "startup", "processes": 2, "rssKiB": 10, "cpuPercent": 50.0, "appRssKiB": 8},
+                                      {"t": 2, "phase": "idle", "processes": 3, "rssKiB": 30, "cpuPercent": 2.0, "appRssKiB": 20},
+                                      {"t": 3, "phase": "idle", "processes": 3, "rssKiB": 25, "cpuPercent": 4.0, "appRssKiB": 18}])
+        self.assertEqual((summary["peakRssKiB"], summary["idleRssKiB"], summary["idleAppRssKiB"], summary["idleMeanCpuPercent"],
+                          summary["peakProcesses"]), (30, 25, 18, 3.0, 3))
+
     def test_uninstaller_sources_match_the_harness(self):
         folder = ROOT / "desktop/macos-installed-inputs/uninstaller"
         script = (folder / "delete-data.sh").read_text()
