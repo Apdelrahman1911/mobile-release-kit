@@ -7604,6 +7604,10 @@ sys.exit(status)
                 testcase.assertEqual((root["path"], [entry["path"].rsplit("/", 1)[-1] for entry in entries]),
                     ("remove-producer-root", ["Remove.pkg", "remove-producer.json", "remove-producer.sig"]))
                 self.hidden.append(len(entries))
+            def restore_image_sidecars(self, root, entries):
+                testcase.assertEqual((root["path"], [entry["path"].rsplit("/", 1)[-1] for entry in entries]),
+                    ("remove-producer-root", ["Remove.pkg", "remove-producer.json", "remove-producer.sig"]))
+                self.hidden.append(-len(entries))
             def package_stager_io(self, name, args):
                 testcase.assertEqual(name, "remove-input")
                 testcase.assertEqual((args.output, args.package, args.remover), (self.work / "remove-emitter-input",
@@ -7788,7 +7792,7 @@ sys.exit(status)
                     self.assertEqual((operation.loads,operation.source_posts),(1,1))
                     self.assertEqual((operation.saved["source"],operation.saved["workflowSource"],operation.saved["imageSourceCommit"]),("b"*40,"b"*40,"a"*40))
                     self.assertEqual(len(operation.dispatched),9)
-                    self.assertEqual(operation.hidden,[3])
+                    self.assertEqual(operation.hidden,[3,-3])
                 else:
                     with self.assertRaises((module.Refused,RuntimeError)):operation.execute()
                     self.assertFalse(operation.saved["passed"])

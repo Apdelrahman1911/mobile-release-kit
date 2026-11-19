@@ -8855,18 +8855,28 @@ class Operation:
 
     def hide_image_sidecars(self, root, entries):
         """Set only UF_HIDDEN on our own just-emitted sidecars before imaging."""
-        need(len(entries) in (2, 3) and all(entry["parent_entry"] is root for entry in entries), "image-sidecar-roster")
+        self.image_sidecar_flags(root, entries, 0, UF_HIDDEN)
+
+    def restore_image_sidecars(self, root, entries):
+        """After imaging, clear UF_HIDDEN so the task originals that later
+        readers consume carry no flags, exactly as before #51. The image keeps
+        its hidden copies."""
+        self.image_sidecar_flags(root, entries, UF_HIDDEN, 0)
+
+    def image_sidecar_flags(self, root, entries, current, wanted):
+        need(len(entries) in (2, 3) and all(entry["parent_entry"] is root for entry in entries)
+             and (current, wanted) in ((0, UF_HIDDEN), (UF_HIDDEN, 0)), "image-sidecar-roster")
         self.recheck_directory(root)
         for entry in entries:
             self.package_clock()
             before = entry["identity"]
             held = os.fstat(entry["fd"])
             need(signature(held) == before == signature(os.stat(entry["name"], dir_fd=entry["parent"], follow_symlinks=False))
-                 and held.st_flags == 0 and stat.S_IMODE(held.st_mode) == 0o444, "image-sidecar-hide-original")
-            _fchflags(entry["fd"], UF_HIDDEN)
+                 and held.st_flags == current and stat.S_IMODE(held.st_mode) == 0o444, "image-sidecar-hide-original")
+            _fchflags(entry["fd"], wanted)
             after = os.fstat(entry["fd"])
             # fchflags changes only ctime; identity, bytes and mode stay exact.
-            need(signature(after)[:8] == before[:8] and after.st_flags == UF_HIDDEN
+            need(signature(after)[:8] == before[:8] and after.st_flags == wanted
                  and signature(after) == signature(os.stat(entry["name"], dir_fd=entry["parent"], follow_symlinks=False)),
                  "image-sidecar-hide-identity")
             entry["identity"] = signature(after)
@@ -9902,6 +9912,9 @@ class Operation:
         self.package_post()
         user_image, _user_path = self.package_image(root, "distribution")
         observation_image, observation_path = self.package_image(observed_root, "observation")
+        if self.app_absence is None:
+            self.restore_image_sidecars(root, (descriptor_entry, signed_entry))
+            self.restore_image_sidecars(observed_root, (observed["producer.json"], observed["producer.sig"]))
         if self.removal_baseline_mount is not None:
             mount_path = self.removal_baseline_attach(observation_path)
         else:
@@ -10127,6 +10140,7 @@ class Operation:
         self.distribution_entry = self.package_directory(self.image_directory)
         self.package_post()
         image, _path = self.package_image(root, "distribution")
+        self.restore_image_sidecars(root, (package_entry, descriptor_entry, signed_entry))
         self.package_post()
         need(not self.installer_entered and not self.mount_entered, "remove-no-installed-operation")
         self.receipt["removalDistribution"] = {"schemaVersion": 1, "kind": "mrk-remove-package-emitted-image-v1", "target": self.target,
