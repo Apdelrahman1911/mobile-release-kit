@@ -14851,7 +14851,7 @@ mod installer {
                     } else {
                         native::no_xattrs(book.fd(code[slot])?.as_fd()).map_err(|_| "removal-current-attributes")?;
                     }
-                    check(stat::fstat(book.fd(code[slot])?).map_err(|_| "removal-current-stat")?.st_flags==0,
+                    check(removal_current_flags_data(slot,stat::fstat(book.fd(code[slot])?).map_err(|_| "removal-current-stat")?.st_flags),
                         "removal-current-flags")?;
                 }
                 let target=if cfg!(target_arch="aarch64") { mobile_release_desktop::macos_install_maintenance::MaintenanceTargetData::Arm64 }
@@ -15301,6 +15301,14 @@ mod installer {
                 request.post(book,source,observed)
             }
         }
+        // macOS itself marks /Library (and may mark Application Support) with
+        // the system-only no-unlink/restricted flags; the install route never
+        // flag-checks these two parents. Every product-owned original from
+        // MobileReleaseKit down still requires no flags at all.
+        fn removal_current_flags_data(slot:usize,flags:u32)->bool {
+            const SYSTEM_PARENT_FLAGS:u32=0x0010_0000|0x0008_0000; // SF_NOUNLINK | SF_RESTRICTED
+            match slot { 1|2=>flags & !SYSTEM_PARENT_FLAGS==0, _=>flags==0 }
+        }
         fn removal_source_binding_data(binding:&mobile_release_desktop::macos_install_maintenance::ReleaseBindingData<'_>,
             source:Option<&str>,runtime:Option<&str>,package:&str,actual_package:&str) -> bool {
             binding.release==paths::RELEASE && binding.package_version==paths::PACKAGE_VERSION
@@ -15395,6 +15403,12 @@ mod installer {
             assert!(removal.starts_with("MRK_MACOS_REMOVAL_REFUSED=reasonSha256=") && removal.ends_with(";resume=0;originals=1\n")
                 && removal.contains(&hash(b"removal-peer-exit-required")) && removal.len() <= 160);
             assert!(removal_failure_line_data(None,true,false).contains(&hash(b"removal-finality-refused")));
+            assert!(removal_current_flags_data(1,0x0010_0000) && removal_current_flags_data(2,0x0008_0000)
+                && removal_current_flags_data(1,0) && removal_current_flags_data(2,0x0018_0000));
+            for slot in 3..15 {assert!(removal_current_flags_data(slot,0) && !removal_current_flags_data(slot,0x0010_0000));}
+            for flags in [0x0000_0002,0x0002_0000,0x0000_0020,0x0010_0002] {
+                assert!(!removal_current_flags_data(1,flags) && !removal_current_flags_data(2,flags));
+            }
             // Real maintenance/launcher failures must survive the same closed
             // worker vocabulary and final diagnostic route. Prefixes alone are
             // not admission: a plausible private/user-derived label stays closed.
