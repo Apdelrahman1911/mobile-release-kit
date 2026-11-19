@@ -275,6 +275,14 @@ mod installer {
         let transient=if launcher {
             MAINTENANCE_COPY_CHAIN_LIVE.max(MAINTENANCE_RETAINED_ROOTS_LIVE.checked_add(MAINTENANCE_LAUNCHER_LIVE)?
                 .checked_add(launcher_phase_live)?)
+        } else if launcher_removal && removal_live!=0 {
+            // Live removal (#remove): the launcher retirement completes and
+            // releases all but its shared parent readers BEFORE the first
+            // snapshot opens any recursive chain (retire_before_snapshot
+            // refuses once capture exists). Peak: the chain plus retained
+            // roots, or the launcher alone, never both summed.
+            if launcher_phase_live!=0 {return None;}
+            MAINTENANCE_COPY_CHAIN_LIVE.checked_add(MAINTENANCE_RETAINED_ROOTS_LIVE)?.max(MAINTENANCE_LAUNCHER_LIVE)
         } else if launcher_removal {
             if launcher_phase_live!=0 {return None;}
             MAINTENANCE_COPY_CHAIN_LIVE.checked_add(MAINTENANCE_LAUNCHER_LIVE)?
@@ -24218,8 +24226,17 @@ exec ./mrk-macos-remove --fixture-supervise "$1"
             // No launcher: unchanged historical forecast held+2*16+12+1.
             assert_eq!(maintenance_live_data(10,0,false,false,0),Some(10+2*16+12+1));
             assert_eq!(maintenance_live_data(10,3,false,false,0),Some(10+2*16+12+1+3));
-            // Launcher removal: unchanged historical summed forecast.
-            assert_eq!(maintenance_live_data(10,3,false,true,0),Some(10+2*16+12+1+20+3));
+            // Maintenance launcher removal: unchanged historical summed forecast.
+            assert_eq!(maintenance_live_data(10,0,false,true,0),Some(10+2*16+12+1+20));
+            // Live removal retires the launcher before any snapshot chain:
+            // chain+retained roots, never chain+launcher. Hosted remove
+            // evidence held 37 originals and was refused at 105 > 96.
+            assert_eq!(maintenance_live_data(10,3,false,true,0),Some(10+12+1+(2*16+4).max(20)+3));
+            let removal=maintenance_live_data(37,3,false,true,0).unwrap();
+            assert_eq!((removal,37+2*16+12+1+20+3),(89,105));
+            assert!(transaction::BudgetData::checked_with_reason_data(&[transaction::GenerationCostData{files:1,bytes:1}],1,0,0,0,removal).is_ok());
+            assert!(MAINTENANCE_LAUNCHER_LIVE<=MAINTENANCE_COPY_CHAIN_LIVE+MAINTENANCE_RETAINED_ROOTS_LIVE);
+            assert_eq!(maintenance_live_data(0,3,false,true,phase),None);
             // Hosted #49 evidence: an enrolled-launcher Update holding 31
             // originals was refused at 98. The launcher peak (4 retained
             // roots+20+phase) lies within the closed recursive copy chain.
