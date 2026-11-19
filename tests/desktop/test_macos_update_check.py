@@ -76,11 +76,58 @@ class LaunchSmokeSourceTests(unittest.TestCase):
         self.assertIn("'Continue and Quit'", M.SHEET_JXA)
         self.assertIn("'Quit and prepare to remove Mobile Release Kit?'", M.SHEET_JXA)
         self.assertIn("names.length !== 2", M.SHEET_JXA)
-        source = (ROOT / "desktop/tools/macos_update_check.py").read_text().split("def remove_check(", 1)[1]
-        order = [source.index(marker) for marker in ('"removal-sheet-not-confirmed"', '"remove-returned-nonzero"',
-                 '"removal-left-app-objects"', '"user-data-changed-by-removal"', 'install("reinstall"',
-                 '"user-data-changed-by-reinstall"', 'launch_smoke("after-reinstall"')]
+        text = (ROOT / "desktop/tools/macos_update_check.py").read_text()
+        live = text.split("def live_remove(", 1)[1].split("\ndef ", 1)[0]
+        order = [live.index(marker) for marker in ('"removal-sheet-not-confirmed"', '"remove-returned-nonzero"',
+                 '"removal-left-app-objects"')]
         self.assertEqual(order, sorted(order))
+        source = text.split("def remove_check(", 1)[1].split("\ndef ", 1)[0]
+        order = [source.index(marker) for marker in ('live_remove(mount, work, evidence, steps, "remove")',
+                 '"user-data-changed-by-removal"', 'install("reinstall"',
+                 '"user-data-changed-by-reinstall"', 'launch_smoke("after-reinstall"', "uninstaller_check(", '"detach"')]
+        self.assertEqual(order, sorted(order))
+
+    def test_uninstaller_check_covers_cancel_recovery_refusal_and_scoped_deletion(self):
+        self.assertEqual(M.REMOVAL_SIDECARS, ("Remove.pkg", "remove-producer.json", "remove-producer.sig"))
+        self.assertEqual(M.UNINSTALLER, "Uninstall Mobile Release Kit.app")
+        source = (ROOT / "desktop/tools/macos_update_check.py").read_text()
+        image = source.split("def removal_image(", 1)[1].split("\ndef ", 1)[0]
+        for marker in ('"removal-image-hidden-sidecars"', '"uninstaller-codesign"', '"uninstaller-gatekeeper"',
+                       '"Notarized Developer ID"', "stat.UF_HIDDEN"):
+            self.assertIn(marker, image)
+        check = source.split("def uninstaller_check(", 1)[1].split("\ndef ", 1)[0]
+        order = [check.index(marker) for marker in ('"uninstall-cancel-delete"', '"uninstall-cancel-keep"',
+                 '"uninstall-installer-quit"', "p.returncode == 65", 'live_remove(mount, work, evidence, steps, "remove-again")',
+                 '"user-data-changed-by-second-removal"', '"uninstall-delete"', '"delete-all-data-left-app-data"',
+                 '"delete-all-data-removed-decoy-keychain-item"', '"delete-all-data-touched-other-files"')]
+        self.assertEqual(order, sorted(order))
+        # Cancels are pinned to the exact dialog, never the first "Cancel" seen.
+        self.assertIn('("Cancel", "Delete All Data")', check)
+        self.assertIn('("Cancel", "Continue")', check)
+        # Decoys include a look-alike sibling, a project, gh config and link targets.
+        self.assertTrue(any("desktop.decoy" in d for d in M.DECOY_FILES))
+        self.assertTrue(any(d.startswith("Projects/") for d in M.DECOY_FILES))
+        self.assertTrue(any(d.startswith(".config/gh/") for d in M.DECOY_FILES))
+        self.assertNotIn(M.DECOY_SERVICE, M.KEYCHAIN_SERVICES)
+
+    def test_uninstaller_sources_match_the_harness(self):
+        folder = ROOT / "desktop/macos-installed-inputs/uninstaller"
+        script = (folder / "delete-data.sh").read_text()
+        applet = (folder / "main.applescript").read_text()
+        for service in M.KEYCHAIN_SERVICES:
+            self.assertIn(f"'{service}'", script)
+        for app_id in M.APP_IDS:
+            self.assertIn(app_id, script)
+        self.assertIn("exit 65", script)
+        self.assertIn("rm -r -f -x --", script)
+        self.assertNotIn("sudo", script)
+        for label in (M.KEEP_LABEL, M.DELETE_LABEL, "Delete All Data", "still installed, so none of your data was deleted",
+                      "was removed, but some data was kept"):
+            self.assertIn(label, applet)
+        self.assertIn("default button keepLabel", applet)
+        self.assertIn('default button "Cancel" cancel button "Cancel"', applet)
+        # No top-level state an applet would save into its signed bundle.
+        self.assertNotRegex(applet, r"(?m)^\s*(property|global)\s")
 
     def test_removal_selection_is_optional_and_strict(self):
         import tempfile

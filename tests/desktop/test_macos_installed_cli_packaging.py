@@ -162,6 +162,7 @@ class InstalledCliStageData(unittest.TestCase):
             "Contents/Info.plist": (b"entry info", 0o644), TOOL.PAYLOAD_INFO: (b"payload info", 0o644),
             "Contents/PkgInfo": (b"APPL????", 0o644), TOOL.PAYLOAD_CONTENTS + "PkgInfo": (b"APPL????", 0o644),
             "Contents/Resources/icon.png": (b"icon", 0o644), TOOL.PAYLOAD_CONTENTS + "Resources/icon.png": (b"icon", 0o644),
+            TOOL.THIRD_PARTY_NOTICES: (b"notices", 0o644),
             "Contents/_CodeSignature/CodeResources": (b"inert seal", 0o644),
             TOOL.PAYLOAD_CONTENTS + "_CodeSignature/CodeResources": (b"inert payload seal", 0o644)}
         manifest = b"inert manifest"

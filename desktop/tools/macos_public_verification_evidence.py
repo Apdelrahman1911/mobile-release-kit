@@ -80,7 +80,7 @@ NATIVE_ROLES = frozenset((
     "verify-after-history-provider", "verify-after-github-seal", "resolve-notarytool", "resolve-stapler",
     "verify-inner-before", "verify-outer-before", "payload-zip", "payload-submit", "payload-log",
     "staple-inner", "validate-inner", "staple-outer", "validate-outer", "verify-inner-after", "verify-outer-after",
-    "producer-tests", "producer-build", "producer-emitter", "distribution-create", "distribution-sign", "distribution-verify-signature",
+    "producer-tests", "producer-build", "producer-emitter", "uninstaller-compile", "uninstaller-sign", "uninstaller-verify", "distribution-create", "distribution-sign", "distribution-verify-signature",
     "distribution-verify-image", "observation-create", "observation-sign", "observation-verify-signature",
     "observation-verify-image", "distribution-attach", "installer-log-cursor", "installer", "installer-log-capture",
     "distribution-detach", "final-package-productbuild",
@@ -96,7 +96,7 @@ CREDENTIAL_ROLES = frozenset((
     "search-restored", "delete", "default-after", "search-final", "producer-adhoc", "producer-adhoc-verify",
     "producer-cdhash", "installer-chain",
 ))
-PURPOSES = frozenset((*PHASES, "installer", "producer", "distribution-image", "observation-image",
+PURPOSES = frozenset((*PHASES, "installer", "producer", "uninstaller", "distribution-image", "observation-image",
     "python", "resident-image", "helper", "observer-program"))
 OWNER_REASONS = frozenset(("output-bound", "deadline", "protocol-or-original-ownership", "original-parent-ended",
     "cleanup-unconfirmed", "failed-timeout-or-incomplete-output", "exec-rejected", "stopped-before-execution",

@@ -1,4 +1,4 @@
-# Install, update and remove Mobile Release Kit on macOS (0.1.5)
+# Install, update and remove Mobile Release Kit on macOS (0.2.0)
 
 This is the current guide for the ordinary Apple Silicon package. It supersedes
 the `0.1.1` / `desktop-01` wording kept for history in `macos-installed.md` and
@@ -6,7 +6,7 @@ the `0.1.1` / `desktop-01` wording kept for history in `macos-installed.md` and
 
 | Item | Value |
 | --- | --- |
-| Package version / release | `0.1.5` / `macos26-arm64-desktop-05` (target `aarch64-apple-darwin`) |
+| Package version / release | `0.2.0` / `macos26-arm64-desktop-06` (target `aarch64-apple-darwin`) |
 | Minimum macOS | 26.0 |
 | Package identifier | `dev.mobile-release-kit.desktop.installed` |
 | App | `/Library/Application Support/MobileReleaseKit/Mobile Release Kit.app` (bundle `dev.mobile-release-kit.desktop`) |

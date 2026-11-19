@@ -6224,7 +6224,7 @@ mod installer {
             let request=BindingData::new_data(BindingInputData{request_id:&"1".repeat(32),root_nonce:&"2".repeat(32),
                 source_commit:binding.source_commit,release,target:TargetData::Arm64,remove_producer_sha256:&remover_sha,
                 installed_producer_sha256:&producer_sha,installed_inventory_sha256:&inventory_sha,protocol_sha256:binding.protocol_sha256,
-                start:10,work:110_000_000_010,hard:120_000_000_010}).unwrap();
+                start:10,work:10+mobile_release_desktop::macos_remove_protocol::WORK_NS,hard:10+mobile_release_desktop::macos_remove_protocol::HARD_NS}).unwrap();
             let mut raw=capture.header(&request,state.digest_data(),&selected_raw,0).unwrap();
             for (row,(_,_,body)) in capture.controls.iter().zip(&bodies) {
                 raw.extend_from_slice(&removal_snapshot_frame_data(row).unwrap());raw.extend_from_slice(body);
@@ -9048,7 +9048,7 @@ mod installer {
                 source_commit:&"3".repeat(40),release,target:if intel {TargetData::Intel}else{TargetData::Arm64},
                 remove_producer_sha256:&"4".repeat(64),installed_producer_sha256:&"5".repeat(64),
                 installed_inventory_sha256:&"6".repeat(64),protocol_sha256:&"7".repeat(64),
-                start:10,work:110_000_000_010,hard:120_000_000_010}).unwrap();
+                start:10,work:10+mobile_release_desktop::macos_remove_protocol::WORK_NS,hard:10+mobile_release_desktop::macos_remove_protocol::HARD_NS}).unwrap();
             let identity=Identity {dev:1,ino:2,mode:0o040755,uid:0,gid:0,links:2,size:64,
                 mtime:1,mtime_ns:2,ctime:3,ctime_ns:4};
             let mut children=vec![("control.json".to_owned(),9)];
@@ -13766,12 +13766,13 @@ mod installer {
         use mobile_release_desktop::protocol::strict_json;
 
         const SECOND: u64 = 1_000_000_000;
-        const REMOVAL_TOTAL: u64 = 120 * SECOND;
+        const REMOVAL_TOTAL: u64 = 300 * SECOND;
         // Durable enrollment and payload sealing each require a full disk flush.
         // The owner APFS installation exceeded the old 110s work window while
         // copying 7,038 of 7,230 files. Keep one entry-anchored endpoint, with
         // a bounded 290s install/recovery window and the original 10s settlement.
-        // The standalone Remover retains its native 120s protocol unchanged.
+        // The standalone Remover uses the same 300s window (290s work), kept in
+        // lockstep with macos_remove_protocol and the native removal coordinator.
         const fn compiled_total_data(installer: bool, remover: bool) -> u64 {
             if installer && !remover { 300 * SECOND } else { REMOVAL_TOTAL }
         }
@@ -22629,9 +22630,13 @@ exec ./mrk-macos-remove --fixture-supervise "$1"
             #[test]
             fn installer_budget_is_bounded_and_remover_keeps_its_native_profile() {
                 assert_eq!(compiled_total_data(true,false),300*SECOND);
-                assert_eq!(compiled_total_data(false,true),120*SECOND);
-                assert_eq!(compiled_total_data(false,false),120*SECOND);
-                assert_eq!(compiled_total_data(true,true),120*SECOND);
+                // The remover window is the removal protocol's hard bound, in
+                // lockstep (290s work + 10s settlement = WORK_NS/HARD_NS).
+                assert_eq!(compiled_total_data(false,true),300*SECOND);
+                assert_eq!(compiled_total_data(false,false),300*SECOND);
+                assert_eq!(compiled_total_data(true,true),300*SECOND);
+                assert_eq!(REMOVAL_TOTAL,mobile_release_desktop::macos_remove_protocol::HARD_NS);
+                assert_eq!(REMOVAL_TOTAL-SETTLEMENT,mobile_release_desktop::macos_remove_protocol::WORK_NS);
                 assert_eq!(SETTLEMENT,10*SECOND);
                 assert_eq!(TOTAL,compiled_total_data(cfg!(feature="macos-installed-installer"),
                     cfg!(feature="macos-installed-remover")));

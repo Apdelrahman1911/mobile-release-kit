@@ -126,7 +126,7 @@ def main():
     a = a.parse_args(); assert os.geteuid() == 0 and os.environ.get('RUNNER_ENVIRONMENT') == 'github-hosted'
     user = os.environ['SUDO_USER']; home = f'/home/{user}'; ev = a.evidence; ev.mkdir(mode=0o755)
     try:
-        debs = list(a.download.rglob('mobile-release-kit-desktop_0.1.5-1_amd64.deb')); assert len(debs) == 1, 'exactly one DEB'
+        debs = list(a.download.rglob('mobile-release-kit-desktop_0.2.0-1_amd64.deb')); assert len(debs) == 1, 'exactly one DEB'
         deb = debs[0]; step('inputs', debSha256=hashlib.sha256(deb.read_bytes()).hexdigest(), bytes=deb.stat().st_size)
         step('host', kernel=os.uname().release, machine=os.uname().machine, osRelease=Path('/etc/os-release').read_text()[:600])
         env = dict(os.environ, DEBIAN_FRONTEND='noninteractive')

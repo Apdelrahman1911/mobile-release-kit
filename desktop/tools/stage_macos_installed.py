@@ -795,6 +795,31 @@ def source_packaging_input(role):
     return read_at(fd, name, limit, source_metadata=True)[0]
 
 
+THIRD_PARTY_NOTICES = "Contents/Resources/THIRD-PARTY-NOTICES.txt"
+THIRD_PARTY_LOCKFILES = frozenset(("desktop/src-tauri/Cargo.lock", "desktop/native/macos-installed-native/Cargo.lock",
+  "desktop/helpers/macos-android-register/Cargo.lock", "desktop/helpers/macos-desktop-image/Cargo.lock",
+  "desktop/helpers/macos-vault-helper/Cargo.lock", "desktop/helpers/macos-github-seal/Cargo.lock", "desktop/package-lock.json"))
+
+
+def source_input(path, limit):
+  with parent(path) as (fd, name):
+    return read_at(fd, name, limit, source_metadata=True)[0]
+
+
+def third_party_notices():
+  """#29: the generated notices, only while they still match every lockfile
+  they were generated from (desktop/tools/macos_third_party_notices.py)."""
+  folder = DESKTOP / "macos-installed-inputs/notices"
+  inputs = json.loads(source_input(folder / "third-party-inputs.json", 4 * 1024 * 1024))
+  notice = source_input(folder / "THIRD-PARTY-NOTICES.txt", 16 * 1024 * 1024)
+  need(type(inputs) is dict and inputs.get("schemaVersion") == 1 and type(inputs.get("lockfiles")) is dict
+     and set(inputs["lockfiles"]) == THIRD_PARTY_LOCKFILES and inputs.get("noticeBytes") == len(notice) > 0
+     and inputs.get("noticeSha256") == digest(notice), "third-party-notices-digest")
+  for name in sorted(THIRD_PARTY_LOCKFILES):
+    need(digest(source_input(DESKTOP.parent / name, 16 * 1024 * 1024)) == inputs["lockfiles"][name], "third-party-notices-stale")
+  return notice
+
+
 def source_build_release(*, target=ARM_TARGET):
 
 
@@ -2820,7 +2845,8 @@ def removal_package_receipt_data(body, *, selection, binding, package, descripto
                         "developerIdOrNotarizationQualified", "productReady"))
      and value["directStagerIOPending"] is None and value["cleanupErrors"] == []
      and value["finalPackageReceiptSha256"] == final_package_sha, "remove-owner-finality")
-  roles = ("producer-build", "producer-emitter", "distribution-create", "distribution-sign", "distribution-verify-signature", "distribution-verify-image")
+  roles = ("producer-build", "producer-emitter", "uninstaller-compile", "uninstaller-sign", "uninstaller-verify",
+           "distribution-create", "distribution-sign", "distribution-verify-signature", "distribution-verify-image")
   calls = value["originalCalls"]
   need(type(calls) is list and len(calls) == len(roles), "remove-owner-call-count")
   for row, role in zip(calls, roles):
@@ -2831,15 +2857,15 @@ def removal_package_receipt_data(body, *, selection, binding, package, descripto
   credential_roles = ("search-before", "default-before", "create", "search-created", "settings", "unlock", "import", "partitions", "identity",
     "certificates", "search-admit", "restrict", "search-restricted", "search-after-callback", "restore", "search-restored", "delete", "search-final", "default-after")
   credentials = value["credentialOriginals"]
-  ordered = ("producer-adhoc", "producer-adhoc-verify", "producer-cdhash") + credential_roles * 2
+  ordered = ("producer-adhoc", "producer-adhoc-verify", "producer-cdhash") + credential_roles * 3
   need(type(credentials) is list and len(credentials) == len(ordered), "remove-owner-credential-count")
   for row, role in zip(credentials, ordered):
     maintenance_map(row, ("role", "entered", "returned", "settled", "status"), "remove-owner-credential-fields")
     need(row["role"] == role and all(row[k] is True for k in ("entered", "returned", "settled"))
        and type(row["status"]) is int and row["status"] == 0, "remove-owner-credential-finality")
   contexts = value["credentialContexts"]
-  need(type(contexts) is list and len(contexts) == 2, "remove-owner-context-count")
-  for row, purpose in zip(contexts, ("producer", "distribution-image")):
+  need(type(contexts) is list and len(contexts) == 3, "remove-owner-context-count")
+  for row, purpose in zip(contexts, ("producer", "uninstaller", "distribution-image")):
     maintenance_map(row, ("purpose", "searchRestored", "defaultUnchanged", "retired", "closed"), "remove-owner-context-fields")
     need(row["purpose"] == purpose and all(row[k] is True for k in ("searchRestored", "defaultUnchanged", "retired", "closed")),
        "remove-owner-context-finality")
@@ -3916,7 +3942,8 @@ def app_with_github_seal(args, seal):
        INSTALLED_CLI: (cli, 0o555),
        "Contents/Info.plist": (source_entry_info(selection=selection), 0o644), PAYLOAD_INFO: (source_app_info(selection=selection), 0o644),
        "Contents/PkgInfo": (b"APPL????", 0o644), PAYLOAD_CONTENTS + "PkgInfo": (b"APPL????", 0o644),
-       "Contents/Resources/icon.png": (icon, 0o644), PAYLOAD_CONTENTS + "Resources/icon.png": (icon, 0o644)}
+       "Contents/Resources/icon.png": (icon, 0o644), PAYLOAD_CONTENTS + "Resources/icon.png": (icon, 0o644),
+       THIRD_PARTY_NOTICES: (third_party_notices(), 0o644)}
   if desktop_body is not None:
     files[DESKTOP_IMAGE] = (desktop_body, 0o755)
   support_sha, support = android_support_files(args)
@@ -4030,7 +4057,7 @@ def input_with_github_seal(args, seal, *, ticket_expectations=None):
   support.update(PAYLOAD_RELATIVE + "/" + notice["resourcePath"] for row in support_rows for notice in row["notices"])
   expected_names = {ENTRY_BINARY, APP_BINARY, VAULT_HELPER, ANDROID_HELPER, ANDROID_SERVICE_PLIST, RESIDENT_IMAGE, REMOVER, INSTALLED_CLI,
            "Contents/Info.plist", PAYLOAD_INFO, "Contents/PkgInfo", PAYLOAD_CONTENTS + "PkgInfo",
-           "Contents/Resources/icon.png", PAYLOAD_CONTENTS + "Resources/icon.png",
+           "Contents/Resources/icon.png", PAYLOAD_CONTENTS + "Resources/icon.png", THIRD_PARTY_NOTICES,
            "Contents/_CodeSignature/CodeResources", PAYLOAD_CONTENTS + "_CodeSignature/CodeResources"} | support
   if role == "ordinary-image":
     expected_names.add(DESKTOP_IMAGE)
@@ -6277,10 +6304,14 @@ def emitted_removal_data(stdout, stderr, returncode, package, descriptor, signed
   return result
 
 
-def removal_distribution_layout_data(names, expected, actual):
-  """The separate fixed three-file Remove carrier; no arbitrary filename selector."""
+def removal_distribution_layout_data(names, expected, actual, *, uninstaller=None):
+  """The separate fixed three-file Remove carrier; no arbitrary filename selector.
+
+  The image itself also carries the fixed uninstaller app (#83) beside them."""
   roster = {"Remove.pkg", "remove-producer.json", "remove-producer.sig"}
-  need(type(names) in (list, tuple, set) and len(names) == 3 and set(names) == roster
+  need(uninstaller in (None, "Uninstall Mobile Release Kit.app"), "remove-distribution-uninstaller-name")
+  listed = roster if uninstaller is None else roster | {uninstaller}
+  need(type(names) in (list, tuple, set) and len(names) == len(listed) and set(names) == listed
      and type(expected) is dict and set(expected) == roster and type(actual) is dict and set(actual) == roster,
      "remove-distribution-three-file-roster")
   for name, original in expected.items():

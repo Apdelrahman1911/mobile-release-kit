@@ -792,7 +792,7 @@ impl PassiveInstalledProfile {
     fn bindings_match(target: &str, manifest: Option<&str>, protocol: Option<&str>) -> bool {
         target == Self::TARGET && manifest == Some(Self::MANIFEST) && protocol == Some(Self::PROTOCOL)
     }
-    // Read-only passive family ONLY: the current runtime this 0.1.5 DEB bundles
+    // Read-only passive family ONLY: the current runtime this 0.2.0 DEB bundles
     // (assembly of run 43631372422: manifest 5b5eac42…, protocol unchanged).
     // MANIFEST/bindings_match above stay historical, so every other family that
     // reuses them (configuration and workflow edits, GitHub, metadata/version
