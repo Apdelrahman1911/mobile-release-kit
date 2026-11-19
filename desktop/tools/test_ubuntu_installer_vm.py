@@ -7,7 +7,7 @@ from ubuntu_candidate_supervisor import run
 def execute(download,case,work):
  assert os.geteuid()==0 and not work.exists()
  assert os.environ.get('GITHUB_ACTIONS')=='true' and os.environ.get('RUNNER_ENVIRONMENT')=='github-hosted'
- artifacts=list(download.rglob('mobile-release-kit-desktop_0.1.5-1_amd64.deb'));assert len(artifacts)==1
+ artifacts=list(download.rglob('mobile-release-kit-desktop_0.2.0-1_amd64.deb'));assert len(artifacts)==1
  originals=list(download.rglob('assembly.json'));assert len(originals)==1
  receipt=json.loads(originals[0].read_text());deb=artifacts[0]
  assert receipt['sha256']==S.sha(deb) and receipt['size']==deb.stat().st_size
@@ -29,7 +29,7 @@ def execute(download,case,work):
    p=parent/digest/'engine_bootstrap.py';body=p.read_bytes();st=p.stat()
    p.write_bytes(body);os.utime(p,ns=(st.st_atime_ns,st.st_mtime_ns))
   else:(parent/digest/'unrecognized').write_bytes(b'unknown')
-  command=['/var/lib/dpkg/info/mobile-release-kit-desktop.postinst','configure','0.1.5-1']
+  command=['/var/lib/dpkg/info/mobile-release-kit-desktop.postinst','configure','0.2.0-1']
  else:
   parent.mkdir(parents=True,mode=0o755)
   if case in ['unknown-final','unknown-stage']:

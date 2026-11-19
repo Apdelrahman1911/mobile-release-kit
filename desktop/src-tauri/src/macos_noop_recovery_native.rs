@@ -943,7 +943,7 @@ mod tests {
             source_commit:binding.source_commit,release:binding.release,target:TargetData::Arm64,
             remove_producer_sha256:&seed.header.values[6],installed_producer_sha256:&seed.header.values[4],
             installed_inventory_sha256:binding.inventory_sha256,protocol_sha256:binding.protocol_sha256,
-            start:10,work:110_000_000_010,hard:120_000_000_010}).unwrap();
+            start:10,work:10+mobile_release_desktop::macos_remove_protocol::WORK_NS,hard:10+mobile_release_desktop::macos_remove_protocol::HARD_NS}).unwrap();
         let mut raw=capture.header(&request,state.digest_data(),&selected.encode_data().unwrap(),0).unwrap();
         for (row,(_,_,bytes,_,_)) in capture.controls.iter().zip(&body) {
             raw.extend(removal_snapshot_frame_data(row).unwrap());raw.extend(bytes);

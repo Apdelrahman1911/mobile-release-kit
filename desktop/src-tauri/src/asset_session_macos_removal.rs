@@ -772,7 +772,7 @@ mod tests{
                 request_id:"11111111111111111111111111111111",root_nonce:"22222222222222222222222222222222",
                 source_commit:"3333333333333333333333333333333333333333",release:&release,target,
                 remove_producer_sha256:&"4".repeat(64),installed_producer_sha256:&"5".repeat(64),
-                installed_inventory_sha256:&"6".repeat(64),protocol_sha256:&"7".repeat(64),start:1,work:110_000_000_001,hard:120_000_000_001}).unwrap();
+                installed_inventory_sha256:&"6".repeat(64),protocol_sha256:&"7".repeat(64),start:1,work:1+crate::macos_remove_protocol::WORK_NS,hard:1+crate::macos_remove_protocol::HARD_NS}).unwrap();
             let expected=challenge_data(&binding).unwrap();let mut bytes=[0;wire::FRAME_LIMIT];
             let used=wire::FrameData::challenge_data(&binding).unwrap().encode_framed_data(&mut bytes).unwrap();
             let decoded=decode_challenge(&bytes[..used]).unwrap();

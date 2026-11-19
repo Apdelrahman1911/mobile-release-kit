@@ -16,8 +16,11 @@ pub const FRAME_BODY_LIMIT: usize = 4096;
 pub const PREFIX_BYTES: usize = 4;
 pub const FRAME_LIMIT: usize = PREFIX_BYTES + FRAME_BODY_LIMIT;
 pub const FRAME_COUNT: usize = 4;
-pub const WORK_NS: u64 = 110_000_000_000;
-pub const HARD_NS: u64 = 120_000_000_000;
+// Removal includes the person reading/confirming the in-app sheet, five
+// signature checks and full-payload hashing/flushes; one entry-anchored
+// window matching the installer (290s work + 10s settlement).
+pub const WORK_NS: u64 = 290_000_000_000;
+pub const HARD_NS: u64 = 300_000_000_000;
 pub const PURPOSE: &str = "mrk-macos-remove-producer-v1";
 pub const REQUEST_LIMIT: usize = 32768;
 pub const DESCRIPTOR_LIMIT: usize = 16384;

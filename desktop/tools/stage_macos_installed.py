@@ -2820,7 +2820,8 @@ def removal_package_receipt_data(body, *, selection, binding, package, descripto
                         "developerIdOrNotarizationQualified", "productReady"))
      and value["directStagerIOPending"] is None and value["cleanupErrors"] == []
      and value["finalPackageReceiptSha256"] == final_package_sha, "remove-owner-finality")
-  roles = ("producer-build", "producer-emitter", "distribution-create", "distribution-sign", "distribution-verify-signature", "distribution-verify-image")
+  roles = ("producer-build", "producer-emitter", "uninstaller-compile", "uninstaller-sign", "uninstaller-verify",
+           "distribution-create", "distribution-sign", "distribution-verify-signature", "distribution-verify-image")
   calls = value["originalCalls"]
   need(type(calls) is list and len(calls) == len(roles), "remove-owner-call-count")
   for row, role in zip(calls, roles):
@@ -2831,15 +2832,15 @@ def removal_package_receipt_data(body, *, selection, binding, package, descripto
   credential_roles = ("search-before", "default-before", "create", "search-created", "settings", "unlock", "import", "partitions", "identity",
     "certificates", "search-admit", "restrict", "search-restricted", "search-after-callback", "restore", "search-restored", "delete", "search-final", "default-after")
   credentials = value["credentialOriginals"]
-  ordered = ("producer-adhoc", "producer-adhoc-verify", "producer-cdhash") + credential_roles * 2
+  ordered = ("producer-adhoc", "producer-adhoc-verify", "producer-cdhash") + credential_roles * 3
   need(type(credentials) is list and len(credentials) == len(ordered), "remove-owner-credential-count")
   for row, role in zip(credentials, ordered):
     maintenance_map(row, ("role", "entered", "returned", "settled", "status"), "remove-owner-credential-fields")
     need(row["role"] == role and all(row[k] is True for k in ("entered", "returned", "settled"))
        and type(row["status"]) is int and row["status"] == 0, "remove-owner-credential-finality")
   contexts = value["credentialContexts"]
-  need(type(contexts) is list and len(contexts) == 2, "remove-owner-context-count")
-  for row, purpose in zip(contexts, ("producer", "distribution-image")):
+  need(type(contexts) is list and len(contexts) == 3, "remove-owner-context-count")
+  for row, purpose in zip(contexts, ("producer", "uninstaller", "distribution-image")):
     maintenance_map(row, ("purpose", "searchRestored", "defaultUnchanged", "retired", "closed"), "remove-owner-context-fields")
     need(row["purpose"] == purpose and all(row[k] is True for k in ("searchRestored", "defaultUnchanged", "retired", "closed")),
        "remove-owner-context-finality")
@@ -6277,10 +6278,14 @@ def emitted_removal_data(stdout, stderr, returncode, package, descriptor, signed
   return result
 
 
-def removal_distribution_layout_data(names, expected, actual):
-  """The separate fixed three-file Remove carrier; no arbitrary filename selector."""
+def removal_distribution_layout_data(names, expected, actual, *, uninstaller=None):
+  """The separate fixed three-file Remove carrier; no arbitrary filename selector.
+
+  The image itself also carries the fixed uninstaller app (#83) beside them."""
   roster = {"Remove.pkg", "remove-producer.json", "remove-producer.sig"}
-  need(type(names) in (list, tuple, set) and len(names) == 3 and set(names) == roster
+  need(uninstaller in (None, "Uninstall Mobile Release Kit.app"), "remove-distribution-uninstaller-name")
+  listed = roster if uninstaller is None else roster | {uninstaller}
+  need(type(names) in (list, tuple, set) and len(names) == len(listed) and set(names) == listed
      and type(expected) is dict and set(expected) == roster and type(actual) is dict and set(actual) == roster,
      "remove-distribution-three-file-roster")
   for name, original in expected.items():

@@ -1664,7 +1664,7 @@ export function App() {
     metadataImagesState.selectionStatus?.capability.available === true && metadataImagesState.editStatus?.capability.available === true &&
     !metadataImagesState.reading && !metadataImagesState.integrityFailed && !metadataImagesState.generationLost && !metadataImagesState.nativeBlocked &&
     !metadataImagesState.selectionIssue && !metadataImagesState.editIssue;
-  const localEditingLabel = nativeWorkflowAvailable || nativeMetadataAvailable || nativeVersionAvailable || nativeImagesAvailable ? 'Local file editing' : nativeSaveAvailable ? 'Configuration-only editing' : 'Read-only drafting';
+  const localEditingLabel = nativeWorkflowAvailable || nativeMetadataAvailable || nativeVersionAvailable || nativeImagesAvailable ? 'Local file editing' : nativeSaveAvailable ? 'Configuration-only editing' : 'Editing is not available on this platform in this release';
 
   const bootstrap = useCallback(async () => {
     const preparationError = installationPreparation.reconnectionError();
@@ -2738,7 +2738,7 @@ export function App() {
           <IOSRecovery state={iosArchiveState} controller={iosArchive} projectName={session?.project.name ?? null}
             operationProjectName={iosArchiveState.status?.operation ? workspace.projects[iosArchiveState.status.operation.context.projectId]?.project.name ?? null : null} onHelp={setHelp} />
           <AgentIOSRecoveryAccess state={iosArchiveState} controller={iosArchive} permission={agentIOSArchive} /></>}
-        <footer className="workspace-footer"><span><Icon name="shield" size={14} />Configuration is not verification.</span><span>{preview ? 'Illustration only · no engine connected' : 'Configuration desktop slice · not a completed release product'}</span></footer>
+        <footer className="workspace-footer"><span><Icon name="shield" size={14} />Configuration is not verification.</span><span>{preview ? 'Illustration only · no engine connected' : `Mobile Release Kit ${info?.appVersion ?? ''}`.trim()}</span></footer>
       </main>
     </div>
     <HelpDialog content={help} onClose={() => setHelp(null)} />

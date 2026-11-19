@@ -3,8 +3,8 @@
 //! Parsed DATA and the main-window sheet alone cannot authenticate a peer.
 use std::{mem::size_of, sync::Arc};
 
-const PARENT_WORK_NS: u64 = 110_000_000_000;
-const PARENT_HARD_NS: u64 = 120_000_000_000;
+const PARENT_WORK_NS: u64 = 290_000_000_000;
+const PARENT_HARD_NS: u64 = 300_000_000_000;
 // Same representable first-failure ceiling as the existing Android Signal.
 const MAX_RAW: u64 = (1_u64 << 61) - 1;
 

@@ -7537,7 +7537,10 @@ sys.exit(status)
                     "source/" + self.release_input: release_body, "remove-package-final/Remove.pkg": package,
                     "producer-root/Install.pkg": b"INERT prior Install package", "producer-root/producer.json": installed,
                     "producer-root/producer.sig": b"INERT prior signature", "input/install-inventory.json": inventory,
-                    "input/app/" + TOOL.REMOVER: program}
+                    "input/app/" + TOOL.REMOVER: program,
+                    "source/desktop/macos-installed-inputs/uninstaller/main.applescript": b"INERT applet source",
+                    "source/desktop/macos-installed-inputs/uninstaller/delete-data.sh": b"INERT data script"}
+                self.hidden = []
                 if candidate:
                     for old,new in (("producer-root/Install.pkg","Install.pkg"),("producer-root/producer.json","producer.json"),
                                     ("producer-root/producer.sig","producer.sig"),("input/install-inventory.json","install-inventory.json"),
@@ -7590,6 +7593,16 @@ sys.exit(status)
                 path = parent["path"] + "/" + name
                 module.need(path not in self.values, "DATA-exclusive-file")
                 self.values[path] = body; self.rosters[parent["path"]].add(name)
+                return {"fd": path, "path": path}
+            def recheck_directory(self, entry): module.need(entry["path"] in self.rosters, "DATA-directory")
+            def close(self, entry): entry["closed"] = True
+            def package_unlink(self, parent, name):
+                testcase.assertEqual((parent["path"].rsplit("/", 2)[-2:], name), ([module.UNINSTALLER_NAME, "Contents"], "Info.plist"))
+                del self.values[parent["path"] + "/" + name]; self.rosters[parent["path"]].discard(name)
+            def hide_image_sidecars(self, root, entries):
+                testcase.assertEqual((root["path"], [entry["path"].rsplit("/", 1)[-1] for entry in entries]),
+                    ("remove-producer-root", ["Remove.pkg", "remove-producer.json", "remove-producer.sig"]))
+                self.hidden.append(len(entries))
             def package_stager_io(self, name, args):
                 testcase.assertEqual(name, "remove-input")
                 testcase.assertEqual((args.output, args.package, args.remover), (self.work / "remove-emitter-input",
@@ -7638,6 +7651,29 @@ sys.exit(status)
                     for name, body in (("remove-producer.json", value), ("remove-producer.sig", signed)):
                         self.package_file({"path": "remove-producer-root"}, name, body)
                     output = TOOL.canonical(summary) + b"\n"
+                elif role == "uninstaller-compile":
+                    app = "remove-producer-root/" + module.UNINSTALLER_NAME
+                    testcase.assertEqual(argv, ["/usr/bin/osacompile", "-o", str(self.work / app),
+                                               str(self.work / "uninstaller-source/main.applescript")])
+                    testcase.assertEqual(self.values["uninstaller-source/main.applescript"], b"INERT applet source")
+                    self.rosters["remove-producer-root"].add(module.UNINSTALLER_NAME)
+                    self.rosters[app] = {"Contents"}
+                    self.rosters[app + "/Contents"] = {"Info.plist", "MacOS", "Resources"}
+                    self.rosters[app + "/Contents/Resources"] = {"Scripts"}
+                    self.values[app + "/Contents/Info.plist"] = module.plistlib.dumps({"CFBundleExecutable": "applet",
+                        "CFBundlePackageType": "APPL", "CFBundleIdentifier": "com.apple.ScriptEditor.id.applet",
+                        "NSAppleEventsUsageDescription": "INERT", "NSCameraUsageDescription": "INERT",
+                        "LSMinimumSystemVersionByArchitecture": {"arm64": "11.0"}})
+                elif role in ("uninstaller-sign", "uninstaller-verify"):
+                    app = str(self.work / "remove-producer-root" / module.UNINSTALLER_NAME)
+                    testcase.assertEqual(argv[-1], app)
+                    info = module.plistlib.loads(self.values["remove-producer-root/" + module.UNINSTALLER_NAME + "/Contents/Info.plist"])
+                    testcase.assertEqual((info["CFBundleIdentifier"], info["CFBundleShortVersionString"], info["LSMinimumSystemVersion"]),
+                                         (module.UNINSTALLER_IDENTIFIER, selected.package_version, "26.0"))
+                    testcase.assertFalse([key for key in info if key.endswith("UsageDescription") or key == "LSMinimumSystemVersionByArchitecture"])
+                    testcase.assertEqual(self.values["remove-producer-root/" + module.UNINSTALLER_NAME + "/Contents/Resources/delete-data.sh"],
+                                         b"INERT data script")
+                    testcase.assertIn("--timestamp" if role == "uninstaller-sign" else "--strict", argv)
                 self.calls.append({"role": role, "entered": True, "returned": True, "capturesSettled": True,
                     "returncode": 0, "stdoutSha256": TOOL.digest(output), "stderrSha256": TOOL.digest(b"")})
                 return CompletedProcess(argv, 0, output, b"")
@@ -7648,7 +7684,7 @@ sys.exit(status)
                 return {"DATA": True}
             @contextlib.contextmanager
             def credential_scope(self, purpose, **_options):
-                testcase.assertIn(purpose, ("producer", "distribution-image"))
+                testcase.assertIn(purpose, ("producer", "uninstaller", "distribution-image"))
                 yield
                 self.credential_calls.extend({"role": role, "entered": True, "returned": True, "settled": True, "status": 0}
                     for role in module.CREDENTIAL_ROLES[:17] + ("search-final", "default-after"))
@@ -7657,7 +7693,7 @@ sys.exit(status)
             def package_image(self, root, label):
                 testcase.assertEqual((root["path"], label), ("remove-producer-root", "distribution"))
                 with self.credential_scope("distribution-image"):
-                    for role in module.REMOVE_PACKAGE_ROLES[2:]: self.package_call(role, ["INERT", role])
+                    for role in module.REMOVE_PACKAGE_ROLES[5:]: self.package_call(role, ["INERT", role])
                 if self.fault == "late": self.now[0] += 990_000_000_000
                 if self.fault == "unexpected-installer": self.installer_entered = True
                 return {"file": "MobileReleaseKit-Remove.dmg", "bytes": 1, "sha256": "e" * 64}, self.work / "remove-distribution/MobileReleaseKit-Remove.dmg"
@@ -7750,15 +7786,16 @@ sys.exit(status)
                     self.assertEqual(operation.execute(),"e"*64)
                     self.assertEqual((operation.loads,operation.source_posts),(1,1))
                     self.assertEqual((operation.saved["source"],operation.saved["workflowSource"],operation.saved["imageSourceCommit"]),("b"*40,"b"*40,"a"*40))
-                    self.assertEqual(len(operation.dispatched),6)
+                    self.assertEqual(len(operation.dispatched),9)
+                    self.assertEqual(operation.hidden,[3])
                 else:
                     with self.assertRaises((module.Refused,RuntimeError)):operation.execute()
                     self.assertFalse(operation.saved["passed"])
                     if fault=="donor-changed":self.assertEqual(operation.dispatched,[])
                     if fault in ("product-emitter-graph","optimized-emitter-graph"):self.assertEqual(operation.dispatched,["producer-build"])
             self.assertFalse(operation.installer_entered or operation.mount_entered)
-        self.assertEqual(len(successful["originalCalls"]), 6)
-        self.assertEqual(len(successful["credentialOriginals"]), 41)
+        self.assertEqual(len(successful["originalCalls"]), 9)
+        self.assertEqual(len(successful["credentialOriginals"]), 60)
         arguments = dict(selection=selected, binding={"source": "a" * 40, "runId": "123", "runAttempt": "1"},
             package=package, descriptor=descriptor, signed=signed, expected_descriptor=descriptor,
             final_package_sha="f" * 64, release_body=release_body, profiles=(profile, service))
@@ -17029,7 +17066,7 @@ class MacInstallationMetadataData(unittest.TestCase):
         self.assertEqual(selected["packageVersion"], TOOL.PACKAGE_VERSION)
         self.assertEqual(selected["release"], TOOL.RELEASE)
         self.assertEqual(TOOL.HISTORICAL_SUPPLIER_RELEASE, "macos26-arm64-project-draft-01")
-        self.assertEqual(TOOL.RELEASE, "macos26-arm64-desktop-05")
+        self.assertEqual(TOOL.RELEASE, "macos26-arm64-desktop-06")
         # Current verification generation, not a predecessor or release approval.
         def source_data(relative, limit):
             path = source / relative
@@ -17042,17 +17079,17 @@ class MacInstallationMetadataData(unittest.TestCase):
         cargo = tomllib.loads(source_data("desktop/src-tauri/Cargo.toml", 16384).decode("utf-8"))
         tauri = json.loads(source_data("desktop/src-tauri/tauri.conf.json", 4096))
         self.assertEqual((cargo["package"]["name"], cargo["package"]["version"], tauri["version"]),
-                         ("mobile-release-kit-desktop", "0.1.5", "0.1.5"))
-        for target, name, release in ((TOOL.ARM_TARGET, "build-release.json", "macos26-arm64-desktop-05"),
-                                      (TOOL.INTEL_TARGET, "build-release-intel.json", "macos26-x86_64-desktop-05")):
+                         ("mobile-release-kit-desktop", "0.2.0", "0.2.0"))
+        for target, name, release in ((TOOL.ARM_TARGET, "build-release.json", "macos26-arm64-desktop-06"),
+                                      (TOOL.INTEL_TARGET, "build-release-intel.json", "macos26-x86_64-desktop-06")):
             row = TOOL.build_release_data(source_data("desktop/macos-installed-inputs/" + name, 4096), target=target)
-            self.assertEqual(row, {"schemaVersion": 1, "packageVersion": "0.1.5", "release": release})
+            self.assertEqual(row, {"schemaVersion": 1, "packageVersion": "0.2.0", "release": release})
         for relative in ("desktop/src-tauri/Cargo.lock", "desktop/helpers/macos-android-register/Cargo.lock",
                          "desktop/helpers/macos-desktop-image/Cargo.lock"):
             locked = tomllib.loads(source_data(relative, 256 * 1024).decode("utf-8"))
             roots = [row for row in locked["package"] if row["name"] == "mobile-release-kit-desktop"]
             self.assertEqual(len(roots), 1)
-            self.assertEqual(roots[0]["version"], "0.1.5")
+            self.assertEqual(roots[0]["version"], "0.2.0")
             self.assertNotIn("source", roots[0])
             self.assertNotIn("checksum", roots[0])
         # This is bounded SOURCE metadata comparison, not native xattr/input

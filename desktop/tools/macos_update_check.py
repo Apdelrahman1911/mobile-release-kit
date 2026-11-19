@@ -30,6 +30,7 @@ import os
 import plistlib
 import re
 import signal
+import stat
 import subprocess
 import sys
 import time
@@ -561,6 +562,33 @@ SHEET_JXA = """function run(argv) {
 }
 """
 LAUNCHER = Path("/Applications/Mobile Release Kit.app")
+REMOVAL_SIDECARS = ("Remove.pkg", "remove-producer.json", "remove-producer.sig")
+UNINSTALLER = "Uninstall Mobile Release Kit.app"
+UNINSTALLER_ID = "dev.mobile-release-kit.desktop.uninstaller"
+APP_IDS = ("dev.mobile-release-kit.desktop", "dev.mobile-release-kit.desktop.entry", "dev.mobile-release-kit.desktop.launcher")
+KEYCHAIN_SERVICES = ("dev.mobile-release-kit.desktop/vault/wrapping-key/v1",
+                     "dev.mobile-release-kit.desktop/local-release/key/v1",
+                     "dev.mobile-release-kit.desktop/local-release/checkpoint/v1")
+DECOY_SERVICE = "dev.mobile-release-kit.desktop.decoy/keep/v1"
+KEEP_LABEL = "Uninstall App (Keep My Data)"
+DELETE_LABEL = "Uninstall App & Delete All Data"
+DIALOG_JXA = """function run(argv) {
+  const se = Application('System Events');
+  const matches = se.processes.whose({bundleIdentifier: argv[0]});
+  if (matches.length < 1) return JSON.stringify({state: 'no-process'});
+  const wins = matches[0].windows();
+  if (wins.length < 1) return JSON.stringify({state: 'no-window'});
+  const w = wins[0];
+  const buttons = w.buttons().map(b => b.name());
+  const texts = w.staticTexts().map(t => { try { return t.value(); } catch (x) { return ''; } });
+  if (argv[1] === 'click') {
+    if (buttons.indexOf(argv[2]) < 0) return JSON.stringify({state: 'missing-button', buttons: buttons});
+    w.buttons.byName(argv[2]).click();
+    return JSON.stringify({state: 'clicked', buttons: buttons, texts: texts});
+  }
+  return JSON.stringify({state: 'dialog', buttons: buttons, texts: texts});
+}
+"""
 
 
 def removal_image(row, work, steps):
@@ -589,11 +617,85 @@ def removal_image(row, work, steps):
     mount = Path(mounts[0])
     package = mount / "Remove.pkg"
     need(package.is_file(), "removal-image-roster")
+    # #83/#51: the image shows only the uninstaller; the package and its two
+    # signed sidecars are present but hidden (UF_HIDDEN), never absent.
+    names = sorted(n for n in os.listdir(mount) if not n.startswith("."))
+    hidden = sorted(n for n in names if os.lstat(mount / n).st_flags & stat.UF_HIDDEN)
+    need(names == sorted([*REMOVAL_SIDECARS, UNINSTALLER]), "removal-image-roster")
+    need(hidden == sorted(REMOVAL_SIDECARS), "removal-image-hidden-sidecars")
+    app = mount / UNINSTALLER
+    p, r4 = run(["/usr/bin/codesign", "--verify", "--strict", "--deep", "-vv", str(app)], 120)
+    steps.append(dict(r4, role="uninstaller-codesign"))
+    need(p.returncode == 0, "uninstaller-codesign")
+    p, r5 = run(["/usr/bin/codesign", "-d", "-r-", str(app)], 60)
+    need(p.returncode == 0 and f'identifier "{UNINSTALLER_ID}"' in (p.stdout + p.stderr), "uninstaller-identifier")
+    p, r6 = run(["/usr/sbin/spctl", "-a", "-vv", "-t", "exec", str(app)], 120)
+    steps.append(dict(r6, role="uninstaller-gatekeeper"))
+    need(p.returncode == 0 and "Notarized Developer ID" in (p.stdout + p.stderr), "uninstaller-gatekeeper")
     p, r3 = run(["/usr/sbin/pkgutil", "--check-signature", str(package)], 120)
     steps.append(dict(r3, role="removal-package-signature"))
     need(p.returncode == 0 and "Developer ID Installer" in p.stdout and "trusted by the Apple notary service" in p.stdout,
          "removal-package-signature")
     return mount, sorted(os.listdir(mount))
+
+
+def live_remove(mount, work, evidence, steps, label):
+    """Open the installed app, run the mounted Remove.pkg with the standard
+    Installer and confirm only the app's own exact sheet; require Installer 0
+    and no app, launcher or process left. Returns the observations."""
+    out = {}
+    # The live route asks the running app to confirm; open it first.
+    p, r = run(["/usr/bin/open", str(APP)], 60)
+    steps.append(dict(r, role=f"{label}-launch"))
+    need(p.returncode == 0, f"{label}-launch-returned-nonzero")
+    started = time.monotonic()
+    pids = []
+    while time.monotonic() - started < 90 and not (pids and window_count(pids[0], work)):
+        time.sleep(2)
+        pids = payload_pids()
+    need(pids, f"{label}-app-not-running")
+    time.sleep(10)
+    script = work / "sheet.js"
+    script.write_text(SHEET_JXA)
+    log = open(evidence / f"{label}-installer.log", "w")
+    installer = subprocess.Popen(["/usr/bin/sudo", "-n", "/usr/sbin/installer", "-verbose", "-pkg",
+                                  str(mount / "Remove.pkg"), "-target", "/"], stdout=log, stderr=subprocess.STDOUT, text=True)
+    sheet, clicked_at = [], None
+    try:
+        deadline = time.monotonic() + 240
+        while time.monotonic() < deadline and installer.poll() is None:
+            live = payload_pids()
+            if live and clicked_at is None:
+                q = subprocess.run(["/usr/bin/osascript", "-l", "JavaScript", str(script), str(live[0]), "probe"],
+                                   capture_output=True, text=True, timeout=30)
+                state_text = (q.stdout.strip() or ("error:" + q.stderr.strip()[-160:]))
+                if not sheet or sheet[-1] != state_text:
+                    sheet.append(state_text)
+                if state_text == "present":
+                    subprocess.run(["/usr/sbin/screencapture", "-x", str(evidence / f"screen-{label}-sheet.png")],
+                                   capture_output=True, timeout=60)
+                    q = subprocess.run(["/usr/bin/osascript", "-l", "JavaScript", str(script), str(live[0]), "click"],
+                                       capture_output=True, text=True, timeout=30)
+                    sheet.append(q.stdout.strip() or ("error:" + q.stderr.strip()[-160:]))
+                    if q.stdout.strip() == "clicked":
+                        clicked_at = time.monotonic()
+            time.sleep(2)
+        if installer.poll() is None:
+            installer.kill()
+            out["timedOut"] = True
+        installer.wait(timeout=60)
+    finally:
+        log.close()
+        out["sheet"] = sheet[-12:]
+    out["returncode"] = installer.returncode
+    steps.append({"argv": ["installer", "-pkg", "Remove.pkg"], "returncode": installer.returncode, "role": label})
+    need(clicked_at is not None, "removal-sheet-not-confirmed")
+    need(installer.returncode == 0, "remove-returned-nonzero")
+    time.sleep(5)
+    remaining = {"app": APP.exists(), "launcher": LAUNCHER.exists(), "process": bool(payload_pids())}
+    out["remaining"] = remaining
+    need(not any(remaining.values()), "removal-left-app-objects")
+    return out
 
 
 def remove_check(selection, work, evidence, steps, result):
@@ -611,61 +713,13 @@ def remove_check(selection, work, evidence, steps, result):
          == (row["release"], row["packageVersion"], row["packageSha256"]), "remove-baseline-identity")
     seeded = seed_user_data()
     result["seededFiles"] = len(seeded)
-    # The live route asks the running app to confirm; open it first.
-    p, r = run(["/usr/bin/open", str(APP)], 60)
-    steps.append(dict(r, role="remove-launch"))
-    need(p.returncode == 0, "remove-launch-returned-nonzero")
-    started = time.monotonic()
-    pids = []
-    while time.monotonic() - started < 90 and not (pids and window_count(pids[0], work)):
-        time.sleep(2)
-        pids = payload_pids()
-    need(pids, "remove-app-not-running")
-    time.sleep(10)
-    script = work / "sheet.js"
-    script.write_text(SHEET_JXA)
-    log = open(evidence / "remove-installer.log", "w")
-    installer = subprocess.Popen(["/usr/bin/sudo", "-n", "/usr/sbin/installer", "-verbose", "-pkg",
-                                  str(mount / "Remove.pkg"), "-target", "/"], stdout=log, stderr=subprocess.STDOUT, text=True)
-    sheet, clicked_at = [], None
-    try:
-        deadline = time.monotonic() + 240
-        while time.monotonic() < deadline and installer.poll() is None:
-            live = payload_pids()
-            if live and clicked_at is None:
-                q = subprocess.run(["/usr/bin/osascript", "-l", "JavaScript", str(script), str(live[0]), "probe"],
-                                   capture_output=True, text=True, timeout=30)
-                state_text = (q.stdout.strip() or ("error:" + q.stderr.strip()[-160:]))
-                if not sheet or sheet[-1] != state_text:
-                    sheet.append(state_text)
-                if state_text == "present":
-                    subprocess.run(["/usr/sbin/screencapture", "-x", str(evidence / "screen-removal-sheet.png")],
-                                   capture_output=True, timeout=60)
-                    q = subprocess.run(["/usr/bin/osascript", "-l", "JavaScript", str(script), str(live[0]), "click"],
-                                       capture_output=True, text=True, timeout=30)
-                    sheet.append(q.stdout.strip() or ("error:" + q.stderr.strip()[-160:]))
-                    if q.stdout.strip() == "clicked":
-                        clicked_at = time.monotonic()
-            time.sleep(2)
-        if installer.poll() is None:
-            installer.kill()
-            result["removeTimedOut"] = True
-        installer.wait(timeout=60)
-    finally:
-        log.close()
-        result["removalSheet"] = sheet[-12:]
-    result["removeReturn"] = installer.returncode
-    steps.append({"argv": ["installer", "-pkg", "Remove.pkg"], "returncode": installer.returncode, "role": "remove"})
-    need(clicked_at is not None, "removal-sheet-not-confirmed")
-    need(installer.returncode == 0, "remove-returned-nonzero")
-    time.sleep(5)
-    remaining = {"app": APP.exists(), "launcher": LAUNCHER.exists(), "process": bool(payload_pids())}
-    result["afterRemoval"] = remaining
-    need(not any(remaining.values()), "removal-left-app-objects")
+    out = live_remove(mount, work, evidence, steps, "remove")
+    result.update(removalSheet=out["sheet"], removeReturn=out["returncode"], afterRemoval=out["remaining"])
+    if out.get("timedOut"):
+        result["removeTimedOut"] = True
     kept = manifest()
     result["userDataPreservedByRemoval"] = all(kept.get(k) == v for k, v in seeded.items())
     need(result["userDataPreservedByRemoval"], "user-data-changed-by-removal")
-    subprocess.run(["/usr/bin/hdiutil", "detach", str(mount)], capture_output=True, timeout=120)
     # Reinstall after confirmed removal with the matching installer.
     rc = install("reinstall", folder, steps, evidence=evidence)
     result["reinstallReturn"] = rc
@@ -676,6 +730,203 @@ def remove_check(selection, work, evidence, steps, result):
          == (row["release"], row["packageVersion"], row["packageSha256"]), "reinstall-identity")
     need(all(manifest().get(k) == v for k, v in seeded.items()), "user-data-changed-by-reinstall")
     result["launchAfterReinstall"] = launch_smoke("after-reinstall", work, evidence, steps)
+    try:
+        uninstaller_check(mount, work, evidence, steps, result)
+    finally:
+        subprocess.run(["/usr/bin/hdiutil", "detach", "-force", str(mount)], capture_output=True, timeout=120)
+
+
+def home_path(relative):
+    return Path.home() / relative
+
+
+DECOY_FILES = ("Library/Application Support/dev.mobile-release-kit.desktop.decoy/keep.txt",
+               "Library/Caches/dev.mobile-release-kit.desktop-other/keep.txt",
+               "Projects/MRKDecoyProject/README.md",
+               "Projects/MRKDecoyProject/.mobile-release-kit/state.json",
+               ".config/gh/mrk-decoy.txt",
+               "MRKOutside/keep.txt",
+               "MRKOutsideData/keep.txt")
+# Exact per-user app locations the "delete all data" choice must remove.
+DELETE_TARGETS = ("Library/Caches/dev.mobile-release-kit.desktop/fixture.bin",
+                  "Library/WebKit/dev.mobile-release-kit.desktop/fixture.bin",
+                  "Library/HTTPStorages/dev.mobile-release-kit.desktop.binarycookies",
+                  "Library/Saved Application State/dev.mobile-release-kit.desktop.savedState/fixture.bin",
+                  "Library/Logs/dev.mobile-release-kit.desktop/fixture.log",
+                  "Library/Application Support/dev.mobile-release-kit.desktop.entry/fixture.json")
+LINKED_TARGET = "Library/Caches/dev.mobile-release-kit.desktop.launcher"
+
+
+def plant_decoys():
+    for relative in DECOY_FILES:
+        path = home_path(relative)
+        need(not path.exists(), "decoy-preexists")
+        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        path.write_bytes(os.urandom(512))
+    return decoy_state()
+
+
+def decoy_state():
+    return {relative: digest(home_path(relative)) if home_path(relative).is_file() else None for relative in DECOY_FILES}
+
+
+def keychain_has(service):
+    return subprocess.run(["/usr/bin/security", "find-generic-password", "-s", service],
+                          capture_output=True, timeout=30).returncode == 0
+
+
+def installer_running():
+    return subprocess.run(["/usr/bin/pgrep", "-x", "Installer"], capture_output=True, timeout=30).returncode == 0
+
+
+def uninstaller_run(mount, work, evidence, label, answers, timeout=240):
+    """Open the mounted uninstaller as the owner would and answer its dialogs
+    in order. An answer is a button name, or None to quit Installer once the
+    uninstaller has opened it (Installer is quit before any step runs, so
+    nothing is removed by it). Returns every dialog seen."""
+    script = work / "dialog.js"
+    script.write_text(DIALOG_JXA)
+
+    def ask(*args):
+        q = subprocess.run(["/usr/bin/osascript", "-l", "JavaScript", str(script), UNINSTALLER_ID, *args],
+                           capture_output=True, text=True, timeout=30)
+        try:
+            return json.loads(q.stdout)
+        except ValueError:
+            return {"state": "error", "detail": q.stderr.strip()[-160:]}
+
+    need(not installer_running(), f"{label}-installer-already-running")
+    p, _ = run(["/usr/bin/open", "-n", str(mount / UNINSTALLER)], 60)
+    need(p.returncode == 0, f"{label}-open-returned-{p.returncode}")
+    seen, deadline = [], time.monotonic() + timeout
+    for step, answer in enumerate(answers):
+        if answer is None:
+            while time.monotonic() < deadline and not installer_running():
+                time.sleep(1)
+            need(installer_running(), f"{label}-installer-not-opened")
+            time.sleep(5)
+            subprocess.run(["/usr/sbin/screencapture", "-x", str(evidence / f"screen-{label}-installer.png")],
+                           capture_output=True, timeout=60)
+            subprocess.run(["/usr/bin/osascript", "-e", 'tell application id "com.apple.installer" to quit'],
+                           capture_output=True, timeout=30)
+            quit_by = time.monotonic() + 15
+            while installer_running() and time.monotonic() < quit_by:
+                time.sleep(1)
+            if installer_running():
+                subprocess.run(["/usr/bin/pkill", "-x", "Installer"], capture_output=True, timeout=30)
+            seen.append({"installer": "quit"})
+            continue
+        # An answer may name a second button that must be on the same dialog,
+        # so a shared "Cancel" is never clicked on the wrong one.
+        answer, also = answer if isinstance(answer, tuple) else (answer, answer)
+        state, wanted = {}, lambda st: st.get("state") == "dialog" and {answer, also} <= set(st.get("buttons", []))
+        while time.monotonic() < deadline:
+            state = ask("probe")
+            if wanted(state):
+                break
+            time.sleep(1)
+        need(wanted(state), f"{label}-dialog-{step}-missing")
+        subprocess.run(["/usr/sbin/screencapture", "-x", str(evidence / f"screen-{label}-{step}.png")],
+                       capture_output=True, timeout=60)
+        home = str(Path.home())
+        seen.append({"buttons": state["buttons"], "texts": [t.replace(home, "~") for t in state.get("texts", [])],
+                     "answer": answer})
+        clicked = ask("click", answer)
+        need(clicked.get("state") == "clicked", f"{label}-dialog-{step}-click")
+        closed_by = time.monotonic() + 15
+        while time.monotonic() < closed_by:
+            after = ask("probe")
+            if (after.get("buttons"), after.get("texts")) != (state.get("buttons"), state.get("texts")):
+                break
+            time.sleep(0.5)
+    while time.monotonic() < deadline and ask("probe").get("state") != "no-process":
+        time.sleep(1)
+    need(ask("probe").get("state") == "no-process", f"{label}-uninstaller-did-not-exit")
+    need(not installer_running(), f"{label}-installer-left-running")
+    return seen
+
+
+def dialog_says(seen, fragment):
+    return any(fragment in text for row in seen for text in row.get("texts", []))
+
+
+def uninstaller_check(mount, work, evidence, steps, result):
+    """#83: the Remove image's signed uninstaller. While the app is installed:
+    cancelling either choice, or quitting Installer, removes and deletes
+    nothing, and the data script refuses. After a second confirmed removal,
+    "Delete All Data" removes only the app's own exact per-user locations and
+    keychain items; links, look-alike siblings, projects and other files stay."""
+    out = result["uninstaller"] = {}
+    script = mount / UNINSTALLER / "Contents/Resources/delete-data.sh"
+    need(script.is_file(), "uninstaller-data-script-missing")
+    decoys = plant_decoys()
+    before = manifest()
+    need(before, "uninstaller-no-user-data")
+
+    def unchanged(tag):
+        need(APP.exists(), f"{tag}-app-removed")
+        need(manifest() == before, f"{tag}-user-data-changed")
+        need(decoy_state() == decoys, f"{tag}-decoy-changed")
+
+    seen = uninstaller_run(mount, work, evidence, "uninstall-cancel-delete",
+                           [DELETE_LABEL, ("Cancel", "Delete All Data")])
+    out["cancelAtDeleteConfirmation"] = seen
+    need(sorted(seen[0]["buttons"]) == sorted(["Cancel", DELETE_LABEL, KEEP_LABEL]), "uninstaller-choice-buttons")
+    unchanged("uninstall-cancel-delete")
+    out["cancelBeforeInstallerKeep"] = uninstaller_run(mount, work, evidence, "uninstall-cancel-keep",
+                                                       [KEEP_LABEL, ("Cancel", "Continue")])
+    unchanged("uninstall-cancel-keep")
+    # Failure recovery: Installer quit without removing; nothing may be deleted.
+    seen = uninstaller_run(mount, work, evidence, "uninstall-installer-quit",
+                           [DELETE_LABEL, "Delete All Data", "Continue", None, "OK"])
+    out["installerQuitWhileInstalled"] = seen
+    need(dialog_says(seen, "still installed, so none of your data was deleted"), "uninstall-installer-quit-message")
+    unchanged("uninstall-installer-quit")
+    p, r = run(["/bin/sh", str(script)], 60)
+    steps.append(dict(r, role="delete-data-while-installed"))
+    out["dataScriptWhileInstalled"] = p.returncode
+    need(p.returncode == 65, "delete-data-not-refused-while-installed")
+    unchanged("delete-data-while-installed")
+
+    second = live_remove(mount, work, evidence, steps, "remove-again")
+    out["secondRemoval"] = second
+    need(manifest() == before, "user-data-changed-by-second-removal")
+
+    # Exact app locations, a link at one of them, a link inside the app data,
+    # and keychain items: the app's exact services plus a look-alike decoy.
+    for relative in DELETE_TARGETS:
+        path = home_path(relative)
+        path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        path.write_bytes(os.urandom(256))
+    link = home_path(LINKED_TARGET)
+    need(not link.exists() and not link.is_symlink(), "linked-target-preexists")
+    link.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+    link.symlink_to(home_path("MRKOutside"))
+    (USER_DATA / "link-out").symlink_to(home_path("MRKOutsideData"))
+    subprocess.run(["/usr/bin/defaults", "write", APP_IDS[0], "mrkFixture", "-bool", "YES"], check=True, timeout=30)
+    out["appKeychainItemsBefore"] = {svc: keychain_has(svc) for svc in KEYCHAIN_SERVICES}
+    for svc in (*KEYCHAIN_SERVICES, DECOY_SERVICE):
+        subprocess.run(["/usr/bin/security", "add-generic-password", "-A", "-a", "mrk-fixture", "-s", svc,
+                        "-w", os.urandom(16).hex()], check=True, capture_output=True, timeout=30)
+    seen = uninstaller_run(mount, work, evidence, "uninstall-delete",
+                           [DELETE_LABEL, "Delete All Data", "Continue", None, "OK"])
+    out["deleteAllData"] = seen
+    gone = {relative: not home_path(relative).exists() for relative in DELETE_TARGETS}
+    gone["Library/Application Support/dev.mobile-release-kit.desktop"] = not USER_DATA.exists() and not USER_DATA.is_symlink()
+    gone["Library/Preferences/dev.mobile-release-kit.desktop.plist"] = not home_path(
+        "Library/Preferences/dev.mobile-release-kit.desktop.plist").exists()
+    out["deleted"] = gone
+    out["keychainAfter"] = {svc: keychain_has(svc) for svc in (*KEYCHAIN_SERVICES, DECOY_SERVICE)}
+    out["linkKept"] = link.is_symlink()
+    out["decoysUnchanged"] = decoy_state() == decoys
+    subprocess.run(["/usr/bin/security", "delete-generic-password", "-s", DECOY_SERVICE], capture_output=True, timeout=30)
+    need(all(gone.values()), "delete-all-data-left-app-data")
+    need(not any(out["keychainAfter"][svc] for svc in KEYCHAIN_SERVICES), "delete-all-data-left-keychain-item")
+    need(out["keychainAfter"][DECOY_SERVICE], "delete-all-data-removed-decoy-keychain-item")
+    need(out["linkKept"] and out["decoysUnchanged"], "delete-all-data-touched-other-files")
+    need(dialog_says(seen, "was removed, but some data was kept") and dialog_says(seen, "kept (link, not followed)"),
+         "delete-all-data-did-not-report-kept-link")
+    need(not APP.exists() and not LAUNCHER.exists(), "delete-all-data-app-present")
 
 
 if __name__ == "__main__":

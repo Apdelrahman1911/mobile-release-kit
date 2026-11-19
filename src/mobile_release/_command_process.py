@@ -1043,6 +1043,11 @@ def _fence_fields(content: bytes) -> dict[str, Any]:
 # Command-local lifecycle.  These roles deliberately do not depend on the
 # profile executor's private state machine or its scratch/validator policy.
 POLL = 0.01
+# Bounded early polling for waits that normally settle within milliseconds
+# (a child that already closed its pipes, a killed group). After QUICK_SPINS
+# blind passes the original POLL applies, so a stuck peer never spins (#17).
+QUICK_POLL = 0.001
+QUICK_SPINS = 50
 HELPER_OK, HELPER_FAILED, HELPER_UNKNOWN = 0, 2, 70
 
 
@@ -1436,12 +1441,12 @@ class _TaskSlot:
 
 
 def _pause(cutoff: int, *, readers: tuple[native.FDLease, ...] = (),
-           writers: tuple[native.FDLease, ...] = ()) -> None:
+           writers: tuple[native.FDLease, ...] = (), quick: bool = False) -> None:
     left = (cutoff - time.monotonic_ns()) / NANOSECOND
     if left <= 0:
         return
     if not readers and not writers:
-        time.sleep(min(POLL, left))
+        time.sleep(min(QUICK_POLL if quick else POLL, left))
         return
     # Readiness is only a hint to repeat the original checked nonblocking IO.
     # poll owns no descriptor and, unlike select, has no FD_SETSIZE boundary.
@@ -1457,6 +1462,11 @@ def _pause(cutoff: int, *, readers: tuple[native.FDLease, ...] = (),
     left = (cutoff - time.monotonic_ns()) / NANOSECOND
     if left > 0:
         readiness.poll(int(min(POLL, left) * 1000))
+
+
+def _live_readers(*pairs: tuple[native.FDLease, bool]) -> tuple[native.FDLease, ...]:
+    """Readiness hints only: still-open readers whose EOF is not yet observed."""
+    return tuple(reader for reader, eof in pairs if not eof and reader.state == "OPEN")
 
 
 class _Wire:
@@ -1908,6 +1918,7 @@ def _wait_original(context: _Context, child: native.Child, pump: Callable[[], No
     # All caller-owned numeric routes MUST be permanently retired first. A
     # genuine pid0 permits another original wait, never another signal/probe.
     child.retire_numeric()
+    spins = 0
     while time.monotonic_ns() < context.cutoff():
         try:
             receipt = child.poll_wait()
@@ -1921,7 +1932,8 @@ def _wait_original(context: _Context, child: native.Child, pump: Callable[[], No
             pump()
         except BaseException as error:
             context.record(error)
-        _pause(context.cutoff())
+        spins += 1
+        _pause(context.cutoff(), quick=spins <= QUICK_SPINS)
     context.cleanup_unknown = True
     return None
 
@@ -2599,13 +2611,20 @@ class _Anchor:
         # W numeric signal/probe authority is retired BEFORE the very first
         # potentially consuming wait, including a genuine pid0 poll.
         self.child.retire_numeric()
+        spins = 0
         while self.wait is None or not self.downstream.eof:
             ctx.check()
             self._worker_frames()
             if self.wait is None:
                 self.wait = self.child.poll_wait()
             _check_stop(ctx, parent)
-            _pause(ctx.run)
+            if self.wait is not None and self.downstream.eof:
+                break
+            # W's frames and EOF wake this wait; only W's final reap polls,
+            # briefly fast and then at the original POLL for a long-lived tool.
+            readers = _live_readers((self.downstream.reader, self.downstream.eof))
+            spins = 0 if readers else spins + 1
+            _pause(ctx.run, readers=readers, quick=not readers and spins <= QUICK_SPINS)
         _require(self.armed and not self.worker_protocol_failed and not self.downstream.poisoned)
 
     def _local_producers(self) -> bool:
@@ -2935,7 +2954,8 @@ class _Custodian:
             self._pump()
             _check_stop(ctx, parent)
             _require(not self.downstream.eof or self.anchor_work is not None)
-            _pause(ctx.run)
+            if self.anchor_work is None:
+                _pause(ctx.run, readers=_live_readers((self.downstream.reader, self.downstream.eof)))
 
     def _stop_anchor(self) -> None:
         wire = self.downstream
@@ -2995,16 +3015,19 @@ class _Custodian:
                 ctx.record(error)
                 if wire.poisoned:
                     break
-            _pause(ctx.cutoff())
+            if not wire.eof and self.anchor_work is None:
+                _pause(ctx.cutoff(), readers=_live_readers((wire.reader, wire.eof)))
         try:
             self.group.terminate()
+            spins = 0
             while not self.group.probe() and time.monotonic_ns() < ctx.cutoff():
                 try:
                     self._pump()
                 except BaseException as error:
                     self.anchor_protocol_failed = True
                     ctx.record(error)
-                _pause(ctx.cutoff())
+                spins += 1
+                _pause(ctx.cutoff(), quick=spins <= QUICK_SPINS)
         except BaseException as error:
             ctx.record(error, unknown=True)
         finally:
@@ -3016,7 +3039,8 @@ class _Custodian:
                 self.group_done_sent = True
                 while not wire.eof and time.monotonic_ns() < ctx.cutoff():
                     self._pump()
-                    _pause(ctx.cutoff())
+                    if not wire.eof:
+                        _pause(ctx.cutoff(), readers=_live_readers((wire.reader, wire.eof)))
             except BaseException as error:
                 self.anchor_protocol_failed = True
                 ctx.record(error)
@@ -3033,9 +3057,9 @@ class _Custodian:
         self.wait = _wait_original(ctx, self.child, self._pump)
         while not all(self.source_eof) and time.monotonic_ns() < ctx.cutoff():
             self._source_io()
-            if self.source_failed:
+            if self.source_failed or all(self.source_eof):
                 break
-            _pause(ctx.cutoff())
+            _pause(ctx.cutoff(), readers=_live_readers(*zip(self.source_readers, self.source_eof)))
         if wire is not None:
             wire.close_writer()
             ctx.close(wire.reader)

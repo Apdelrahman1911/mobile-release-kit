@@ -286,8 +286,8 @@ or product readiness. The separate evidence and signing limitations below remain
 The installed app is
 `/Library/Application Support/MobileReleaseKit/Mobile Release Kit.app`.
 The current ARM64 runtime path is
-`/Library/Application Support/MobileReleaseKit/versions/macos26-arm64-desktop-05/runtime`
-for package version `0.1.5`. See `macos-install-update-remove.md` for the
+`/Library/Application Support/MobileReleaseKit/versions/macos26-arm64-desktop-06/runtime`
+for package version `0.2.0`. See `macos-install-update-remove.md` for the
 current install, update and removal routes; older `0.1.1` / `desktop-01`
 wording below is historical.
 The historical supplier archive keeps its original label; it does not select the

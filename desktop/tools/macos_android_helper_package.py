@@ -64,8 +64,13 @@ SAME_PACKAGE_PHASE = "same-package-noop"
 SAME_PACKAGE_ROLES = ("distribution-attach", "installer", "distribution-detach")
 PHASES = ("prepare", "verify-before", "verify-after", "package-install", "package-remove", SAME_PACKAGE_PHASE, UPDATE_PHASE, XCODE_SETUP_VERIFY) + APP_ABSENCE_PHASES
 REMOVE_PHASES = ("finalize-remove-package", "package-remove", "finalize-remove-image")
-REMOVE_PACKAGE_ROLES = ("producer-build", "producer-emitter", "distribution-create", "distribution-sign",
-                        "distribution-verify-signature", "distribution-verify-image")
+REMOVE_PACKAGE_ROLES = ("producer-build", "producer-emitter", "uninstaller-compile", "uninstaller-sign", "uninstaller-verify",
+                        "distribution-create", "distribution-sign", "distribution-verify-signature", "distribution-verify-image")
+# #83: the Remove image's one visible item. It asks keep-data/delete-data, runs
+# the unchanged signed Remove.pkg in Installer and, only after confirmed
+# removal, deletes the app's own per-user data as the user.
+UNINSTALLER_NAME = "Uninstall Mobile Release Kit.app"
+UNINSTALLER_IDENTIFIER = "dev.mobile-release-kit.desktop.uninstaller"
 PRODUCER_PROFILE = "desktop/packaging/macos-install-producer-signing.profile"
 ARM_TARGET = "aarch64-apple-darwin"
 INTEL_TARGET = "x86_64-apple-darwin"
@@ -1283,6 +1288,23 @@ def digest(value):
 def signature(info):
     return (info.st_dev, info.st_ino, info.st_mode, info.st_nlink,
             info.st_uid, info.st_gid, info.st_size, info.st_mtime_ns, info.st_ctime_ns)
+
+
+# #51: a disk image shows only its package. The signed producer sidecars keep
+# their names, bytes and 0444 mode beside it; Finder merely hides them.
+UF_HIDDEN = 0x00008000
+_DARWIN_FCHFLAGS = None
+
+
+def _fchflags(fd, flags):
+    global _DARWIN_FCHFLAGS
+    if _DARWIN_FCHFLAGS is None:
+        import ctypes
+        call = ctypes.CDLL("/usr/lib/libSystem.B.dylib", use_errno=True).fchflags
+        call.argtypes = [ctypes.c_int, ctypes.c_uint]
+        call.restype = ctypes.c_int
+        _DARWIN_FCHFLAGS = call
+    need(_DARWIN_FCHFLAGS(fd, flags) == 0, "image-sidecar-hide")
 
 
 class _CreatedDmgXattrs:
@@ -3036,7 +3058,7 @@ def signing_requirement(identity, identifier):
          and (store_identifier or identifier in (IDENTIFIER, IDENTIFIER + ".image", "dev.mobile-release-kit.desktop.distribution",
                             "dev.mobile-release-kit.desktop.observation", "dev.mobile-release-kit.desktop.remove-distribution", PYTHON_IDENTIFIER,
                              "dev.mobile-release-kit.desktop", "dev.mobile-release-kit.desktop.entry",
-                             "dev.mobile-release-kit.desktop.remove", INSTALLED_CLI_IDENTIFIER, LAUNCHER_IDENTIFIER, XCODE_SETUP_IDENTIFIER, *SUPPORT_IDENTIFIERS, *[row[1] for row in TOOL_FIXED.values()])), "fixed-signing-requirement")
+                             "dev.mobile-release-kit.desktop.remove", UNINSTALLER_IDENTIFIER, INSTALLED_CLI_IDENTIFIER, LAUNCHER_IDENTIFIER, XCODE_SETUP_IDENTIFIER, *SUPPORT_IDENTIFIERS, *[row[1] for row in TOOL_FIXED.values()])), "fixed-signing-requirement")
     return ('identifier "' + identifier + '" and anchor apple generic'
             ' and certificate 1[field.1.2.840.113635.100.6.2.6] exists'
             ' and certificate leaf[field.1.2.840.113635.100.6.1.13] exists'
@@ -4193,6 +4215,7 @@ class Operation:
         pairs = {"python": PYTHON_ROLES[:2], "resident-image": ("resident-image-sign", "resident-image-verify-signed"),
                  "helper": ("sign", "verify-signed"), "producer": ("producer-emitter",),
                  "installer": ("final-package-sign",), "observer-program": ("program-sign", "program-verify"), **IMAGE_CREDENTIAL_ROLES,
+                 "uninstaller": ("uninstaller-sign", "uninstaller-verify"),
                  **{phase: (phase, phase + "-verify") for phase in SIGNING_PHASES + TOOL_SIGNING_PHASES},
                  **{role: (role + "-sign", role + "-verify") for role in ("bundletool-aapt2", "bundletool-jna", "agp-aapt2")}}
         if self.store_signing is not None:
@@ -4200,7 +4223,7 @@ class Operation:
         need((purpose == "sign-store-runtime" and self.phase in STORE_SIGNING_PHASES and self.store_signing is not None
               or purpose == "python" and self.phase in PYTHON_PHASES or purpose in ("resident-image", "helper") and self.phase == "prepare"
               or purpose in ("producer", "distribution-image", "observation-image") and self.phase == "package-install"
-              or purpose in ("producer", "distribution-image") and self.phase == "package-remove"
+              or purpose in ("producer", "uninstaller", "distribution-image") and self.phase == "package-remove"
               or purpose == "installer" and self.phase in FINAL_PACKAGE_PHASES
               or self.phase == "prepare-removal-observers" and purpose in ("observer-program", "installer", "producer", "distribution-image")
               or purpose in SIGNING_PHASES + TOOL_SIGNING_PHASES and self.phase == purpose
@@ -5481,7 +5504,7 @@ class Operation:
         self.package_finalization_input(entry, package)
         self.final_image_inputs.extend(self.package_outputs)
         root = self.directory(self.work_entry, "remove-producer-root", "final-removal-producer")
-        names = {"Remove.pkg", "remove-producer.json", "remove-producer.sig"}
+        names = {"Remove.pkg", "remove-producer.json", "remove-producer.sig", UNINSTALLER_NAME}
         need(set(os.listdir(root["fd"])) == names, "final-removal-producer-roster")
         self.final_image_roots.append((root, names))
         need(retained(root, "Remove.pkg", self.stager.MAX_BYTES, (0o444,))[1] == package, "final-removal-package-copy")
@@ -7344,8 +7367,8 @@ class Operation:
              and distribution.get("groupEndpointMet") is True and distribution.get("installerEntered") is False
              and distribution.get("removalExecuted") is False, "removal-target-package-preparation")
         root = self.directory(self.work_entry, "remove-producer-root", "removal-target-three-originals")
-        need(set(self.removal_names(root, 3)) == set(REMOVAL_INPUT_NAMES), "removal-target-preparation-roster")
-        self.package_roots.append((root, set(REMOVAL_INPUT_NAMES)))
+        need(set(self.removal_names(root, 4)) == {*REMOVAL_INPUT_NAMES, UNINSTALLER_NAME}, "removal-target-preparation-roster")
+        self.package_roots.append((root, {*REMOVAL_INPUT_NAMES, UNINSTALLER_NAME}))
         files, bodies = {}, {}
         for leaf in REMOVAL_INPUT_NAMES:
             limit = self.stager.MAX_BYTES if leaf == "Remove.pkg" else 16384 if leaf.endswith("json") else 512
@@ -8830,6 +8853,78 @@ class Operation:
         self.package_clock()
         return entry
 
+    def hide_image_sidecars(self, root, entries):
+        """Set only UF_HIDDEN on our own just-emitted sidecars before imaging."""
+        need(len(entries) in (2, 3) and all(entry["parent_entry"] is root for entry in entries), "image-sidecar-roster")
+        self.recheck_directory(root)
+        for entry in entries:
+            self.package_clock()
+            before = entry["identity"]
+            held = os.fstat(entry["fd"])
+            need(signature(held) == before == signature(os.stat(entry["name"], dir_fd=entry["parent"], follow_symlinks=False))
+                 and held.st_flags == 0 and stat.S_IMODE(held.st_mode) == 0o444, "image-sidecar-hide-original")
+            _fchflags(entry["fd"], UF_HIDDEN)
+            after = os.fstat(entry["fd"])
+            # fchflags changes only ctime; identity, bytes and mode stay exact.
+            need(signature(after)[:8] == before[:8] and after.st_flags == UF_HIDDEN
+                 and signature(after) == signature(os.stat(entry["name"], dir_fd=entry["parent"], follow_symlinks=False)),
+                 "image-sidecar-hide-identity")
+            entry["identity"] = signature(after)
+        self.recheck_directory(root)
+
+    def package_uninstaller(self, root, selection):
+        """#83: compile, describe and sign the Remove image's uninstaller app."""
+        need(self.phase == "package-remove" and self.removal and self.signing is not None
+             and set(os.listdir(root["fd"])) == {"Remove.pkg", "remove-producer.json", "remove-producer.sig"}, "uninstaller-purpose")
+        self.stage = "remove-uninstaller"
+        bodies = {}
+        for name, limit in (("main.applescript", 32 * 1024), ("delete-data.sh", 16 * 1024)):
+            entry = self.source_original("desktop/macos-installed-inputs/uninstaller/" + name, "source-uninstaller-" + name, limit)
+            bodies[name] = self.read(entry)
+            self.package_sources.append((entry, bodies[name]))
+        source_root = self.package_directory("uninstaller-source")
+        self.package_file(source_root, "main.applescript", bodies["main.applescript"])
+        self.package_roots.append((source_root, {"main.applescript"}))
+        app = self.work / "remove-producer-root" / UNINSTALLER_NAME
+        self.package_call("uninstaller-compile", ["/usr/bin/osacompile", "-o", str(app),
+            str(self.work / "uninstaller-source" / "main.applescript")], timeout=120)
+        bundle = self.directory(root, UNINSTALLER_NAME, "uninstaller-bundle")
+        contents = self.directory(bundle, "Contents", "uninstaller-contents")
+        need({"Info.plist", "MacOS", "Resources"} <= set(os.listdir(contents["fd"])), "uninstaller-applet-roster")
+        resources = self.directory(contents, "Resources", "uninstaller-resources")
+        need("delete-data.sh" not in os.listdir(resources["fd"]), "uninstaller-resource-collision")
+        self.package_file(resources, "delete-data.sh", bodies["delete-data.sh"])
+        info_entry = self.original(contents, "Info.plist", "uninstaller-applet-info", 64 * 1024, (0o644, 0o600, 0o444))
+        info = plistlib.loads(self.read(info_entry))
+        need(type(info) is dict and info.get("CFBundleExecutable") == "applet"
+             and info.get("CFBundlePackageType") == "APPL", "uninstaller-applet-shape")
+        self.close(info_entry)
+        need(info_entry["closed"], "uninstaller-info-close")
+        # The applet asks for none of the template's privacy-protected data.
+        for key in [key for key in info if key.endswith("UsageDescription")] + ["LSMinimumSystemVersionByArchitecture"]:
+            info.pop(key, None)
+        info.update(CFBundleIdentifier=UNINSTALLER_IDENTIFIER, CFBundleName="Uninstall Mobile Release Kit",
+                    CFBundleDisplayName="Uninstall Mobile Release Kit", CFBundleShortVersionString=selection.package_version,
+                    CFBundleVersion=selection.package_version, LSMinimumSystemVersion="26.0")
+        self.package_unlink(contents, "Info.plist")
+        self.package_file(contents, "Info.plist", plistlib.dumps(info, fmt=plistlib.FMT_XML, sort_keys=True))
+        self.package_post()
+        with self.credential_scope("uninstaller"):
+            self.package_call("uninstaller-sign", ["/usr/bin/codesign", "--force", "--sign", self.signing[1], "--timestamp",
+                "--options", "runtime", "--identifier", UNINSTALLER_IDENTIFIER, str(app)], timeout=120)
+            self.package_call("uninstaller-verify", ["/usr/bin/codesign", "--verify", "--strict", "--deep", "--test-requirement",
+                "=" + signing_requirement(self.signing, UNINSTALLER_IDENTIFIER), str(app)], timeout=60)
+        self.package_post()
+
+    def package_unlink(self, parent, name):
+        """Remove one closed, just-read package-tree file by name in its checked parent."""
+        self.package_clock()
+        need(self.phase == "package-remove" and name == "Info.plist", "package-unlink-purpose")
+        self.recheck_directory(parent)
+        os.unlink(name, dir_fd=parent["fd"])
+        self.recheck_directory(parent)
+        need(name not in os.listdir(parent["fd"]), "package-unlink")
+
     def prepared_file_post(self, entry, *, body=None):
         """Complete same-FD/name POST without a second whole-package allocation."""
         need(self.prepared_staging and self.phase == "package-install", "prepared-staging-owner")
@@ -9154,7 +9249,8 @@ class Operation:
             actual[name] = (body, 0o444)
         if self.removal:
             need(package_name == "Remove.pkg", "final-removal-mount-package")
-            self.stager.removal_distribution_layout_data(os.listdir(self.mount_entry["fd"]), expected, actual)
+            self.stager.removal_distribution_layout_data(os.listdir(self.mount_entry["fd"]), expected, actual,
+                                                         uninstaller=UNINSTALLER_NAME)
         else:
             self.stager.distribution_layout_data(os.listdir(self.mount_entry["fd"]), package_name, expected, actual)
         self.recheck_mount()
@@ -9170,7 +9266,8 @@ class Operation:
                      and signature(os.fstat(entry["fd"])) == entry["identity"]
                      == signature(os.stat(entry["name"], dir_fd=self.mount_entry["fd"], follow_symlinks=False)), "package-mounted-post-bytes")
         need(set(os.listdir(self.mount_entry["fd"])) == {self.package_name, "remove-producer.json" if self.removal else "producer.json",
-             "remove-producer.sig" if self.removal else "producer.sig"}, "package-mounted-post-roster")
+             "remove-producer.sig" if self.removal else "producer.sig", *((UNINSTALLER_NAME,) if self.removal else ())},
+             "package-mounted-post-roster")
         self.recheck_mount()
 
     def observe_distribution_detach_failure(self, original):
@@ -9791,9 +9888,12 @@ class Operation:
         self.package_name = self.stager.distribution_request_name(request_id)
         self.publish("package-request-id.txt", (request_id + "\n").encode("ascii"))
         observed_root = self.package_directory("producer-observation-root")
-        for name, value in expected.items():
-            self.package_file(observed_root, self.package_name if name == "Install.pkg" else name, value)
+        observed = {name: self.package_file(observed_root, self.package_name if name == "Install.pkg" else name, value)
+                    for name, value in expected.items()}
         self.package_roots.append((observed_root, {self.package_name, "producer.json", "producer.sig"}))
+        if self.app_absence is None:
+            self.hide_image_sidecars(root, (descriptor_entry, signed_entry))
+            self.hide_image_sidecars(observed_root, (observed["producer.json"], observed["producer.sig"]))
         self.distribution_entry = self.package_directory("distribution")
         self.package_post()
         user_image, _user_path = self.package_image(root, "distribution")
@@ -9975,7 +10075,7 @@ class Operation:
         # rehashes them. The copied input bodies are no longer needed here.
         del input_values, value, program, inventory
         root = self.package_directory("remove-producer-root")
-        self.package_file(root, "Remove.pkg", package)
+        package_entry = self.package_file(root, "Remove.pkg", package)
         self.package_post()
         self.stage = "remove-explicit-producer-compiler"
         environment = build_environment(self.environment, self.work, self.image_release, target=self.target)
@@ -10012,7 +10112,11 @@ class Operation:
         expected = {"Remove.pkg": package, "remove-producer.json": descriptor, "remove-producer.sig": signed}
         self.stager.removal_distribution_layout_data(os.listdir(root["fd"]), expected,
             {name: (value, 0o444) for name, value in expected.items()})
-        self.package_roots.append((root, set(expected)))
+        self.package_uninstaller(root, selection)
+        self.package_roots.append((root, {*expected, UNINSTALLER_NAME}))
+        # Finder shows only the uninstaller; Remove.pkg and its sidecars stay
+        # beside it with unchanged names, bytes and modes.
+        self.hide_image_sidecars(root, (package_entry, descriptor_entry, signed_entry))
         # Credential checks have consumed the signed producer body. Keep only
         # scalar receipt facts before reading/signing the distribution image.
         del producer, expected, package
@@ -10515,8 +10619,8 @@ class Operation:
             self.receipt["passed"] = (self.receipt["passed"] and self.removal_package_complete
                 and not self.installer_entered and not self.mount_entered and not self.installation_readback
                 and tuple(row["role"] for row in self.credential_calls) == ("producer-adhoc", "producer-adhoc-verify", "producer-cdhash")
-                    + (CREDENTIAL_ROLES[:17] + ("search-final", "default-after")) * 2
-                and tuple(row["purpose"] for row in self.credential_contexts) == ("producer", "distribution-image"))
+                    + (CREDENTIAL_ROLES[:17] + ("search-final", "default-after")) * 3
+                and tuple(row["purpose"] for row in self.credential_contexts) == ("producer", "uninstaller", "distribution-image"))
             if self.receipt["passed"]:
                 self.package_clock()
         # This receipt remains provisional until its own write/readback/close
