@@ -181,7 +181,7 @@ class CandidatePartTransportTests(unittest.TestCase):
         names = {S.ENTRY_BINARY, S.APP_BINARY, S.VAULT_HELPER, S.ANDROID_HELPER, S.ANDROID_SERVICE_PLIST,
                  S.RESIDENT_IMAGE, S.REMOVER, S.INSTALLED_CLI, 'Contents/Info.plist', S.PAYLOAD_INFO,
                  'Contents/PkgInfo', S.PAYLOAD_CONTENTS + 'PkgInfo', 'Contents/Resources/icon.png',
-                 S.PAYLOAD_CONTENTS + 'Resources/icon.png', 'Contents/_CodeSignature/CodeResources',
+                 S.PAYLOAD_CONTENTS + 'Resources/icon.png', S.THIRD_PARTY_NOTICES, 'Contents/_CodeSignature/CodeResources',
                  S.PAYLOAD_CONTENTS + '_CodeSignature/CodeResources'}
         app = {name: (b'inert\n', 0o555) for name in names}
         app.update({name: (body, 0o755) for name, body in bodies.items()})
