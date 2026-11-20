@@ -4,7 +4,7 @@
 //! There is no renderer command, independent scheduler, service action or writer.
 use super::*;
 use std::{cell::{Cell,RefCell}, mem::{size_of,size_of_val}, os::fd::BorrowedFd,
-    panic::{catch_unwind,AssertUnwindSafe}, sync::{OnceLock,TryLockError}, task::Wake};
+    panic::{catch_unwind,AssertUnwindSafe}, sync::{OnceLock,RwLock,TryLockError}, task::Wake};
 use mrk_macos_installed_native::{self as native, android_registration::RemovalClock,
     android_service_management::Decision, install_producer::{RemovalProducerVerifier,ProducerCheckpoint,SignatureResult},
     removal_coordinator as peer_native};
@@ -91,7 +91,7 @@ fn joined_data_only(unknown:bool,worker:bool,coordinator:bool,main:bool,returned
 struct Original{
     document:Weak<Inner>,identity:Weak<()>,id:[u8;16],generation:u32,
     pickers:[Option<Arc<OriginalWork>>;3],source_generation:u32,
-    admitted:Instant,work:Instant,hard:Instant,stop:watch::Sender<bool>,first:Mutex<Option<(AdmissionFailure,Instant)>>,
+    admitted:Instant,work:Instant,hard:Instant,stop:watch::Sender<bool>,first:RwLock<Option<(AdmissionFailure,Instant)>>,
     unknown:AtomicBool,clock:OnceLock<Arc<RemovalClock>>,source:OnceLock<AppRemovalWorkGate>,
     dispatcher:Arc<AndroidServiceDispatcher>,prompt:OnceLock<Arc<MacosRemovalPrompt>>,offers:Mutex<Offers>,
     reservation:usize,whole:usize,
@@ -143,7 +143,7 @@ impl Original{
     fn poison(&self){self.unknown.store(true,Ordering::SeqCst);self.stop.send_replace(true);if let Some(prompt)=self.prompt.get(){prompt.stop();}self.signal();}
     fn note(&self,why:AdmissionFailure,at:Instant){
         if at>Instant::now(){self.poison();return;}
-        match self.first.try_lock(){Ok(mut value)=>*value=first(*value,Some((why,at))),Err(_)=>{self.poison();return;}}
+        match self.first.try_write(){Ok(mut value)=>*value=first(*value,Some((why,at))),Err(_)=>{self.poison();return;}}
         if let Some(source)=self.source.get(){source.source_note(why,at);}
         if matches!(why,AdmissionFailure::Unknown|AdmissionFailure::AlreadyUsed){self.unknown.store(true,Ordering::SeqCst);}
         self.stop.send_replace(true);if let Some(prompt)=self.prompt.get(){prompt.stop();}self.signal();
@@ -157,7 +157,10 @@ impl Original{
         }
     }
     fn local_first(&self)->Option<(AdmissionFailure,Instant)>{
-        let local=match self.first.try_lock(){Ok(value)=>*value,Err(_)=>{self.poison();None}};
+        // The worker's preflight and the coordinator's cleanup cut can
+        // observe the same first failure concurrently. Only a conflicting
+        // publication or a poisoned lock makes this observation unknown.
+        let local=match self.first.try_read(){Ok(value)=>*value,Err(_)=>{self.poison();None}};
         first(local,self.source.get().and_then(AppRemovalWorkGate::source_first))
     }
     fn local_end(&self,external:Option<(AdmissionFailure,Instant)>)->Option<Instant>{
@@ -317,7 +320,7 @@ pub(super) fn reserve(document:&DocumentBinding,id:[u8;16],generation:u32,at:Ins
     if id==[0;16]||generation==0||Instant::now()>=work{return Err(unavailable());}
     let executor=tokio::runtime::Handle::try_current().map_err(|_|unavailable())?;let(stop,_)=watch::channel(false);
     let original=Arc::new(Original{document:Arc::downgrade(&document.inner),identity:Arc::downgrade(&document.inner.session_identity),id,generation,
-        pickers,source_generation,admitted:at,work,hard,stop,first:Mutex::new(None),unknown:AtomicBool::new(false),
+        pickers,source_generation,admitted:at,work,hard,stop,first:RwLock::new(None),unknown:AtomicBool::new(false),
         clock:OnceLock::new(),source:OnceLock::new(),dispatcher,prompt:OnceLock::new(),offers:Mutex::new(Offers::new()),
         reservation,whole:prior_and_saved.checked_add(reservation).ok_or_else(unavailable)?,worker:AsyncMutex::new(None),returned:Mutex::new(None),
         worker_joined:AtomicBool::new(false),coordinator:Mutex::new(None),coordinator_return:Mutex::new(None),
@@ -562,8 +565,10 @@ fn run_worker(original:&Original,guard:&mut BackingGuard)->WorkerReturn{
     let backing=guard.value.as_mut().expect("one reserved removal backing");
     let stop=original.stop.subscribe();let mut completion=None;let mut retired=None;let mut peer_known=true;
     let mut forward=false;
+    let mut stage="request";
     let preparation=(||->Flow<()>{
         backing.request.read_once(original.work,&stop).map_err(|_|())?;
+        stage="clock";
         let bound=backing.request.request().map_err(|_|())?.binding_data().clock_data();
         // First raw DATA appears only after this bounded read. Enforce its
         // original endpoints NOW; never restart local or Parent time.
@@ -572,15 +577,20 @@ fn run_worker(original:&Original,guard:&mut BackingGuard)->WorkerReturn{
         original.clock.set(clock).map_err(|_|())?;original.source.set(gate.clone()).map_err(|_|())?;
         if let Some((why,at))=original.local_first(){gate.source_note(why,at);}
         backing.request.bind_clock_once(gate.clone(),original.work,&stop).map_err(|_|())?;
+        stage="installed-product";
         backing.inspector=Some(RemovalProducerAdmission::new(gate));
         let inspector=backing.inspector.as_mut().ok_or(())?;
         inspector.admit(original.work,&stop,&mut|_,at|original.note_source(at),
-            &mut|first|original.local_expired(first),&mut|_,_|{}).map_err(|_|())?;
+            &mut|first|original.local_expired(first),&mut|_,_|{}).map_err(|why|{
+                removal_trace(format_args!("app installed-product=refused reason={why:?}"));
+            })?;
         if inspector.retained_bytes().is_none_or(|n|n>INSPECTOR_RESERVE){return Err(());}
         let current=inspector.current(original.work,&stop,&mut|_,at|original.note_source(at)).map_err(|_|())?;
+        stage="source-binding";
         let request=backing.request.request().map_err(|_|())?;
         let code=joined_data(request,&current)?;let binding=challenge_data(request.binding_data()).ok_or(())?;
         source_post(original,&backing.request,&current)?;
+        stage="remove-signature";
         let parent_veto=Cell::new(false);backing.remove_entered=true;
         let signature=backing.remove.verify_and_close(request.remove_descriptor_data(),request.remove_signature_data(),
             &mut|point|signature_gate(original,&parent_veto,point));
@@ -588,6 +598,7 @@ fn run_worker(original:&Original,guard:&mut BackingGuard)->WorkerReturn{
             if signature==SignatureResult::Unknown{original.poison();}
             else if !parent_veto.get(){original.note(AdmissionFailure::Native,Instant::now());}return Err(());
         }
+        stage="peer-preparation";
         source_post(original,&backing.request,&current)?;
         let all=current.originals().map_err(|_|())?;let req=backing.request.originals().map_err(|_|())?;
         let fds:[BorrowedFd<'_>;20]=[all[0],all[1],all[2],all[3],all[8],all[16],all[19],all[20],all[21],all[22],
@@ -600,6 +611,7 @@ fn run_worker(original:&Original,guard:&mut BackingGuard)->WorkerReturn{
         // cannot free any borrowed raw4/source cell or permit another attempt.
         let mut callback=|point|peer_gate(original,&backing.request,&current,point);
         let mut peer=peer_native::RemovalPeer::app(source,binding,&mut callback);
+        stage="exchange";
         let flow=catch_unwind(AssertUnwindSafe(||exchange(original,&backing.request,&current,&mut peer,&mut completion)));
         forward=matches!(flow,Ok(Ok(())));
         if flow.is_err(){original.note(AdmissionFailure::Unknown,Instant::now());}
@@ -620,6 +632,7 @@ fn run_worker(original:&Original,guard:&mut BackingGuard)->WorkerReturn{
         if forward&&retired.is_none(){return Err(());}Ok(())
     })();
     if preparation.is_err(){
+        removal_trace(format_args!("app worker=refused stage={stage}"));
         if let Some((why,at))=backing.request.first_failure(){original.note(why,at);}
         original.stop.send_replace(true);if let Some(prompt)=original.prompt.get(){prompt.stop();}
     }
