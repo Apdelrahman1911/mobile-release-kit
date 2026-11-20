@@ -322,7 +322,7 @@ int mrk_decode_directory_entries(const uint8_t *block, size_t bytes, int count,
         if (name.attr_dataoffset < (int32_t)(fixed - name_field)
             || (uint32_t)name.attr_dataoffset > length - name_field
             || name.attr_length < 2 || name.attr_length > 256 || !inode
-            || (kind != VREG && kind != VDIR && kind != VLNK && kind != VSOCK)) return EIO;
+            || (kind != VREG && kind != VDIR && kind != VLNK)) return EIO;
         // attr_dataoffset is relative to the name reference itself.
         size_t name_at = name_field + (uint32_t)name.attr_dataoffset;
         if (name.attr_length > length - name_at) return EIO;
@@ -333,9 +333,7 @@ int mrk_decode_directory_entries(const uint8_t *block, size_t bytes, int count,
         memcpy(out + written, &inode, sizeof(inode));
         // Report link metadata only; consumers still decide which kinds they
         // admit. This decoder never opens or follows a reported entry.
-        // Sockets are reported as DT_SOCK (the removal request's own "s"); every
-        // consumer admits kinds explicitly, so none can take one for a file.
-        out[written + 8] = kind == VDIR ? DT_DIR : (kind == VLNK ? DT_LNK : (kind == VSOCK ? DT_SOCK : DT_REG));
+        out[written + 8] = kind == VDIR ? DT_DIR : (kind == VLNK ? DT_LNK : DT_REG);
         memcpy(out + written + 9, &name_length, sizeof(name_length));
         memcpy(out + written + 11, text, name_length);
         written += 11 + name_length;

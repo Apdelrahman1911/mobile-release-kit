@@ -279,13 +279,9 @@ static int p_owner_flags_ok(unsigned slot,const struct stat *st){
     if(!p_system_parent(slot))return st->st_uid==0&&st->st_gid==0&&st->st_flags==0;
     return st->st_uid==0&&(st->st_flags&~(uint32_t)(SF_NOUNLINK|SF_RESTRICTED))==0;
 }
-// APFS counts every child entry in a directory's link count, so the peer's own
-// bind of "s" adds exactly one link to the request directory. Everything else
-// (object, type, mode, owner, group, flags) must stay exact.
-static int p_directory_bound_identity(const struct stat *now,const struct stat *before){
-    return now->st_dev==before->st_dev&&now->st_ino==before->st_ino&&now->st_mode==before->st_mode
-        &&now->st_uid==before->st_uid&&now->st_gid==before->st_gid&&now->st_flags==before->st_flags
-        &&before->st_nlink<UINT16_MAX&&now->st_nlink==before->st_nlink+1;
+static int p_directory_same_identity(const struct stat *a,const struct stat *b){
+    return a->st_dev==b->st_dev&&a->st_ino==b->st_ino&&a->st_mode==b->st_mode
+        &&a->st_uid==b->st_uid&&a->st_gid==b->st_gid&&a->st_nlink==b->st_nlink&&a->st_flags==b->st_flags;
 }
 static mrk_removal_stat_data p_stat_data(const struct stat *s){
     return (mrk_removal_stat_data){.device=(uint64_t)s->st_dev,.inode=s->st_ino,.links=s->st_nlink,
@@ -622,7 +618,7 @@ static int p_open(MRKRemovalPeer *b,PeerCall *s){
     // before source POST; neither role can refresh a later foreign change.
     if(rc==0){
         struct stat parent={0},named={0};
-        if(fstat(b->input.borrowed[18],&parent)||!p_directory_bound_identity(&parent,&b->borrowed[18])
+        if(fstat(b->input.borrowed[18],&parent)||!p_directory_same_identity(&parent,&b->borrowed[18])
             ||fstatat(b->input.borrowed[18],"s",&named,AT_SYMLINK_NOFOLLOW)||!S_ISSOCK(named.st_mode)
             ||named.st_uid||named.st_gid||named.st_nlink!=1||named.st_flags)p_fail(b,44,1);
         else {b->borrowed[18]=parent;b->socket_identity=named;b->report.bind_returned=1;
