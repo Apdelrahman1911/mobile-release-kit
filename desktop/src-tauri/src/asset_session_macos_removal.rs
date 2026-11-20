@@ -101,7 +101,7 @@ struct Original{
     final_at:OnceLock<Instant>,ready_taken:AtomicBool,
     // A wrapper-observed Instant is retained as such, never converted to a
     // historical Parent stamp. Raw native first-F stays in this exact custody.
-    peer_observation:Mutex<Option<peer_native::RemovalPeerCustody>>,
+    peer_observation:RwLock<Option<peer_native::RemovalPeerCustody>>,
 }
 struct WorkerReturn{
     known:bool,resources_retired:bool,main_retired:bool,
@@ -168,7 +168,7 @@ impl Original{
         let mut end=match first{Some((_,at))=>at.checked_add(TAIL)?.min(self.hard),None=>self.hard};
         // A returned native/wrapper observation only narrows this original
         // local tail. It is NOT a conversion of native_first_failure.
-        if let Ok(value)=self.peer_observation.try_lock(){if let Some(at)=value.as_ref().and_then(|v|v.first_failure){end=end.min(at.checked_add(TAIL)?);}}
+        if let Ok(value)=self.peer_observation.try_read(){if let Some(at)=value.as_ref().and_then(|v|v.first_failure){end=end.min(at.checked_add(TAIL)?);}}
         else{self.poison();return None;}
         Some(end)
     }
@@ -197,7 +197,7 @@ impl Original{
     fn pause(&self){std::thread::park_timeout(HEARTBEAT.min(self.local_end(None).unwrap_or(self.hard).saturating_duration_since(Instant::now())));}
     fn main_retired(&self)->bool{self.prompt.get().is_none_or(|prompt|prompt.never_requested()||prompt.known_main_retired())}
     fn observe_peer(&self,custody:peer_native::RemovalPeerCustody){
-        match self.peer_observation.try_lock(){Ok(mut slot)=>{
+        match self.peer_observation.try_write(){Ok(mut slot)=>{
             if slot.as_ref().is_some_and(|old|old.native_calls>custody.native_calls||old.native_returns>custody.native_returns
                 ||old.native_first_failure!=0&&(old.native_first_failure!=custody.native_first_failure||old.native_first_code!=custody.native_first_code)){
                 drop(slot);self.poison();return;
@@ -324,7 +324,7 @@ pub(super) fn reserve(document:&DocumentBinding,id:[u8;16],generation:u32,at:Ins
         clock:OnceLock::new(),source:OnceLock::new(),dispatcher,prompt:OnceLock::new(),offers:Mutex::new(Offers::new()),
         reservation,whole:prior_and_saved.checked_add(reservation).ok_or_else(unavailable)?,worker:AsyncMutex::new(None),returned:Mutex::new(None),
         worker_joined:AtomicBool::new(false),coordinator:Mutex::new(None),coordinator_return:Mutex::new(None),
-        coordinator_joined:AtomicBool::new(false),final_at:OnceLock::new(),ready_taken:AtomicBool::new(false),peer_observation:Mutex::new(None)});
+        coordinator_joined:AtomicBool::new(false),final_at:OnceLock::new(),ready_taken:AtomicBool::new(false),peer_observation:RwLock::new(None)});
     let(release,enter)=oneshot::channel();let(worker_enter,worker_wait)=oneshot::channel();
     let worker_task={let original=original.clone();move||worker(original,worker_wait)};
     let coordinator=coordinate(original.clone(),enter,worker_enter);
@@ -527,13 +527,17 @@ fn exchange(original:&Original,request:&RemovalRequestOriginal,current:&RemovalC
     removal_trace(format_args!("app prompt=requested"));original.signal();
     let confirmation=loop{
         if !original.work_ok(){prompt.stop();}
-        match prompt.take(){Ok(Some(value))=>break value,Ok(None)=>{original.note(AdmissionFailure::Stopped,Instant::now());return Err(());},Err(())=>{}}
-        if !original.cleanup_ok(){return Err(());}original.pause();
+        match prompt.take(){Ok(Some(value))=>break value,Ok(None)=>{
+            removal_trace(format_args!("app prompt=closed-without-consent"));
+            original.note(AdmissionFailure::Stopped,Instant::now());return Err(());},Err(())=>{}}
+        if !original.cleanup_ok(){removal_trace(format_args!("app prompt=cleanup-refused"));return Err(());}original.pause();
     };
+    removal_trace(format_args!("app prompt=confirmed"));
     if !original.work_ok()||!confirmation.cutoff().same_original(&cutoff){return Err(());}
     let nonce=hex_id(confirmation.app_nonce());
     let count=send_frame_data(original,&mut transcript,wire::FrameData::confirmed_data(binding,&nonce).map_err(|_|())?,&mut buffer)?;
     let begun=peer.send_confirmed(confirmation.native(),&buffer[..count],&mut gate);await_frame(original,peer,&mut gate,begun)?;
+    removal_trace(format_args!("app op=confirmed progress=ready"));
     source_post(original,request,current)?;
     {let mut offers=original.offers.try_lock().map_err(|_|())?;
         if offers.confirmed.is_some()||!offers.state.confirmed(){return Err(());}offers.confirmed=Some(confirmation);}
@@ -545,6 +549,7 @@ fn exchange(original:&Original,request:&RemovalRequestOriginal,current:&RemovalC
         if offers.state.completion{return Err(());}drop(offers);original.pause();
     }
     let result=completion.as_ref().ok_or(())?;
+    removal_trace(format_args!("app maintenance=returned phase={:?}",result.status().phase));
     {let offers=original.offers.try_lock().map_err(|_|())?;
         if !result.matches_removal(offers.saved.as_ref().ok_or(())?,&cutoff)||!result.request_quit(){return Err(());}}
     let status=result.status();
@@ -554,6 +559,7 @@ fn exchange(original:&Original,request:&RemovalRequestOriginal,current:&RemovalC
     source_post(original,request,current)?;
     let count=send_frame_data(original,&mut transcript,wire::FrameData::prepared_data(binding,&nonce,branch).map_err(|_|())?,&mut buffer)?;
     let begun=peer.send_prepared(&buffer[..count],&mut gate);await_frame(original,peer,&mut gate,begun)?;
+    removal_trace(format_args!("app op=prepared progress=ready"));
     let begun=peer.receive(&mut gate);await_frame(original,peer,&mut gate,begun)?;
     let received=peer.received_frame(&mut gate).map_err(|_|())?;
     transcript.advance_data(wire::ActionData::Receive,received,original.raw_work()?).map_err(|_|())?;
