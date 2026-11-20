@@ -13,6 +13,23 @@ pub(super) const WORK_NAME: &str = ".applications-launcher-v1";
 pub(super) const SOURCE_NAME: &str = "MobileReleaseKitLauncher.app";
 const RETAINED_NAME: &str = "previous.app";
 
+#[derive(Clone, Copy)]
+enum MutationAuthority<'a> {
+    Install,
+    LiveRemoval {
+        exclusion: &'a worker::RemovalExclusion,
+        source: &'a worker::RemovalAdmission,
+    },
+}
+impl MutationAuthority<'_> {
+    fn check(self, book: &Install) -> Result<()> {
+        match self {
+            Self::Install => Operation::mutation_ready(book),
+            Self::LiveRemoval { exclusion, source } => exclusion.post(book, source),
+        }
+    }
+}
+
 // Returned copy writes are accounted separately so restoring a missing
 // convenience launcher cannot turn a core same-package no-op into a rewrite.
 // A bound failure is absorbing and retained AFTER the actual returned write.
@@ -433,23 +450,25 @@ impl RemovalPreparation {
         }
         book.clock()
     }
-    pub(super) fn retire_before_snapshot(&mut self, book: &mut Install, prepared: &PreparedFresh) -> Result<()> {
+    pub(super) fn retire_before_snapshot(&mut self, book: &mut Install, prepared: &PreparedFresh,
+        exclusion: &worker::RemovalExclusion, source: &worker::RemovalAdmission) -> Result<()> {
         check(!self.entered && !self.completed,"launcher-removal-once")?;
         self.entered = true;
+        let authority = MutationAuthority::LiveRemoval { exclusion, source };
         let result = (|| {
-            Operation::mutation_ready(book)?;
+            authority.check(book)?;
             check(book.removal_snapshot_capture.is_none() && book.removal_payload_plan.is_none(),
                 "launcher-removal-before-snapshot")?;
             self.post_before(book)?;
             if self.workspace.is_none() && !self.absent {
-                self.workspace = Some(Workspace::create(book,prepared,&self.generation)?);
+                self.workspace = Some(Workspace::create(book,prepared,&self.generation,authority)?);
                 let workspace = self.workspace.as_ref().ok_or("launcher-workspace-missing")?;
-                self.operation.quarantine(book,workspace,&self.material.index())?;
-                self.retirement.prepare(book,&self.operation,workspace,&self.material.index())?;
+                self.operation.quarantine(book,workspace,&self.material.index(),authority)?;
+                self.retirement.prepare(book,&self.operation,workspace,&self.material.index(),authority)?;
             }
             if let Some(workspace) = self.workspace.as_mut() {
-                self.retirement.run(book,workspace)?;
-                workspace.retire_empty(book)?;
+                self.retirement.run(book,workspace,authority)?;
+                workspace.retire_empty(book,authority)?;
             }
             check(self.operation.absent(book)?,"launcher-removal-final-absence")?;
             self.operation.parent_post(book)?;
@@ -521,7 +540,7 @@ impl Effects {
             }
             check(matches!(self.observation.decision,launcher::Decision::PublishAbsent
                 | launcher::Decision::ReplaceEnrolled),"launcher-lifecycle-decision")?;
-            self.workspace = Some(Workspace::create(book,prepared,generation)?);
+            self.workspace = Some(Workspace::create(book,prepared,generation,MutationAuthority::Install)?);
             let workspace = self.workspace.as_ref().ok_or("launcher-workspace-missing")?;
             let staged = Operation::stage(book,prepared,workspace)?;
             self.observation.post(book)?;
@@ -530,7 +549,7 @@ impl Effects {
             self.phase.as_ref().ok_or("launcher-phase-required")?.post(book)?;
             if self.observation.decision == launcher::Decision::ReplaceEnrolled {
                 let old = self.observation.previous.as_ref().ok_or("launcher-generation-missing")?;
-                self.observation.operation.quarantine(book,workspace,&old.index())?;
+                self.observation.operation.quarantine(book,workspace,&old.index(),MutationAuthority::Install)?;
             }
             self.next.publish(book,workspace,staged,&self.observation.current.index())?;
             self.readback_verified = true;
@@ -548,10 +567,10 @@ impl Effects {
             if let Some(workspace) = self.workspace.as_mut() {
                 if self.observation.decision == launcher::Decision::ReplaceEnrolled {
                     let old = self.observation.previous.as_ref().ok_or("launcher-generation-missing")?;
-                    self.old_retirement.prepare(book,&self.observation.operation,workspace,&old.index())?;
-                    self.old_retirement.run(book,workspace)?;
+                    self.old_retirement.prepare(book,&self.observation.operation,workspace,&old.index(),MutationAuthority::Install)?;
+                    self.old_retirement.run(book,workspace,MutationAuthority::Install)?;
                 }
-                workspace.retire_empty(book)?;
+                workspace.retire_empty(book,MutationAuthority::Install)?;
             }
             self.live_post(book,false)?;
             check(!book.launcher_writes.failed,"launcher-write-bound")?;
@@ -613,8 +632,8 @@ impl Effects {
                     _ => return Err("launcher-inverse-original-refused"),
                 }
                 self.new_retirement.prepare_staged_copy(book,workspace,prepared)?;
-                self.new_retirement.run(book,workspace)?;
-                workspace.retire_empty(book)?;
+                self.new_retirement.run(book,workspace,MutationAuthority::Install)?;
+                workspace.retire_empty(book,MutationAuthority::Install)?;
             }
             // This is the original previous presence/absence, not the incoming
             // bundle's existence and never permission to publish inverse state.
@@ -1123,9 +1142,9 @@ pub(super) struct Workspace {
     pub(super) retirement_settled: bool,
 }
 impl Workspace {
-    pub(super) fn create(book: &mut Install, prepared: &PreparedFresh,
-        generation: &transaction::GenerationData) -> Result<Self> {
-        Operation::mutation_ready(book)?;
+    fn create(book: &mut Install, prepared: &PreparedFresh,
+        generation: &transaction::GenerationData, authority: MutationAuthority<'_>) -> Result<Self> {
+        authority.check(book)?;
         let root = book.gate.parent.ok_or("launcher-maintenance-required")?;
         let binding = generation.release_data().binding_data();
         check(root == prepared.destination && binding.release == paths::RELEASE
@@ -1197,9 +1216,9 @@ impl Workspace {
     // Successful operations leave the old exact phase-directory census intact.
     // Only this held EMPTY workspace is removed. Preserve returned effects even
     // if a following check/close fails; there is no name-based cleanup retry.
-    pub(super) fn retire_empty(&mut self, book: &mut Install) -> Result<()> {
+    fn retire_empty(&mut self, book: &mut Install, authority: MutationAuthority<'_>) -> Result<()> {
         check(!self.retirement_attempted && !self.retired, "launcher-workspace-retirement-once")?;
-        Operation::mutation_ready(book)?;
+        authority.check(book)?;
         check(self.roster(book)?.is_empty(), "launcher-workspace-not-empty")?;
         let before = stat::fstat(book.fd(self.stage)?).map_err(|_| "launcher-stage-stat")?;
         let mut remaining = maintenance::roster_now(book, self.stage)?;
@@ -1404,11 +1423,11 @@ impl Operation {
     /// A shared-parent race is rechecked AFTER the exclusive move. On mismatch
     /// retain the moved entry untouched: never delete it or overwrite a new
     /// Applications occupant in a guessed rollback.
-    pub(super) fn quarantine(&mut self, book: &mut Install, workspace: &Workspace,
-        expected: &InventoryIndex<'_>) -> Result<usize> {
+    fn quarantine(&mut self, book: &mut Install, workspace: &Workspace,
+        expected: &InventoryIndex<'_>, authority: MutationAuthority<'_>) -> Result<usize> {
         check(self.returned == Returned::NotAttempted, "launcher-operation-once")?;
         let bundle = self.bundle.ok_or("launcher-original-missing")?;
-        Self::mutation_ready(book)?;
+        authority.check(book)?;
         workspace.post(book)?;
         self.parent_post(book)?;
         check(book.originals[bundle].parent == Some(self.applications)
@@ -1615,17 +1634,17 @@ impl Retirement {
 
     // The caller stores `self` before calling prepare, so failure never loses
     // the exact attempted operation. Only a verified quarantined bundle enters.
-    pub(super) fn prepare(&mut self, book: &mut Install, operation: &Operation,
-        workspace: &Workspace, expected: &InventoryIndex<'_>) -> Result<()> {
+    fn prepare(&mut self, book: &mut Install, operation: &Operation,
+        workspace: &Workspace, expected: &InventoryIndex<'_>, authority: MutationAuthority<'_>) -> Result<()> {
         check(!self.entered && !self.prepared && self.nodes.is_empty(), "launcher-retirement-once")?;
         self.entered = true;
-        let result = self.prepare_inner(book, operation, workspace, expected);
+        let result = self.prepare_inner(book, operation, workspace, expected, authority);
         if let Err(error) = result { self.first_failure = Some(error); }
         result
     }
     fn prepare_inner(&mut self, book: &mut Install, operation: &Operation,
-        workspace: &Workspace, expected: &InventoryIndex<'_>) -> Result<()> {
-        Operation::mutation_ready(book)?;
+        workspace: &Workspace, expected: &InventoryIndex<'_>, authority: MutationAuthority<'_>) -> Result<()> {
+        authority.check(book)?;
         workspace.post(book)?;
         check(operation.returned == Returned::Quarantined && operation.verified,
             "launcher-retirement-quarantine")?;
@@ -1827,13 +1846,13 @@ impl Retirement {
         Ok(())
     }
 
-    pub(super) fn run(&mut self, book: &mut Install, workspace: &Workspace) -> Result<()> {
+    fn run(&mut self, book: &mut Install, workspace: &Workspace, authority: MutationAuthority<'_>) -> Result<()> {
         check(self.prepared && self.first_failure.is_none() && !self.completed,
             "launcher-retirement-not-ready")?;
         let result = (|| {
             // Leaves were appended after directories. Reverse order deletes
             // every leaf, then deepest known directories, then the bundle root.
-            for slot in (0..self.nodes.len()).rev() { self.unlink(book, workspace, slot)?; }
+            for slot in (0..self.nodes.len()).rev() { self.unlink(book, workspace, slot, authority)?; }
             check(self.nodes.iter().all(|node| node.removed && node.attempted
                 && book.originals[node.original].state == State::Closed
                 && book.originals[node.original].fd.is_none()), "launcher-retirement-finality")?;
@@ -1848,8 +1867,8 @@ impl Retirement {
         result
     }
 
-    fn unlink(&mut self, book: &mut Install, workspace: &Workspace, slot: usize) -> Result<()> {
-        Operation::mutation_ready(book)?;
+    fn unlink(&mut self, book: &mut Install, workspace: &Workspace, slot: usize, authority: MutationAuthority<'_>) -> Result<()> {
+        authority.check(book)?;
         workspace.post(book)?;
         let node = &self.nodes[slot];
         check(!node.attempted && !node.removed, "launcher-retirement-node-once")?;
