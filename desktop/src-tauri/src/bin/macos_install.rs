@@ -16567,6 +16567,13 @@ mod installer {
         enum RemovalNodeEffect { Present, ObservedAbsent, Removed, Unknown }
         struct RemovalNodeState { original:Option<usize>,effect:RemovalNodeEffect,roster_observed:bool,
             returned:Option<std::result::Result<(),i32>> }
+        impl RemovalNodeState {
+            fn settle_unlinked_original(&self,book:&mut Install,original:usize)->Result<()> {
+                check(self.effect==RemovalNodeEffect::Removed && self.returned==Some(Ok(()))
+                    && self.original==Some(original),"removal-payload-unlinked-effect")?;
+                book.close_unlinked(original,"removal-payload-unlinked-close")
+            }
+        }
         struct RemovalPayloadExecution {
             origin:RemovalPayloadOrigin,journal:RemovalPayloadJournal,admission:RemovalSnapshotAdmission,
             plan:maintenance::RemovalPayloadPlan,binding:maintenance::RemovalHistoryBindingData,
@@ -17193,7 +17200,7 @@ mod installer {
                     && node.present_data()?.0.mode==u32::from(actual.st_mode) && node.present_data()?.0.uid==actual.st_uid
                     && node.present_data()?.0.gid==actual.st_gid && actual.st_flags==0,"removal-payload-unlinked-original")?;
                 self.advance_parent(book,parent,before)?;
-                book.forward_close(n,"removal-payload-unlinked-close")?;
+                self.states[index].settle_unlinked_original(book,n)?;
                 if directory {book.persist(parent,false)?;}
                 self.external_post(book)?;
                 #[cfg(feature="macos-installed-removal-abrupt-fixture")]
@@ -22684,6 +22691,36 @@ exec ./mrk-macos-remove --fixture-supervise "$1"
         mod tests {
             use super::*;
             #[test]
+            #[ignore = "requires a disposable macOS runner with untagged fixture directories"]
+            fn payload_removal_settles_the_same_original_after_unlink() {
+                use super::super::tests::unlinked_snapshot_book;
+                let template=std::env::temp_dir().join("mrk-removal-payload-unlink.XXXXXXXX");
+                let fixture=unistd::mkdtemp(&template).unwrap();
+                let tested=std::panic::catch_unwind(|| {
+                    let (mut book,n)=unlinked_snapshot_book(&fixture.join("first"));
+                    assert!(book.read_existing_app_metadata(n,"test-snapshot").is_ok());
+                    unistd::unlinkat(book.fd(0).unwrap(),"Old.app",unistd::UnlinkatFlags::RemoveDir).unwrap();
+                    assert_eq!(book.forward_close(n,"removal-payload-unlinked-close"),Err("removal-payload-unlinked-close"));
+                    assert_eq!(book.close_refusal,Some("original-close-snapshot-name"));
+
+                    let (mut book,n)=unlinked_snapshot_book(&fixture.join("second"));
+                    let mut state=RemovalNodeState {original:Some(n),effect:RemovalNodeEffect::Present,
+                        roster_observed:true,returned:None};
+                    assert_eq!(state.settle_unlinked_original(&mut book,n),Err("removal-payload-unlinked-effect"));
+                    assert!(book.originals[n].fd.is_some());
+                    unistd::unlinkat(book.fd(0).unwrap(),"Old.app",unistd::UnlinkatFlags::RemoveDir).unwrap();
+                    state.effect=RemovalNodeEffect::Removed;
+                    state.returned=Some(Ok(()));
+                    assert_eq!(state.settle_unlinked_original(&mut book,0),Err("removal-payload-unlinked-effect"));
+                    assert_eq!(state.settle_unlinked_original(&mut book,n),Ok(()));
+                    assert!(!book.unknown && book.originals[n].state==State::Closed && book.originals[n].fd.is_none()
+                        && book.originals[n].existing_app_metadata.is_none());
+                });
+                std::fs::remove_dir_all(fixture).unwrap();
+                tested.unwrap();
+            }
+
+            #[test]
             fn launcher_removal_requires_both_original_locks() {
                 use std::fs;
 
@@ -24215,7 +24252,7 @@ exec ./mrk-macos-remove --fixture-supervise "$1"
         // Real-filesystem reproduction of the hosted #49 launcher-retirement
         // refusal: an enrolled bundle root carries an existing-app snapshot,
         // is unlinked by its own parent FD and must then close as KNOWN.
-        fn unlinked_snapshot_book(root:&std::path::Path)->(super::Install,usize) {
+        pub(super) fn unlinked_snapshot_book(root:&std::path::Path)->(super::Install,usize) {
             use super::*;
             let _=std::fs::remove_dir_all(root);
             std::fs::create_dir_all(root.join("Old.app")).unwrap();
