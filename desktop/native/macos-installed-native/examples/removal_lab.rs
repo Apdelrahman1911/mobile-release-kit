@@ -176,6 +176,11 @@ fn drive(peer: *mut c_void, census: &mut Census) -> (Vec<Stage>, Result<String, 
         else if r.token_ready != 1 { Err(format!("peer credentials refused before identity (native code {})", r.first_code)) }
         else if !identity_code(r.first_code) { Err(format!("refused before the identity boundary (native code {})", r.first_code)) }
         else { Ok(format!("identity boundary reached as expected (native code {}, peer uid {} pid {})", r.first_code, r.peer_uid, r.peer_pid)) };
+    // Production's App waits for the Parent's frames and never closes first;
+    // hold the connection until the Parent has finished (it releases our
+    // stdin after its own CLOSE, or on any earlier exit).
+    let mut released = String::new();
+    let _ = std::io::stdin().read_line(&mut released);
     run(peer, CLOSE, census, "close", &mut stages);
     (stages, verdict)
 }
@@ -237,8 +242,9 @@ fn parent() -> Result<bool, String> {
     // App first: it registers the notice observer, then waits for the hint.
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
     let mut child = Command::new("/usr/bin/sudo").args(["-n", "-u", &user]).arg(&exe)
-        .args(["app", &hex(&id), &start.to_string()]).stdout(Stdio::piped()).stderr(Stdio::inherit())
+        .args(["app", &hex(&id), &start.to_string()]).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::inherit())
         .spawn().map_err(|e| format!("spawn app: {e}"))?;
+    let release = child.stdin.take();
     let mut lines = BufReader::new(child.stdout.take().unwrap()).lines();
     let ready = lines.next().and_then(|l| l.ok()).unwrap_or_default();
     let fds = borrowed(&request_dir)?;
@@ -262,6 +268,7 @@ fn parent() -> Result<bool, String> {
             (stages, verdict)
         }
     };
+    drop(release); // the App may now close its end
     let app = lines.map_while(Result::ok).filter(|l| l.starts_with('{')).last().unwrap_or_else(|| "{\"role\":\"app\",\"pass\":false,\"verdict\":\"no app result\"}".into());
     let status = child.wait().map_err(|e| e.to_string())?;
     let parent_line = summary("parent", &stages, &verdict, &census, &[("appReadyLine".into(), ready.clone())]);
@@ -338,14 +345,15 @@ fn app(id_text: &str, start_text: &str) -> Result<bool, String> {
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
+    let label = if args.get(1).map(String::as_str) == Some("app") { "REMOVAL_LAB_APP" } else { "REMOVAL_LAB" };
     let result = match args.get(1).map(String::as_str) {
         Some("parent") => parent(),
         Some("app") if args.len() == 4 => app(&args[2], &args[3]),
         _ => Err("usage: removal_lab parent   (as root via sudo on a hosted runner)".into()),
     };
     match result {
-        Ok(true) => { eprintln!("REMOVAL_LAB=pass"); }
-        Ok(false) => { eprintln!("REMOVAL_LAB=fail"); std::process::exit(1); }
-        Err(error) => { eprintln!("REMOVAL_LAB=error {error}"); std::process::exit(2); }
+        Ok(true) => { eprintln!("{label}=pass"); }
+        Ok(false) => { eprintln!("{label}=fail"); std::process::exit(1); }
+        Err(error) => { eprintln!("{label}=error {error}"); std::process::exit(2); }
     }
 }
