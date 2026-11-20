@@ -72,7 +72,12 @@ jobs:
         working-directory: desktop/native/macos-installed-native
         run: cargo build --locked --jobs 3 --example removal_lab --features removal-lab
 
-      - name: Run the removal lab (root Parent, console-user App)
+      # Each mode: the workflow starts the console-user App first (notice
+      # observer registered), then the root Parent. "sudo" runs the Parent in
+      # the runner's session; "installer" runs it from the postinstall of a
+      # payload-free, unsigned lab package through the real Installer, the
+      # production remover's context (installd package script service).
+      - name: Run the removal lab (sudo Parent, then Installer-postinstall Parent)
         shell: bash
         working-directory: desktop/native/macos-installed-native
         env:
@@ -80,7 +85,47 @@ jobs:
         run: |
           set -euo pipefail
           lab="$PWD/target/debug/examples/removal_lab"
-          /usr/bin/sudo -n --preserve-env=GITHUB_ACTIONS,RUNNER_ENVIRONMENT "$lab" parent 2>&1 | tee "$RUNNER_TEMP/removal-lab.log"
+          logs="$RUNNER_TEMP/removal-lab"
+          mkdir -p "$logs"
+          status=0
+          for mode in sudo installer; do
+            id="$(/usr/bin/openssl rand -hex 16)"
+            done_marker="$logs/$mode.done"
+            app_log="$logs/$mode-app.log"
+            parent_out="$logs/$mode-parent.txt"
+            "$lab" app "$id" "$done_marker" >"$app_log" 2>&1 &
+            app_pid=$!
+            for _ in $(seq 150); do grep -q '^notice-ready' "$app_log" && break; sleep 0.2; done
+            started=$(date +%s)
+            case "$mode" in
+              sudo)
+                /usr/bin/sudo -n --preserve-env=GITHUB_ACTIONS,RUNNER_ENVIRONMENT \
+                  "$lab" parent "$id" "$USER" "$parent_out" "$done_marker" >"$logs/$mode-parent.log" 2>&1 || true
+                ;;
+              installer)
+                scripts="$RUNNER_TEMP/removal-lab-scripts"
+                rm -rf "$scripts"; mkdir -p "$scripts"
+                printf '#!/bin/sh\nexport GITHUB_ACTIONS=true RUNNER_ENVIRONMENT=github-hosted\nexec "%s" parent "%s" "%s" "%s" "%s"\n' \
+                  "$lab" "$id" "$USER" "$parent_out" "$done_marker" >"$scripts/postinstall"
+                chmod 0755 "$scripts/postinstall"
+                /usr/bin/pkgbuild --nopayload --scripts "$scripts" --identifier dev.mobile-release-kit.removal-lab \
+                  --version 1 "$RUNNER_TEMP/removal-lab.pkg" >/dev/null
+                /usr/bin/sudo -n /usr/sbin/installer -verbose -pkg "$RUNNER_TEMP/removal-lab.pkg" -target / \
+                  >"$logs/$mode-parent.log" 2>&1 || true
+                ;;
+            esac
+            app_rc=0; wait "$app_pid" || app_rc=$?
+            echo "== $mode ($(( $(date +%s) - started )) s, app exit $app_rc)"
+            cat "$parent_out" 2>/dev/null || { echo "no parent result"; tail -20 "$logs/$mode-parent.log"; }
+            grep -E '^\{|REMOVAL_LAB_APP=' "$app_log" || tail -20 "$app_log"
+            if grep -q '^REMOVAL_LAB_PARENT=pass' "$parent_out" 2>/dev/null && [[ $app_rc == 0 ]]; then
+              echo "REMOVAL_LAB_MODE_$mode=pass"
+            else
+              echo "REMOVAL_LAB_MODE_$mode=fail"; status=1
+            fi
+          done
+          [[ $status == 0 ]] && echo REMOVAL_LAB=pass || echo REMOVAL_LAB=fail
+          exit "$status"
 
       - name: Retain lab output
         if: ${{ !cancelled() }}
@@ -88,7 +133,7 @@ jobs:
         with:
           name: macos-removal-lab-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
-            ${{ runner.temp }}/removal-lab.log
+            ${{ runner.temp }}/removal-lab
             ${{ runner.temp }}/unit.log
           if-no-files-found: warn
           retention-days: 30

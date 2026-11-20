@@ -2,7 +2,8 @@
 //! disposable GitHub-hosted macOS runner: it creates the real fixed install and
 //! request paths as root, then drives the production removal peer (compiled
 //! verbatim, see tests/removal_lab.m) as two real processes:
-//!   Parent: root, like the remover run by Installer.
+//!   Parent: root, under sudo or inside a real Installer postinstall (the
+//!           production remover context), selected by the workflow.
 //!   App:    the runner's console user, like the running app.
 //! Covered with production code: constructor and confirmation windows, the
 //! readiness notice (root post, user run-loop observer), OPEN (socket, flags,
@@ -18,11 +19,11 @@ use mrk_macos_installed_native::removal_coordinator::{parent_monotonic, post_rem
     RemovalNoticeInbox, RemovalNoticeStart};
 use std::ffi::c_void;
 use std::fs::{self, File, OpenOptions};
-use std::io::{BufRead, BufReader, Read, Write};
+use std::io::Write;
 use std::os::fd::AsRawFd;
 use std::os::unix::fs::{chown, OpenOptionsExt, PermissionsExt};
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::Command;
 use std::task::{Context, Poll, Waker};
 use std::time::{Duration, Instant};
 
@@ -159,7 +160,7 @@ fn run(peer: *mut c_void, operation: u32, census: &mut Census, name: &'static st
     result
 }
 /// OPEN, CONNECT (bounded), AUTHENTICATE up to the identity boundary, CLOSE.
-fn drive(peer: *mut c_void, census: &mut Census) -> (Vec<Stage>, Result<String, String>) {
+fn drive(peer: *mut c_void, census: &mut Census, done_path: &str) -> (Vec<Stage>, Result<String, String>) {
     let mut stages = Vec::new();
     if run(peer, OPEN, census, "open", &mut stages) != 1 { return (stages, Err("OPEN refused".into())); }
     let deadline = Instant::now() + Duration::from_secs(60);
@@ -178,9 +179,9 @@ fn drive(peer: *mut c_void, census: &mut Census) -> (Vec<Stage>, Result<String, 
         else { Ok(format!("identity boundary reached as expected (native code {}, peer uid {} pid {})", r.first_code, r.peer_uid, r.peer_pid)) };
     // Production's App waits for the Parent's frames and never closes first;
     // hold the connection until the Parent has finished (it releases our
-    // stdin after its own CLOSE, or on any earlier exit).
-    let mut released = String::new();
-    let _ = std::io::stdin().read_line(&mut released);
+    // done marker after its own CLOSE, or on any earlier exit).
+    let deadline = Instant::now() + Duration::from_secs(120);
+    while !Path::new(done_path).exists() && Instant::now() < deadline { std::thread::sleep(Duration::from_millis(50)); }
     run(peer, CLOSE, census, "close", &mut stages);
     (stages, verdict)
 }
@@ -226,31 +227,38 @@ fn build_tree(request_dir: &str) -> Result<(), String> {
     file(&format!("{request_dir}/request.json"), 0o444, b"{\"lab\":true}")
 }
 
-fn parent() -> Result<bool, String> {
+/// Parent: root, started by the workflow either through sudo or from the
+/// postinstall of a payload-free package run by the real Installer (the
+/// production remover's context). The App was started first by the workflow.
+fn parent(id_text: &str, user: &str, out_path: &str, done_path: &str) -> Result<bool, String> {
     let hosted = std::env::var("GITHUB_ACTIONS").as_deref() == Ok("true")
         && std::env::var("RUNNER_ENVIRONMENT").as_deref() == Ok("github-hosted");
     if !hosted { return Err("refusing: the removal lab runs only on a disposable GitHub-hosted runner".into()); }
-    if unsafe { nix::libc::getuid() } != 0 { return Err("refusing: Parent must be root (sudo)".into()); }
-    let user = std::env::var("SUDO_USER").map_err(|_| "SUDO_USER missing".to_string())?;
+    if unsafe { nix::libc::getuid() } != 0 { return Err("refusing: Parent must be root".into()); }
     if user.is_empty() || user == "root" { return Err("refusing: App user must be the non-root console user".into()); }
     if Path::new(ROOT).exists() || Path::new(REQUESTS).exists() { return Err("refusing: fixed paths already exist (not a fresh runner)".into()); }
-    let mut id = [0u8; 16];
-    File::open("/dev/urandom").and_then(|mut f| f.read_exact(&mut id)).map_err(|e| e.to_string())?;
+    let id = unhex(id_text).ok_or("bad id")?;
     let request_dir = format!("{REQUESTS}/r-{}", hex(&id));
-    build_tree(&request_dir)?;
+    let result = parent_run(id, &request_dir);
+    // Disposable runner: remove only the lab's own fixed tree, then release the App.
+    for d in [ROOT, REQUESTS] { let _ = Command::new("/bin/chmod").args(["-R", "u+w", d]).status(); let _ = fs::remove_dir_all(d); }
+    let line = match &result { Ok(line) => line.clone(), Err(e) => format!("{{\"role\":\"parent\",\"pass\":false,\"verdict\":{e:?}}}") };
+    let context = format!("{{\"ppid\":{},\"sid\":{},\"euid\":{}}}", unsafe { nix::libc::getppid() },
+        unsafe { nix::libc::getsid(0) }, unsafe { nix::libc::geteuid() });
+    let pass = line.contains("\"pass\":true");
+    let _ = fs::write(out_path, format!("{line}\n{{\"parentContext\":{context:?}}}\nREMOVAL_LAB_PARENT={}\n", if pass { "pass" } else { "fail" }));
+    let _ = File::create(done_path);
+    println!("{line}");
+    Ok(pass)
+}
+fn parent_run(id: [u8; 16], request_dir: &str) -> Result<String, String> {
+    build_tree(request_dir)?;
     let start = parent_monotonic().ok_or("monotonic")?;
-    // App first: it registers the notice observer, then waits for the hint.
-    let exe = std::env::current_exe().map_err(|e| e.to_string())?;
-    let mut child = Command::new("/usr/bin/sudo").args(["-n", "-u", &user]).arg(&exe)
-        .args(["app", &hex(&id), &start.to_string()]).stdin(Stdio::piped()).stdout(Stdio::piped()).stderr(Stdio::inherit())
-        .spawn().map_err(|e| format!("spawn app: {e}"))?;
-    let release = child.stdin.take();
-    let mut lines = BufReader::new(child.stdout.take().unwrap()).lines();
-    let ready = lines.next().and_then(|l| l.ok()).unwrap_or_default();
-    let fds = borrowed(&request_dir)?;
+    let fds = borrowed(request_dir)?;
     let bytes = (b"{}".to_vec(), vec![0u8; 256]);
     let peer = unsafe { mrk_removal_peer_new(&inputs(1, start, id, &fds, &bytes)) };
-    let mut census = Census { directory: open_ro(&request_dir, true)?, role: "parent", first: None, checkpoints: 0, bound: false };
+    let mut census = Census { directory: open_ro(request_dir, true)?, role: "parent", first: None, checkpoints: 0, bound: false };
+    let mut posted = None;
     let (stages, verdict) = if peer.is_null() {
         (Vec::new(), Err("Parent constructor refused the protocol window/inputs".to_string()))
     } else if unsafe { mrk_macos_installed_native::mrk_removal_lab_enter_open(peer) } != 1 {
@@ -261,23 +269,13 @@ fn parent() -> Result<bool, String> {
         if run(peer, OPEN, &mut census, "open", &mut stages) != 1 {
             (stages, Err("OPEN refused".to_string()))
         } else {
-            let posted = post_removal_ready(&hex(&id));
-            census.role = if posted { "parent" } else { "parent(post-failed)" };
+            posted = Some(post_removal_ready(&hex(&id)));
             let (mut rest, verdict) = drive_after_open(peer, &mut census);
             stages.append(&mut rest);
             (stages, verdict)
         }
     };
-    drop(release); // the App may now close its end
-    let app = lines.map_while(Result::ok).filter(|l| l.starts_with('{')).last().unwrap_or_else(|| "{\"role\":\"app\",\"pass\":false,\"verdict\":\"no app result\"}".into());
-    let status = child.wait().map_err(|e| e.to_string())?;
-    let parent_line = summary("parent", &stages, &verdict, &census, &[("appReadyLine".into(), ready.clone())]);
-    println!("{parent_line}");
-    println!("{app}");
-    let app_pass = app.contains("\"pass\":true");
-    // Disposable runner: remove only the lab's own fixed tree.
-    for d in [ROOT, REQUESTS] { let _ = Command::new("/bin/chmod").args(["-R", "u+w", d]).status(); let _ = fs::remove_dir_all(d); }
-    Ok(verdict.is_ok() && census.first.is_none() && app_pass && status.success())
+    Ok(summary("parent", &stages, &verdict, &census, &[("posted".into(), format!("{posted:?}"))]))
 }
 fn drive_after_open(peer: *mut c_void, census: &mut Census) -> (Vec<Stage>, Result<String, String>) {
     // Same as drive() minus OPEN, which the Parent ran before posting.
@@ -300,10 +298,10 @@ fn drive_after_open(peer: *mut c_void, census: &mut Census) -> (Vec<Stage>, Resu
     (stages, verdict)
 }
 
-fn app(id_text: &str, start_text: &str) -> Result<bool, String> {
+fn app(id_text: &str, done_path: &str) -> Result<bool, String> {
     if unsafe { nix::libc::getuid() } == 0 { return Err("refusing: App must not be root".into()); }
     let id = unhex(id_text).ok_or("bad id")?;
-    let start: u64 = start_text.parse().map_err(|_| "bad start")?;
+    let start = parent_monotonic().ok_or("monotonic")?;
     let mut extra = Vec::new();
     // Confirmation sheet original on the main thread with the protocol window.
     let sheet = unsafe { mrk_removal_confirmation_reserve(start, start + WORK_NS, start + HARD_NS) };
@@ -316,7 +314,7 @@ fn app(id_text: &str, start_text: &str) -> Result<bool, String> {
     std::io::stdout().flush().ok();
     let waker = Waker::noop();
     let mut cx = Context::from_waker(waker);
-    let deadline = Instant::now() + Duration::from_secs(30);
+    let deadline = Instant::now() + Duration::from_secs(90);
     let mut hint = None;
     while started == RemovalNoticeStart::Registered && Instant::now() < deadline {
         unsafe { CFRunLoopRunInMode(kCFRunLoopDefaultMode, 0.1, 1) };
@@ -334,7 +332,7 @@ fn app(id_text: &str, start_text: &str) -> Result<bool, String> {
     let mut census = Census { directory: open_ro(&request_dir, true)?, role: "app", first: None, checkpoints: 0, bound: true };
     let (stages, verdict) = if peer.is_null() { (Vec::new(), Err("App constructor refused".to_string())) }
         else if unsafe { mrk_macos_installed_native::mrk_removal_lab_enter_open(peer) } != 1 { (Vec::new(), Err("lab entry refused".to_string())) }
-        else { drive(peer, &mut census) };
+        else { drive(peer, &mut census, done_path) };
     let notice_ok = matches!(hint, Some(h) if h == id);
     let pass = verdict.is_ok() && census.first.is_none() && !sheet.is_null() && notice_ok;
     let mut line = summary("app", &stages, &verdict, &census, &extra);
@@ -347,9 +345,9 @@ fn main() {
     let args: Vec<String> = std::env::args().collect();
     let label = if args.get(1).map(String::as_str) == Some("app") { "REMOVAL_LAB_APP" } else { "REMOVAL_LAB" };
     let result = match args.get(1).map(String::as_str) {
-        Some("parent") => parent(),
+        Some("parent") if args.len() == 6 => parent(&args[2], &args[3], &args[4], &args[5]),
         Some("app") if args.len() == 4 => app(&args[2], &args[3]),
-        _ => Err("usage: removal_lab parent   (as root via sudo on a hosted runner)".into()),
+        _ => Err("usage: removal_lab app ID DONE | removal_lab parent ID APP_USER OUT DONE (root, hosted runner only)".into()),
     };
     match result {
         Ok(true) => { eprintln!("{label}=pass"); }
