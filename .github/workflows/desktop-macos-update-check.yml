@@ -35,7 +35,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        mode: [update, fresh, remove]
+        mode: [update, fresh, remove, uninstaller]
     if: github.repository == 'Apdelrahman1911/mobile-release-kit' && github.ref == 'refs/heads/verify/desktop-macos-update-check'
     runs-on: macos-26
     timeout-minutes: 45
