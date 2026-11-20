@@ -28,39 +28,65 @@ if [ -L "$home" ] || [ ! -d "$home" ] || [ -L "$lib" ] || [ ! -d "$lib" ] \
     echo "refused: the home Library folder is not a folder owned by this user"
     exit 64
 fi
+home=$(cd -P "$home" && pwd -P) || exit 64
+lib="$home/Library"
+library_device=$(stat -f %d "$lib") || exit 64
 
 status=0
 remove() {
-    target=$1
+    target="./$1"
+    display="$directory/$1"
     if [ ! -e "$target" ] && [ ! -L "$target" ]; then
         return 0
     fi
     if [ -L "$target" ]; then
-        echo "kept (link, not followed): $target"; status=1; return 0
+        echo "kept (link, not followed): $display"; status=1; return 0
     fi
-    if [ "$(stat -f %u "$target")" != "$uid" ]; then
-        echo "kept (not owned by you): $target"; status=1; return 0
+    if [ "$(stat -f '%u:%d' "$target")" != "$uid:$device" ]; then
+        echo "kept (different owner or volume): $display"; status=1; return 0
     fi
-    # -x: never cross into another mounted volume. rm never follows links.
+    if [ "$#" -eq 2 ] && [ -f "$target" ]; then
+        defaults delete "$2" >/dev/null 2>&1 || true
+    fi
     if rm -r -f -x -- "$target" && [ ! -e "$target" ]; then
-        echo "deleted: $target"
+        echo "deleted: $display"
     else
-        echo "could not delete: $target"; status=1
+        echo "could not delete: $display"; status=1
     fi
 }
 
-for id in dev.mobile-release-kit.desktop dev.mobile-release-kit.desktop.entry dev.mobile-release-kit.desktop.launcher; do
-    remove "$lib/Application Support/$id"
-    remove "$lib/Caches/$id"
-    remove "$lib/WebKit/$id"
-    remove "$lib/HTTPStorages/$id"
-    remove "$lib/HTTPStorages/$id.binarycookies"
-    remove "$lib/Saved Application State/$id.savedState"
-    remove "$lib/Logs/$id"
-    if [ -f "$lib/Preferences/$id.plist" ] && [ ! -L "$lib/Preferences/$id.plist" ]; then
-        defaults delete "$id" >/dev/null 2>&1 || true
+remove_directory_data() (
+    directory="$lib/$1"
+    if [ -L "$directory" ]; then
+        echo "kept (link, not followed): $directory"
+        exit 1
     fi
-    remove "$lib/Preferences/$id.plist"
+    [ -e "$directory" ] || exit 0
+    if ! cd -P "$directory" || [ "$(pwd -P)" != "$directory" ] || [ "$(stat -f %u .)" != "$uid" ]; then
+        echo "kept (unverified Library directory): $directory"
+        exit 1
+    fi
+    device=$(stat -f %d .) || exit 1
+    if [ "$device" != "$library_device" ]; then
+        echo "kept (different volume): $directory"
+        exit 1
+    fi
+    # The working directory pins the verified parent. Remove only its fixed
+    # leaves. The device check and rm -x constrain traversal below that parent.
+    status=0
+    for id in dev.mobile-release-kit.desktop dev.mobile-release-kit.desktop.entry dev.mobile-release-kit.desktop.launcher; do
+        case "$1" in
+            Preferences) remove "$id.plist" "$id" ;;
+            "Saved Application State") remove "$id.savedState" ;;
+            HTTPStorages) remove "$id"; remove "$id.binarycookies" ;;
+            *) remove "$id" ;;
+        esac
+    done
+    exit "$status"
+)
+
+for directory in "Application Support" Caches WebKit HTTPStorages "Saved Application State" Logs Preferences; do
+    remove_directory_data "$directory" || status=1
 done
 
 # The app's own login-keychain items, matched by their exact fixed service.
