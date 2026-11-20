@@ -33,9 +33,11 @@ import signal
 import stat
 import subprocess
 import sys
+import tempfile
 import threading
 import time
 import zipfile
+from collections import deque
 from pathlib import Path
 
 REPOSITORY = "Apdelrahman1911/mobile-release-kit"
@@ -316,6 +318,7 @@ UI_JXA = """function run(argv) {
 }
 """
 RUNTIME_AVAILABLE_TEXT, RUNTIME_UNAVAILABLE_TEXT = "Bundled runtime", "Runtime unavailable"
+RUNTIME_DETAILS_LABEL = "Advanced · app connection details"
 WORKSPACE_ERROR_MARKERS = ("Maximum update depth", "Minified React error", "Something went wrong")
 CLI_STATUS_GUIDANCE = "CLI / AI access"
 
@@ -346,6 +349,15 @@ def first_launch_observe(pid, work, evidence, label):
     time.sleep(6)
     tools = ui_query(pid, work, "texts")
     texts = (overview.get("texts") or []) + (tools.get("texts") or [])
+    details = None
+    runtime_labels = {RUNTIME_AVAILABLE_TEXT, RUNTIME_UNAVAILABLE_TEXT}
+    if navigate.get("clicked") == "Build tools" and not tools.get("error") and not runtime_labels.intersection(texts):
+        # The healthy card starts collapsed. An unhealthy card stays open.
+        # Opening this disclosure leaves the original connection untouched.
+        details = ui_query(pid, work, "click", RUNTIME_DETAILS_LABEL)
+        if details.get("clicked") == RUNTIME_DETAILS_LABEL:
+            tools = ui_query(pid, work, "texts")
+            texts += tools.get("texts") or []
     shot = evidence / f"screen-{label}-build-tools.png"
     subprocess.run(["/usr/sbin/screencapture", "-x", str(shot)], capture_output=True, timeout=60)
     card = tools.get("texts") or []
@@ -357,7 +369,7 @@ def first_launch_observe(pid, work, evidence, label):
     except subprocess.TimeoutExpired:
         status = {"returncode": None, "guidance": False}
     return {"overviewTexts": len(overview.get("texts") or []), "overviewError": overview.get("error"),
-            "navigate": navigate, "buildToolsTexts": len(card), "buildToolsError": tools.get("error"),
+            "navigate": navigate, "runtimeDetails": details, "buildToolsTexts": len(card), "buildToolsError": tools.get("error"),
             "runtimeCard": runtime, "workspaceErrorMarkers": sorted({m for m in WORKSPACE_ERROR_MARKERS
                                                                      for t in texts if m in t}),
             "cliStatus": status, "screenshot": shot.name if shot.exists() else None}
@@ -786,6 +798,34 @@ def stall_diagnostics(evidence, label):
     subprocess.run(["/usr/sbin/screencapture", "-x", str(evidence / f"screen-{label}-stall.png")], capture_output=True, timeout=60)
 
 
+def removal_file_summary(trace):
+    """Summarize installer-owned path activity without retaining raw paths."""
+    sections = (
+        ("/MobileReleaseKit-RemovalRequests/", "request"),
+        ("/install-inventory.json", "inventory"),
+        ("/installation-v1.json", "installation-record"),
+        ("/installation-v2.json", "transaction-state"),
+        ("/.install-", "transaction-stage"),
+        ("/runtime/", "runtime"),
+        ("/MobileReleaseKitPayload.app/", "payload"),
+        ("/Mobile Release Kit.app/", "app"),
+    )
+    previous = None
+    summary = deque(maxlen=80)
+    for line in trace:
+        if str(STATE) not in line:
+            continue
+        for marker, section in sections:
+            if marker in line:
+                break
+        else:
+            section = "installed-root"
+        if section != previous:
+            summary.append(section)
+            previous = section
+    return " -> ".join(summary)
+
+
 def sample_removal_start(pid, evidence, label, stop):
     """Capture short-lived app work while Installer publishes the request."""
     requests = STATE.with_name("MobileReleaseKit-RemovalRequests")
@@ -797,15 +837,29 @@ def sample_removal_start(pid, evidence, label, stop):
             stop.wait(0.025)
         else:
             return
-        sample = subprocess.run(["/usr/bin/sudo", "-n", "/usr/bin/sample", str(pid), "8", "1", "-mayDie"],
-                                capture_output=True, text=True, timeout=18)
-        graph = sample.stdout.partition("Call graph:\n")[2].partition("\nTotal number in stack")[0]
-        # Keep function names and counts. The sample header and binary-image
-        # list can include paths. Request files and IDs are never read here.
-        lines = [line.strip() for line in graph.splitlines()
-                 if "(in libmrk_desktop_image.dylib)" in line
-                 and any(name in line for name in ("removal", "installation_observation_macos", "install_producer"))]
-        report = [f"returncode={sample.returncode} frames={len(lines)}", *lines[:160]]
+        with tempfile.TemporaryFile(mode="w+t", dir=evidence.parent, errors="replace") as trace:
+            files = subprocess.Popen(["/usr/bin/sudo", "-n", "/usr/bin/fs_usage", "-w", "-f", "filesys",
+                                      "-t", "8", str(pid)], stdout=trace, stderr=subprocess.DEVNULL)
+            try:
+                sample = subprocess.run(["/usr/bin/sudo", "-n", "/usr/bin/sample", str(pid), "4", "2"],
+                                        capture_output=True, text=True, timeout=75)
+                graph = sample.stdout.partition("Call graph:\n")[2].partition("\nTotal number in stack")[0]
+                # Keep function names and counts, with the path-bearing header
+                # and binary-image list omitted.
+                lines = [line.strip() for line in graph.splitlines()
+                         if "(in libmrk_desktop_image.dylib)" in line
+                         and any(name in line for name in ("removal", "installation_observation_macos", "install_producer"))]
+                report = [f"sample returncode={sample.returncode} frames={len(lines)}", *lines[:160]]
+            except (OSError, subprocess.SubprocessError) as error:
+                report = [f"sample failed: {type(error).__name__}"]
+            finally:
+                try:
+                    files.wait(timeout=12)
+                except subprocess.TimeoutExpired:
+                    files.kill()
+                    files.wait()
+            trace.seek(0)
+            report.append(f"filesystem returncode={files.returncode} sections={removal_file_summary(trace)}")
     except (OSError, subprocess.SubprocessError) as error:
         report = [f"capture failed: {type(error).__name__}"]
     (evidence / f"{label}-app-start-sample.txt").write_text("\n".join(report) + "\n")
@@ -863,7 +917,7 @@ def live_remove(mount, work, evidence, steps, label):
         installer.wait(timeout=60)
     finally:
         sample_stop.set()
-        sample_thread.join(timeout=18)
+        sample_thread.join(timeout=87)
         log.close()
         out["sheet"] = sheet[-12:]
         # Keep the probe history even when this check fails below.

@@ -85,11 +85,19 @@ class LaunchSmokeSourceTests(unittest.TestCase):
         order = [live.index(marker) for marker in ('"removal-sheet-not-confirmed"', '"remove-returned-nonzero"',
                  '"removal-left-app-objects"')]
         self.assertEqual(order, sorted(order))
+
         source = text.split("def remove_check(", 1)[1].split("\ndef ", 1)[0]
         order = [source.index(marker) for marker in ('live_remove(mount, work, evidence, steps, "remove")',
                  '"user-data-changed-by-removal"', 'install("reinstall"',
                  '"user-data-changed-by-reinstall"', 'launch_smoke("after-reinstall"', "uninstaller_check(", '"detach"')]
         self.assertEqual(order, sorted(order))
+
+    def test_removal_file_summary_keeps_only_fixed_categories(self):
+        root = str(M.STATE)
+        trace = [f"open {root}-RemovalRequests/r-private/request.json", f"stat {root}/installation-v2.json",
+                 f"open {root}/installation-v2.json", "open /Users/runner/private.txt",
+                 f"open {root}/versions/release/runtime/private"]
+        self.assertEqual(M.removal_file_summary(trace), "request -> transaction-state -> runtime")
 
     def test_uninstaller_check_covers_cancel_recovery_refusal_and_scoped_deletion(self):
         self.assertEqual(M.REMOVAL_SIDECARS, ("Remove.pkg", "remove-producer.json", "remove-producer.sig"))
@@ -188,9 +196,9 @@ class FirstLaunchObservationTests(unittest.TestCase):
         self.assertIn("e.click()", M.UI_JXA)
         self.assertIn("AXStaticText", M.UI_JXA)
 
-    def observe(self, overview, tools, cli_rc=3, cli_text="... CLI / AI access ..."):
+    def observe(self, overview, tools, cli_rc=3, cli_text="... CLI / AI access ...", details=()):
         from unittest import mock
-        replies = iter([overview, {"clicked": "Build tools", "role": "AXLink"}, tools])
+        replies = iter([overview, {"clicked": "Build tools", "role": "AXLink"}, tools, *details])
         cli = mock.Mock(returncode=cli_rc, stdout=cli_text, stderr="")
         with tempfile.TemporaryDirectory() as folder, \
              mock.patch.object(M, "ui_query", side_effect=lambda *a, **k: next(replies)), \
@@ -206,6 +214,12 @@ class FirstLaunchObservationTests(unittest.TestCase):
         self.assertEqual(bad["runtimeCard"], "unavailable")
         unseen = self.observe({"error": "timeout"}, {"error": "no-window"})
         self.assertEqual((unseen["runtimeCard"], unseen["overviewError"]), ("not-observed", "timeout"))
+
+    def test_opens_collapsed_runtime_card(self):
+        opened = {"clicked": M.RUNTIME_DETAILS_LABEL, "role": "AXDisclosureTriangle"}
+        result = self.observe({"texts": []}, {"texts": [M.RUNTIME_DETAILS_LABEL]},
+                              details=(opened, {"texts": [M.RUNTIME_AVAILABLE_TEXT]}))
+        self.assertEqual((result["runtimeCard"], result["runtimeDetails"]), ("bundled", opened))
 
     def test_workspace_error_and_cli_guidance_are_recorded(self):
         value = self.observe({"texts": ["Minified React error #185"]}, {"texts": ["Bundled runtime"]},
