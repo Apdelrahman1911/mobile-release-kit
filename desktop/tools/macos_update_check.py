@@ -33,6 +33,7 @@ import signal
 import stat
 import subprocess
 import sys
+import threading
 import time
 import zipfile
 from pathlib import Path
@@ -785,6 +786,31 @@ def stall_diagnostics(evidence, label):
     subprocess.run(["/usr/sbin/screencapture", "-x", str(evidence / f"screen-{label}-stall.png")], capture_output=True, timeout=60)
 
 
+def sample_removal_start(pid, evidence, label, stop):
+    """Capture short-lived app work while Installer publishes the request."""
+    requests = STATE.with_name("MobileReleaseKit-RemovalRequests")
+    deadline = time.monotonic() + 60
+    try:
+        while not stop.is_set() and time.monotonic() < deadline:
+            if next(requests.glob("r-*/request.json"), None) is not None:
+                break
+            stop.wait(0.025)
+        else:
+            return
+        sample = subprocess.run(["/usr/bin/sudo", "-n", "/usr/bin/sample", str(pid), "8", "1", "-mayDie"],
+                                capture_output=True, text=True, timeout=18)
+        graph = sample.stdout.partition("Call graph:\n")[2].partition("\nTotal number in stack")[0]
+        # Keep function names and counts. The sample header and binary-image
+        # list can include paths. Request files and IDs are never read here.
+        lines = [line.strip() for line in graph.splitlines()
+                 if "(in libmrk_desktop_image.dylib)" in line
+                 and any(name in line for name in ("removal", "installation_observation_macos", "install_producer"))]
+        report = [f"returncode={sample.returncode} frames={len(lines)}", *lines[:160]]
+    except (OSError, subprocess.SubprocessError) as error:
+        report = [f"capture failed: {type(error).__name__}"]
+    (evidence / f"{label}-app-start-sample.txt").write_text("\n".join(report) + "\n")
+
+
 def live_remove(mount, work, evidence, steps, label):
     """Open the installed app, run the mounted Remove.pkg with the standard
     Installer and confirm only the app's own exact sheet; require Installer 0
@@ -806,6 +832,10 @@ def live_remove(mount, work, evidence, steps, label):
     log = open(evidence / f"{label}-installer.log", "w")
     installer = subprocess.Popen(["/usr/bin/sudo", "-n", "/usr/sbin/installer", "-verbose", "-pkg",
                                   str(mount / "Remove.pkg"), "-target", "/"], stdout=log, stderr=subprocess.STDOUT, text=True)
+    sample_stop = threading.Event()
+    sample_thread = threading.Thread(target=sample_removal_start,
+                                     args=(pids[0], evidence, label, sample_stop), daemon=True)
+    sample_thread.start()
     sheet, clicked_at = [], None
     try:
         deadline = time.monotonic() + 240
@@ -832,6 +862,8 @@ def live_remove(mount, work, evidence, steps, label):
             out["timedOut"] = True
         installer.wait(timeout=60)
     finally:
+        sample_stop.set()
+        sample_thread.join(timeout=18)
         log.close()
         out["sheet"] = sheet[-12:]
         # Keep the probe history even when this check fails below.
