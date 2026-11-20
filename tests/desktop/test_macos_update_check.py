@@ -64,10 +64,14 @@ class LaunchSmokeSourceTests(unittest.TestCase):
 
     def test_both_modes_are_wired_in_the_workflow(self):
         workflow = (ROOT / ".github/workflows/desktop-macos-update-check.yml").read_text()
-        self.assertIn("mode: [update, fresh, remove]", workflow)
+        self.assertIn("mode: [update, fresh, remove, uninstaller]", workflow)
         self.assertIn('--mode "${{ matrix.mode }}"', workflow)
         source = (ROOT / "desktop/tools/macos_update_check.py").read_text()
-        self.assertIn('choices=("update", "fresh", "remove")', source)
+        self.assertIn('choices=("update", "fresh", "remove", "uninstaller")', source)
+        # The installed-only uninstaller mode never runs or claims a live removal.
+        installed = source.split("def uninstaller_installed_check(", 1)[1].split("\ndef ", 1)[0]
+        self.assertNotIn("live_remove(", installed)
+        self.assertIn("uninstaller_while_installed(", installed)
         # The launch smoke runs only after every user-data comparison in update mode.
         update = source.split("def main():", 1)[1]
         self.assertLess(update.index('"user-data-changed-by-downgrade-attempt"'), update.index('launch_smoke("after-update"'))
@@ -95,7 +99,12 @@ class LaunchSmokeSourceTests(unittest.TestCase):
         for marker in ('"removal-image-hidden-sidecars"', '"uninstaller-codesign"', '"uninstaller-gatekeeper"',
                        '"Notarized Developer ID"', "stat.UF_HIDDEN"):
             self.assertIn(marker, image)
-        check = source.split("def uninstaller_check(", 1)[1].split("\ndef ", 1)[0]
+        installed = source.split("def uninstaller_while_installed(", 1)[1].split("\ndef ", 1)[0]
+        confirmed = source.split("def uninstaller_check(", 1)[1].split("\ndef ", 1)[0]
+        # The confirmed path first runs every installed-app path, then removes.
+        self.assertLess(confirmed.index("uninstaller_while_installed("),
+                        confirmed.index('live_remove(mount, work, evidence, steps, "remove-again")'))
+        check = installed + confirmed
         order = [check.index(marker) for marker in ('"uninstall-cancel-delete"', '"uninstall-cancel-keep"',
                  '"uninstall-installer-quit"', "p.returncode == 65", 'live_remove(mount, work, evidence, steps, "remove-again")',
                  '"user-data-changed-by-second-removal"', '"uninstall-delete"', '"delete-all-data-left-app-data"',
