@@ -12048,10 +12048,11 @@ mod installer {
             action==ActionData::SamePackageNoop && present==[true;2] && !intent && controls && current
         }
         impl RemovalObserved {
-            pub(super) fn retire_launcher_before_snapshot(&mut self,book:&mut Install)->Result<()> {
+            pub(super) fn retire_launcher_before_snapshot(&mut self,book:&mut Install,
+                exclusion:&worker::RemovalExclusion,source:&worker::RemovalAdmission)->Result<()> {
                 self.post(book)?;
                 if let Some(removal) = self.inner.launcher_removal.as_mut() {
-                    removal.retire_before_snapshot(book,&self.inner.prepared)?;
+                    removal.retire_before_snapshot(book,&self.inner.prepared,exclusion,source)?;
                 }
                 self.post(book)
             }
@@ -15022,14 +15023,24 @@ mod installer {
             peer: RemovalPeerCompletion, reservation: usize, maintenance: usize,
         }
         impl RemovalExclusion {
+            fn original_locks_held(book: &Install, root: usize, reservation: usize, maintenance: usize) -> bool {
+                let held = |index, role| book.originals.get(index).is_some_and(|row: &Original|
+                    row.state == State::Owned && row.fd.is_some() && row.role == role && row.parent == Some(root));
+                book.registration.participant == Some(reservation)
+                    && book.registration.lock_attempted && book.registration.exclusive_acquired
+                    && !book.registration.closed_under_maintenance
+                    && book.gate.participant == Some(maintenance) && book.gate.entered
+                    && book.gate.lock_attempted && book.gate.exclusive_acquired
+                    && held(reservation, Role::ReservationParticipant) && held(maintenance, Role::GateParticipant)
+            }
+
             pub(super) fn post(&self,book:&Install,source:&RemovalAdmission)->Result<()> {
                 source.existing_maintenance_post(book)?;
                 let retired=self.peer.retired();
                 check(retired.role()==native::removal_coordinator::RemovalPeerRole::Parent
                     && retired.original_peer_exit_observed() && retired.peer_pid_data()>0
-                    && book.registration.participant==Some(self.reservation)
                     && source.existing_maintenance==Some(self.maintenance)
-                    && book.gate.entered && book.gate.lock_attempted && book.gate.exclusive_acquired,
+                    && Self::original_locks_held(book, source.root_original(), self.reservation, self.maintenance),
                     "removal-exclusive-originals")?;
                 // The unique private constructor below bound the exact request
                 // before M; shared clock and current source remain live checks.
@@ -21077,9 +21088,10 @@ exec ./mrk-macos-remove --fixture-supervise "$1"
                 self.prepare_removal_request()?;self.prepare_removal_publication()?;
                 let peer=self.join_removal_peer(removal_ready_hint)?;
                 let exclusion=self.acquire_removal_exclusion(peer)?;
+                let source=self.removal.as_ref().ok_or("removal-original-missing")?;
                 self.removal_observed.as_mut().ok_or("removal-current-missing")?
-                    .retire_launcher_before_snapshot(&mut self.book)?;
-                exclusion.post(&self.book,self.removal.as_ref().ok_or("removal-original-missing")?)?;
+                    .retire_launcher_before_snapshot(&mut self.book,&exclusion,source)?;
+                exclusion.post(&self.book,source)?;
                 self.reobserve_removal_exclusive(&exclusion)?;
                 let linked={
                     let source=self.removal.as_ref().ok_or("removal-original-missing")?;
@@ -22641,6 +22653,56 @@ exec ./mrk-macos-remove --fixture-supervise "$1"
         #[cfg(test)]
         mod tests {
             use super::*;
+            #[test]
+            fn launcher_removal_requires_both_original_locks() {
+                use std::fs;
+
+                let template = std::env::temp_dir().join("mrk-launcher-locks.XXXXXXXX");
+                let directory = unistd::mkdtemp(&template).unwrap().canonicalize().unwrap();
+                let reservation_file = directory.join(paths::REGISTRATION_GATE_NAME);
+                let maintenance_file = directory.join(paths::MAINTENANCE_GATE_NAME);
+                fs::write(&reservation_file, paths::REGISTRATION_GATE_BYTES).unwrap();
+                fs::write(&maintenance_file, paths::MAINTENANCE_GATE_BYTES).unwrap();
+                let tested = std::panic::catch_unwind(|| {
+                    let mut book = Install::new();
+                    let mut root = book.open(None, "/", true).unwrap();
+                    for part in directory.components().skip(1) {
+                        root = book.open(Some(root), part.as_os_str().to_str().unwrap(), true).unwrap();
+                    }
+                    let reservation = book.open_role(Some(root), paths::REGISTRATION_GATE_NAME, false,
+                        Role::ReservationParticipant).unwrap();
+                    let maintenance = book.open_role(Some(root), paths::MAINTENANCE_GATE_NAME, false,
+                        Role::GateParticipant).unwrap();
+                    let held = |book: &Install| RemovalExclusion::original_locks_held(book, root, reservation, maintenance);
+                    let acquire = |book: &Install, index| {
+                        #[allow(deprecated)]
+                        fcntl::flock(book.fd(index).unwrap().as_raw_fd(), fcntl::FlockArg::LockExclusiveNonblock).unwrap();
+                    };
+                    assert!(!held(&book));
+                    book.registration.lock_attempted = true;
+                    acquire(&book, reservation);
+                    book.registration.exclusive_acquired = true;
+                    assert!(!held(&book));
+                    book.gate.entered = true;
+                    book.gate.lock_attempted = true;
+                    acquire(&book, maintenance);
+                    book.gate.exclusive_acquired = true;
+                    assert!(held(&book));
+                    assert!(!RemovalExclusion::original_locks_held(&book, root, maintenance, reservation));
+                    let substitute = book.open(Some(root), paths::REGISTRATION_GATE_NAME, false).unwrap();
+                    book.registration.participant = Some(substitute);
+                    assert!(!held(&book));
+                    book.registration.participant = Some(reservation);
+                    drop(book.originals[reservation].fd.take());
+                    book.originals[reservation].state = State::Closed;
+                    assert!(!held(&book)); // The maintenance lock alone is insufficient.
+                });
+                fs::remove_file(reservation_file).unwrap();
+                fs::remove_file(maintenance_file).unwrap();
+                fs::remove_dir(directory).unwrap();
+                tested.unwrap();
+            }
+
             #[test]
             fn installer_budget_is_bounded_and_remover_keeps_its_native_profile() {
                 assert_eq!(compiled_total_data(true,false),300*SECOND);
