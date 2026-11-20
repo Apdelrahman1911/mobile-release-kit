@@ -439,7 +439,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--selection", required=True)
     parser.add_argument("--work", required=True)
-    parser.add_argument("--mode", choices=("update", "fresh", "remove"), default="update")
+    parser.add_argument("--mode", choices=("update", "fresh", "remove", "uninstaller"), default="update")
     args = parser.parse_args()
     work = Path(args.work)
     evidence = work / "evidence"
@@ -449,8 +449,9 @@ def main():
         selection = load_selection(args.selection)
         result["selection"] = selection
         need(not STATE.exists() and not USER_DATA.exists(), "runner-not-fresh")
-        if args.mode in ("fresh", "remove"):
-            (fresh_check if args.mode == "fresh" else remove_check)(selection, work, evidence, steps, result)
+        if args.mode in ("fresh", "remove", "uninstaller"):
+            {"fresh": fresh_check, "remove": remove_check, "uninstaller": uninstaller_installed_check}[args.mode](
+                selection, work, evidence, steps, result)
             result["passed"] = True
             return 0
         previous = fetch("previous", selection["previous"], work, steps)
@@ -887,13 +888,34 @@ def dialog_says(seen, fragment):
     return any(fragment in text for row in seen for text in row.get("texts", []))
 
 
-def uninstaller_check(mount, work, evidence, steps, result):
-    """#83: the Remove image's signed uninstaller. While the app is installed:
-    cancelling either choice, or quitting Installer, removes and deletes
-    nothing, and the data script refuses. After a second confirmed removal,
-    "Delete All Data" removes only the app's own exact per-user locations and
-    keychain items; links, look-alike siblings, projects and other files stay."""
-    out = result["uninstaller"] = {}
+def uninstaller_installed_check(selection, work, evidence, steps, result):
+    """#83 without a live removal: install the next package, seed data, then
+    run every uninstaller path that must remove and delete nothing while the
+    app is installed (both cancels, Installer quit, data script refusal).
+    The confirmed Delete All Data path needs a completed live removal and
+    stays in remove mode."""
+    need("removal" in selection, "selection-has-no-removal-carrier")
+    row = selection["next"]
+    folder = fetch("next", row, work, steps)
+    mount, roster = removal_image(selection["removal"], work, steps)
+    result["removalImageRoster"] = roster
+    try:
+        need(install("next", folder, steps, evidence=evidence) == 0, "uninstaller-baseline-install-returned-nonzero")
+        state = installed_state()
+        result["afterInstall"] = state
+        need((state["release"], state["packageVersion"], state["packageSha256"])
+             == (row["release"], row["packageVersion"], row["packageSha256"]), "uninstaller-baseline-identity")
+        result["seededFiles"] = len(seed_user_data())
+        uninstaller_while_installed(mount, work, evidence, steps, result)
+    finally:
+        subprocess.run(["/usr/bin/hdiutil", "detach", "-force", str(mount)], capture_output=True, timeout=120)
+
+
+def uninstaller_while_installed(mount, work, evidence, steps, result):
+    """While the app is installed: cancelling either choice, or quitting
+    Installer, removes and deletes nothing, and the data script refuses.
+    Returns (decoys, before) for the confirmed path that follows."""
+    out = result.setdefault("uninstaller", {})
     script = mount / UNINSTALLER / "Contents/Resources/delete-data.sh"
     need(script.is_file(), "uninstaller-data-script-missing")
     decoys = plant_decoys()
@@ -924,7 +946,16 @@ def uninstaller_check(mount, work, evidence, steps, result):
     out["dataScriptWhileInstalled"] = p.returncode
     need(p.returncode == 65, "delete-data-not-refused-while-installed")
     unchanged("delete-data-while-installed")
+    return decoys, before
 
+
+def uninstaller_check(mount, work, evidence, steps, result):
+    """#83: the Remove image's signed uninstaller. The installed-app paths
+    (uninstaller_while_installed), then after a second confirmed removal,
+    "Delete All Data" removes only the app's own exact per-user locations and
+    keychain items; links, look-alike siblings, projects and other files stay."""
+    decoys, before = uninstaller_while_installed(mount, work, evidence, steps, result)
+    out = result["uninstaller"]
     second = live_remove(mount, work, evidence, steps, "remove-again")
     out["secondRemoval"] = second
     need(manifest() == before, "user-data-changed-by-second-removal")
