@@ -100,34 +100,60 @@ impl DocumentBinding {
     /// Main-window startup owns one observer original. Store its bounded cell
     /// before native registration so a partial/Unknown start is never lost.
     pub(crate) fn install_macos_removal_notice(&self)->bool{
-        if !cfg!(feature="macos-installed-desktop-image")||!mrk_macos_installed_native::main_thread(){return false;}
+        if !cfg!(feature="macos-installed-desktop-image")||!mrk_macos_installed_native::main_thread(){
+            macos_removal::removal_trace(format_args!("app notice=not-main"));return false;}
         let runtime=macos_removal::NoticeRuntime::reserved();
         {
             let mut state=self.lock();
-            if state.maintenance.notice.is_some(){return false;}
+            if state.maintenance.notice.is_some(){macos_removal::removal_trace(format_args!("app notice=duplicate"));return false;}
             state.maintenance.notice=Some(runtime.clone());
         }
-        runtime.install()
+        let registered=runtime.install();
+        macos_removal::removal_trace(format_args!("app notice={}",if registered{"registered"}else{"refused"}));
+        registered
     }
     pub(crate) fn removal_notice_runtime(&self)->Option<Arc<macos_removal::NoticeRuntime>>{self.lock().maintenance.notice.clone()}
 
     /// Native id hint only. No caller supplies a path, deadline or credential.
     /// The original local read-only bootstrap is captured before any Doc wait.
+    /// Every refusal stays the same `unavailable()`; only a fixed stage number
+    /// is traced (removal_trace) so the hosted check can tell which gate held.
     pub(crate) fn start_macos_removal_hint(&self,id:[u8;16])->Result<(),BridgeError>{
+        macos_removal::removal_trace(format_args!("app hint=received"));
+        let mut stage=0u8;
+        let result=self.start_macos_removal_hint_staged(id,&mut stage);
+        match &result{
+            Ok(())=>macos_removal::removal_trace(format_args!("app hint=admitted")),
+            Err(_)=>macos_removal::removal_trace(format_args!("app hint=refused stage={stage}")),
+        }
+        result
+    }
+    fn start_macos_removal_hint_staged(&self,id:[u8;16],stage:&mut u8)->Result<(),BridgeError>{
         let at=Instant::now();
+        *stage=1;
         if !cfg!(feature="macos-installed-desktop-image")||id==[0;16]
             ||!crate::installation::preparation_profile_available(){return Err(unavailable());}
         self.reconcile();
+        *stage=2;
         let snapshot={let state=self.lock();self.macos_maintenance_gate(&state)?;
+            *stage=3;
             self.inner.bridge.android_build.removal_snapshot(&self.inner.session_identity)?};
+        *stage=4;
         let checked=snapshot.check_originals()?;
         let admitted={
+            *stage=5;
             let mut state=self.lock();self.macos_maintenance_gate(&state)?;
+            *stage=6;
             if state.maintenance.notice.as_ref().and_then(|notice|notice.retained_bytes()).is_none(){return Err(unavailable());}
+            *stage=7;
             let census=installation_memory::macos_maintenance_census(self,&state,checked.picker_originals()).map_err(|_|unavailable())?;
+            *stage=8;
             let prior=self.inner.bridge.android_build.removal_admission_bytes(&self.inner.session_identity,&checked,&census).ok_or_else(unavailable)?;
+            *stage=9;
             let dispatcher=self.inner.bridge.android_build.removal_dispatcher(&self.inner.session_identity).ok_or_else(unavailable)?;
+            *stage=10;
             let generation=state.maintenance.hints.admit(id).ok_or_else(unavailable)?;
+            *stage=11;
             let admitted=match macos_removal::reserve(self,id,generation,at,checked.picker_originals().clone(),
                 checked.source_generation(),prior,dispatcher){Ok(admitted)=>admitted,Err(error)=>{
                     let _=state.maintenance.hints.retire(id,generation,true);return Err(error);
@@ -136,6 +162,7 @@ impl DocumentBinding {
             state.maintenance.completion=None;state.maintenance.last=None;
             self.bump(&mut state);admitted
         };
+        *stage=12;
         admitted.release().map_err(|_|unavailable())
     }
 

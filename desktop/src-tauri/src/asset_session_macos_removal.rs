@@ -14,6 +14,20 @@ use crate::{installed_runtime::{AppRemovalWorkGate,AppRemovalCleanup,AdmissionFa
     saved_command_owner::{MacosRemovalPrompt,MacosRemovalConfirmed,MacosMaintenanceHandle,
         MacosMaintenanceCompletion,MacosMaintenancePhase,AndroidServiceDispatcher}};
 
+/// Removal diagnostics (#30/#83): fixed ASCII stage words and small numbers
+/// only, never a path, request id, nonce, credential or user data, written to
+/// the unified log so the hosted remove check can tell which stage stopped.
+pub(crate) fn removal_trace(fields:std::fmt::Arguments<'_>){peer_native::removal_trace(&fields.to_string());}
+fn progress_word(p:peer_native::RemovalPeerProgress)->&'static str{match p{
+    peer_native::RemovalPeerProgress::Ready=>"ready",peer_native::RemovalPeerProgress::Pending=>"pending",
+    peer_native::RemovalPeerProgress::Refused=>"refused",peer_native::RemovalPeerProgress::Unknown=>"unknown"}}
+fn trace_step(op:&str,p:peer_native::RemovalPeerProgress,peer:&peer_native::RemovalPeer<'_>)->peer_native::RemovalPeerProgress{
+    if p!=peer_native::RemovalPeerProgress::Pending{
+        removal_trace(format_args!("app op={op} progress={} native={}",progress_word(p),peer.custody().native_first_code));
+    }
+    p
+}
+
 const LOCAL_WORK:Duration=Duration::from_secs(300);
 const LOCAL_HARD:Duration=Duration::from_secs(310);
 const TAIL:Duration=Duration::from_secs(10);
@@ -477,13 +491,22 @@ fn send_frame_data(original:&Original,transcript:&mut wire::TranscriptData,frame
 fn exchange(original:&Original,request:&RemovalRequestOriginal,current:&RemovalCurrent<'_>,peer:&mut peer_native::RemovalPeer<'_>,
     completion:&mut Option<MacosMaintenanceCompletion>)->Flow<()>{
     let mut gate=|point|peer_gate(original,request,current,point);
-    if peer.admit_source(&mut gate)!=peer_native::RemovalPeerProgress::Ready
-        ||peer.open(&mut gate)!=peer_native::RemovalPeerProgress::Ready{return Err(());}
-    loop{original.raw_work()?;match peer.connect(&mut gate){peer_native::RemovalPeerProgress::Ready=>break,
+    removal_trace(format_args!("app exchange=start"));
+    let source=peer.admit_source(&mut gate);
+    if trace_step("source",source,peer)!=peer_native::RemovalPeerProgress::Ready{return Err(());}
+    let opened=peer.open(&mut gate);
+    if trace_step("open",opened,peer)!=peer_native::RemovalPeerProgress::Ready{return Err(());}
+    loop{if original.raw_work().is_err(){removal_trace(format_args!("app op=connect work=closed"));return Err(());}
+        let p=peer.connect(&mut gate);match trace_step("connect",p,peer){peer_native::RemovalPeerProgress::Ready=>break,
         peer_native::RemovalPeerProgress::Pending=>original.pause(),_=>return Err(())}}
-    if peer.authenticate(&mut gate)!=peer_native::RemovalPeerProgress::Ready{return Err(());}
-    let begun=peer.receive(&mut gate);await_frame(original,peer,&mut gate,begun)?;
-    let cutoff=peer.admit_challenge(decode_challenge,&mut gate).map_err(|_|())?;
+    let authenticated=peer.authenticate(&mut gate);
+    if trace_step("authenticate",authenticated,peer)!=peer_native::RemovalPeerProgress::Ready{return Err(());}
+    let begun=peer.receive(&mut gate);
+    if await_frame(original,peer,&mut gate,begun).is_err(){
+        removal_trace(format_args!("app op=challenge-frame failed native={}",peer.custody().native_first_code));return Err(());}
+    let cutoff=match peer.admit_challenge(decode_challenge,&mut gate){Ok(c)=>c,Err(_)=>{
+        removal_trace(format_args!("app op=challenge-admit failed native={}",peer.custody().native_first_code));return Err(());}};
+    removal_trace(format_args!("app op=challenge progress=ready"));
     let clock=original.clock.get().ok_or(())?;
     if !clock.authenticate_once(&cutoff){return Err(());}
     source_post(original,request,current)?;
@@ -497,7 +520,8 @@ fn exchange(original:&Original,request:&RemovalRequestOriginal,current:&RemovalC
     transcript.advance_data(wire::ActionData::Receive,&buffer[..count],original.raw_work()?).map_err(|_|())?;
     let prompt=Arc::new(MacosRemovalPrompt::reserved(clock.clone(),original.dispatcher.clone()));
     original.prompt.set(prompt.clone()).map_err(|_|())?;
-    if !prompt.request(){return Err(());}original.signal();
+    if !prompt.request(){removal_trace(format_args!("app prompt=refused"));return Err(());}
+    removal_trace(format_args!("app prompt=requested"));original.signal();
     let confirmation=loop{
         if !original.work_ok(){prompt.stop();}
         match prompt.take(){Ok(Some(value))=>break value,Ok(None)=>{original.note(AdmissionFailure::Stopped,Instant::now());return Err(());},Err(())=>{}}

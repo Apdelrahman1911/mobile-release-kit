@@ -658,8 +658,9 @@ def stall_diagnostics(evidence, label):
             capture(f"sample-{role}-{pid}", ["/usr/bin/sudo", "-n", "/usr/bin/sample", str(pid), "3"], 120, 1500)
     capture("requests", ["/usr/bin/sudo", "-n", "/bin/ls", "-laeOR", "/Library/Application Support/MobileReleaseKit-RemovalRequests"])
     capture("log", ["/usr/bin/log", "show", "--last", "6m", "--style", "compact", "--predicate",
-                    f'process == "{PAYLOAD_PROCESS}" OR process == "mrk-macos-remove" OR process == "mrk-macos-entry"'
-                    ' OR process == "installd" OR process == "package_script_service"'], 180)
+                    f'(process == "{PAYLOAD_PROCESS}" OR process == "mrk-macos-remove" OR process == "mrk-macos-entry"'
+                    ' OR process == "installd" OR process == "package_script_service")'
+                    ' AND NOT (subsystem BEGINSWITH "com.apple.WebKit")'], 180)
     subprocess.run(["/usr/sbin/screencapture", "-x", str(evidence / f"screen-{label}-stall.png")], capture_output=True, timeout=60)
 
 
@@ -714,6 +715,15 @@ def live_remove(mount, work, evidence, steps, label):
         out["sheet"] = sheet[-12:]
         # Keep the probe history even when this check fails below.
         (evidence / f"{label}-sheet-probes.json").write_text(json.dumps(sheet[-40:]) + "\n")
+        # The app's fixed-code removal trace (no paths/ids), pass or fail.
+        try:
+            t = subprocess.run(["/usr/bin/log", "show", "--last", "8m", "--style", "compact", "--predicate",
+                                'eventMessage BEGINSWITH "MRK_REMOVAL_TRACE"'], capture_output=True, text=True, timeout=180)
+            trace = [line[:300] for line in t.stdout.splitlines() if "MRK_REMOVAL_TRACE" in line][-60:]
+        except Exception as error:  # diagnostics must not raise
+            trace = [f"capture failed: {type(error).__name__}"]
+        out["appTrace"] = trace
+        (evidence / f"{label}-app-trace.txt").write_text("\n".join(trace) + "\n")
     out["returncode"] = installer.returncode
     steps.append({"argv": ["installer", "-pkg", "Remove.pkg"], "returncode": installer.returncode, "role": label})
     need(clicked_at is not None, "removal-sheet-not-confirmed")
