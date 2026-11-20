@@ -7,10 +7,13 @@ use std::{ffi::{c_int,c_void},marker::PhantomData,ptr::NonNull,rc::Rc,time::Inst
 #[derive(Clone,Copy,Debug,PartialEq,Eq)]
 pub enum Status { NotRegistered,Enabled,RequiresApproval,NotFound,Unavailable,Error }
 #[derive(Clone,Copy,Debug,PartialEq,Eq)]
-pub enum Action { Observe,RequestRegistration,OpenApprovalSettings,UnregisterAfterQuiescence }
+pub enum Action { Observe,RequestRegistration,OpenApprovalSettings,UnregisterAfterQuiescence,ObserveForMaintenance }
 impl Action {
-    fn code(self)->u32 { match self { Self::Observe=>0,Self::RequestRegistration=>1,Self::OpenApprovalSettings=>2,Self::UnregisterAfterQuiescence=>3 } }
+    fn code(self)->u32 { match self { Self::Observe=>0,Self::RequestRegistration=>1,Self::OpenApprovalSettings=>2,
+        Self::UnregisterAfterQuiescence=>3,Self::ObserveForMaintenance=>4 } }
+    fn is_observe(self)->bool { matches!(self,Self::Observe|Self::ObserveForMaintenance) }
 }
+const CORROBORATED_ABSENT:u32=6;
 #[derive(Clone,Copy,Debug,PartialEq,Eq)]
 pub enum Outcome { NotEntered,Observed,RegistrationRequested,AlreadyRegistered,NeedsApproval,
     SettingsRequested,Refused,Error,Unknown,DeniedByUser,Stopped,UnregisterAccepted }
@@ -120,12 +123,14 @@ fn decode(raw:Report,action:Action,phase:Phase)->Option<Observation> {
             || raw.status==4) { return None; }
     if action==Action::UnregisterAfterQuiescence{return decode_maintenance(raw,phase);}
     if !report_version_valid(raw,action) || raw.action!=action.code() || Some(raw.phase)!=phase.code()
-        || raw.status>5 || raw.outcome>9 || raw.entered>1 || raw.returned>raw.entered
+        || raw.status>CORROBORATED_ABSENT || raw.outcome>9 || raw.entered>1 || raw.returned>raw.entered
+        || raw.status==CORROBORATED_ABSENT && (action!=Action::ObserveForMaintenance
+            || !matches!(phase,Phase::ObserveStatus|Phase::ReleaseService))
         || raw.cleanup_known>1 || raw.unknown>1 || raw.called!=1
         || raw.service_state>5
         || (raw.unknown==1)!=(raw.outcome==8)
         || raw.unknown==1 && (raw.cleanup_known!=0 || raw.outcome!=8)
-        || action==Action::Observe && (raw.entered!=0 || raw.returned!=0)
+        || action.is_observe() && (raw.entered!=0 || raw.returned!=0)
         || raw.unknown==0 && matches!(raw.service_state,0|1|3|5) { return None; }
     if matches!(phase,Phase::AcquireService|Phase::ObserveStatus) && raw.entered!=0 { return None; }
     let reservation_action=matches!(action,Action::RequestRegistration|Action::OpenApprovalSettings);
@@ -144,14 +149,15 @@ fn decode(raw:Report,action:Action,phase:Phase)->Option<Observation> {
             Phase::ObserveStatus if raw.service_state!=2 || raw.entered!=0 || raw.returned!=0
                 || raw.status==4 => return None,
             Phase::Mutate if raw.service_state!=2 || !reservation_refused && (raw.entered!=1 || raw.returned!=1)
-                || action==Action::Observe => return None,
+                || action.is_observe() => return None,
             Phase::ObserveResult if raw.service_state!=2 || raw.entered!=1 || raw.returned!=1
                 || action!=Action::RequestRegistration || raw.status==4 => return None,
             _=>{},
         }
         if phase==Phase::ObserveStatus {
             let expected=if raw.status==5 { 7 } else { match action {
-                Action::Observe=>1,Action::OpenApprovalSettings=>0,Action::UnregisterAfterQuiescence=>return None,
+                Action::Observe|Action::ObserveForMaintenance=>1,
+                Action::OpenApprovalSettings=>0,Action::UnregisterAfterQuiescence=>return None,
                 Action::RequestRegistration=>match raw.status { 0|3=>0,1=>3,2=>4,_=>return None },
             } };
             if raw.outcome!=expected { return None; }
@@ -159,17 +165,17 @@ fn decode(raw:Report,action:Action,phase:Phase)->Option<Observation> {
         if phase==Phase::Mutate && !reservation_refused && match action {
             Action::RequestRegistration=>!matches!(raw.status,0|3) || !matches!(raw.outcome,2|3|4|7|9),
             Action::OpenApprovalSettings=>raw.status>3 || raw.outcome!=5,
-            Action::Observe|Action::UnregisterAfterQuiescence=>true,
+            Action::Observe|Action::ObserveForMaintenance|Action::UnregisterAfterQuiescence=>true,
         } { return None; }
         if phase==Phase::ObserveResult
             && (!matches!(raw.outcome,2|3|4|7|9) || raw.status==5 && raw.outcome!=7) { return None; }
     }
-    let status=match raw.status { 0=>Status::NotRegistered,1=>Status::Enabled,2=>Status::RequiresApproval,
+    let status=match raw.status { 0|CORROBORATED_ABSENT=>Status::NotRegistered,1=>Status::Enabled,2=>Status::RequiresApproval,
         3=>Status::NotFound,4=>Status::Unavailable,_=>Status::Error };
     let outcome=match raw.outcome { 0=>Outcome::NotEntered,1=>Outcome::Observed,2=>Outcome::RegistrationRequested,
         3=>Outcome::AlreadyRegistered,4=>Outcome::NeedsApproval,5=>Outcome::SettingsRequested,
         6=>Outcome::Refused,7=>Outcome::Error,8=>Outcome::Unknown,_=>Outcome::DeniedByUser };
-    if outcome==Outcome::Observed && action!=Action::Observe
+    if outcome==Outcome::Observed && !action.is_observe()
         || matches!(outcome,Outcome::RegistrationRequested|Outcome::AlreadyRegistered|Outcome::NeedsApproval|Outcome::DeniedByUser)
             && action!=Action::RequestRegistration
         || outcome==Outcome::SettingsRequested && action!=Action::OpenApprovalSettings
@@ -184,7 +190,8 @@ fn decode(raw:Report,action:Action,phase:Phase)->Option<Observation> {
 /// bit2=NSError present, bit3=exception. No private message crosses the seam.
 fn decode_maintenance(raw:Report,phase:Phase)->Option<Observation>{
     let bits=raw.reserved;
-    if raw.version!=3 || raw.action!=3 || Some(raw.phase)!=phase.code() || raw.status>5
+    if raw.version!=3 || raw.action!=3 || Some(raw.phase)!=phase.code() || raw.status>CORROBORATED_ABSENT
+        || raw.status==CORROBORATED_ABSENT && (!matches!(phase,Phase::ObserveResult|Phase::ReleaseService) || bits&7!=3)
         || !matches!(raw.outcome,0|6|7|8|10) || raw.entered>1 || raw.returned>raw.entered
         || raw.cleanup_known>1 || raw.unknown>1 || raw.called!=1 || raw.service_state>5
         || bits&!15!=0 || bits&6!=0 && bits&1==0 || (raw.returned==1)!=(bits&1==1)
@@ -207,7 +214,7 @@ fn decode_maintenance(raw:Report,phase:Phase)->Option<Observation>{
         }
         if raw.outcome==10 && (bits!=3 || raw.entered!=1 || raw.returned!=1){return None;}
     }
-    let status=match raw.status{0=>Status::NotRegistered,1=>Status::Enabled,2=>Status::RequiresApproval,
+    let status=match raw.status{0|CORROBORATED_ABSENT=>Status::NotRegistered,1=>Status::Enabled,2=>Status::RequiresApproval,
         3=>Status::NotFound,4=>Status::Unavailable,_=>Status::Error};
     let outcome=match raw.outcome{0=>Outcome::NotEntered,6=>Outcome::Refused,7=>Outcome::Error,
         8=>Outcome::Unknown,10=>Outcome::UnregisterAccepted,_=>return None};
@@ -1136,6 +1143,24 @@ mod tests {
 #[cfg(test)]
 mod maintenance_report_tests{
     use super::*;
+    #[test]
+    fn corroborated_absence_stays_bound_to_maintenance_observation() {
+        let action=Action::ObserveForMaintenance;
+        let observed=Report{version:2,action:action.code(),status:CORROBORATED_ABSENT,outcome:1,
+            phase:3,service_state:2,called:1,..Report::default()};
+        let proof=decode(observed,action,Phase::ObserveStatus).unwrap();
+        assert_eq!(proof.status,Status::NotRegistered);
+        assert!(!proof.mutation_entered && !proof.native_settled);
+        let unknown=decode(Report{status:3,..observed},action,Phase::ObserveStatus).unwrap();
+        assert_eq!(unknown.status,Status::NotFound);
+        assert!(decode(Report{action:0,..observed},Action::Observe,Phase::ObserveStatus).is_none());
+        assert!(decode(Report{phase:4,entered:1,returned:1,..observed},action,Phase::Mutate).is_none());
+        let result=Report{version:3,action:3,status:CORROBORATED_ABSENT,outcome:10,entered:1,returned:1,
+            phase:5,service_state:2,called:1,reserved:3,..Report::default()};
+        assert_eq!(decode(result,Action::UnregisterAfterQuiescence,Phase::ObserveResult).unwrap().status,Status::NotRegistered);
+        assert!(decode(Report{reserved:5,..result},Action::UnregisterAfterQuiescence,Phase::ObserveResult).is_none());
+    }
+
     #[test]
     fn bool_error_exception_and_version_are_independent_facts(){
         let good=Report{version:3,action:3,status:1,outcome:10,entered:1,returned:1,

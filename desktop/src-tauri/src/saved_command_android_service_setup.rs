@@ -491,7 +491,7 @@ impl MainBinding {
         let Some(previous)=&original.retirement.predecessor else{return false;};
         let (Some(pair),Some(next_pair))=(&previous.pair,&original.retirement.pair)else{return false;};
         Arc::ptr_eq(previous,&self.retirement) && Arc::ptr_eq(pair,next_pair)
-            && previous.predecessor.is_none() && previous.action==management::Action::Observe
+            && previous.predecessor.is_none() && previous.action==management::Action::ObserveForMaintenance
             && previous.maintenance.is_none() && !previous.require_enabled
             && previous.phase.load(Ordering::SeqCst)==CALLBACK_RETIRED
             && self.serial>0 && self.serial==previous.retired_serial.load(Ordering::SeqCst)
@@ -571,7 +571,7 @@ impl CallbackOriginal {
         // separate setup Check successfully reports other known states. Latch
         // at this real native return, never after cleanup/IPC receipt.
         if self.retirement.pair.is_some() && self.retirement.predecessor.is_none()
-            && self.action==management::Action::Observe && phase==Phase::ObserveStatus {
+            && self.action==management::Action::ObserveForMaintenance && phase==Phase::ObserveStatus {
             if let (Some(at),Some(observation))=(returned,custody.observation){
                 if !matches!(observation.status,management::Status::Enabled|management::Status::NotRegistered){
                     failure.note(if observation.status==management::Status::RequiresApproval{
@@ -1196,7 +1196,7 @@ impl MaintenancePreparation {
     }
     fn new_bound(gate:WorkGate,dispatcher:Arc<Dispatcher>,operation:[u8;16],removal:Option<Arc<RemovalMainCut>>)->Self{
         let pair=Arc::new(MaintenancePair{finalized:AtomicBool::new(false),continuation:std::sync::atomic::AtomicU8::new(0)});
-        let probe=Preparation::create_bound(gate.clone(),dispatcher.clone(),management::Action::Observe,false,None,Some(pair.clone()),None,removal.clone());
+        let probe=Preparation::create_bound(gate.clone(),dispatcher.clone(),management::Action::ObserveForMaintenance,false,None,Some(pair.clone()),None,removal.clone());
         let enabled=Preparation::create_bound(gate,dispatcher,management::Action::UnregisterAfterQuiescence,true,Some(operation),
             Some(pair.clone()),Some(probe.retirement.clone()),removal);
         Self{probe,enabled,pair,enabled_entered:AtomicBool::new(false),returned:Mutex::new(None)}
@@ -1855,7 +1855,7 @@ mod callback_lifecycle_tests {
         // unrelated setup or whole-owner finality.
         let (_,control,_cohort,gate)=control_in_lane(Instant::now(),ControlLane::Maintenance);
         let pair=Arc::new(MaintenancePair{finalized:AtomicBool::new(false),continuation:std::sync::atomic::AtomicU8::new(1)});
-        let probe=Arc::new(Retirement{original:control.clone(),action:Action::Observe,require_enabled:false,
+        let probe=Arc::new(Retirement{original:control.clone(),action:Action::ObserveForMaintenance,require_enabled:false,
             phase:std::sync::atomic::AtomicU8::new(CALLBACK_RETIRED),retired_serial:std::sync::atomic::AtomicU32::new(1),
             maintenance:None,pair:Some(pair.clone()),predecessor:None,removal:None});
         let successor=Arc::new(Retirement{original:control.clone(),action:Action::UnregisterAfterQuiescence,require_enabled:true,
@@ -2161,12 +2161,13 @@ mod callback_lifecycle_tests {
             (management::Status::RequiresApproval,Some(wire::Reason::ApprovalRequired))]{
             let (_,control,_cohort,gate)=control_in_lane(admitted,ControlLane::Maintenance);
             let pair=Arc::new(MaintenancePair{finalized:AtomicBool::new(false),continuation:std::sync::atomic::AtomicU8::new(0)});
-            let retirement=Arc::new(Retirement{original:control.clone(),action:Action::Observe,require_enabled:false,
+            let retirement=Arc::new(Retirement{original:control.clone(),action:Action::ObserveForMaintenance,require_enabled:false,
                 phase:std::sync::atomic::AtomicU8::new(PENDING),retired_serial:std::sync::atomic::AtomicU32::new(0),
                 maintenance:None,pair:Some(pair),predecessor:None,removal:None});
-            let original=CallbackOriginal{gate,action:Action::Observe,serial:1,retirement,returned:Mutex::new(None)};
+            let original=CallbackOriginal{gate,action:Action::ObserveForMaintenance,serial:1,retirement,returned:Mutex::new(None)};
             let custody=management::Custody{phase:Some(Phase::ObserveStatus),action_admitted:true,
-                service:ServiceCustody::Owned,observation:Some(observed(state)),..deferred()};
+                action:Some(Action::ObserveForMaintenance),service:ServiceCustody::Owned,
+                observation:Some(management::Observation{action:Action::ObserveForMaintenance,..observed(state)}),..deferred()};
             let mut failure=CapturedFailure::default();
             assert_eq!(original.gate(Checkpoint::Returned{phase:Phase::ObserveStatus,at:returned_at,custody},&mut failure),
                 if why.is_some(){Decision::Stop}else{Decision::Proceed});
