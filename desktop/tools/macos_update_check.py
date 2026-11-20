@@ -857,7 +857,7 @@ def sample_removal_start(pid, evidence, label, stop):
             files = subprocess.Popen(["/usr/bin/sudo", "-n", "/usr/bin/fs_usage", "-w", "-f", "filesys",
                                       "-t", "8", str(pid)], stdout=trace, stderr=subprocess.DEVNULL)
             try:
-                sample = subprocess.run(["/usr/bin/sudo", "-n", "/usr/bin/sample", str(pid), "4", "2"],
+                sample = subprocess.run(["/usr/bin/sudo", "-n", "/usr/bin/sample", str(pid), "9", "2"],
                                         capture_output=True, text=True, timeout=75)
                 graph = sample.stdout.partition("Call graph:\n")[2].partition("\nTotal number in stack")[0]
                 # Keep function names and counts, with the path-bearing header
@@ -865,7 +865,10 @@ def sample_removal_start(pid, evidence, label, stop):
                 lines = [line.strip() for line in graph.splitlines()
                          if "(in libmrk_desktop_image.dylib)" in line
                          and any(name in line for name in ("removal", "installation_observation_macos", "install_producer"))]
-                report = [f"sample returncode={sample.returncode} frames={len(lines)}", *lines[:160]]
+                prompt = [line.strip() for line in graph.splitlines()
+                          if any(name in line for name in ("removal_prompt", "mrk_removal_confirmation", "beginSheet", "endSheet"))]
+                report = [f"sample returncode={sample.returncode} frames={len(lines)} promptFrames={len(prompt)}",
+                          *prompt[:80], *lines[:160]]
             except (OSError, subprocess.SubprocessError) as error:
                 report = [f"sample failed: {type(error).__name__}"]
             finally:
