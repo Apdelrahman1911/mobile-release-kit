@@ -963,6 +963,8 @@ def live_remove(mount, work, evidence, steps, label):
         (evidence / f"{label}-app-trace.txt").write_text("\n".join(trace) + "\n")
     out["returncode"] = installer.returncode
     steps.append({"argv": ["installer", "-pkg", "Remove.pkg"], "returncode": installer.returncode, "role": label})
+    if clicked and installer.returncode != 0:
+        removal_refusal_evidence(pids[0], work, evidence, label)
     need(clicked, "removal-sheet-not-confirmed")
     need(installer.returncode == 0, "remove-returned-nonzero")
     need(quit_clicked, "removal-quit-sheet-not-confirmed")
@@ -971,6 +973,37 @@ def live_remove(mount, work, evidence, steps, label):
     out["remaining"] = remaining
     need(not any(remaining.values()), "removal-left-app-objects")
     return out
+
+
+def removal_refusal_evidence(pid, work, evidence, label):
+    """Observe the original failure on the disposable runner after Installer exits."""
+    service_label = "dev.mobile-release-kit.desktop.android-register"
+    try:
+        with (evidence / f"{label}-maintenance-service.log").open("w") as output:
+            for argv in (
+                ["/bin/launchctl", "print", f"system/{service_label}"],
+                ["/bin/launchctl", "print", f"gui/{os.getuid()}/{service_label}"],
+                ["/usr/bin/sudo", "-n", "/usr/bin/log", "show", "--last", "3m", "--info",
+                 "--style", "compact", "--predicate",
+                 '(process == "smd" OR process == "backgroundtaskmanagementd" OR process == "launchd"'
+                 ' OR subsystem CONTAINS[c] "servicemanagement") AND'
+                 ' (eventMessage CONTAINS[c] "mobile-release-kit" OR eventMessage CONTAINS[c] "MobileReleaseKit")'],
+            ):
+                probe = subprocess.run(argv, capture_output=True, text=True, timeout=35)
+                output.write(f"{argv[-1]} returned {probe.returncode}\n")
+                output.write((probe.stdout + probe.stderr)[-24000:] + "\n")
+        if pid in payload_pids():
+            for control in ("Build tools", "About this installation", "Refresh preparation status"):
+                ui_query(pid, work, "click", control, timeout=10)
+            time.sleep(1)
+            words = ui_query(pid, work, "texts", timeout=10).get("texts") or []
+            relevant = [line for line in words if any(term in line.lower() for term in
+                        ("prepare", "preparation", "native helper", "cleanup", "original request"))]
+            (evidence / f"{label}-maintenance-ui.json").write_text(json.dumps(relevant[:30]) + "\n")
+            subprocess.run(["/usr/sbin/screencapture", "-x", str(evidence / f"screen-{label}-maintenance.png")],
+                           capture_output=True, timeout=15)
+    except (OSError, subprocess.TimeoutExpired) as error:
+        (evidence / f"{label}-maintenance-probe-error.txt").write_text(type(error).__name__ + "\n")
 
 
 def remove_check(selection, work, evidence, steps, result):
