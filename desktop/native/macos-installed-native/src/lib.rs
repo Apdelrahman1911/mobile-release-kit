@@ -163,6 +163,16 @@ compile_error!("resident image requires its isolated native helper graph");
 #[cfg(all(feature = "desktop-image", any(feature = "installed-observation", feature = "vault-helper",
     feature = "android-registration-helper", mrk_wrapping_keychain_qualification)))]
 compile_error!("ordinary product image requires its isolated native role");
+#[cfg(all(feature = "removal-lab", any(feature = "desktop-image", feature = "resident-image",
+    feature = "vault-helper", feature = "android-registration-helper", feature = "installed-observation",
+    feature = "xcode-setup", feature = "package-producer-signing", feature = "e2-native-fixture",
+    feature = "installed-removal-abrupt-fixture", feature = "installed-restore-cut-fixture")))]
+compile_error!("the removal lab is nonshipping and never combines with another native role");
+#[cfg(feature = "removal-lab")]
+unsafe extern "C" {
+    /// Lab only: start a fresh peer after the identity-bound SOURCE stage.
+    pub fn mrk_removal_lab_enter_open(original: *mut std::ffi::c_void) -> i32;
+}
 pub const ANDROID_REGISTRATION_HELPER_BUILD: bool = cfg!(feature = "android-registration-helper");
 #[cfg(any(
     all(feature = "android-registration-helper", not(mrk_android_registration_helper_native)),
