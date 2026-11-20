@@ -98,6 +98,33 @@ class LaunchSmokeSourceTests(unittest.TestCase):
                  '"user-data-changed-by-reinstall"', 'launch_smoke("after-reinstall"', "uninstaller_check(", '"detach"')]
         self.assertEqual(order, sorted(order))
 
+    def test_remove_result_retains_installer_status_when_acceptance_raises(self):
+        from contextlib import redirect_stdout
+        from io import StringIO
+        from unittest import mock
+
+        for installer_status, failure in ((1, "remove-returned-nonzero"), (None, "remove-app-not-running")):
+            with self.subTest(failure=failure), tempfile.TemporaryDirectory() as directory:
+                work = Path(directory)
+
+                def refuse(_selection, _work, _evidence, steps, _result):
+                    steps.append({"role": "remove-launch", "returncode": 0})
+                    if installer_status is not None:
+                        steps.append({"role": "remove", "returncode": installer_status})
+                    raise M.Failed(failure)
+
+                argv = ["check", "--selection", "unused", "--work", directory, "--mode", "remove"]
+                with mock.patch.object(sys, "argv", argv), mock.patch.object(M, "load_selection", return_value=VALID), \
+                     mock.patch.object(M, "STATE", work / "state"), mock.patch.object(M, "USER_DATA", work / "user"), \
+                     mock.patch.object(M, "remove_check", side_effect=refuse), mock.patch.object(M, "install_log_excerpt"), \
+                     redirect_stdout(StringIO()) as stdout:
+                    self.assertEqual(M.main(), 1)
+                result = json.loads((work / "evidence" / "RESULT.json").read_text())
+                for row in (result, json.loads(stdout.getvalue())):
+                    self.assertFalse(row["passed"])
+                    self.assertEqual(row["failure"], failure)
+                    self.assertEqual(row["removeReturn"], installer_status)
+
     def test_removal_file_summary_keeps_only_fixed_categories(self):
         root = str(M.STATE)
         trace = [f"open {root}-RemovalRequests/r-private/request.json", f"stat {root}/installation-v2.json",

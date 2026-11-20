@@ -638,6 +638,8 @@ def main():
         result["failure"] = str(error)[:200]
     finally:
         result["steps"] = steps
+        if args.mode == "remove" and "removeReturn" not in result:
+            result["removeReturn"] = next((step["returncode"] for step in steps if step.get("role") == "remove"), None)
         try:
             install_log_excerpt(evidence)
         except Exception as error:  # evidence capture must not mask the result
