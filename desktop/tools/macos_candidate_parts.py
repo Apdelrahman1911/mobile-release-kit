@@ -72,10 +72,31 @@ ORIGINAL_CUTS = MappingProxyType({
                'Retain prepared signed input for failed-job-only installation retries',
                "Retire only the completed candidate's disposable compiler outputs"),
 })
+# Ordinary edges are DATA dependencies, not scheduling habit. The Desktop image
+# compiles only prepare (runtime), vault (helper digest/size) and frontend
+# (dist) bindings; the remover compiles only prepare bindings. Resident outputs
+# (facade, entry, resident image, Android helper) are consumed first by
+# assemble. CLI stays behind resident so at most four hosted macOS parts run
+# at once. Same-run source binding and every consumer check are unchanged.
 ORDINARY_PARTS = MappingProxyType({
-    ('image' if name == 'observer' else name): tuple('image' if prior == 'observer' else prior for prior in deps)
-    for name, deps in PARTS.items()
+    'prepare': (),
+    'resident': ('prepare',),
+    'vault': ('prepare',),
+    'frontend': ('prepare',),
+    'image': ('vault', 'frontend'),
+    'remover': ('prepare',),
+    'cli': ('resident',),
+    'sign-remover': ('remover',),
+    'sign-cli': ('cli',),
+    'assemble': ('resident', 'image', 'vault', 'sign-remover', 'sign-cli'),
+    'notarize-payload': ('assemble',),
+    'installer': ('notarize-payload',),
+    'scripts-package': ('installer',),
+    'final-package': ('scripts-package',),
 })
+# Producers whose restored outputs export a binding; image/remover never read them.
+RESIDENT_BINDINGS = ('MRK_MACOS_ANDROID_HELPER_SHA256', 'MRK_MACOS_DESKTOP_FACADE_SHA256',
+                     'MRK_MACOS_ENTRY_SHA256', 'MRK_MACOS_RESIDENT_IMAGE_SHA256')
 ORDINARY_CUTS = MappingProxyType(dict({k: v for k, v in ORIGINAL_CUTS.items() if k != 'observer'},
     image=('Build the genuine ordinary Desktop image',
            'Record the effective pinned ordinary Desktop compiler'),

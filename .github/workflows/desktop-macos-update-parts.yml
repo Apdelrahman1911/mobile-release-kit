@@ -849,7 +849,6 @@ jobs:
       DEVELOPER_DIR: "/Library/Developer/CommandLineTools"
     needs:
     - desktop26-prepare
-    - desktop26-resident
     - desktop26-vault
     - desktop26-frontend
     steps:
@@ -980,7 +979,6 @@ jobs:
       DEVELOPER_DIR: "/Library/Developer/CommandLineTools"
     needs:
     - desktop26-prepare
-    - desktop26-resident
     steps:
     - name: Check out exact reviewed source without retained credentials
       timeout-minutes: 3
@@ -1247,7 +1245,6 @@ jobs:
     environment: macos-developer-id
     needs:
     - desktop26-prepare
-    - desktop26-resident
     - desktop26-remover
     steps:
     - name: Check out exact reviewed source without retained credentials

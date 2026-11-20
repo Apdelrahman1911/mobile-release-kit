@@ -6254,23 +6254,53 @@ mod installer {
             check(!origin||intent.action_data()==ActionData::FreshInstall&&intent.fresh_birth_data().is_some(),
                 "fresh-output-pair-birth-required")?;Ok(origin)
         }
-        fn fresh_output_stage_controls(book:&mut Install,intent_parent:usize,stage:usize,intent:&IntentData,
-            selected:&ReleaseSetData,completed:bool)->Result<([PartialFreshFileObserved;2],Option<u64>)>{
-            check(fresh_output_pair_present(book,stage,intent)?,"fresh-output-pair-required")?;
-            let before=book.named(Some(stage),fresh_data::JOURNAL_NAME).map_err(|_|"fresh-output-journal-stat")?;
-            let size=usize::try_from(before.st_size).map_err(|_|"fresh-output-journal-bound")?;
-            check(size<=fresh_data::JOURNAL_LIMIT&&matches!(before.st_mode,0o100600|0o100444),"fresh-output-journal-bound")?;
+        pub(super) fn fresh_output_read_budget_data(size:usize,control:u64,originals:usize,live:usize)->Result<(usize,u64)> {
+            check(size<=fresh_data::JOURNAL_LIMIT,"fresh-output-journal-bound")?;
             // Reserve before opening/allocating the index. The fixed minimum
             // frame size bounds retained rows; actual parsing cannot exceed
             // this observed byte quote even if the named file later changes.
             let entries=(size/(fresh_data::ENTRY_MIN+4)).min(fresh_data::ENROLLMENT_LIMIT);
             let quote=(size as u64).checked_mul(4).and_then(|n|n.checked_add((entries as u64).checked_mul(1024)?))
                 .and_then(|n|n.checked_add(4*fresh_data::ORIGIN_LIMIT as u64+131072)).ok_or("fresh-output-read-memory")?;
-            check(removal_effective_control_bytes(book)?.checked_add(quote)
-                .is_some_and(|n|n<=installation_record::CONTROL_LIMIT as u64)
-                &&book.originals.len().checked_add(8).is_some_and(|n|n<=installation_record::ORIGINAL_LIMIT)
-                &&book.originals.iter().filter(|row|row.fd.is_some()).count().checked_add(8+worker::EXTRA_LIVE)
-                    .is_some_and(|n|n<96),"fresh-output-read-budget")?;
+            check(control.checked_add(quote).is_some_and(|n|n<=installation_record::CONTROL_LIMIT as u64),
+                "fresh-output-read-control-budget")?;
+            check(originals.checked_add(8).is_some_and(|n|n<=installation_record::ORIGINAL_LIMIT),
+                "fresh-output-read-original-budget")?;
+            check(live.checked_add(8+worker::EXTRA_LIVE).is_some_and(|n|n<96),"fresh-output-read-live-budget")?;
+            Ok((entries,quote))
+        }
+        #[cfg(test)]
+        #[test]
+        fn fresh_output_read_reports_the_exhausted_budget_before_parsing() {
+            let size=4*1024*1024;
+            let (entries,quote)=fresh_output_read_budget_data(size,0,0,0).unwrap();
+            assert_eq!(entries,size/(fresh_data::ENTRY_MIN+4));
+            let cap=installation_record::CONTROL_LIMIT as u64;
+            let originals=installation_record::ORIGINAL_LIMIT-8;
+            let live=95-8-worker::EXTRA_LIVE;
+            assert_eq!(fresh_output_read_budget_data(size,cap-quote,originals,live),Ok((entries,quote)));
+            assert_eq!(fresh_output_read_budget_data(size,cap-quote+1,originals,live),Err("fresh-output-read-control-budget"));
+            assert_eq!(fresh_output_read_budget_data(size,cap-quote,originals+1,live),Err("fresh-output-read-original-budget"));
+            assert_eq!(fresh_output_read_budget_data(size,cap-quote,originals,live+1),Err("fresh-output-read-live-budget"));
+            assert_eq!(fresh_output_read_budget_data(fresh_data::JOURNAL_LIMIT+1,0,0,0),Err("fresh-output-journal-bound"));
+        }
+        fn fresh_output_stage_controls(book:&mut Install,intent_parent:usize,stage:usize,intent:&IntentData,
+            selected:&ReleaseSetData,completed:bool)->Result<([PartialFreshFileObserved;2],Option<u64>)>{
+            check(fresh_output_pair_present(book,stage,intent)?,"fresh-output-pair-required")?;
+            let before=book.named(Some(stage),fresh_data::JOURNAL_NAME).map_err(|_|"fresh-output-journal-stat")?;
+            let size=usize::try_from(before.st_size).map_err(|_|"fresh-output-journal-bound")?;
+            check(size<=fresh_data::JOURNAL_LIMIT&&matches!(before.st_mode,0o100600|0o100444),"fresh-output-journal-bound")?;
+            let control=removal_effective_control_bytes(book)?;
+            let originals=book.originals.len();
+            let live=book.originals.iter().filter(|row|row.fd.is_some()).count();
+            let (entries,quote)=fresh_output_read_budget_data(size,control,originals,live).map_err(|reason|{
+                if !book.worker_stderr_is_gate {
+                    let line=format!("MRK_MACOS_FRESH_OUTPUT_BUDGET_DIAGNOSTIC=reason={reason};journalBytes={size};control={control};records={originals};openFds={live};capture={}\n",
+                        u8::from(book.removal_snapshot_capture.is_some()));
+                    let _=std::io::Write::write_all(&mut std::io::stderr().lock(),line.as_bytes());
+                }
+                reason
+            })?;
             book.removal_control_reserved=book.removal_control_reserved.checked_add(quote).ok_or("fresh-output-read-memory")?;
             let result=removal_archive_scope(book,|book|{
                 let (index,origin,journal,journal_digest)=book.fresh_output_read(intent_parent,stage,intent,selected,size)?;
