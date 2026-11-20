@@ -183,6 +183,7 @@ fn drive(peer: *mut c_void, census: &mut Census, done_path: &str) -> (Vec<Stage>
     let deadline = Instant::now() + Duration::from_secs(120);
     while !Path::new(done_path).exists() && Instant::now() < deadline { std::thread::sleep(Duration::from_millis(50)); }
     run(peer, CLOSE, census, "close", &mut stages);
+    let _ = File::create(format!("{done_path}.app"));
     (stages, verdict)
 }
 fn summary(role: &str, stages: &[Stage], verdict: &Result<String, String>, census: &Census, extra: &[(String, String)]) -> String {
@@ -240,14 +241,18 @@ fn parent(id_text: &str, user: &str, out_path: &str, done_path: &str) -> Result<
     let id = unhex(id_text).ok_or("bad id")?;
     let request_dir = format!("{REQUESTS}/r-{}", hex(&id));
     let result = parent_run(id, &request_dir);
-    // Disposable runner: remove only the lab's own fixed tree, then release the App.
+    // Release the App (it holds its connection until now), let it CLOSE with
+    // the tree intact, then remove only the lab's own fixed tree.
+    let _ = File::create(done_path);
+    let app_closed = format!("{done_path}.app");
+    let deadline = Instant::now() + Duration::from_secs(60);
+    while !Path::new(&app_closed).exists() && Instant::now() < deadline { std::thread::sleep(Duration::from_millis(50)); }
     for d in [ROOT, REQUESTS] { let _ = Command::new("/bin/chmod").args(["-R", "u+w", d]).status(); let _ = fs::remove_dir_all(d); }
     let line = match &result { Ok(line) => line.clone(), Err(e) => format!("{{\"role\":\"parent\",\"pass\":false,\"verdict\":{e:?}}}") };
     let context = format!("{{\"ppid\":{},\"sid\":{},\"euid\":{}}}", unsafe { nix::libc::getppid() },
         unsafe { nix::libc::getsid(0) }, unsafe { nix::libc::geteuid() });
     let pass = line.contains("\"pass\":true");
     let _ = fs::write(out_path, format!("{line}\n{{\"parentContext\":{context:?}}}\nREMOVAL_LAB_PARENT={}\n", if pass { "pass" } else { "fail" }));
-    let _ = File::create(done_path);
     println!("{line}");
     Ok(pass)
 }
@@ -333,6 +338,7 @@ fn app(id_text: &str, done_path: &str) -> Result<bool, String> {
     let (stages, verdict) = if peer.is_null() { (Vec::new(), Err("App constructor refused".to_string())) }
         else if unsafe { mrk_macos_installed_native::mrk_removal_lab_enter_open(peer) } != 1 { (Vec::new(), Err("lab entry refused".to_string())) }
         else { drive(peer, &mut census, done_path) };
+    let _ = File::create(format!("{done_path}.app")); // also on early refusal
     let notice_ok = matches!(hint, Some(h) if h == id);
     let pass = verdict.is_ok() && census.first.is_none() && !sheet.is_null() && notice_ok;
     let mut line = summary("app", &stages, &verdict, &census, &extra);
