@@ -1160,7 +1160,9 @@ mod tests {
         // Pure fixed-cutoff DATA, with deliberately DISTINCT clock origins.
         // No native proof, clock sample, peer or service is manufactured here.
         let p=800_000_000_000;let u=3_000_000_000;
-        let make=||RemovalClockData::from_samples(p,p+290_000_000_000,p+300_000_000_000,u,p+100,p+110,u+20).unwrap();
+        assert_eq!((super::REMOVAL_WORK_NS,super::REMOVAL_HARD_NS),
+        (crate::removal_coordinator::PARENT_WORK_NS,crate::removal_coordinator::PARENT_HARD_NS));
+    let make=||RemovalClockData::from_samples(p,p+290_000_000_000,p+300_000_000_000,u,p+100,p+110,u+20).unwrap();
         let clock=make();assert_eq!(clock.uptime_work,u+290_000_000_000-110);
         assert_eq!(clock.uptime_hard,u+300_000_000_000-110);
         assert!(clock.observe_samples(p+110,u+20,u+100,p+200,u+120));

@@ -3,8 +3,8 @@
 //! Parsed DATA and the main-window sheet alone cannot authenticate a peer.
 use std::{mem::size_of, sync::Arc};
 
-const PARENT_WORK_NS: u64 = 290_000_000_000;
-const PARENT_HARD_NS: u64 = 300_000_000_000;
+pub(crate) const PARENT_WORK_NS: u64 = 290_000_000_000;
+pub(crate) const PARENT_HARD_NS: u64 = 300_000_000_000;
 // Same representable first-failure ceiling as the existing Android Signal.
 const MAX_RAW: u64 = (1_u64 << 61) - 1;
 
@@ -709,6 +709,23 @@ mod peer {
     #[cfg(test)]
     mod tests{
         use super::*;
+        // The real C constructor must admit exactly the Rust protocol window
+        // (it once kept its own 110/120 s copy and refused every removal).
+        #[test]
+        fn native_constructor_admits_exactly_the_protocol_window(){
+            let role=if unsafe{nix::libc::getuid()}==0{RemovalPeerRole::Parent}else{RemovalPeerRole::App};
+            let start=crate::removal_coordinator::parent_monotonic().expect("monotonic");
+            let (installed,signature)=([1u8;1],[2u8;256]);
+            let inputs=|work:u64,hard:u64|RawInputs{version:1,role:role as u32,start,work:start+work,hard:start+hard,
+                request_id:[9;16],code_sha256:[[3;32];3],installed_sha256:[4;32],remove_sha256:[5;32],request_sha256:[6;32],
+                borrowed:[-1;20],installed:installed.as_ptr(),installed_signature:signature.as_ptr(),remove:installed.as_ptr(),
+                remove_signature:signature.as_ptr(),installed_size:1,installed_signature_size:256,remove_size:1,remove_signature_size:256};
+            // A test-only original is never run; its fixed calloc is left to process exit.
+            assert!(!unsafe{mrk_removal_peer_new(&inputs(PARENT_WORK_NS,PARENT_HARD_NS))}.is_null());
+            for (work,hard) in [(110_000_000_000,120_000_000_000),(PARENT_WORK_NS+1,PARENT_HARD_NS),(PARENT_WORK_NS,PARENT_HARD_NS+1)]{
+                assert!(unsafe{mrk_removal_peer_new(&inputs(work,hard))}.is_null());
+            }
+        }
         fn binding()->RemovalChallengeData{
             let mut release=[0;128];let text=b"macos26-arm64-remove-01";release[..text.len()].copy_from_slice(text);
             RemovalChallengeData{request_id:[1;16],root_nonce:[2;16],source:[3;20],target:RemovalTargetData::Arm64,

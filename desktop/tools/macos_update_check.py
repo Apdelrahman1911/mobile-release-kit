@@ -759,6 +759,30 @@ def removal_image(row, work, steps):
     return mount, sorted(os.listdir(mount))
 
 
+def stall_diagnostics(evidence, label):
+    """Diagnostics only, captured while a live removal is still pending at the
+    deadline: process table, stacks of the app and the remover, the request
+    directory and the unified log of those processes, plus a screenshot.
+    Never changes the verdict; every capture is bounded and best effort."""
+    def capture(name, argv, timeout=90, keep=4000):
+        try:
+            p = subprocess.run(argv, capture_output=True, text=True, timeout=timeout)
+            text = "\n".join(tail_text(p.stdout + p.stderr, keep))
+        except Exception as error:  # diagnostics must not raise
+            text = f"capture failed: {type(error).__name__}"
+        (evidence / f"{label}-stall-{name}.txt").write_text(text + "\n")
+    capture("ps", ["/bin/ps", "-axo", "pid,ppid,user,etime,stat,command"])
+    remover = subprocess.run(["/usr/bin/pgrep", "-f", "Helpers/mrk-macos-remove"], capture_output=True, text=True, timeout=30)
+    for role, pids in (("app", payload_pids()), ("remover", sorted(int(v) for v in remover.stdout.split()))):
+        for pid in pids[:2]:
+            capture(f"sample-{role}-{pid}", ["/usr/bin/sudo", "-n", "/usr/bin/sample", str(pid), "3"], 120, 1500)
+    capture("requests", ["/usr/bin/sudo", "-n", "/bin/ls", "-laeOR", "/Library/Application Support/MobileReleaseKit-RemovalRequests"])
+    capture("log", ["/usr/bin/log", "show", "--last", "6m", "--style", "compact", "--predicate",
+                    f'process == "{PAYLOAD_PROCESS}" OR process == "mrk-macos-remove" OR process == "mrk-macos-entry"'
+                    ' OR process == "installd" OR process == "package_script_service"'], 180)
+    subprocess.run(["/usr/sbin/screencapture", "-x", str(evidence / f"screen-{label}-stall.png")], capture_output=True, timeout=60)
+
+
 def live_remove(mount, work, evidence, steps, label):
     """Open the installed app, run the mounted Remove.pkg with the standard
     Installer and confirm only the app's own exact sheet; require Installer 0
@@ -801,12 +825,15 @@ def live_remove(mount, work, evidence, steps, label):
                         clicked_at = time.monotonic()
             time.sleep(2)
         if installer.poll() is None:
+            stall_diagnostics(evidence, label)
             installer.kill()
             out["timedOut"] = True
         installer.wait(timeout=60)
     finally:
         log.close()
         out["sheet"] = sheet[-12:]
+        # Keep the probe history even when this check fails below.
+        (evidence / f"{label}-sheet-probes.json").write_text(json.dumps(sheet[-40:]) + "\n")
     out["returncode"] = installer.returncode
     steps.append({"argv": ["installer", "-pkg", "Remove.pkg"], "returncode": installer.returncode, "role": label})
     need(clicked_at is not None, "removal-sheet-not-confirmed")

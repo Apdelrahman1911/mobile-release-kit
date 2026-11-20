@@ -1,0 +1,139 @@
+name: Desktop macOS removal lab
+
+# Fast removal debugging without the full signed product pipeline. On one
+# disposable hosted runner: run the native crate's unit tests, then build the
+# nonshipping removal lab (production removal coordinator compiled verbatim)
+# and drive a real root Parent and a real console-user App peer through the
+# readiness notice, OPEN, CONNECT and the peer credentials at AUTHENTICATE,
+# with the census of the request directory at every checkpoint. The lab must
+# stop at the identity boundary: identity, frames, the confirmation sheet, app
+# exit and file removal need the signed, notarized product and stay in the
+# hosted update check (desktop-macos-update-check.yml, remove mode).
+# Uses no signing credentials and creates nothing outside this runner.
+on:
+  push:
+    branches:
+      - verify/desktop-macos-removal-lab
+    paths:
+      - .github/workflows/desktop-macos-removal-lab.yml
+      - desktop/native/macos-installed-native/**
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: desktop-macos-removal-lab-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  removal-lab:
+    name: removal lab
+    if: github.repository == 'Apdelrahman1911/mobile-release-kit'
+    runs-on: macos-26
+    timeout-minutes: 30
+    env:
+      BASH_ENV: ''
+      ENV: ''
+      RUSTUP_TOOLCHAIN: 1.98.1
+      MACOSX_DEPLOYMENT_TARGET: '26.0'
+      CARGO_TERM_COLOR: never
+    steps:
+      - name: Admit only a fresh hosted Apple Silicon macOS 26 runner
+        shell: bash
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: |
+          set -euo pipefail
+          [[ "$RUNNER_ENVIRONMENT" == github-hosted && "$RUNNER_OS" == macOS && "$RUNNER_ARCH" == ARM64 ]]
+          [[ "$(/usr/bin/sw_vers -productVersion)" == 26.* && "$(/usr/bin/id -u)" != 0 ]]
+          [[ ! -e "/Library/Application Support/MobileReleaseKit" && ! -e "/Library/Application Support/MobileReleaseKit-RemovalRequests" ]]
+
+      - name: Check out the exact source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Select the fixed Rust toolchain
+        shell: bash
+        run: rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal --no-self-update
+
+      - name: Native unit tests (window agreement, socket census decoder)
+        shell: bash
+        working-directory: desktop/native/macos-installed-native
+        run: |
+          set -euo pipefail
+          cargo test --locked --jobs 3 --lib -- \
+            removal_coordinator:: android_registration:: bulk_directory_records 2>&1 | tee "$RUNNER_TEMP/unit.log"
+
+      - name: Build the removal lab
+        shell: bash
+        working-directory: desktop/native/macos-installed-native
+        run: cargo build --locked --jobs 3 --example removal_lab --features removal-lab
+
+      # Each mode: the workflow starts the console-user App first (notice
+      # observer registered), then the root Parent. "sudo" runs the Parent in
+      # the runner's session; "installer" runs it from the postinstall of a
+      # payload-free, unsigned lab package through the real Installer, the
+      # production remover's context (installd package script service).
+      - name: Run the removal lab (sudo Parent, then Installer-postinstall Parent)
+        shell: bash
+        working-directory: desktop/native/macos-installed-native
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: |
+          set -euo pipefail
+          lab="$PWD/target/debug/examples/removal_lab"
+          logs="$RUNNER_TEMP/removal-lab"
+          mkdir -p "$logs"
+          status=0
+          for mode in sudo installer; do
+            id="$(/usr/bin/openssl rand -hex 16)"
+            done_marker="$logs/$mode.done"
+            app_log="$logs/$mode-app.log"
+            parent_out="$logs/$mode-parent.txt"
+            "$lab" app "$id" "$done_marker" >"$app_log" 2>&1 &
+            app_pid=$!
+            for _ in $(seq 150); do grep -q '^notice-ready' "$app_log" && break; sleep 0.2; done
+            started=$(date +%s)
+            case "$mode" in
+              sudo)
+                /usr/bin/sudo -n --preserve-env=GITHUB_ACTIONS,RUNNER_ENVIRONMENT \
+                  "$lab" parent "$id" "$USER" "$parent_out" "$done_marker" >"$logs/$mode-parent.log" 2>&1 || true
+                ;;
+              installer)
+                scripts="$RUNNER_TEMP/removal-lab-scripts"
+                rm -rf "$scripts"; mkdir -p "$scripts"
+                printf '#!/bin/sh\nexport GITHUB_ACTIONS=true RUNNER_ENVIRONMENT=github-hosted\nexec "%s" parent "%s" "%s" "%s" "%s"\n' \
+                  "$lab" "$id" "$USER" "$parent_out" "$done_marker" >"$scripts/postinstall"
+                chmod 0755 "$scripts/postinstall"
+                /usr/bin/pkgbuild --nopayload --scripts "$scripts" --identifier dev.mobile-release-kit.removal-lab \
+                  --version 1 "$RUNNER_TEMP/removal-lab.pkg" >/dev/null
+                /usr/bin/sudo -n /usr/sbin/installer -verbose -pkg "$RUNNER_TEMP/removal-lab.pkg" -target / \
+                  >"$logs/$mode-parent.log" 2>&1 || true
+                ;;
+            esac
+            app_rc=0; wait "$app_pid" || app_rc=$?
+            echo "== $mode ($(( $(date +%s) - started )) s, app exit $app_rc)"
+            cat "$parent_out" 2>/dev/null || { echo "no parent result"; tail -20 "$logs/$mode-parent.log"; }
+            grep -E '^\{|REMOVAL_LAB_APP=' "$app_log" || tail -20 "$app_log"
+            if grep -q '^REMOVAL_LAB_PARENT=pass' "$parent_out" 2>/dev/null && [[ $app_rc == 0 ]]; then
+              echo "REMOVAL_LAB_MODE_$mode=pass"
+            else
+              echo "REMOVAL_LAB_MODE_$mode=fail"; status=1
+            fi
+          done
+          [[ $status == 0 ]] && echo REMOVAL_LAB=pass || echo REMOVAL_LAB=fail
+          exit "$status"
+
+      - name: Retain lab output
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: macos-removal-lab-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/removal-lab
+            ${{ runner.temp }}/unit.log
+          if-no-files-found: warn
+          retention-days: 30
