@@ -431,7 +431,7 @@ pub(crate) struct AppRemovalWorkGate{original:std::sync::Arc<AppRemovalGateOrigi
 #[cfg(not(feature = "macos-android-registration-helper"))]
 struct AppRemovalGateOriginal {
     clock:std::sync::Arc<native::android_registration::RemovalClock>,work:Instant,hard:Instant,
-    first:std::sync::Mutex<Option<(AdmissionFailure,Instant)>>,unknown:std::sync::atomic::AtomicBool,
+    first:std::sync::RwLock<Option<(AdmissionFailure,Instant)>>,unknown:std::sync::atomic::AtomicBool,
 }
 #[cfg(not(feature = "macos-android-registration-helper"))]
 enum AppRemovalCut { Local(AdmissionFailure),ParentClock }
@@ -445,7 +445,7 @@ impl AppRemovalWorkGate {
         let hard=clock.bridge().earlier_instant_data(clock.uptime_hard())?;
         if work>=hard || Instant::now()>=work || clock.work_sample().is_none(){return None;}
         Some(Self{original:std::sync::Arc::new(AppRemovalGateOriginal{clock,work,hard,
-            first:std::sync::Mutex::new(None),unknown:std::sync::atomic::AtomicBool::new(false)})})
+            first:std::sync::RwLock::new(None),unknown:std::sync::atomic::AtomicBool::new(false)})})
     }
     fn cut(&self)->std::result::Result<(),AppRemovalCut>{
         use std::sync::atomic::Ordering;
@@ -463,11 +463,11 @@ impl AppRemovalWorkGate {
         use std::sync::atomic::Ordering;
         if at>Instant::now(){self.original.unknown.store(true,Ordering::SeqCst);return;}
         if matches!(failure,AdmissionFailure::Unknown|AdmissionFailure::AlreadyUsed){self.original.unknown.store(true,Ordering::SeqCst);}
-        match self.original.first.try_lock(){Ok(mut first)=>*first=earliest_failure(*first,Some((failure,at))),
+        match self.original.first.try_write(){Ok(mut first)=>*first=earliest_failure(*first,Some((failure,at))),
             Err(_)=>{self.original.unknown.store(true,Ordering::SeqCst);}}
     }
     pub(crate) fn source_first(&self)->Option<(AdmissionFailure,Instant)>{
-        match self.original.first.try_lock(){Ok(first)=>*first,Err(_)=>{
+        match self.original.first.try_read(){Ok(first)=>*first,Err(_)=>{
             self.original.unknown.store(true,std::sync::atomic::Ordering::SeqCst);None}}
     }
     pub(crate) fn source_parent_vetoed(&self)->bool{self.original.clock.unknown()}

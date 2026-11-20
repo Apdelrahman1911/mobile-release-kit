@@ -4,7 +4,7 @@
 //! There is no renderer command, independent scheduler, service action or writer.
 use super::*;
 use std::{cell::{Cell,RefCell}, mem::{size_of,size_of_val}, os::fd::BorrowedFd,
-    panic::{catch_unwind,AssertUnwindSafe}, sync::{OnceLock,TryLockError}, task::Wake};
+    panic::{catch_unwind,AssertUnwindSafe}, sync::{OnceLock,RwLock,TryLockError}, task::Wake};
 use mrk_macos_installed_native::{self as native, android_registration::RemovalClock,
     android_service_management::Decision, install_producer::{RemovalProducerVerifier,ProducerCheckpoint,SignatureResult},
     removal_coordinator as peer_native};
@@ -91,7 +91,7 @@ fn joined_data_only(unknown:bool,worker:bool,coordinator:bool,main:bool,returned
 struct Original{
     document:Weak<Inner>,identity:Weak<()>,id:[u8;16],generation:u32,
     pickers:[Option<Arc<OriginalWork>>;3],source_generation:u32,
-    admitted:Instant,work:Instant,hard:Instant,stop:watch::Sender<bool>,first:Mutex<Option<(AdmissionFailure,Instant)>>,
+    admitted:Instant,work:Instant,hard:Instant,stop:watch::Sender<bool>,first:RwLock<Option<(AdmissionFailure,Instant)>>,
     unknown:AtomicBool,clock:OnceLock<Arc<RemovalClock>>,source:OnceLock<AppRemovalWorkGate>,
     dispatcher:Arc<AndroidServiceDispatcher>,prompt:OnceLock<Arc<MacosRemovalPrompt>>,offers:Mutex<Offers>,
     reservation:usize,whole:usize,
@@ -101,7 +101,7 @@ struct Original{
     final_at:OnceLock<Instant>,ready_taken:AtomicBool,
     // A wrapper-observed Instant is retained as such, never converted to a
     // historical Parent stamp. Raw native first-F stays in this exact custody.
-    peer_observation:Mutex<Option<peer_native::RemovalPeerCustody>>,
+    peer_observation:RwLock<Option<peer_native::RemovalPeerCustody>>,
 }
 struct WorkerReturn{
     known:bool,resources_retired:bool,main_retired:bool,
@@ -143,7 +143,7 @@ impl Original{
     fn poison(&self){self.unknown.store(true,Ordering::SeqCst);self.stop.send_replace(true);if let Some(prompt)=self.prompt.get(){prompt.stop();}self.signal();}
     fn note(&self,why:AdmissionFailure,at:Instant){
         if at>Instant::now(){self.poison();return;}
-        match self.first.try_lock(){Ok(mut value)=>*value=first(*value,Some((why,at))),Err(_)=>{self.poison();return;}}
+        match self.first.try_write(){Ok(mut value)=>*value=first(*value,Some((why,at))),Err(_)=>{self.poison();return;}}
         if let Some(source)=self.source.get(){source.source_note(why,at);}
         if matches!(why,AdmissionFailure::Unknown|AdmissionFailure::AlreadyUsed){self.unknown.store(true,Ordering::SeqCst);}
         self.stop.send_replace(true);if let Some(prompt)=self.prompt.get(){prompt.stop();}self.signal();
@@ -157,7 +157,10 @@ impl Original{
         }
     }
     fn local_first(&self)->Option<(AdmissionFailure,Instant)>{
-        let local=match self.first.try_lock(){Ok(value)=>*value,Err(_)=>{self.poison();None}};
+        // The worker's preflight and the coordinator's cleanup cut can
+        // observe the same first failure concurrently. Only a conflicting
+        // publication or a poisoned lock makes this observation unknown.
+        let local=match self.first.try_read(){Ok(value)=>*value,Err(_)=>{self.poison();None}};
         first(local,self.source.get().and_then(AppRemovalWorkGate::source_first))
     }
     fn local_end(&self,external:Option<(AdmissionFailure,Instant)>)->Option<Instant>{
@@ -165,7 +168,7 @@ impl Original{
         let mut end=match first{Some((_,at))=>at.checked_add(TAIL)?.min(self.hard),None=>self.hard};
         // A returned native/wrapper observation only narrows this original
         // local tail. It is NOT a conversion of native_first_failure.
-        if let Ok(value)=self.peer_observation.try_lock(){if let Some(at)=value.as_ref().and_then(|v|v.first_failure){end=end.min(at.checked_add(TAIL)?);}}
+        if let Ok(value)=self.peer_observation.try_read(){if let Some(at)=value.as_ref().and_then(|v|v.first_failure){end=end.min(at.checked_add(TAIL)?);}}
         else{self.poison();return None;}
         Some(end)
     }
@@ -194,7 +197,7 @@ impl Original{
     fn pause(&self){std::thread::park_timeout(HEARTBEAT.min(self.local_end(None).unwrap_or(self.hard).saturating_duration_since(Instant::now())));}
     fn main_retired(&self)->bool{self.prompt.get().is_none_or(|prompt|prompt.never_requested()||prompt.known_main_retired())}
     fn observe_peer(&self,custody:peer_native::RemovalPeerCustody){
-        match self.peer_observation.try_lock(){Ok(mut slot)=>{
+        match self.peer_observation.try_write(){Ok(mut slot)=>{
             if slot.as_ref().is_some_and(|old|old.native_calls>custody.native_calls||old.native_returns>custody.native_returns
                 ||old.native_first_failure!=0&&(old.native_first_failure!=custody.native_first_failure||old.native_first_code!=custody.native_first_code)){
                 drop(slot);self.poison();return;
@@ -317,11 +320,11 @@ pub(super) fn reserve(document:&DocumentBinding,id:[u8;16],generation:u32,at:Ins
     if id==[0;16]||generation==0||Instant::now()>=work{return Err(unavailable());}
     let executor=tokio::runtime::Handle::try_current().map_err(|_|unavailable())?;let(stop,_)=watch::channel(false);
     let original=Arc::new(Original{document:Arc::downgrade(&document.inner),identity:Arc::downgrade(&document.inner.session_identity),id,generation,
-        pickers,source_generation,admitted:at,work,hard,stop,first:Mutex::new(None),unknown:AtomicBool::new(false),
+        pickers,source_generation,admitted:at,work,hard,stop,first:RwLock::new(None),unknown:AtomicBool::new(false),
         clock:OnceLock::new(),source:OnceLock::new(),dispatcher,prompt:OnceLock::new(),offers:Mutex::new(Offers::new()),
         reservation,whole:prior_and_saved.checked_add(reservation).ok_or_else(unavailable)?,worker:AsyncMutex::new(None),returned:Mutex::new(None),
         worker_joined:AtomicBool::new(false),coordinator:Mutex::new(None),coordinator_return:Mutex::new(None),
-        coordinator_joined:AtomicBool::new(false),final_at:OnceLock::new(),ready_taken:AtomicBool::new(false),peer_observation:Mutex::new(None)});
+        coordinator_joined:AtomicBool::new(false),final_at:OnceLock::new(),ready_taken:AtomicBool::new(false),peer_observation:RwLock::new(None)});
     let(release,enter)=oneshot::channel();let(worker_enter,worker_wait)=oneshot::channel();
     let worker_task={let original=original.clone();move||worker(original,worker_wait)};
     let coordinator=coordinate(original.clone(),enter,worker_enter);
@@ -524,13 +527,17 @@ fn exchange(original:&Original,request:&RemovalRequestOriginal,current:&RemovalC
     removal_trace(format_args!("app prompt=requested"));original.signal();
     let confirmation=loop{
         if !original.work_ok(){prompt.stop();}
-        match prompt.take(){Ok(Some(value))=>break value,Ok(None)=>{original.note(AdmissionFailure::Stopped,Instant::now());return Err(());},Err(())=>{}}
-        if !original.cleanup_ok(){return Err(());}original.pause();
+        match prompt.take(){Ok(Some(value))=>break value,Ok(None)=>{
+            removal_trace(format_args!("app prompt=closed-without-consent"));
+            original.note(AdmissionFailure::Stopped,Instant::now());return Err(());},Err(())=>{}}
+        if !original.cleanup_ok(){removal_trace(format_args!("app prompt=cleanup-refused"));return Err(());}original.pause();
     };
+    removal_trace(format_args!("app prompt=confirmed"));
     if !original.work_ok()||!confirmation.cutoff().same_original(&cutoff){return Err(());}
     let nonce=hex_id(confirmation.app_nonce());
     let count=send_frame_data(original,&mut transcript,wire::FrameData::confirmed_data(binding,&nonce).map_err(|_|())?,&mut buffer)?;
     let begun=peer.send_confirmed(confirmation.native(),&buffer[..count],&mut gate);await_frame(original,peer,&mut gate,begun)?;
+    removal_trace(format_args!("app op=confirmed progress=ready"));
     source_post(original,request,current)?;
     {let mut offers=original.offers.try_lock().map_err(|_|())?;
         if offers.confirmed.is_some()||!offers.state.confirmed(){return Err(());}offers.confirmed=Some(confirmation);}
@@ -542,6 +549,7 @@ fn exchange(original:&Original,request:&RemovalRequestOriginal,current:&RemovalC
         if offers.state.completion{return Err(());}drop(offers);original.pause();
     }
     let result=completion.as_ref().ok_or(())?;
+    removal_trace(format_args!("app maintenance=returned phase={:?}",result.status().phase));
     {let offers=original.offers.try_lock().map_err(|_|())?;
         if !result.matches_removal(offers.saved.as_ref().ok_or(())?,&cutoff)||!result.request_quit(){return Err(());}}
     let status=result.status();
@@ -551,6 +559,7 @@ fn exchange(original:&Original,request:&RemovalRequestOriginal,current:&RemovalC
     source_post(original,request,current)?;
     let count=send_frame_data(original,&mut transcript,wire::FrameData::prepared_data(binding,&nonce,branch).map_err(|_|())?,&mut buffer)?;
     let begun=peer.send_prepared(&buffer[..count],&mut gate);await_frame(original,peer,&mut gate,begun)?;
+    removal_trace(format_args!("app op=prepared progress=ready"));
     let begun=peer.receive(&mut gate);await_frame(original,peer,&mut gate,begun)?;
     let received=peer.received_frame(&mut gate).map_err(|_|())?;
     transcript.advance_data(wire::ActionData::Receive,received,original.raw_work()?).map_err(|_|())?;
@@ -562,8 +571,10 @@ fn run_worker(original:&Original,guard:&mut BackingGuard)->WorkerReturn{
     let backing=guard.value.as_mut().expect("one reserved removal backing");
     let stop=original.stop.subscribe();let mut completion=None;let mut retired=None;let mut peer_known=true;
     let mut forward=false;
+    let mut stage="request";
     let preparation=(||->Flow<()>{
         backing.request.read_once(original.work,&stop).map_err(|_|())?;
+        stage="clock";
         let bound=backing.request.request().map_err(|_|())?.binding_data().clock_data();
         // First raw DATA appears only after this bounded read. Enforce its
         // original endpoints NOW; never restart local or Parent time.
@@ -572,15 +583,20 @@ fn run_worker(original:&Original,guard:&mut BackingGuard)->WorkerReturn{
         original.clock.set(clock).map_err(|_|())?;original.source.set(gate.clone()).map_err(|_|())?;
         if let Some((why,at))=original.local_first(){gate.source_note(why,at);}
         backing.request.bind_clock_once(gate.clone(),original.work,&stop).map_err(|_|())?;
+        stage="installed-product";
         backing.inspector=Some(RemovalProducerAdmission::new(gate));
         let inspector=backing.inspector.as_mut().ok_or(())?;
         inspector.admit(original.work,&stop,&mut|_,at|original.note_source(at),
-            &mut|first|original.local_expired(first),&mut|_,_|{}).map_err(|_|())?;
+            &mut|first|original.local_expired(first),&mut|_,_|{}).map_err(|why|{
+                removal_trace(format_args!("app installed-product=refused reason={why:?}"));
+            })?;
         if inspector.retained_bytes().is_none_or(|n|n>INSPECTOR_RESERVE){return Err(());}
         let current=inspector.current(original.work,&stop,&mut|_,at|original.note_source(at)).map_err(|_|())?;
+        stage="source-binding";
         let request=backing.request.request().map_err(|_|())?;
         let code=joined_data(request,&current)?;let binding=challenge_data(request.binding_data()).ok_or(())?;
         source_post(original,&backing.request,&current)?;
+        stage="remove-signature";
         let parent_veto=Cell::new(false);backing.remove_entered=true;
         let signature=backing.remove.verify_and_close(request.remove_descriptor_data(),request.remove_signature_data(),
             &mut|point|signature_gate(original,&parent_veto,point));
@@ -588,6 +604,7 @@ fn run_worker(original:&Original,guard:&mut BackingGuard)->WorkerReturn{
             if signature==SignatureResult::Unknown{original.poison();}
             else if !parent_veto.get(){original.note(AdmissionFailure::Native,Instant::now());}return Err(());
         }
+        stage="peer-preparation";
         source_post(original,&backing.request,&current)?;
         let all=current.originals().map_err(|_|())?;let req=backing.request.originals().map_err(|_|())?;
         let fds:[BorrowedFd<'_>;20]=[all[0],all[1],all[2],all[3],all[8],all[16],all[19],all[20],all[21],all[22],
@@ -600,6 +617,7 @@ fn run_worker(original:&Original,guard:&mut BackingGuard)->WorkerReturn{
         // cannot free any borrowed raw4/source cell or permit another attempt.
         let mut callback=|point|peer_gate(original,&backing.request,&current,point);
         let mut peer=peer_native::RemovalPeer::app(source,binding,&mut callback);
+        stage="exchange";
         let flow=catch_unwind(AssertUnwindSafe(||exchange(original,&backing.request,&current,&mut peer,&mut completion)));
         forward=matches!(flow,Ok(Ok(())));
         if flow.is_err(){original.note(AdmissionFailure::Unknown,Instant::now());}
@@ -620,6 +638,7 @@ fn run_worker(original:&Original,guard:&mut BackingGuard)->WorkerReturn{
         if forward&&retired.is_none(){return Err(());}Ok(())
     })();
     if preparation.is_err(){
+        removal_trace(format_args!("app worker=refused stage={stage}"));
         if let Some((why,at))=backing.request.first_failure(){original.note(why,at);}
         original.stop.send_replace(true);if let Some(prompt)=original.prompt.get(){prompt.stop();}
     }

@@ -7,11 +7,29 @@
 // does not publish /Applications or report a fully installed application.
 use super::*;
 use mobile_release_desktop::macos_applications_launcher as launcher;
+use mobile_release_desktop::macos_install_maintenance::ReleaseData;
 use installation_record::InventoryIndex;
 
 pub(super) const WORK_NAME: &str = ".applications-launcher-v1";
 pub(super) const SOURCE_NAME: &str = "MobileReleaseKitLauncher.app";
 const RETAINED_NAME: &str = "previous.app";
+
+#[derive(Clone, Copy)]
+enum MutationAuthority<'a> {
+    Install,
+    LiveRemoval {
+        exclusion: &'a worker::RemovalExclusion,
+        source: &'a worker::RemovalAdmission,
+    },
+}
+impl MutationAuthority<'_> {
+    fn check(self, book: &Install) -> Result<()> {
+        match self {
+            Self::Install => Operation::mutation_ready(book),
+            Self::LiveRemoval { exclusion, source } => exclusion.post(book, source),
+        }
+    }
+}
 
 // Returned copy writes are accounted separately so restoring a missing
 // convenience launcher cannot turn a core same-package no-op into a rewrite.
@@ -51,9 +69,12 @@ pub(super) const PHASE_CONTROL_QUOTE: u64 = 16 * PHASE_LIMIT as u64
     + std::mem::size_of::<PublicationPhaseData>() as u64;
 pub(super) const PHASE_ORIGINAL_QUOTE: u64 = 5;
 pub(super) const PHASE_LIVE_QUOTE: u64 = 2;
-pub(super) const OBSERVATION_CONTROL_QUOTE: u64 = 3 * installation_record::INVENTORY_LIMIT as u64 + 64 * 1024
-    + PHASE_CONTROL_QUOTE;
+const OBSERVATION_INVENTORY_SCRATCH: u64 = 3 * installation_record::INVENTORY_LIMIT as u64;
 const FRESH_RETAINED_CONTROL_QUOTE: u64 = 64 * 1024 + PHASE_CONTROL_QUOTE;
+pub(super) const OBSERVATION_CONTROL_QUOTE: u64 = OBSERVATION_INVENTORY_SCRATCH + FRESH_RETAINED_CONTROL_QUOTE;
+// In addition to the fixed launcher material and its index, removal keeps
+// one generation tuple and a workspace ledger for at most ten short paths.
+const REMOVAL_RETAINED_CONTROL_QUOTE: u64 = FRESH_RETAINED_CONTROL_QUOTE + 64 * 1024;
 pub(super) struct Material { entries: Vec<Entry>, bytes: u64 }
 #[cfg(test)]
 pub(super) fn material_memory_phase_profile(index: &InventoryIndex<'_>) -> Result<serde_json::Value> {
@@ -364,8 +385,30 @@ pub(super) struct RemovalPreparation {
     workspace: Option<Workspace>, retirement: Retirement,
     absent: bool, entered: bool, completed: bool, first_failure: Option<&'static str>,
 }
+fn reserve_removal_launcher_control(book: &mut Install, quote: u64) -> Result<()> {
+    check(maintenance::removal_effective_control_bytes(book)?.checked_add(quote)
+        .is_some_and(|n|n<=installation_record::CONTROL_LIMIT as u64),"launcher-removal-control-bound")?;
+    book.removal_control_reserved = book.removal_control_reserved.checked_add(quote)
+        .ok_or("launcher-removal-control-bound")?;
+    Ok(())
+}
+
+fn with_removal_inventory_scratch<T>(book: &mut Install, work: impl FnOnce(&mut Install) -> Result<T>) -> Result<T> {
+    reserve_removal_launcher_control(book, OBSERVATION_INVENTORY_SCRATCH)?;
+    let result = work(book)?;
+    // The caller returns only a bounded launcher observation or workspace.
+    // Both full temporary indexes and the reparsed inventory have dropped.
+    book.removal_control_reserved = book.removal_control_reserved.checked_sub(OBSERVATION_INVENTORY_SCRATCH)
+        .filter(|n|*n>=book.removal_observation_reserved).ok_or("launcher-removal-control-accounting")?;
+    Ok(result)
+}
+
 impl RemovalPreparation {
     pub(super) fn observe(book: &mut Install, prepared: &PreparedFresh,
+        generation: &transaction::GenerationData, capsule: &transaction::CapsuleData) -> Result<Option<Self>> {
+        with_removal_inventory_scratch(book, |book| Self::observe_with_inventory(book, prepared, generation, capsule))
+    }
+    fn observe_with_inventory(book: &mut Install, prepared: &PreparedFresh,
         generation: &transaction::GenerationData, capsule: &transaction::CapsuleData) -> Result<Option<Self>> {
         let Some(material) = Material::from_index(&prepared.inventory.index()?)? else {
             check(capsule.launcher_data().is_none(),"launcher-removal-enrollment-mismatch")?;
@@ -376,9 +419,7 @@ impl RemovalPreparation {
         let binding = generation.release_data().binding_data();
         check(format!("{:x}",Sha256::digest(&prepared.inventory_bytes)) == binding.inventory_sha256,
             "launcher-removal-source")?;
-        check(book.removal_control_reserved.checked_add(OBSERVATION_CONTROL_QUOTE)
-            .is_some_and(|n|n<=(installation_record::CONTROL_LIMIT as u64)),"launcher-removal-control-bound")?;
-        book.removal_control_reserved += OBSERVATION_CONTROL_QUOTE;
+        reserve_removal_launcher_control(book, REMOVAL_RETAINED_CONTROL_QUOTE)?;
         let mut operation = Operation::open(book)?;
         let absent = operation.absent(book)?;
         let workspace = Workspace::admit(book,generation,&prepared.inventory_bytes)?;
@@ -433,23 +474,26 @@ impl RemovalPreparation {
         }
         book.clock()
     }
-    pub(super) fn retire_before_snapshot(&mut self, book: &mut Install, prepared: &PreparedFresh) -> Result<()> {
+    pub(super) fn retire_before_snapshot(&mut self, book: &mut Install, prepared: &PreparedFresh,
+        exclusion: &worker::RemovalExclusion, source: &worker::RemovalAdmission) -> Result<()> {
         check(!self.entered && !self.completed,"launcher-removal-once")?;
         self.entered = true;
+        let authority = MutationAuthority::LiveRemoval { exclusion, source };
         let result = (|| {
-            Operation::mutation_ready(book)?;
+            authority.check(book)?;
             check(book.removal_snapshot_capture.is_none() && book.removal_payload_plan.is_none(),
                 "launcher-removal-before-snapshot")?;
             self.post_before(book)?;
             if self.workspace.is_none() && !self.absent {
-                self.workspace = Some(Workspace::create(book,prepared,&self.generation)?);
+                self.workspace = Some(with_removal_inventory_scratch(book, |book|
+                    Workspace::create(book,prepared,&self.generation,authority))?);
                 let workspace = self.workspace.as_ref().ok_or("launcher-workspace-missing")?;
-                self.operation.quarantine(book,workspace,&self.material.index())?;
-                self.retirement.prepare(book,&self.operation,workspace,&self.material.index())?;
+                self.operation.quarantine(book,workspace,&self.material.index(),authority)?;
+                self.retirement.prepare(book,&self.operation,workspace,&self.material.index(),authority)?;
             }
             if let Some(workspace) = self.workspace.as_mut() {
-                self.retirement.run(book,workspace)?;
-                workspace.retire_empty(book)?;
+                self.retirement.run(book,workspace,authority)?;
+                workspace.retire_empty(book,authority)?;
             }
             check(self.operation.absent(book)?,"launcher-removal-final-absence")?;
             self.operation.parent_post(book)?;
@@ -521,7 +565,7 @@ impl Effects {
             }
             check(matches!(self.observation.decision,launcher::Decision::PublishAbsent
                 | launcher::Decision::ReplaceEnrolled),"launcher-lifecycle-decision")?;
-            self.workspace = Some(Workspace::create(book,prepared,generation)?);
+            self.workspace = Some(Workspace::create(book,prepared,generation,MutationAuthority::Install)?);
             let workspace = self.workspace.as_ref().ok_or("launcher-workspace-missing")?;
             let staged = Operation::stage(book,prepared,workspace)?;
             self.observation.post(book)?;
@@ -530,7 +574,7 @@ impl Effects {
             self.phase.as_ref().ok_or("launcher-phase-required")?.post(book)?;
             if self.observation.decision == launcher::Decision::ReplaceEnrolled {
                 let old = self.observation.previous.as_ref().ok_or("launcher-generation-missing")?;
-                self.observation.operation.quarantine(book,workspace,&old.index())?;
+                self.observation.operation.quarantine(book,workspace,&old.index(),MutationAuthority::Install)?;
             }
             self.next.publish(book,workspace,staged,&self.observation.current.index())?;
             self.readback_verified = true;
@@ -548,10 +592,10 @@ impl Effects {
             if let Some(workspace) = self.workspace.as_mut() {
                 if self.observation.decision == launcher::Decision::ReplaceEnrolled {
                     let old = self.observation.previous.as_ref().ok_or("launcher-generation-missing")?;
-                    self.old_retirement.prepare(book,&self.observation.operation,workspace,&old.index())?;
-                    self.old_retirement.run(book,workspace)?;
+                    self.old_retirement.prepare(book,&self.observation.operation,workspace,&old.index(),MutationAuthority::Install)?;
+                    self.old_retirement.run(book,workspace,MutationAuthority::Install)?;
                 }
-                workspace.retire_empty(book)?;
+                workspace.retire_empty(book,MutationAuthority::Install)?;
             }
             self.live_post(book,false)?;
             check(!book.launcher_writes.failed,"launcher-write-bound")?;
@@ -613,8 +657,8 @@ impl Effects {
                     _ => return Err("launcher-inverse-original-refused"),
                 }
                 self.new_retirement.prepare_staged_copy(book,workspace,prepared)?;
-                self.new_retirement.run(book,workspace)?;
-                workspace.retire_empty(book)?;
+                self.new_retirement.run(book,workspace,MutationAuthority::Install)?;
+                workspace.retire_empty(book,MutationAuthority::Install)?;
             }
             // This is the original previous presence/absence, not the incoming
             // bundle's existence and never permission to publish inverse state.
@@ -1123,17 +1167,34 @@ pub(super) struct Workspace {
     pub(super) retirement_settled: bool,
 }
 impl Workspace {
-    pub(super) fn create(book: &mut Install, prepared: &PreparedFresh,
-        generation: &transaction::GenerationData) -> Result<Self> {
-        Operation::mutation_ready(book)?;
+    // DATA comparison. The mutation caller must already hold its role-specific
+    // authorization and obtain current_removal from the live signed admission.
+    fn check_generation(release: &ReleaseData, inventory_bytes: &[u8],
+        current_removal: Option<&ReleaseData>) -> Result<()> {
+        let binding = release.binding_data();
+        let selected = match current_removal {
+            Some(current) => current == release,
+            None => binding.release == paths::RELEASE
+                && Some(binding.inventory_sha256) == option_env!("MRK_MACOS_INSTALL_INVENTORY_SHA256")
+                && Some(binding.source_commit) == option_env!("MRK_MACOS_INSTALL_SOURCE_COMMIT")
+                && Some(binding.runtime_manifest_sha256) == option_env!("MRK_BUNDLED_RUNTIME_MANIFEST_SHA256"),
+        };
+        check(selected && format!("{:x}", Sha256::digest(inventory_bytes)) == binding.inventory_sha256,
+            "launcher-generation-binding")
+    }
+
+    fn create(book: &mut Install, prepared: &PreparedFresh,
+        generation: &transaction::GenerationData, authority: MutationAuthority<'_>) -> Result<Self> {
+        authority.check(book)?;
         let root = book.gate.parent.ok_or("launcher-maintenance-required")?;
-        let binding = generation.release_data().binding_data();
-        check(root == prepared.destination && binding.release == paths::RELEASE
-            && Some(binding.inventory_sha256) == option_env!("MRK_MACOS_INSTALL_INVENTORY_SHA256")
-            && Some(binding.source_commit) == option_env!("MRK_MACOS_INSTALL_SOURCE_COMMIT")
-            && Some(binding.runtime_manifest_sha256) == option_env!("MRK_BUNDLED_RUNTIME_MANIFEST_SHA256")
-            && format!("{:x}", Sha256::digest(&prepared.inventory_bytes)) == binding.inventory_sha256,
-            "launcher-generation-binding")?;
+        check(root == prepared.destination, "launcher-generation-binding")?;
+        let current_removal = match authority {
+            MutationAuthority::Install => None,
+            // The remover is itself in the inventory. Its inventory digest
+            // comes from the currently admitted signed producer descriptor.
+            MutationAuthority::LiveRemoval { source, .. } => Some(source.current_selection(book)?.current_data()),
+        };
+        Self::check_generation(generation.release_data(), &prepared.inventory_bytes, current_removal)?;
         launcher::LauncherInventory::from_index(&prepared.inventory.index()?)?.ok_or("launcher-inventory-missing")?;
         let instance = generation.instance_data();
         check(worker::invocation_valid(instance), "launcher-generation-instance")?;
@@ -1197,9 +1258,9 @@ impl Workspace {
     // Successful operations leave the old exact phase-directory census intact.
     // Only this held EMPTY workspace is removed. Preserve returned effects even
     // if a following check/close fails; there is no name-based cleanup retry.
-    pub(super) fn retire_empty(&mut self, book: &mut Install) -> Result<()> {
+    fn retire_empty(&mut self, book: &mut Install, authority: MutationAuthority<'_>) -> Result<()> {
         check(!self.retirement_attempted && !self.retired, "launcher-workspace-retirement-once")?;
-        Operation::mutation_ready(book)?;
+        authority.check(book)?;
         check(self.roster(book)?.is_empty(), "launcher-workspace-not-empty")?;
         let before = stat::fstat(book.fd(self.stage)?).map_err(|_| "launcher-stage-stat")?;
         let mut remaining = maintenance::roster_now(book, self.stage)?;
@@ -1404,11 +1465,11 @@ impl Operation {
     /// A shared-parent race is rechecked AFTER the exclusive move. On mismatch
     /// retain the moved entry untouched: never delete it or overwrite a new
     /// Applications occupant in a guessed rollback.
-    pub(super) fn quarantine(&mut self, book: &mut Install, workspace: &Workspace,
-        expected: &InventoryIndex<'_>) -> Result<usize> {
+    fn quarantine(&mut self, book: &mut Install, workspace: &Workspace,
+        expected: &InventoryIndex<'_>, authority: MutationAuthority<'_>) -> Result<usize> {
         check(self.returned == Returned::NotAttempted, "launcher-operation-once")?;
         let bundle = self.bundle.ok_or("launcher-original-missing")?;
-        Self::mutation_ready(book)?;
+        authority.check(book)?;
         workspace.post(book)?;
         self.parent_post(book)?;
         check(book.originals[bundle].parent == Some(self.applications)
@@ -1615,17 +1676,17 @@ impl Retirement {
 
     // The caller stores `self` before calling prepare, so failure never loses
     // the exact attempted operation. Only a verified quarantined bundle enters.
-    pub(super) fn prepare(&mut self, book: &mut Install, operation: &Operation,
-        workspace: &Workspace, expected: &InventoryIndex<'_>) -> Result<()> {
+    fn prepare(&mut self, book: &mut Install, operation: &Operation,
+        workspace: &Workspace, expected: &InventoryIndex<'_>, authority: MutationAuthority<'_>) -> Result<()> {
         check(!self.entered && !self.prepared && self.nodes.is_empty(), "launcher-retirement-once")?;
         self.entered = true;
-        let result = self.prepare_inner(book, operation, workspace, expected);
+        let result = self.prepare_inner(book, operation, workspace, expected, authority);
         if let Err(error) = result { self.first_failure = Some(error); }
         result
     }
     fn prepare_inner(&mut self, book: &mut Install, operation: &Operation,
-        workspace: &Workspace, expected: &InventoryIndex<'_>) -> Result<()> {
-        Operation::mutation_ready(book)?;
+        workspace: &Workspace, expected: &InventoryIndex<'_>, authority: MutationAuthority<'_>) -> Result<()> {
+        authority.check(book)?;
         workspace.post(book)?;
         check(operation.returned == Returned::Quarantined && operation.verified,
             "launcher-retirement-quarantine")?;
@@ -1827,13 +1888,13 @@ impl Retirement {
         Ok(())
     }
 
-    pub(super) fn run(&mut self, book: &mut Install, workspace: &Workspace) -> Result<()> {
+    fn run(&mut self, book: &mut Install, workspace: &Workspace, authority: MutationAuthority<'_>) -> Result<()> {
         check(self.prepared && self.first_failure.is_none() && !self.completed,
             "launcher-retirement-not-ready")?;
         let result = (|| {
             // Leaves were appended after directories. Reverse order deletes
             // every leaf, then deepest known directories, then the bundle root.
-            for slot in (0..self.nodes.len()).rev() { self.unlink(book, workspace, slot)?; }
+            for slot in (0..self.nodes.len()).rev() { self.unlink(book, workspace, slot, authority)?; }
             check(self.nodes.iter().all(|node| node.removed && node.attempted
                 && book.originals[node.original].state == State::Closed
                 && book.originals[node.original].fd.is_none()), "launcher-retirement-finality")?;
@@ -1848,8 +1909,8 @@ impl Retirement {
         result
     }
 
-    fn unlink(&mut self, book: &mut Install, workspace: &Workspace, slot: usize) -> Result<()> {
-        Operation::mutation_ready(book)?;
+    fn unlink(&mut self, book: &mut Install, workspace: &Workspace, slot: usize, authority: MutationAuthority<'_>) -> Result<()> {
+        authority.check(book)?;
         workspace.post(book)?;
         let node = &self.nodes[slot];
         check(!node.attempted && !node.removed, "launcher-retirement-node-once")?;
@@ -2042,6 +2103,89 @@ fn prefix_hash(size: u64,
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn launcher_removal_reuses_inventory_scratch_between_censuses() {
+        const MIB: u64 = 1024 * 1024;
+        let journal_bytes = 4 * MIB as usize;
+        // The completed first census retains history and both signed bindings.
+        // Its advertised control total exceeds its explicitly reserved bytes.
+        let mut book = Install::new();
+        book.removal_control_reserved = 4 * MIB;
+        with_removal_inventory_scratch(&mut book, |book| {
+            assert_eq!(maintenance::removal_effective_control_bytes(book)?, 40 * MIB);
+            reserve_removal_launcher_control(book, REMOVAL_RETAINED_CONTROL_QUOTE)
+        }).unwrap();
+        assert_eq!(book.removal_control_reserved, 4 * MIB + REMOVAL_RETAINED_CONTROL_QUOTE);
+
+        book.removal_observation_reserved = book.removal_control_reserved;
+        book.removal_observation_control = Some(28 * MIB + REMOVAL_RETAINED_CONTROL_QUOTE);
+        reserve_removal_launcher_control(&mut book, 2 * MIB).unwrap(); // second-census payload plan
+        with_removal_inventory_scratch(&mut book, |book| {
+            assert_eq!(maintenance::removal_effective_control_bytes(book)?,
+                66 * MIB + REMOVAL_RETAINED_CONTROL_QUOTE);
+            reserve_removal_launcher_control(book, REMOVAL_RETAINED_CONTROL_QUOTE)
+        }).unwrap();
+
+        let control = maintenance::removal_effective_control_bytes(&book).unwrap();
+        assert_eq!(control, 30 * MIB + 2 * REMOVAL_RETAINED_CONTROL_QUOTE);
+        assert!(maintenance::fresh_output_read_budget_data(journal_bytes, control, 20_000, 40).is_ok());
+        let previous_control = 30 * MIB + 2 * OBSERVATION_CONTROL_QUOTE;
+        assert_eq!(maintenance::fresh_output_read_budget_data(journal_bytes, previous_control, 20_000, 40),
+            Err("fresh-output-read-control-budget"));
+    }
+
+    #[test]
+    fn launcher_removal_scratch_refuses_overcommit_and_keeps_failed_work_charged() {
+        let mut book = Install::new();
+        let limit = installation_record::CONTROL_LIMIT as u64;
+        book.removal_control_reserved = 1;
+        book.removal_observation_reserved = 1;
+        book.removal_observation_control = Some(limit - OBSERVATION_INVENTORY_SCRATCH + 1);
+        assert_eq!(with_removal_inventory_scratch::<()>(&mut book, |_| panic!("overcommitted scratch entered")),
+            Err("launcher-removal-control-bound"));
+        assert_eq!(book.removal_control_reserved, 1);
+        book.removal_observation_control = Some(limit - OBSERVATION_INVENTORY_SCRATCH);
+        assert_eq!(with_removal_inventory_scratch::<()>(&mut book, |_| Err("original-read-refused")),
+            Err("original-read-refused"));
+        assert_eq!(maintenance::removal_effective_control_bytes(&book), Ok(limit));
+    }
+
+    #[test]
+    fn launcher_workspace_uses_the_admitted_removal_inventory() {
+        use mobile_release_desktop::macos_install_maintenance::ReleaseSetData;
+        use serde_json::json;
+
+        let inventory = b"original installed inventory";
+        let mut fixture = json!({
+            "schemaVersion": 2,
+            "current": {
+                "profile": "fixed-macos26-arm64-maintenance-v2",
+                "packageIdentifier": paths::PACKAGE_ID,
+                "bundleIdentifier": paths::BUNDLE_ID,
+                "packageVersion": "0.2.0",
+                "release": "macos26-arm64-desktop-workspace-test",
+                "sourceCommit": "1".repeat(40),
+                "protocolSha256": paths::PROTOCOL_SHA,
+                "runtimeManifestSha256": "2".repeat(64),
+                "inventorySha256": format!("{:x}", Sha256::digest(inventory)),
+                "signingPolicySha256": "3".repeat(64),
+                "packageSha256": "4".repeat(64),
+            },
+            "acceptedPredecessors": [],
+        });
+        let parse = |value: &serde_json::Value| ReleaseSetData::parse_data(&serde_json::to_vec(value).unwrap()).unwrap();
+        let admitted = parse(&fixture);
+        let release = admitted.current_data();
+        assert_eq!(Workspace::check_generation(release, inventory, Some(release)), Ok(()));
+        assert_eq!(Workspace::check_generation(release, inventory, None), Err("launcher-generation-binding"));
+        assert_eq!(Workspace::check_generation(release, b"changed inventory", Some(release)),
+            Err("launcher-generation-binding"));
+        fixture["current"]["packageSha256"] = json!("5".repeat(64));
+        let other_package = parse(&fixture);
+        assert_eq!(Workspace::check_generation(release, inventory, Some(other_package.current_data())),
+            Err("launcher-generation-binding"));
+    }
 
     #[test]
     fn launcher_phase_is_closed_and_original_placement_never_accepts_identical_replacements() {

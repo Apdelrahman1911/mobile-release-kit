@@ -6254,23 +6254,53 @@ mod installer {
             check(!origin||intent.action_data()==ActionData::FreshInstall&&intent.fresh_birth_data().is_some(),
                 "fresh-output-pair-birth-required")?;Ok(origin)
         }
-        fn fresh_output_stage_controls(book:&mut Install,intent_parent:usize,stage:usize,intent:&IntentData,
-            selected:&ReleaseSetData,completed:bool)->Result<([PartialFreshFileObserved;2],Option<u64>)>{
-            check(fresh_output_pair_present(book,stage,intent)?,"fresh-output-pair-required")?;
-            let before=book.named(Some(stage),fresh_data::JOURNAL_NAME).map_err(|_|"fresh-output-journal-stat")?;
-            let size=usize::try_from(before.st_size).map_err(|_|"fresh-output-journal-bound")?;
-            check(size<=fresh_data::JOURNAL_LIMIT&&matches!(before.st_mode,0o100600|0o100444),"fresh-output-journal-bound")?;
+        pub(super) fn fresh_output_read_budget_data(size:usize,control:u64,originals:usize,live:usize)->Result<(usize,u64)> {
+            check(size<=fresh_data::JOURNAL_LIMIT,"fresh-output-journal-bound")?;
             // Reserve before opening/allocating the index. The fixed minimum
             // frame size bounds retained rows; actual parsing cannot exceed
             // this observed byte quote even if the named file later changes.
             let entries=(size/(fresh_data::ENTRY_MIN+4)).min(fresh_data::ENROLLMENT_LIMIT);
             let quote=(size as u64).checked_mul(4).and_then(|n|n.checked_add((entries as u64).checked_mul(1024)?))
                 .and_then(|n|n.checked_add(4*fresh_data::ORIGIN_LIMIT as u64+131072)).ok_or("fresh-output-read-memory")?;
-            check(removal_effective_control_bytes(book)?.checked_add(quote)
-                .is_some_and(|n|n<=installation_record::CONTROL_LIMIT as u64)
-                &&book.originals.len().checked_add(8).is_some_and(|n|n<=installation_record::ORIGINAL_LIMIT)
-                &&book.originals.iter().filter(|row|row.fd.is_some()).count().checked_add(8+worker::EXTRA_LIVE)
-                    .is_some_and(|n|n<96),"fresh-output-read-budget")?;
+            check(control.checked_add(quote).is_some_and(|n|n<=installation_record::CONTROL_LIMIT as u64),
+                "fresh-output-read-control-budget")?;
+            check(originals.checked_add(8).is_some_and(|n|n<=installation_record::ORIGINAL_LIMIT),
+                "fresh-output-read-original-budget")?;
+            check(live.checked_add(8+worker::EXTRA_LIVE).is_some_and(|n|n<96),"fresh-output-read-live-budget")?;
+            Ok((entries,quote))
+        }
+        #[cfg(test)]
+        #[test]
+        fn fresh_output_read_reports_the_exhausted_budget_before_parsing() {
+            let size=4*1024*1024;
+            let (entries,quote)=fresh_output_read_budget_data(size,0,0,0).unwrap();
+            assert_eq!(entries,size/(fresh_data::ENTRY_MIN+4));
+            let cap=installation_record::CONTROL_LIMIT as u64;
+            let originals=installation_record::ORIGINAL_LIMIT-8;
+            let live=95-8-worker::EXTRA_LIVE;
+            assert_eq!(fresh_output_read_budget_data(size,cap-quote,originals,live),Ok((entries,quote)));
+            assert_eq!(fresh_output_read_budget_data(size,cap-quote+1,originals,live),Err("fresh-output-read-control-budget"));
+            assert_eq!(fresh_output_read_budget_data(size,cap-quote,originals+1,live),Err("fresh-output-read-original-budget"));
+            assert_eq!(fresh_output_read_budget_data(size,cap-quote,originals,live+1),Err("fresh-output-read-live-budget"));
+            assert_eq!(fresh_output_read_budget_data(fresh_data::JOURNAL_LIMIT+1,0,0,0),Err("fresh-output-journal-bound"));
+        }
+        fn fresh_output_stage_controls(book:&mut Install,intent_parent:usize,stage:usize,intent:&IntentData,
+            selected:&ReleaseSetData,completed:bool)->Result<([PartialFreshFileObserved;2],Option<u64>)>{
+            check(fresh_output_pair_present(book,stage,intent)?,"fresh-output-pair-required")?;
+            let before=book.named(Some(stage),fresh_data::JOURNAL_NAME).map_err(|_|"fresh-output-journal-stat")?;
+            let size=usize::try_from(before.st_size).map_err(|_|"fresh-output-journal-bound")?;
+            check(size<=fresh_data::JOURNAL_LIMIT&&matches!(before.st_mode,0o100600|0o100444),"fresh-output-journal-bound")?;
+            let control=removal_effective_control_bytes(book)?;
+            let originals=book.originals.len();
+            let live=book.originals.iter().filter(|row|row.fd.is_some()).count();
+            let (entries,quote)=fresh_output_read_budget_data(size,control,originals,live).map_err(|reason|{
+                if !book.worker_stderr_is_gate {
+                    let line=format!("MRK_MACOS_FRESH_OUTPUT_BUDGET_DIAGNOSTIC=reason={reason};journalBytes={size};control={control};records={originals};openFds={live};capture={}\n",
+                        u8::from(book.removal_snapshot_capture.is_some()));
+                    let _=std::io::Write::write_all(&mut std::io::stderr().lock(),line.as_bytes());
+                }
+                reason
+            })?;
             book.removal_control_reserved=book.removal_control_reserved.checked_add(quote).ok_or("fresh-output-read-memory")?;
             let result=removal_archive_scope(book,|book|{
                 let (index,origin,journal,journal_digest)=book.fresh_output_read(intent_parent,stage,intent,selected,size)?;
@@ -12048,10 +12078,11 @@ mod installer {
             action==ActionData::SamePackageNoop && present==[true;2] && !intent && controls && current
         }
         impl RemovalObserved {
-            pub(super) fn retire_launcher_before_snapshot(&mut self,book:&mut Install)->Result<()> {
+            pub(super) fn retire_launcher_before_snapshot(&mut self,book:&mut Install,
+                exclusion:&worker::RemovalExclusion,source:&worker::RemovalAdmission)->Result<()> {
                 self.post(book)?;
                 if let Some(removal) = self.inner.launcher_removal.as_mut() {
-                    removal.retire_before_snapshot(book,&self.inner.prepared)?;
+                    removal.retire_before_snapshot(book,&self.inner.prepared,exclusion,source)?;
                 }
                 self.post(book)
             }
@@ -15022,14 +15053,24 @@ mod installer {
             peer: RemovalPeerCompletion, reservation: usize, maintenance: usize,
         }
         impl RemovalExclusion {
+            fn original_locks_held(book: &Install, root: usize, reservation: usize, maintenance: usize) -> bool {
+                let held = |index, role| book.originals.get(index).is_some_and(|row: &Original|
+                    row.state == State::Owned && row.fd.is_some() && row.role == role && row.parent == Some(root));
+                book.registration.participant == Some(reservation)
+                    && book.registration.lock_attempted && book.registration.exclusive_acquired
+                    && !book.registration.closed_under_maintenance
+                    && book.gate.participant == Some(maintenance) && book.gate.entered
+                    && book.gate.lock_attempted && book.gate.exclusive_acquired
+                    && held(reservation, Role::ReservationParticipant) && held(maintenance, Role::GateParticipant)
+            }
+
             pub(super) fn post(&self,book:&Install,source:&RemovalAdmission)->Result<()> {
                 source.existing_maintenance_post(book)?;
                 let retired=self.peer.retired();
                 check(retired.role()==native::removal_coordinator::RemovalPeerRole::Parent
                     && retired.original_peer_exit_observed() && retired.peer_pid_data()>0
-                    && book.registration.participant==Some(self.reservation)
                     && source.existing_maintenance==Some(self.maintenance)
-                    && book.gate.entered && book.gate.lock_attempted && book.gate.exclusive_acquired,
+                    && Self::original_locks_held(book, source.root_original(), self.reservation, self.maintenance),
                     "removal-exclusive-originals")?;
                 // The unique private constructor below bound the exact request
                 // before M; shared clock and current source remain live checks.
@@ -16526,6 +16567,13 @@ mod installer {
         enum RemovalNodeEffect { Present, ObservedAbsent, Removed, Unknown }
         struct RemovalNodeState { original:Option<usize>,effect:RemovalNodeEffect,roster_observed:bool,
             returned:Option<std::result::Result<(),i32>> }
+        impl RemovalNodeState {
+            fn settle_unlinked_original(&self,book:&mut Install,original:usize)->Result<()> {
+                check(self.effect==RemovalNodeEffect::Removed && self.returned==Some(Ok(()))
+                    && self.original==Some(original),"removal-payload-unlinked-effect")?;
+                book.close_unlinked(original,"removal-payload-unlinked-close")
+            }
+        }
         struct RemovalPayloadExecution {
             origin:RemovalPayloadOrigin,journal:RemovalPayloadJournal,admission:RemovalSnapshotAdmission,
             plan:maintenance::RemovalPayloadPlan,binding:maintenance::RemovalHistoryBindingData,
@@ -17152,7 +17200,7 @@ mod installer {
                     && node.present_data()?.0.mode==u32::from(actual.st_mode) && node.present_data()?.0.uid==actual.st_uid
                     && node.present_data()?.0.gid==actual.st_gid && actual.st_flags==0,"removal-payload-unlinked-original")?;
                 self.advance_parent(book,parent,before)?;
-                book.forward_close(n,"removal-payload-unlinked-close")?;
+                self.states[index].settle_unlinked_original(book,n)?;
                 if directory {book.persist(parent,false)?;}
                 self.external_post(book)?;
                 #[cfg(feature="macos-installed-removal-abrupt-fixture")]
@@ -21077,9 +21125,10 @@ exec ./mrk-macos-remove --fixture-supervise "$1"
                 self.prepare_removal_request()?;self.prepare_removal_publication()?;
                 let peer=self.join_removal_peer(removal_ready_hint)?;
                 let exclusion=self.acquire_removal_exclusion(peer)?;
+                let source=self.removal.as_ref().ok_or("removal-original-missing")?;
                 self.removal_observed.as_mut().ok_or("removal-current-missing")?
-                    .retire_launcher_before_snapshot(&mut self.book)?;
-                exclusion.post(&self.book,self.removal.as_ref().ok_or("removal-original-missing")?)?;
+                    .retire_launcher_before_snapshot(&mut self.book,&exclusion,source)?;
+                exclusion.post(&self.book,source)?;
                 self.reobserve_removal_exclusive(&exclusion)?;
                 let linked={
                     let source=self.removal.as_ref().ok_or("removal-original-missing")?;
@@ -22642,6 +22691,86 @@ exec ./mrk-macos-remove --fixture-supervise "$1"
         mod tests {
             use super::*;
             #[test]
+            #[ignore = "requires a disposable macOS runner with untagged fixture directories"]
+            fn payload_removal_settles_the_same_original_after_unlink() {
+                use super::super::tests::unlinked_snapshot_book;
+                let template=std::env::temp_dir().join("mrk-removal-payload-unlink.XXXXXXXX");
+                let fixture=unistd::mkdtemp(&template).unwrap();
+                let tested=std::panic::catch_unwind(|| {
+                    let (mut book,n)=unlinked_snapshot_book(&fixture.join("first"));
+                    assert!(book.read_existing_app_metadata(n,"test-snapshot").is_ok());
+                    unistd::unlinkat(book.fd(0).unwrap(),"Old.app",unistd::UnlinkatFlags::RemoveDir).unwrap();
+                    assert_eq!(book.forward_close(n,"removal-payload-unlinked-close"),Err("removal-payload-unlinked-close"));
+                    assert_eq!(book.close_refusal,Some("original-close-snapshot-name"));
+
+                    let (mut book,n)=unlinked_snapshot_book(&fixture.join("second"));
+                    let mut state=RemovalNodeState {original:Some(n),effect:RemovalNodeEffect::Present,
+                        roster_observed:true,returned:None};
+                    assert_eq!(state.settle_unlinked_original(&mut book,n),Err("removal-payload-unlinked-effect"));
+                    assert!(book.originals[n].fd.is_some());
+                    unistd::unlinkat(book.fd(0).unwrap(),"Old.app",unistd::UnlinkatFlags::RemoveDir).unwrap();
+                    state.effect=RemovalNodeEffect::Removed;
+                    state.returned=Some(Ok(()));
+                    assert_eq!(state.settle_unlinked_original(&mut book,0),Err("removal-payload-unlinked-effect"));
+                    assert_eq!(state.settle_unlinked_original(&mut book,n),Ok(()));
+                    assert!(!book.unknown && book.originals[n].state==State::Closed && book.originals[n].fd.is_none()
+                        && book.originals[n].existing_app_metadata.is_none());
+                });
+                std::fs::remove_dir_all(fixture).unwrap();
+                tested.unwrap();
+            }
+
+            #[test]
+            fn launcher_removal_requires_both_original_locks() {
+                use std::fs;
+
+                let template = std::env::temp_dir().join("mrk-launcher-locks.XXXXXXXX");
+                let directory = unistd::mkdtemp(&template).unwrap().canonicalize().unwrap();
+                let reservation_file = directory.join(paths::REGISTRATION_GATE_NAME);
+                let maintenance_file = directory.join(paths::MAINTENANCE_GATE_NAME);
+                fs::write(&reservation_file, paths::REGISTRATION_GATE_BYTES).unwrap();
+                fs::write(&maintenance_file, paths::MAINTENANCE_GATE_BYTES).unwrap();
+                let tested = std::panic::catch_unwind(|| {
+                    let mut book = Install::new();
+                    let mut root = book.open(None, "/", true).unwrap();
+                    for part in directory.components().skip(1) {
+                        root = book.open(Some(root), part.as_os_str().to_str().unwrap(), true).unwrap();
+                    }
+                    let reservation = book.open_role(Some(root), paths::REGISTRATION_GATE_NAME, false,
+                        Role::ReservationParticipant).unwrap();
+                    let maintenance = book.open_role(Some(root), paths::MAINTENANCE_GATE_NAME, false,
+                        Role::GateParticipant).unwrap();
+                    let held = |book: &Install| RemovalExclusion::original_locks_held(book, root, reservation, maintenance);
+                    let acquire = |book: &Install, index| {
+                        #[allow(deprecated)]
+                        fcntl::flock(book.fd(index).unwrap().as_raw_fd(), fcntl::FlockArg::LockExclusiveNonblock).unwrap();
+                    };
+                    assert!(!held(&book));
+                    book.registration.lock_attempted = true;
+                    acquire(&book, reservation);
+                    book.registration.exclusive_acquired = true;
+                    assert!(!held(&book));
+                    book.gate.entered = true;
+                    book.gate.lock_attempted = true;
+                    acquire(&book, maintenance);
+                    book.gate.exclusive_acquired = true;
+                    assert!(held(&book));
+                    assert!(!RemovalExclusion::original_locks_held(&book, root, maintenance, reservation));
+                    let substitute = book.open(Some(root), paths::REGISTRATION_GATE_NAME, false).unwrap();
+                    book.registration.participant = Some(substitute);
+                    assert!(!held(&book));
+                    book.registration.participant = Some(reservation);
+                    drop(book.originals[reservation].fd.take());
+                    book.originals[reservation].state = State::Closed;
+                    assert!(!held(&book)); // The maintenance lock alone is insufficient.
+                });
+                fs::remove_file(reservation_file).unwrap();
+                fs::remove_file(maintenance_file).unwrap();
+                fs::remove_dir(directory).unwrap();
+                tested.unwrap();
+            }
+
+            #[test]
             fn installer_budget_is_bounded_and_remover_keeps_its_native_profile() {
                 assert_eq!(compiled_total_data(true,false),300*SECOND);
                 // The remover window is the removal protocol's hard bound, in
@@ -24123,7 +24252,7 @@ exec ./mrk-macos-remove --fixture-supervise "$1"
         // Real-filesystem reproduction of the hosted #49 launcher-retirement
         // refusal: an enrolled bundle root carries an existing-app snapshot,
         // is unlinked by its own parent FD and must then close as KNOWN.
-        fn unlinked_snapshot_book(root:&std::path::Path)->(super::Install,usize) {
+        pub(super) fn unlinked_snapshot_book(root:&std::path::Path)->(super::Install,usize) {
             use super::*;
             let _=std::fs::remove_dir_all(root);
             std::fs::create_dir_all(root.join("Old.app")).unwrap();

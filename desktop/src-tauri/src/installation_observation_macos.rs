@@ -110,6 +110,11 @@ impl InstalledProducer {
         let (phase,custody) = match point {
             ProducerCheckpoint::Before{phase,custody} | ProducerCheckpoint::Returned{phase,custody,..} => (phase,custody),
         };
+        if book.removal_gate.is_some() && !phase.is_cleanup() && (custody.failed || custody.unknown) {
+            native::removal_coordinator::removal_trace(&format!(
+                "app verifier={:?} phase={phase:?} failed={} unknown={}",
+                custody.operation, custody.failed, custody.unknown));
+        }
         if let Some(at) = custody.first_failure {
             let why = if custody.unknown { AdmissionFailure::Unknown } else { AdmissionFailure::Native };
             book.note_acl(why,at); publish(native_problem(why),at);
@@ -126,6 +131,10 @@ impl InstalledProducer {
         match Self::post(book,originals,end,stop) {
             Ok(()) => Decision::Proceed,
             Err(failure) => {
+                if book.removal_gate.is_some() {
+                    native::removal_coordinator::removal_trace(&format!(
+                        "app verifier={:?} phase={phase:?} gate={failure:?}", custody.operation));
+                }
                 let at = Instant::now();
                 if !book.removal_clock_vetoed(){book.note_acl(failure,at);publish(native_problem(failure),at);}
                 // Unknown poisons this existing wrapper; its close path then

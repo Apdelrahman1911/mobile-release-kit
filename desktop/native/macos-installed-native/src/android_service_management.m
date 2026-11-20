@@ -19,8 +19,10 @@ extern int mrk_android_identity_available(void);
 #include "e2_native_fixture_fixed.h"
 #include "e2_native_fixture_identity.h"
 #define MRK_ANDROID_SERVICE_PLIST @MRK_E2_FIXTURE_PLIST
+#define MRK_ANDROID_SERVICE_LABEL CFSTR(MRK_E2_FIXTURE_SERVICE)
 #else
 #define MRK_ANDROID_SERVICE_PLIST @"dev.mobile-release-kit.desktop.android-register.plist"
+#define MRK_ANDROID_SERVICE_LABEL CFSTR("dev.mobile-release-kit.desktop.android-register")
 #endif
 #ifndef MRK_ANDROID_APP_PATH
 #error fixed installed Android app path is required
@@ -35,6 +37,7 @@ enum {
     MRK_SERVICE_ACQUIRE=2, MRK_SERVICE_STATUS=3, MRK_SERVICE_MUTATE=4,
     MRK_SERVICE_RESULT=5, MRK_SERVICE_RELEASE=6
 };
+enum { MRK_OBSERVE_FOR_MAINTENANCE=4, MRK_STATUS_CORROBORATED_ABSENT=6 };
 typedef struct {
     uint32_t version,action,status,outcome,entered,returned,cleanup_known,unknown;
     uint32_t phase,service_state,called,reserved;
@@ -76,6 +79,32 @@ static uint32_t status_data(SMAppService *service) {
         default:return 5;
     }
 }
+// Service Management can report NotFound for a daemon with no registration
+// record. A successful, labelled system roster provides independent proof
+// that the exact fixed job is absent. Refuse an unavailable or malformed roster.
+static int service_absent_from_launchd(void) {
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wdeprecated-declarations"
+    CFArrayRef jobs=SMCopyAllJobDictionaries(kSMDomainSystemLaunchd);
+#pragma clang diagnostic pop
+    if (!jobs) return 0;
+    CFIndex count=CFArrayGetCount(jobs);
+    int absent=count>0;
+    for (CFIndex i=0;absent && i<count;++i) {
+        CFTypeRef job=CFArrayGetValueAtIndex(jobs,i);
+        if (!job || CFGetTypeID(job)!=CFDictionaryGetTypeID()) { absent=0;break; }
+        CFTypeRef label=CFDictionaryGetValue((CFDictionaryRef)job,CFSTR("Label"));
+        absent=label && CFGetTypeID(label)==CFStringGetTypeID()
+            && CFStringGetLength((CFStringRef)label)>0 && !CFEqual(label,MRK_ANDROID_SERVICE_LABEL);
+    }
+    CFRelease(jobs);
+    return absent;
+}
+static uint32_t maintenance_status_data(SMAppService *service) {
+    uint32_t status=status_data(service);
+    if (status==3 && service_absent_from_launchd()) return MRK_STATUS_CORROBORATED_ABSENT;
+    return status;
+}
 static uint32_t management_version(uint32_t action) {
 #if defined(MRK_INSTALLED_OBSERVATION)
     if (action==1) return 4;
@@ -83,7 +112,7 @@ static uint32_t management_version(uint32_t action) {
     return action==3?3:2;
 }
 void *mrk_android_management_new(uint32_t action) {
-    if (action>3 || pthread_main_np()!=1 || getuid()==0 || geteuid()!=getuid()
+    if (action>MRK_OBSERVE_FOR_MAINTENANCE || pthread_main_np()!=1 || getuid()==0 || geteuid()!=getuid()
         || !mrk_android_identity_available()) return NULL;
     mrk_android_management *original=calloc(1,sizeof(*original));
     if (!original) return NULL;
@@ -193,7 +222,9 @@ int mrk_android_management_step(void *raw,uint32_t phase,mrk_android_management_
                 [original->service retain];original->report.service_state=2;break;
             }
             case MRK_SERVICE_STATUS: {
-                original->report.status=status_data((SMAppService *)original->service);
+                SMAppService *service=(SMAppService *)original->service;
+                original->report.status=original->report.action==MRK_OBSERVE_FOR_MAINTENANCE
+                    ?maintenance_status_data(service):status_data(service);
 #if defined(MRK_E2_NATIVE_FIXTURE)
                 /* Observe ONLY after the original status. This does not select
                  * SMAppService's bundle or change any status/mutation policy. */
@@ -203,7 +234,8 @@ int mrk_android_management_step(void *raw,uint32_t phase,mrk_android_management_
                 }
 #endif
                 if (original->report.status==5) original->report.outcome=7;
-                else if (original->report.action==0) original->report.outcome=1;
+                else if (original->report.action==0 || original->report.action==MRK_OBSERVE_FOR_MAINTENANCE)
+                    original->report.outcome=1;
                 else if (original->report.action==3) {
                     if (original->report.status!=1) original->report.outcome=6;
                 }
@@ -251,7 +283,9 @@ int mrk_android_management_step(void *raw,uint32_t phase,mrk_android_management_
                 break;
             }
             case MRK_SERVICE_RESULT:
-                original->report.status=status_data((SMAppService *)original->service);
+                original->report.status=original->report.action==3
+                    ?maintenance_status_data((SMAppService *)original->service)
+                    :status_data((SMAppService *)original->service);
                 if (original->report.status==5 && original->report.action!=3) original->report.outcome=7;
                 break;
             case MRK_SERVICE_RELEASE:

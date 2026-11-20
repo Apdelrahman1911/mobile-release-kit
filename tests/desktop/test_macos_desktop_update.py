@@ -234,6 +234,70 @@ class OrdinaryDesktopUpdateTests(unittest.TestCase):
         bad = dict(m['origin'], hostProfile='xcode-27')
         with self.assertRaises(ValueError): P.origin_data(bad)
 
+    def test_ordinary_compile_edges_follow_actual_data_bindings(self):
+        # Run 44762279319: image/remover waited 607 s for resident outputs that
+        # only assemble reads. Each edge removal must stay a proven non-input.
+        origin = ordinary_fixture()[0]['origin']
+        self.assertEqual(P.ancestors('image', origin), ('prepare', 'vault', 'frontend'))
+        self.assertEqual(P.ancestors('remover', origin), ('prepare',))
+        self.assertEqual(P.ancestors('sign-remover', origin), ('prepare', 'remover'))
+        self.assertEqual(P.ancestors('cli', origin), ('prepare', 'resident'))
+        for part in ('assemble', 'notarize-payload', 'installer', 'scripts-package', 'final-package'):
+            self.assertLessEqual({'resident', 'image', 'vault', 'frontend', 'sign-remover', 'sign-cli'},
+                                 set(P.ancestors(part, origin)))
+        self.assertEqual(set(P.ancestors('final-package', origin)), set(P.ORDINARY_PARTS) - {'final-package'})
+        # Hosted macOS concurrency: at most four parts become ready after prepare.
+        self.assertEqual([p for p in P.ORDINARY_PARTS if P.ancestors(p, origin) == ('prepare',)],
+                         ['resident', 'vault', 'frontend', 'remover'])
+        markers = (*P.RESIDENT_BINDINGS, 'libmrk_resident_image', 'mrk-macos-entry', 'mrk-android-register',
+                   'android-helper-prepare.json')
+        root = Path(__file__).resolve().parents[2]
+        def local_text(uses, seen):
+            if uses in seen: return ''
+            seen.add(uses)
+            body = (root / uses[2:] / 'action.yml').read_text()
+            return body + ''.join(local_text(u, seen) for u in re.findall(r'uses: "?(\./\.github/actions/[^"\s]+)', body))
+        workflow = yaml('.github/workflows/desktop-macos-update-parts.yml')['jobs']
+        for part in P.ORDINARY_PARTS:
+            if 'resident' in P.ancestors(part, origin) or part == 'resident': continue
+            seen, text = set(), json.dumps(workflow['desktop26-' + part]['steps'])
+            text += ''.join(local_text(s['uses'], seen) for s in workflow['desktop26-' + part]['steps']
+                            if s.get('uses', '').startswith('./.github/actions/'))
+            if 'macos_installed_app_build.sh' in text:
+                text += (root / 'desktop/tools/macos_installed_app_build.sh').read_text()
+            for marker in markers:
+                with self.subTest(part=part, marker=marker):
+                    self.assertNotIn(marker, text)
+        # No compiled graph can embed a resident digest without restoring the edge.
+        sources = [*(root / 'desktop/src-tauri/src').rglob('*.rs'), root / 'desktop/src-tauri/build.rs',
+                   *(root / 'desktop/helpers/macos-desktop-image').rglob('*.rs')]
+        pattern = re.compile(r'(?:option_)?env!\(\s*"(' + '|'.join(P.RESIDENT_BINDINGS) + r')"')
+        self.assertGreater(len(sources), 10)
+        self.assertEqual([str(p) for p in sources if pattern.search(p.read_text())], [])
+
+    def test_ordinary_parts_refuse_old_or_partial_dependency_rosters(self):
+        origin = ordinary_fixture()[0]['origin']
+        def row(name, i, **changes):
+            return dict(part=name, origin=dict(origin, jobId=str(100 + i), **changes), artifactId=str(200 + i),
+                        artifactSha256='a' * 64, manifestSha256='b' * 64)
+        for part, names in (('image', ('prepare', 'resident', 'vault', 'frontend')),  # previous graph
+                            ('image', ('prepare', 'frontend')), ('image', ('vault', 'prepare', 'frontend')),
+                            ('remover', ('prepare', 'resident')), ('remover', ()),
+                            ('sign-remover', ('prepare', 'resident', 'remover')),
+                            ('assemble', tuple(n for n in P.ancestors('assemble', origin) if n != 'resident'))):
+            manifest = ordinary_fixture(part)[0]
+            manifest['dependencies'] = [row(n, i) for i, n in enumerate(names)]
+            with self.subTest(part=part, names=names), self.assertRaisesRegex(ValueError, 'part-dependency-roster'):
+                P.manifest_data(manifest)
+        for changes in (dict(runId='99'), dict(source='9' * 40), dict(tree='8' * 40),
+                        dict(nativeScope='tool-setup', hostProfile='macos-26')):
+            manifest = ordinary_fixture('image')[0]
+            manifest['dependencies'] = [row(n, i, **(changes if n == 'vault' else {}))
+                                        for i, n in enumerate(P.ancestors('image', origin))]
+            with self.subTest(changes=changes), self.assertRaisesRegex(ValueError, 'part-(dependency-binding|origin)'):
+                P.manifest_data(manifest)
+        self.assertEqual(P.manifest_data(ordinary_fixture('image')[0])['part'], 'image')
+
     def test_failed_ordinary_signing_does_not_recompile_the_desktop(self):
         states = dict.fromkeys(P.ORDINARY_PARTS, 'success')
         for n in ('assemble', 'notarize-payload', 'installer', 'scripts-package', 'final-package'): states[n] = 'skipped'

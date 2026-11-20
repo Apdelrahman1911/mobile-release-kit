@@ -29,7 +29,9 @@ concurrency:
 jobs:
   removal-lab:
     name: removal lab
-    if: github.repository == 'Apdelrahman1911/mobile-release-kit'
+    if: >-
+      github.repository == 'Apdelrahman1911/mobile-release-kit'
+      && (github.event_name != 'push' || !contains(github.event.head_commit.message, '[macos-payload-unlink-lab]'))
     runs-on: macos-26
     timeout-minutes: 30
     env:
@@ -137,3 +139,100 @@ jobs:
             ${{ runner.temp }}/unit.log
           if-no-files-found: warn
           retention-days: 30
+
+  payload-unlink:
+    name: Verify payload descriptor settlement in Installer
+    if: >-
+      github.repository == 'Apdelrahman1911/mobile-release-kit'
+      && github.event_name == 'push'
+      && contains(github.event.head_commit.message, '[macos-payload-unlink-lab]')
+    runs-on: macos-26
+    timeout-minutes: 15
+    env:
+      BASH_ENV: ''
+      ENV: ''
+      RUSTUP_TOOLCHAIN: 1.98.1
+      MACOSX_DEPLOYMENT_TARGET: '26.0'
+      CARGO_TERM_COLOR: never
+    steps:
+      - name: Admit a disposable Apple Silicon macOS 26 runner
+        shell: bash
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: |
+          set -euo pipefail
+          [[ "$RUNNER_ENVIRONMENT" == github-hosted && "$RUNNER_OS" == macOS && "$RUNNER_ARCH" == ARM64 ]]
+          [[ "$(/usr/bin/sw_vers -productVersion)" == 26.* && "$(/usr/bin/id -u)" != 0 ]]
+          [[ ! -e "/Library/Application Support/MobileReleaseKit" && ! -e "/Library/Application Support/MobileReleaseKit-RemovalRequests" ]]
+
+      - name: Check out the exact lab source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Compile only the remover regression binary
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup toolchain install "$RUSTUP_TOOLCHAIN" --profile minimal --no-self-update
+          target=aarch64-apple-darwin
+          export CARGO_TARGET_DIR="$RUNNER_TEMP/payload-unlink-cargo"
+          fixtures="$GITHUB_WORKSPACE/.github/fixtures/macos-output-data"
+          export MRK_MACOS_INSTALL_SOURCE_COMMIT="$GITHUB_SHA"
+          export MRK_OUTPUT_DATA_CORPUS="$fixtures/corpus.json"
+          export MRK_OUTPUT_DATA_INVENTORY="$fixtures/inventory.json"
+          export MRK_OUTPUT_DATA_PATH_QUOTES="$fixtures/path-quotes.json"
+          # Two unrelated pinned-data tests need paths at compile time. This
+          # job runs only the explicitly selected native unlink regression.
+          export MRK_PHASE_AUDIT_INVENTORY="$fixtures/inventory.json"
+          export MRK_PHASE_AUDIT_PRODUCER="$fixtures/corpus.json"
+          cargo fetch --manifest-path desktop/src-tauri/Cargo.toml --locked --target "$target"
+          cargo test --manifest-path desktop/src-tauri/Cargo.toml --locked --offline --jobs 2 \
+            --no-default-features --features macos-installed-remover --bin mrk-macos-remove \
+            --target "$target" --no-run --message-format=json > "$RUNNER_TEMP/payload-unlink-compile.jsonl"
+          binary="$(/usr/bin/python3 -I -B - "$RUNNER_TEMP/payload-unlink-compile.jsonl" "$CARGO_TARGET_DIR/$target/debug/deps" <<'PY'
+          import json, pathlib, re, sys
+          rows = [json.loads(line) for line in pathlib.Path(sys.argv[1]).read_text().splitlines()]
+          paths = [pathlib.Path(r["executable"]) for r in rows if r.get("reason") == "compiler-artifact"
+                   and r["target"]["name"] == "mrk-macos-remove" and r["profile"]["test"] and r.get("executable")]
+          assert len(paths) == 1 and paths[0].parent == pathlib.Path(sys.argv[2])
+          assert re.fullmatch(r"mrk_macos_remove-[0-9a-f]+", paths[0].name) and paths[0].is_file()
+          print(paths[0])
+          PY
+          )"
+          printf 'MRK_PAYLOAD_UNLINK_TEST=%s\n' "$binary" >> "$GITHUB_ENV"
+
+      - name: Exercise the original unlink and close inside Installer
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -x "$MRK_PAYLOAD_UNLINK_TEST"
+          work="$(mktemp -d "$RUNNER_TEMP/payload-unlink-proof.XXXXXXXX")"
+          mkdir -m 0755 "$work/scripts" "$work/fixtures"
+          chmod 0755 "$work"
+          test_case=installer::worker::tests::payload_removal_settles_the_same_original_after_unlink
+          printf '#!/bin/sh\nset -eu\numask 022\nexport TMPDIR="%s"\nexec "%s" "%s" --ignored --exact --nocapture >"%s" 2>&1\n' \
+            "$work/fixtures" "$MRK_PAYLOAD_UNLINK_TEST" "$test_case" "$RUNNER_TEMP/payload-unlink-test.log" \
+            >"$work/scripts/postinstall"
+          chmod 0755 "$work/scripts/postinstall"
+          /usr/bin/pkgbuild --nopayload --scripts "$work/scripts" --identifier dev.mobile-release-kit.fixture.payload-unlink \
+            --version 1 "$work/proof.pkg" >/dev/null
+          status=0
+          # Installer output belongs to the runner user.
+          # shellcheck disable=SC2024
+          /usr/bin/sudo -n /usr/sbin/installer -verbose -pkg "$work/proof.pkg" -target / \
+            >"$RUNNER_TEMP/payload-unlink-installer.log" 2>&1 || status=$?
+          cat "$RUNNER_TEMP/payload-unlink-test.log" || cat "$RUNNER_TEMP/payload-unlink-installer.log"
+          [[ $status == 0 ]]
+          grep -F "test $test_case ... ok" "$RUNNER_TEMP/payload-unlink-test.log"
+
+      - name: Retain bounded test evidence
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: macos-payload-unlink-lab-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/payload-unlink-test.log
+            ${{ runner.temp }}/payload-unlink-installer.log
+          if-no-files-found: warn
