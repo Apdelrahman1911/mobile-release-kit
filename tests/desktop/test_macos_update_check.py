@@ -2,6 +2,8 @@
 import copy
 import importlib.util
 import json
+import subprocess
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -130,6 +132,35 @@ class LaunchSmokeSourceTests(unittest.TestCase):
         self.assertTrue(any(d.startswith("Projects/") for d in M.DECOY_FILES))
         self.assertTrue(any(d.startswith(".config/gh/") for d in M.DECOY_FILES))
         self.assertNotIn(M.DECOY_SERVICE, M.KEYCHAIN_SERVICES)
+
+    @unittest.skipUnless(sys.platform == "darwin", "uses macOS stat and rm")
+    def test_uninstaller_file_cleanup_preserves_linked_ancestors_and_decoys(self):
+        script = (ROOT / "desktop/macos-installed-inputs/uninstaller/delete-data.sh").read_text()
+        actual_cleanup = script[script.index("library_device="):script.index("# The app's own login-keychain items")]
+        fixture_command = 'uid=$(id -u)\nlib=$1\n' + actual_cleanup + '\nexit "$status"\n'
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp).resolve()
+            library = root / "Library"
+            library.mkdir()
+            app_id = "dev.mobile-release-kit.desktop"
+            project = root / "Projects" / app_id
+            project.mkdir(parents=True)
+            decoy = project / "keep.txt"
+            decoy.write_text("project data")
+            linked_parent = library / "Application Support"
+            linked_parent.symlink_to(project.parent)
+            cache = library / "Caches" / app_id
+            cache.mkdir(parents=True)
+            (cache / "link-out").symlink_to(project)
+            linked_leaf = library / "Caches" / f"{app_id}.entry"
+            linked_leaf.symlink_to(project)
+            receipt = subprocess.run(["/bin/sh", "-c", fixture_command, "file-cleanup", str(library)],
+                                     capture_output=True, text=True, timeout=30)
+            self.assertEqual(receipt.returncode, 1, receipt.stdout + receipt.stderr)
+            self.assertIn(f"kept (link, not followed): {linked_parent}", receipt.stdout)
+            self.assertTrue(linked_leaf.is_symlink())
+            self.assertFalse(cache.exists())
+            self.assertEqual(decoy.read_text(), "project data")
 
     def test_fresh_mode_adds_interruption_resources_and_signature_after_existing_checks(self):
         source = (ROOT / "desktop/tools/macos_update_check.py").read_text()
