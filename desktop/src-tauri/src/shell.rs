@@ -4182,6 +4182,11 @@ fn start_relay(app: tauri::AppHandle, edits: EditOwner, document: DocumentBindin
         let mut project_identity_revision = None;
         let mut diagnostics_revision = None;
         let mut github_preflight_revision = None;
+        // #66: these two statuses have no relay revision key; emit only when
+        // the serialized payload changes (subscribers read Status explicitly
+        // after subscribing, so suppressed duplicates carry no information).
+        let mut asset_status_sent: Option<Vec<u8>> = None;
+        let mut github_connection_sent: Option<Vec<u8>> = None;
         let mut github_release_revision = None;
         let mut github_setup_revision = None;
         let mut github_publication_revision = None;
@@ -4397,11 +4402,19 @@ fn start_relay(app: tauri::AppHandle, edits: EditOwner, document: DocumentBindin
                 }
             }
             let status = document.status();
-            let _ = app.emit_to(MAIN_WINDOW, ASSET_EVENT, &status);
+            if let Ok(bytes) = serde_json::to_vec(&status) {
+                if asset_status_sent.as_deref() != Some(bytes.as_slice()) {
+                    let _ = app.emit_to(MAIN_WINDOW, ASSET_EVENT, &status); asset_status_sent = Some(bytes);
+                }
+            } else { let _ = app.emit_to(MAIN_WINDOW, ASSET_EVENT, &status); }
             let status = document.github_connection_status();
             #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
             if let Some(q) = app.try_state::<Arc<installed_observation::Observation>>() { q.github_status(&status); q.github_relay(&app).await; }
-            let _ = app.emit_to(MAIN_WINDOW, github_connection_wire::EVENT, &status);
+            if let Ok(bytes) = serde_json::to_vec(&status) {
+                if github_connection_sent.as_deref() != Some(bytes.as_slice()) {
+                    let _ = app.emit_to(MAIN_WINDOW, github_connection_wire::EVENT, &status); github_connection_sent = Some(bytes);
+                }
+            } else { let _ = app.emit_to(MAIN_WINDOW, github_connection_wire::EVENT, &status); }
             let status = document.github_preflight_status();
             #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
             if let Some(q) = app.try_state::<Arc<installed_observation::Observation>>() { q.preflight_status(&status); }
