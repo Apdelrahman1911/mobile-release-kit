@@ -1139,3 +1139,12 @@ mod notice {
 }
 #[cfg(not(any(feature="vault-helper",feature="android-registration-helper")))]
 pub use notice::{RemovalNotice,RemovalNoticeInbox,RemovalNoticeStart,decode_removal_hint,post_removal_ready};
+
+/// Removal diagnostics (#30/#83) for the app: one fixed ASCII line to the
+/// unified log. Callers pass only stage words and small numbers, never a path,
+/// request id, nonce, credential or user data. Interior NULs drop the line.
+pub fn removal_trace(fields:&str){
+    let Ok(text)=std::ffi::CString::new(format!("MRK_REMOVAL_TRACE {fields}"))else{return};
+    // SAFETY: constant "%s" format with exactly one NUL-terminated argument.
+    unsafe{nix::libc::syslog(nix::libc::LOG_NOTICE,c"%s".as_ptr(),text.as_ptr());}
+}
