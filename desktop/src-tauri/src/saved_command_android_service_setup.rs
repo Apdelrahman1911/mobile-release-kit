@@ -1159,7 +1159,6 @@ impl Preparation {
         if !identity.settle(){return None;}
         self.settled_storage(identity.retained_bytes()?)
     }
-    fn inert_settled(&self)->bool{self.inert() && self.identity.try_lock().is_ok_and(|identity|identity.settled())}
     pub(super) fn finalize(&self)->bool{
         if self.retirement.pair.is_some() || !self.known_return(){return false;}
         let main=match self.main.try_lock(){Ok(main)=>main,Err(_)=>return false,};
@@ -1231,9 +1230,13 @@ impl MaintenancePreparation {
     }
     pub(super) fn maintenance_return(&self)->Option<MaintenanceRun>{*self.returned.try_lock().ok()?}
     pub(super) fn known_return(&self)->bool{
+        // An unentered successor contributes to this return only after
+        // settle_inert verifies its resource closure and accounts for its storage.
+        // Reading the return must also work under the cohort lock and after
+        // cohort retirement, so check only the successor's inert state here.
         !self.probe.gate.control.unknown.load(Ordering::SeqCst) && self.probe.known_return()
             && self.returned.try_lock().is_ok_and(|returned|returned.is_some_and(|value|value.known && value.retained.is_some()))
-            && if self.enabled_entered.load(Ordering::SeqCst){self.enabled.known_return()}else{self.enabled.inert_settled()}
+            && if self.enabled_entered.load(Ordering::SeqCst){self.enabled.known_return()}else{self.enabled.inert()}
     }
     pub(super) fn run_maintenance(&self,client:&mut maintenance_native::Client,
         clock:&maintenance::OriginalClock,signal:&registration_native::Signal)->MaintenanceRun{
@@ -1285,9 +1288,7 @@ impl MaintenancePreparation {
     }
     fn finalize(&self)->bool{
         if !self.known_return() || !self.probe.finalization_ready(){return false;}
-        if self.enabled_entered.load(Ordering::SeqCst){
-            if !self.enabled.finalization_ready(){return false;}
-        }else if !self.enabled.inert_settled(){return false;}
+        if self.enabled_entered.load(Ordering::SeqCst) && !self.enabled.finalization_ready(){return false;}
         // Only called at original worker/coordinator/cohort/document final cut.
         // One common publication, never a partially finalized predecessor.
         self.pair.finalized.compare_exchange(false,true,Ordering::SeqCst,Ordering::SeqCst).is_ok()
@@ -1770,6 +1771,38 @@ mod callback_lifecycle_tests {
         let custody=management::Custody{action:None,phase:None,cell:CellCustody::Consumed,service:ServiceCustody::Settled,
             observation:Some(observation),..deferred()};
         CallbackReturned{native:Some((management::Progress::Finished(observation),custody)),failure:CapturedFailure::default(),at,registration_return:None}
+    }
+
+    #[cfg(not(feature="desktop-shell"))]
+    #[test]
+    fn finalized_maintenance_reads_the_worker_return_without_reopening_inert_identity() {
+        let (slot,control,_cohort,gate)=control_in_lane(Instant::now(),ControlLane::Maintenance);
+        let preparation=MaintenancePreparation::new(gate,Arc::new(Dispatcher {}),[1;16]);
+        let mut service=State::default();
+        assert!(!service.adopt_finalized_maintenance(&preparation));
+
+        // Close the genuinely empty successor and supply inert worker-return
+        // fixtures. This test does not enter the native dispatch route.
+        let retained=preparation.enabled.settle_inert().unwrap();
+        *preparation.probe.returned.lock().unwrap()=Some(PreparationReturn{
+            known:true,checked:true,observation:None,identity_diagnostic:Default::default(),
+            retained:Some(0),maintenance:None,
+        });
+        *preparation.returned.lock().unwrap()=Some(MaintenanceRun{
+            known:true,retained:Some(retained),..MaintenanceRun::default()
+        });
+
+        // Owner finalization retains the cohort lock. No finality read should
+        // reacquire the identity slot that can call back into that lock.
+        let _identity=preparation.enabled.identity.lock().unwrap();
+        let mut book=slot.book.lock().unwrap();
+        assert!(service.adopt_finalized_maintenance(&preparation));
+        book.original=None;
+        book.cohort=None;
+        drop(book);
+        assert!(preparation.known_return());
+        assert!(!service.adopt_finalized_maintenance(&preparation));
+        assert!(!control.unknown.load(Ordering::SeqCst));
     }
 
     #[test]
