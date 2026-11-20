@@ -80,11 +80,14 @@ class LaunchSmokeSourceTests(unittest.TestCase):
     def test_remove_mode_confirms_only_the_exact_sheet_and_checks_before_reinstall(self):
         self.assertIn("'Continue and Quit'", M.SHEET_JXA)
         self.assertIn("'Quit and prepare to remove Mobile Release Kit?'", M.SHEET_JXA)
+        self.assertIn("'Quit and discard unsaved drafts?'", M.SHEET_JXA)
         self.assertIn("names.length !== 2", M.SHEET_JXA)
         text = (ROOT / "desktop/tools/macos_update_check.py").read_text()
         live = text.split("def live_remove(", 1)[1].split("\ndef ", 1)[0]
+        self.assertIn('phase = "quit" if clicked else "removal"', live)
+        self.assertIn("pids[0] in live and not quit_clicked", live)
         order = [live.index(marker) for marker in ('"removal-sheet-not-confirmed"', '"remove-returned-nonzero"',
-                 '"removal-left-app-objects"')]
+                 '"removal-quit-sheet-not-confirmed"', '"removal-left-app-objects"')]
         self.assertEqual(order, sorted(order))
 
         source = text.split("def remove_check(", 1)[1].split("\ndef ", 1)[0]

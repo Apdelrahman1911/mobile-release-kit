@@ -693,6 +693,9 @@ def fresh_check(selection, work, evidence, steps, result):
 
 
 SHEET_JXA = """function run(argv) {
+  const quit = argv[2] === 'quit';
+  const title = quit ? 'Quit and discard unsaved drafts?' : 'Quit and prepare to remove Mobile Release Kit?';
+  const confirm = quit ? 'Quit' : 'Continue and Quit';
   const se = Application('System Events');
   const matches = se.processes.whose({unixId: Number(argv[0])});
   if (matches.length !== 1) return 'no-process';
@@ -703,9 +706,9 @@ SHEET_JXA = """function run(argv) {
     const sheet = sheets[0];
     const names = sheet.buttons().map(b => b.name());
     const texts = sheet.staticTexts().map(t => t.value());
-    if (names.length !== 2 || names.indexOf('Cancel') < 0 || names.indexOf('Continue and Quit') < 0) return 'unexpected:' + names.join('|');
-    if (!texts.some(t => t === 'Quit and prepare to remove Mobile Release Kit?')) return 'unexpected-text';
-    if (argv[1] === 'click') { sheet.buttons.byName('Continue and Quit').click(); return 'clicked'; }
+    if (names.length !== 2 || names.indexOf('Cancel') < 0 || names.indexOf(confirm) < 0) return 'unexpected:' + names.join('|');
+    if (!texts.some(t => t === title)) return 'unexpected-text';
+    if (argv[1] === 'click') { sheet.buttons.byName(confirm).click(); return 'clicked'; }
     return 'present';
   }
   return 'absent';
@@ -886,8 +889,8 @@ def sample_removal_start(pid, evidence, label, stop):
 
 def live_remove(mount, work, evidence, steps, label):
     """Open the installed app, run the mounted Remove.pkg with the standard
-    Installer and confirm only the app's own exact sheet; require Installer 0
-    and no app, launcher or process left. Returns the observations."""
+    Installer and confirm its exact removal sheet and ensuing ordinary Quit
+    sheet. Require Installer 0 and no app, launcher or process left."""
     out = {}
     # The live route asks the running app to confirm; open it first.
     p, r = run(["/usr/bin/open", str(APP)], 60)
@@ -909,25 +912,31 @@ def live_remove(mount, work, evidence, steps, label):
     sample_thread = threading.Thread(target=sample_removal_start,
                                      args=(pids[0], evidence, label, sample_stop), daemon=True)
     sample_thread.start()
-    sheet, clicked_at = [], None
+    sheet, quit_sheet = [], []
+    clicked, quit_clicked = False, False
     try:
         deadline = time.monotonic() + 240
         while time.monotonic() < deadline and installer.poll() is None:
             live = payload_pids()
-            if live and clicked_at is None:
-                q = subprocess.run(["/usr/bin/osascript", "-l", "JavaScript", str(script), str(live[0]), "probe"],
-                                   capture_output=True, text=True, timeout=30)
+            if pids[0] in live and not quit_clicked:
+                phase = "quit" if clicked else "removal"
+                history = quit_sheet if clicked else sheet
+                cmd = ["/usr/bin/osascript", "-l", "JavaScript", str(script), str(pids[0])]
+                q = subprocess.run([*cmd, "probe", phase], capture_output=True, text=True, timeout=30)
                 state_text = (q.stdout.strip() or ("error:" + q.stderr.strip()[-160:]))
-                if not sheet or sheet[-1] != state_text:
-                    sheet.append(state_text)
+                if not history or history[-1] != state_text:
+                    history.append(state_text)
                 if state_text == "present":
-                    subprocess.run(["/usr/sbin/screencapture", "-x", str(evidence / f"screen-{label}-sheet.png")],
+                    suffix = "quit-sheet" if clicked else "sheet"
+                    subprocess.run(["/usr/sbin/screencapture", "-x", str(evidence / f"screen-{label}-{suffix}.png")],
                                    capture_output=True, timeout=60)
-                    q = subprocess.run(["/usr/bin/osascript", "-l", "JavaScript", str(script), str(live[0]), "click"],
-                                       capture_output=True, text=True, timeout=30)
-                    sheet.append(q.stdout.strip() or ("error:" + q.stderr.strip()[-160:]))
+                    q = subprocess.run([*cmd, "click", phase], capture_output=True, text=True, timeout=30)
+                    history.append(q.stdout.strip() or ("error:" + q.stderr.strip()[-160:]))
                     if q.stdout.strip() == "clicked":
-                        clicked_at = time.monotonic()
+                        if clicked:
+                            quit_clicked = True
+                        else:
+                            clicked = True
             time.sleep(2)
         if installer.poll() is None:
             stall_diagnostics(evidence, label)
@@ -939,8 +948,10 @@ def live_remove(mount, work, evidence, steps, label):
         sample_thread.join(timeout=87)
         log.close()
         out["sheet"] = sheet[-12:]
+        out["quitSheet"] = quit_sheet[-12:]
         # Keep the probe history even when this check fails below.
         (evidence / f"{label}-sheet-probes.json").write_text(json.dumps(sheet[-40:]) + "\n")
+        (evidence / f"{label}-quit-sheet-probes.json").write_text(json.dumps(quit_sheet[-40:]) + "\n")
         # The app's fixed-code removal trace (no paths/ids), pass or fail.
         try:
             t = subprocess.run(["/usr/bin/log", "show", "--last", "8m", "--style", "compact", "--predicate",
@@ -952,8 +963,9 @@ def live_remove(mount, work, evidence, steps, label):
         (evidence / f"{label}-app-trace.txt").write_text("\n".join(trace) + "\n")
     out["returncode"] = installer.returncode
     steps.append({"argv": ["installer", "-pkg", "Remove.pkg"], "returncode": installer.returncode, "role": label})
-    need(clicked_at is not None, "removal-sheet-not-confirmed")
+    need(clicked, "removal-sheet-not-confirmed")
     need(installer.returncode == 0, "remove-returned-nonzero")
+    need(quit_clicked, "removal-quit-sheet-not-confirmed")
     time.sleep(5)
     remaining = {"app": APP.exists(), "launcher": LAUNCHER.exists(), "process": bool(payload_pids())}
     out["remaining"] = remaining
@@ -977,7 +989,8 @@ def remove_check(selection, work, evidence, steps, result):
     seeded = seed_user_data()
     result["seededFiles"] = len(seeded)
     out = live_remove(mount, work, evidence, steps, "remove")
-    result.update(removalSheet=out["sheet"], removeReturn=out["returncode"], afterRemoval=out["remaining"])
+    result.update(removalSheet=out["sheet"], removalQuitSheet=out["quitSheet"],
+                  removeReturn=out["returncode"], afterRemoval=out["remaining"])
     if out.get("timedOut"):
         result["removeTimedOut"] = True
     kept = manifest()
