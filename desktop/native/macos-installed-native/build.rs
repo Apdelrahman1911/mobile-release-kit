@@ -209,13 +209,7 @@ fn main() {
             .expect("bounded public producer SOURCE header");
         std::fs::write(out.join("mrk-install-producer-selection.h"), header)
             .expect("write fixed producer source selection");
-        // The nonshipping removal lab compiles the SAME coordinator source
-        // through tests/removal_lab.m (verbatim #include plus one lab entry),
-        // replacing, never duplicating, the production translation unit.
-        let removal_lab = std::env::var_os("CARGO_FEATURE_REMOVAL_LAB").is_some();
-        println!("cargo:rerun-if-changed=tests/removal_lab.m");
-        build.include(&out).file("src/install_producer.m")
-            .file(if removal_lab { "tests/removal_lab.m" } else { "src/removal_coordinator.m" });
+        build.include(&out).file("src/install_producer.m").file("src/removal_coordinator.m");
         // Documented audit-token field accessors; no PID/UID-only peer fallback.
         println!("cargo:rustc-link-lib=bsm");
 
