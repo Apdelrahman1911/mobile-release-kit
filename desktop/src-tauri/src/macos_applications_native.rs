@@ -7,6 +7,7 @@
 // does not publish /Applications or report a fully installed application.
 use super::*;
 use mobile_release_desktop::macos_applications_launcher as launcher;
+use mobile_release_desktop::macos_install_maintenance::ReleaseData;
 use installation_record::InventoryIndex;
 
 pub(super) const WORK_NAME: &str = ".applications-launcher-v1";
@@ -1142,24 +1143,34 @@ pub(super) struct Workspace {
     pub(super) retirement_settled: bool,
 }
 impl Workspace {
+    // DATA comparison. The mutation caller must already hold its role-specific
+    // authorization and obtain current_removal from the live signed admission.
+    fn check_generation(release: &ReleaseData, inventory_bytes: &[u8],
+        current_removal: Option<&ReleaseData>) -> Result<()> {
+        let binding = release.binding_data();
+        let selected = match current_removal {
+            Some(current) => current == release,
+            None => binding.release == paths::RELEASE
+                && Some(binding.inventory_sha256) == option_env!("MRK_MACOS_INSTALL_INVENTORY_SHA256")
+                && Some(binding.source_commit) == option_env!("MRK_MACOS_INSTALL_SOURCE_COMMIT")
+                && Some(binding.runtime_manifest_sha256) == option_env!("MRK_BUNDLED_RUNTIME_MANIFEST_SHA256"),
+        };
+        check(selected && format!("{:x}", Sha256::digest(inventory_bytes)) == binding.inventory_sha256,
+            "launcher-generation-binding")
+    }
+
     fn create(book: &mut Install, prepared: &PreparedFresh,
         generation: &transaction::GenerationData, authority: MutationAuthority<'_>) -> Result<Self> {
         authority.check(book)?;
         let root = book.gate.parent.ok_or("launcher-maintenance-required")?;
-        let release = generation.release_data();
-        let binding = release.binding_data();
-        let selected = match authority {
-            MutationAuthority::Install => binding.release == paths::RELEASE
-                && Some(binding.inventory_sha256) == option_env!("MRK_MACOS_INSTALL_INVENTORY_SHA256")
-                && Some(binding.source_commit) == option_env!("MRK_MACOS_INSTALL_SOURCE_COMMIT")
-                && Some(binding.runtime_manifest_sha256) == option_env!("MRK_BUNDLED_RUNTIME_MANIFEST_SHA256"),
+        check(root == prepared.destination, "launcher-generation-binding")?;
+        let current_removal = match authority {
+            MutationAuthority::Install => None,
             // The remover is itself in the inventory. Its inventory digest
             // comes from the currently admitted signed producer descriptor.
-            MutationAuthority::LiveRemoval { source, .. } => source.current_selection(book)?.current_data() == release,
+            MutationAuthority::LiveRemoval { source, .. } => Some(source.current_selection(book)?.current_data()),
         };
-        check(root == prepared.destination && selected
-            && format!("{:x}", Sha256::digest(&prepared.inventory_bytes)) == binding.inventory_sha256,
-            "launcher-generation-binding")?;
+        Self::check_generation(generation.release_data(), &prepared.inventory_bytes, current_removal)?;
         launcher::LauncherInventory::from_index(&prepared.inventory.index()?)?.ok_or("launcher-inventory-missing")?;
         let instance = generation.instance_data();
         check(worker::invocation_valid(instance), "launcher-generation-instance")?;
@@ -2068,6 +2079,42 @@ fn prefix_hash(size: u64,
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn launcher_workspace_uses_the_admitted_removal_inventory() {
+        use mobile_release_desktop::macos_install_maintenance::ReleaseSetData;
+        use serde_json::json;
+
+        let inventory = b"original installed inventory";
+        let mut fixture = json!({
+            "schemaVersion": 2,
+            "current": {
+                "profile": "fixed-macos26-arm64-maintenance-v2",
+                "packageIdentifier": paths::PACKAGE_ID,
+                "bundleIdentifier": paths::BUNDLE_ID,
+                "packageVersion": "0.2.0",
+                "release": "macos26-arm64-desktop-workspace-test",
+                "sourceCommit": "1".repeat(40),
+                "protocolSha256": paths::PROTOCOL_SHA,
+                "runtimeManifestSha256": "2".repeat(64),
+                "inventorySha256": format!("{:x}", Sha256::digest(inventory)),
+                "signingPolicySha256": "3".repeat(64),
+                "packageSha256": "4".repeat(64),
+            },
+            "acceptedPredecessors": [],
+        });
+        let parse = |value: &serde_json::Value| ReleaseSetData::parse_data(&serde_json::to_vec(value).unwrap()).unwrap();
+        let admitted = parse(&fixture);
+        let release = admitted.current_data();
+        assert_eq!(Workspace::check_generation(release, inventory, Some(release)), Ok(()));
+        assert_eq!(Workspace::check_generation(release, inventory, None), Err("launcher-generation-binding"));
+        assert_eq!(Workspace::check_generation(release, b"changed inventory", Some(release)),
+            Err("launcher-generation-binding"));
+        fixture["current"]["packageSha256"] = json!("5".repeat(64));
+        let other_package = parse(&fixture);
+        assert_eq!(Workspace::check_generation(release, inventory, Some(other_package.current_data())),
+            Err("launcher-generation-binding"));
+    }
 
     #[test]
     fn launcher_phase_is_closed_and_original_placement_never_accepts_identical_replacements() {
