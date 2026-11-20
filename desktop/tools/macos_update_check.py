@@ -375,7 +375,7 @@ def first_launch_observe(pid, work, evidence, label):
             "cliStatus": status, "screenshot": shot.name if shot.exists() else None}
 
 
-def launch_smoke(label, work, evidence, steps, observe=None):
+def launch_smoke(label, work, evidence, steps, observe=None, steady_idle_seconds=0):
     """Open the installed app as the logged-in runner user and require a live
     payload process with an on-screen window and no crash report."""
     need(not payload_pids(), f"{label}-app-already-running")
@@ -399,6 +399,16 @@ def launch_smoke(label, work, evidence, steps, observe=None):
         live = payload_pids()
         if live:
             samples.append(resource_sample(live[0], started, "idle"))
+    steady_samples = []
+    if steady_idle_seconds and pids and windows:
+        # Preserve the short sample for comparison with earlier runs. Measure
+        # a separate later interval on the same process without UI activity.
+        steady_started = time.monotonic()
+        for _ in range(steady_idle_seconds):
+            time.sleep(1)
+            if pids[0] not in payload_pids():
+                break
+            steady_samples.append(resource_sample(pids[0], steady_started, "idle"))
     alive = payload_pids()
     settled = window_count(alive[0], work) if alive else None
     shot = evidence / f"screen-{label}.png"
@@ -411,6 +421,12 @@ def launch_smoke(label, work, evidence, steps, observe=None):
                 "screenshot": shot.name if shot.exists() else None}
     if ui is not None:
         observed["ui"] = ui
+    if steady_idle_seconds:
+        observed["steadyIdleResources"] = resource_summary(steady_samples)
+        observed["steadyIdleResources"].update(
+            plannedSamples=steady_idle_seconds,
+            sampleWindowSeconds=steady_samples[-1]["t"] if steady_samples else None,
+            method="ps rss/%cpu of the same app process tree every 1 s after the initial idle sample")
     if alive:
         stop_app(alive)
     need(pids, f"{label}-app-process-not-started")
@@ -664,7 +680,7 @@ def fresh_check(selection, work, evidence, steps, result):
     result["afterSamePackage"] = again
     need(again == state, "same-package-changed-installation")
     need((manifest() if USER_DATA.exists() else {}) == data, "same-package-changed-app-data")
-    result["reopen"] = launch_smoke("reopen", work, evidence, steps)
+    result["reopen"] = launch_smoke("reopen", work, evidence, steps, steady_idle_seconds=60)
     # Additional coverage after every earlier fact is recorded: interruption
     # (#65), then the installed app's signature and Gatekeeper result (#30).
     result["interruption"] = {"startup": kill_and_relaunch("kill-startup", work, evidence, steps, "startup"),
