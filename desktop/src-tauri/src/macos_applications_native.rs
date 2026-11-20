@@ -1146,11 +1146,18 @@ impl Workspace {
         generation: &transaction::GenerationData, authority: MutationAuthority<'_>) -> Result<Self> {
         authority.check(book)?;
         let root = book.gate.parent.ok_or("launcher-maintenance-required")?;
-        let binding = generation.release_data().binding_data();
-        check(root == prepared.destination && binding.release == paths::RELEASE
-            && Some(binding.inventory_sha256) == option_env!("MRK_MACOS_INSTALL_INVENTORY_SHA256")
-            && Some(binding.source_commit) == option_env!("MRK_MACOS_INSTALL_SOURCE_COMMIT")
-            && Some(binding.runtime_manifest_sha256) == option_env!("MRK_BUNDLED_RUNTIME_MANIFEST_SHA256")
+        let release = generation.release_data();
+        let binding = release.binding_data();
+        let selected = match authority {
+            MutationAuthority::Install => binding.release == paths::RELEASE
+                && Some(binding.inventory_sha256) == option_env!("MRK_MACOS_INSTALL_INVENTORY_SHA256")
+                && Some(binding.source_commit) == option_env!("MRK_MACOS_INSTALL_SOURCE_COMMIT")
+                && Some(binding.runtime_manifest_sha256) == option_env!("MRK_BUNDLED_RUNTIME_MANIFEST_SHA256"),
+            // The remover is itself in the inventory. Its inventory digest
+            // comes from the currently admitted signed producer descriptor.
+            MutationAuthority::LiveRemoval { source, .. } => source.current_selection(book)?.current_data() == release,
+        };
+        check(root == prepared.destination && selected
             && format!("{:x}", Sha256::digest(&prepared.inventory_bytes)) == binding.inventory_sha256,
             "launcher-generation-binding")?;
         launcher::LauncherInventory::from_index(&prepared.inventory.index()?)?.ok_or("launcher-inventory-missing")?;
