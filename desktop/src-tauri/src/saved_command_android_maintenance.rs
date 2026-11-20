@@ -230,6 +230,9 @@ mod selected{
             let gate=WorkGate{slot:self.cohort.slot.clone(),control:self.control.clone()};
             if self.removal.is_some(){gate.import_retained(true);let _=self.control.advance_cleanup(Instant::now());}
             else{let _=gate.try_work();}
+            self.synchronize_clock();
+        }
+        fn synchronize_clock(&self){
             if let Some(clock)=self.clock.get(){clock.synchronize(&self.control,&self.signal);}
             else{self.control.advance(Instant::now());}
         }
@@ -562,7 +565,12 @@ mod selected{
             }
             // Publisher.accept releases this SAME book before delivering F.
             // No pending/latch and exact epoch/cohort make this the real final cut.
-            original.synchronize();let at=Instant::now();let first=original.control.failure();
+            // The cohort failure was checked under the held book above.
+            // Refresh the clocks without importing from that mutex again.
+            if original.removal.is_some(){let _=original.control.advance_cleanup(Instant::now());}
+            else{original.control.advance(Instant::now());}
+            original.synchronize_clock();
+            let at=Instant::now();let first=original.control.failure();
             let endpoint=original.control.endpoint();
             if !timely_sample(joined,at,endpoint) || original.control.unknown.load(Ordering::SeqCst){
                 drop(book);original.control.mark_unknown(at);return None;}
