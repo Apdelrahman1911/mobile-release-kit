@@ -13,6 +13,7 @@ from pathlib import Path
 import re
 import stat
 import subprocess
+import sys
 import time
 import zlib
 
@@ -307,22 +308,56 @@ def git_tree(f, git):
     return rows
 
 
+def project_root_access_tag(fd):
+    """Read only the sole bounded tag allowed by the independent native observer."""
+    if sys.platform != "darwin":
+        return None
+    import ctypes
+
+    library = ctypes.CDLL("/usr/lib/libSystem.B.dylib")
+    list_names = library.flistxattr
+    list_names.argtypes = (ctypes.c_int, ctypes.c_void_p, ctypes.c_size_t, ctypes.c_int)
+    list_names.restype = ctypes.c_ssize_t
+    read_tag = library.fgetxattr
+    read_tag.argtypes = (ctypes.c_int, ctypes.c_char_p, ctypes.c_void_p, ctypes.c_size_t, ctypes.c_uint32, ctypes.c_int)
+    read_tag.restype = ctypes.c_ssize_t
+    tag = b"com.apple.macl"
+    count = list_names(fd, None, 0, 0)
+    if count == 0:
+        _need(list_names(fd, None, 0, 0) == 0, "git-cli-project-root-xattr-race")
+        return None
+    _need(count == len(tag) + 1, "git-cli-project-root-xattr-roster")
+    names = ctypes.create_string_buffer(count)
+    _need(list_names(fd, names, count, 0) == count and names.raw == tag + b"\0",
+          "git-cli-project-root-xattr-roster")
+    size = read_tag(fd, tag, None, 0, 0, 0)
+    _need(0 < size <= 1024, "git-cli-project-root-tag-size")
+    body = ctypes.create_string_buffer(size)
+    _need(read_tag(fd, tag, body, size, 0, 0) == size, "git-cli-project-root-tag-read")
+    _need(list_names(fd, names, count, 0) == count and names.raw == tag + b"\0",
+          "git-cli-project-root-xattr-race")
+    return hashlib.sha256(body.raw).hexdigest()
+
+
 def capture(f):
     project = f.projects[f.cases[0]]
     files = {p: shared._at(f, project, p)[:2] for p in shared.FILES}
     dirs = {}
+    root_tag = None
     for p, names in ((".", (".git", ".gitignore", "app", "keep.txt", "release", "untracked.txt", "version.properties")),
                      ("app", ("build.gradle.kts",)), ("release", ("mobile-release.json",))):
         with ExitStack() as opened:
             fd = project if p == "." else opened.enter_context(f._temporary(f._open(p, project, directory=True)))
             before = _sig(os.fstat(fd))
+            if p == ".":
+                root_tag = project_root_access_tag(fd)
             _need(shared._names(f, fd, 16) == names and _sig(os.fstat(fd)) == before, "git-cli-project-roster")
             dirs[p] = before
     with f._temporary(f._open(".git", project, directory=True)) as git:
         f._named(project, ".git", git, 0o700)
         tree = git_tree(f, git)
         f._named(project, ".git", git, 0o700)
-    return {"files": files, "directories": dirs, "git": tree}
+    return {"files": files, "directories": dirs, "git": tree, "rootAccessTag": root_tag}
 
 
 def compare(before, after, case, head):
@@ -336,11 +371,20 @@ def compare(before, after, case, head):
     before_dirs, after_dirs = before["directories"], after["directories"]
     roles = {".": "root", "app": "app", "release": "release"}
     _need(before_dirs.keys() == after_dirs.keys() == roles.keys(), "git-cli-project-directory-roster")
-    fields = ("device", "inode", "mode", "uid", "gid", "link-count", "size", "mtime", "ctime")
+    _need(before["rootAccessTag"] is None, "git-cli-project-root-initial-tag")
+    tag = after["rootAccessTag"]
+    fields = ("device", "inode", "mode", "uid", "gid", "link-count", "size", "mtime")
     for directory, role in roles.items():
         original, current = before_dirs[directory], after_dirs[directory]
-        for field, old_value, new_value in zip(fields, original, current, strict=True):
+        for field, old_value, new_value in zip(fields, original[:-1], current[:-1], strict=True):
             _need(old_value == new_value, f"git-cli-project-directory-{role}-{field}-changed")
+        if directory == "." and tag is not None:
+            # The real Open panel attaches this tag, changing root ctime only.
+            # The signed observer has already checked empty ACLs and retained
+            # the selected root's full identity through normal Quit.
+            _need(hashed(tag) and current[-1] > original[-1], "git-cli-project-root-tag-ctime")
+        else:
+            _need(current[-1] == original[-1], f"git-cli-project-directory-{role}-ctime-changed")
     old, new = before["git"], after["git"]
     upstream.fixture_config(old["config"][3])
     branch_paths = {BRANCH_REF, "logs/" + BRANCH_REF}
@@ -414,6 +458,7 @@ def before_invocation(f, case, run_owned, username):
             f._retire_git_template(case, tmp, template)
         f._roster(tmp, (), "git-cli-setup-tmp-not-empty")
     f.git_cli["before"] = capture(f)
+    _need(f.git_cli["before"]["rootAccessTag"] is None, "git-cli-project-root-initial-tag")
     upstream.fixture_config(f.git_cli["before"]["git"]["config"][3])
     remaining(f, case)
 
