@@ -13,7 +13,8 @@ module StoreRuntimeComponent
   # Consumer smoke after the authenticated build-object projection and signing.
   # Read-only, no Store lane, no gem installation, no notice regeneration.
   def self.projected_smoke(root, architecture)
-    abort "Unsupported runtime" unless RUBY_VERSION == "3.3.14" && %w[arm64 x86_64].include?(architecture)
+    expected = { "arm64" => "3.3.14", "x86_64" => "3.3.12" }
+    abort "Unsupported runtime" unless RUBY_VERSION == expected[architecture]
     abort "Runtime architecture differs" unless RbConfig::CONFIG.fetch("host_cpu") == architecture
     root = File.realpath(root)
     require "bundler"
@@ -26,6 +27,8 @@ module StoreRuntimeComponent
     abort "CRC32 extension escaped runtime" unless loaded.length == 1 && File.realpath(loaded.first).start_with?(root + "/")
     abort "CRC32 result differs" unless Digest::CRC32.hexdigest("123456789") == "cbf43926"
     apple_crypto_smoke
+    openssl = architecture == "arm64" ? "3.5.9" : "3.5.8"
+    abort "Projected OpenSSL mismatch" unless OpenSSL::OPENSSL_LIBRARY_VERSION.start_with?("OpenSSL #{openssl} ")
     Fastlane::FastFile.new(File.join(root, "tooling/fastlane/Fastfile"))
     puts "Projected signed runtime: native CRC32, Apple P256 crypto and Fastlane require/parse passed; no lane or Store request."
   end
