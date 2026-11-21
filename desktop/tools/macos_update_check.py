@@ -2018,6 +2018,8 @@ def confirmed_data_deletion(mount, work, evidence, result, decoys):
     for svc in (*KEYCHAIN_SERVICES, DECOY_SERVICE):
         subprocess.run(["/usr/bin/security", "add-generic-password", "-A", "-a", "mrk-fixture", "-s", svc,
                         "-w", os.urandom(16).hex()], check=True, capture_output=True, timeout=30)
+    out["appKeychainItemsSeeded"] = {svc: keychain_has(svc) for svc in (*KEYCHAIN_SERVICES, DECOY_SERVICE)}
+    need(all(out["appKeychainItemsSeeded"].values()), "delete-all-data-keychain-fixture")
     seen = uninstaller_run(mount, work, evidence, "uninstall-delete",
                            [DELETE_LABEL, "Delete All Data", "Continue", None, "OK"])
     out["deleteAllData"] = seen
