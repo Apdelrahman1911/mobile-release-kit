@@ -26,7 +26,7 @@ permissions:
   actions: read
 
 concurrency:
-  group: desktop-macos-update-check-${{ github.ref }}
+  group: desktop-macos-update-check-${{ github.ref }}${{ contains(github.event.head_commit.message, '[macos-hourly-performance]') && '-hourly-performance' || '' }}
   cancel-in-progress: false
 
 jobs:
@@ -44,10 +44,11 @@ jobs:
           || contains(github.event.head_commit.message, '[macos-package-and-maintenance]') && fromJSON('["release-asset","prepare-quit"]')
           || contains(github.event.head_commit.message, '[macos-workspace-cli]') && fromJSON('["workspace-cli"]')
           || contains(github.event.head_commit.message, '[macos-workspace-xctest]') && fromJSON('["workspace-xctest","prepare-xctest"]')
+          || contains(github.event.head_commit.message, '[macos-hourly-performance]') && fromJSON('["performance-long"]')
           || fromJSON('["update","fresh","remove","uninstaller"]') }}
     if: github.repository == 'Apdelrahman1911/mobile-release-kit' && github.ref == 'refs/heads/verify/desktop-macos-update-check'
     runs-on: macos-26
-    timeout-minutes: 45
+    timeout-minutes: ${{ matrix.mode == 'performance-long' && 85 || 45 }}
     env:
       BASH_ENV: ''
       ENV: ''

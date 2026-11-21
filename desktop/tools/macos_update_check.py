@@ -377,7 +377,7 @@ def first_launch_observe(pid, work, evidence, label):
             "cliStatus": status, "screenshot": shot.name if shot.exists() else None}
 
 
-def launch_smoke(label, work, evidence, steps, observe=None, steady_idle_seconds=0):
+def launch_smoke(label, work, evidence, steps, observe=None, steady_idle_seconds=0, steady_interval=1):
     """Open the installed app as the logged-in runner user and require a live
     payload process with an on-screen window and no crash report."""
     need(not payload_pids(), f"{label}-app-already-running")
@@ -406,8 +406,8 @@ def launch_smoke(label, work, evidence, steps, observe=None, steady_idle_seconds
         # Preserve the short sample for comparison with earlier runs. Measure
         # a separate later interval on the same process without UI activity.
         steady_started = time.monotonic()
-        for _ in range(steady_idle_seconds):
-            time.sleep(1)
+        for _ in range(steady_idle_seconds // steady_interval):
+            time.sleep(steady_interval)
             if pids[0] not in payload_pids():
                 break
             steady_samples.append(resource_sample(pids[0], steady_started, "idle"))
@@ -424,11 +424,9 @@ def launch_smoke(label, work, evidence, steps, observe=None, steady_idle_seconds
     if ui is not None:
         observed["ui"] = ui
     if steady_idle_seconds:
-        observed["steadyIdleResources"] = resource_summary(steady_samples)
-        observed["steadyIdleResources"].update(
-            plannedSamples=steady_idle_seconds,
-            sampleWindowSeconds=steady_samples[-1]["t"] if steady_samples else None,
-            method="ps rss/%cpu of the same app process tree every 1 s after the initial idle sample")
+        observed["steadyIdleResources"] = steady_resource_summary(steady_samples, steady_idle_seconds, steady_interval)
+        if steady_interval > 1:
+            (evidence / f"{label}-resources.json").write_text(json.dumps(steady_samples) + "\n")
     (evidence / f"{label}-launch.json").write_text(json.dumps(observed, indent=2) + "\n")
     if alive:
         stop_app(alive)
@@ -470,6 +468,19 @@ def resource_summary(samples):
             "idleMeanCpuPercent": round(sum(s["cpuPercent"] for s in idle) / len(idle), 1) if idle else None,
             "peakProcesses": max((s["processes"] for s in samples), default=None),
             "method": "ps rss/%cpu of the app process tree; startup every 2 s until the first window, then 15 x 1 s idle"}
+
+
+def steady_resource_summary(samples, seconds, interval):
+    summary = resource_summary(samples)
+    summary.update(plannedSamples=seconds // interval,
+                   sampleWindowSeconds=samples[-1]["t"] if samples else None,
+                   method=f"ps rss/%cpu of the same app process tree every {interval} s after the initial idle sample")
+    if len(samples) >= 2:
+        size = max(1, len(samples) // 12)
+        summary["firstWindowMeanRssKiB"] = round(sum(s["rssKiB"] for s in samples[:size]) / size)
+        summary["lastWindowMeanRssKiB"] = round(sum(s["rssKiB"] for s in samples[-size:]) / size)
+        summary["rssWindowSamples"] = size
+    return summary
 
 
 def json_files_intact():
@@ -585,7 +596,7 @@ def main():
     parser.add_argument("--mode", choices=("update", "fresh", "remove", "uninstaller", "delete-data",
                                            "repeat", "repeat-after-dialogs", "prepare-quit", "performance",
                                            "update-credentials", "release-asset", "workspace-cli",
-                                           "workspace-xctest", "prepare-xctest"), default="update")
+                                           "workspace-xctest", "prepare-xctest", "performance-long"), default="update")
     args = parser.parse_args()
     work = Path(args.work)
     evidence = work / "evidence"
@@ -600,7 +611,7 @@ def main():
              "delete-data": remove_check, "repeat": remove_check, "repeat-after-dialogs": remove_check,
              "prepare-quit": prepare_quit_check, "performance": fresh_check, "release-asset": release_asset_check,
              "workspace-cli": workspace_cli_check, "workspace-xctest": workspace_xctest,
-             "prepare-xctest": workspace_xctest}[args.mode](
+             "prepare-xctest": workspace_xctest, "performance-long": performance_long_check}[args.mode](
                 selection, work, evidence, steps, result)
             result["passed"] = True
             return 0
@@ -715,6 +726,23 @@ def fresh_check(selection, work, evidence, steps, result):
     need(security["gatekeeper"]["returncode"] == 0 and security["gatekeeper"]["notarizedDeveloperId"],
          "installed-app-gatekeeper")
     need("runtime" in (security["codeFlags"] or ""), "installed-app-not-hardened-runtime")
+
+
+def performance_long_check(selection, work, evidence, steps, result):
+    row = selection["next"]
+    folder = fetch("next", row, work, steps)
+    need(install("next", folder, steps, evidence=evidence) == 0, "performance-install")
+    installed = result["afterInstall"] = installed_state()
+    need(installed["packageSha256"] == row["packageSha256"], "performance-package-identity")
+    result["hostOs"] = run(["/usr/bin/sw_vers", "-productVersion"], 20)[0].stdout.strip()
+    result["firstLaunch"] = launch_smoke("one-hour-idle", work, evidence, steps,
+                                         steady_idle_seconds=3600, steady_interval=5)
+    resources = result["firstLaunch"]["steadyIdleResources"]
+    need(resources["samples"] == resources["plannedSamples"] == 720
+         and resources["sampleWindowSeconds"] >= 3600, "performance-one-hour-sample-incomplete")
+    samples = json.loads((evidence / "one-hour-idle-resources.json").read_text())
+    need(len(samples) == 720 and all(s["appRssKiB"] and s["processes"] >= 1 for s in samples),
+         "performance-original-process-census-incomplete")
 
 
 SHEET_JXA = """function run(argv) {
