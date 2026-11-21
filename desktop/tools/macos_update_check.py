@@ -29,6 +29,7 @@ import json
 import os
 import plistlib
 import re
+import shutil
 import signal
 import stat
 import subprocess
@@ -302,7 +303,8 @@ UI_JXA = """function run(argv) {
     const preferred = ['AXLink', 'AXButton', 'AXCheckBox', 'AXRadioButton', 'AXTab', 'AXMenuItem'];
     for (const pass of [true, false]) {
       for (const e of all) {
-        if (label(e) !== argv[2] || preferred.includes(role(e)) !== pass) continue;
+        if (label(e) !== argv[2] || preferred.includes(role(e)) !== pass || (argv[3] && role(e) !== argv[3])) continue;
+        try { if (e.enabled() === false) continue; } catch (x) {}
         try { e.click(); return JSON.stringify({clicked: argv[2], role: role(e)}); } catch (x) {}
       }
     }
@@ -582,7 +584,7 @@ def main():
     parser.add_argument("--work", required=True)
     parser.add_argument("--mode", choices=("update", "fresh", "remove", "uninstaller", "delete-data",
                                            "repeat", "repeat-after-dialogs", "prepare-quit", "performance",
-                                           "update-credentials"), default="update")
+                                           "update-credentials", "release-asset"), default="update")
     args = parser.parse_args()
     work = Path(args.work)
     evidence = work / "evidence"
@@ -595,7 +597,7 @@ def main():
         if args.mode not in ("update", "update-credentials"):
             {"fresh": fresh_check, "remove": remove_check, "uninstaller": uninstaller_installed_check,
              "delete-data": remove_check, "repeat": remove_check, "repeat-after-dialogs": remove_check,
-             "prepare-quit": prepare_quit_check, "performance": fresh_check}[args.mode](
+             "prepare-quit": prepare_quit_check, "performance": fresh_check, "release-asset": release_asset_check}[args.mode](
                 selection, work, evidence, steps, result)
             result["passed"] = True
             return 0
@@ -1175,6 +1177,16 @@ def seed_update_credential():
     return value.encode()
 
 
+def click_when_ready(pid, work, title, role=None):
+    args = ("click", title) if role is None else ("click", title, role)
+    deadline = time.monotonic() + 30
+    while True:
+        result = ui_query(pid, work, *args, timeout=10)
+        if result.get("clicked") == title or pid not in payload_pids() or time.monotonic() >= deadline:
+            return result
+        time.sleep(1)
+
+
 def prepare_quit_check(selection, work, evidence, steps, result):
     row = selection["next"]
     folder = fetch("next", row, work, steps)
@@ -1197,13 +1209,13 @@ def prepare_quit_check(selection, work, evidence, steps, result):
     result["prepareQuitNavigation"] = actions = []
     try:
         for title in ("Build tools", "About this installation"):
-            action = ui_query(pid, work, "click", title, timeout=20)
+            action = click_when_ready(pid, work, title)
             actions.append(action)
             need(action.get("clicked") == title, "prepare-quit-navigation")
         ui_query(pid, work, "click", "Refresh preparation status", timeout=20)
         consent = "I want to stop the installed Android helper and prepare this application to quit."
-        for title in (consent, "Prepare and quit"):
-            action = ui_query(pid, work, "click", title, timeout=20)
+        for title, role in ((consent, "AXCheckBox"), ("Prepare and quit", "AXButton")):
+            action = click_when_ready(pid, work, title, role)
             actions.append(action)
             need(action.get("clicked") == title, "prepare-quit-control")
         script = work / "sheet.js"
@@ -1228,6 +1240,60 @@ def prepare_quit_check(selection, work, evidence, steps, result):
         subprocess.run(["/usr/sbin/screencapture", "-x", str(evidence / "screen-prepare-quit.png")],
                        capture_output=True, timeout=60)
     result["reopen"] = launch_smoke("prepare-quit-reopen", work, evidence, steps)
+
+
+def package_acceptance(package):
+    quarantine = f"0081;{int(time.time()):x};GitHubActions;"
+    written, _ = run(["/usr/bin/xattr", "-w", "com.apple.quarantine", quarantine, str(package)], 30)
+    read, _ = run(["/usr/bin/xattr", "-p", "com.apple.quarantine", str(package)], 30)
+    need(written.returncode == read.returncode == 0 and read.stdout.strip() == quarantine, "asset-quarantine")
+    signature, _ = run(["/usr/sbin/pkgutil", "--check-signature", str(package)], 120)
+    need(signature.returncode == 0 and "Developer ID Installer" in signature.stdout
+         and "trusted by the Apple notary service" in signature.stdout, "asset-signature")
+    gate, _ = run(["/usr/sbin/spctl", "-a", "-vv", "-t", "install", str(package)], 120)
+    need(gate.returncode == 0 and "Notarized Developer ID" in gate.stdout + gate.stderr, "asset-gatekeeper")
+    staple = subprocess.run(["/usr/bin/xcrun", "stapler", "validate", "-v", str(package)],
+                            capture_output=True, text=True, timeout=120)
+    tickets = set(re.findall(r'recordName = "(2/[0-9]+/[0-9a-f]{40,64})";', staple.stdout + staple.stderr))
+    need(staple.returncode == 0 and len(tickets) == 1, "asset-stapled-ticket")
+    return {"sha256": digest(package), "notarizationTicket": tickets.pop(), "quarantineVerified": True}
+
+
+def release_asset_check(selection, work, evidence, steps, result):
+    row = selection["next"]
+    folder = fetch("next", row, work, steps)
+    prepared = json.loads((folder / "PREPARED.json").read_text())
+    origin = prepared["origin"]
+    producer = json.loads((folder / "producer-root/producer.json").read_text())["releaseSet"]["current"]
+    need(origin["target"] == "aarch64-apple-darwin" and origin["source"] == producer["sourceCommit"]
+         and hex_field(origin["source"], 40) and hex_field(origin["tree"], 40), "asset-source-binding")
+    install_mount = carrier_image("release-asset", folder, steps)
+    detached, _ = run(["/usr/bin/hdiutil", "detach", str(install_mount)], 120)
+    need(detached.returncode == 0, "asset-install-image-detach")
+    mount, _ = removal_image(selection["removal"], work, steps)
+    output = work / "release-assets"
+    output.mkdir(mode=0o700)
+    try:
+        assets = {"Install.pkg": folder / "Install.pkg", "Remove.pkg": mount / "Remove.pkg"}
+        verified = {}
+        for name, path in assets.items():
+            copied = output / name
+            shutil.copyfile(path, copied)
+            verified[name] = package_acceptance(copied)
+            need(verified[name]["sha256"] == digest(path), "asset-copy-digest")
+        for name in ("producer.json", "producer.sig"):
+            shutil.copyfile(folder / "producer-root" / name, output / name)
+        image = output / "MobileReleaseKit-Remove.dmg"
+        shutil.copyfile(work / "removal/MobileReleaseKit-Remove.dmg", image)
+        need(digest(image) == selection["removal"]["imageSha256"], "asset-removal-image-digest")
+        shutil.copyfile(folder / "carrier-release-asset.dmg", output / "MobileReleaseKit-Install.dmg")
+        result["asset"] = {"schemaVersion": 1, "version": row["packageVersion"], "release": row["release"],
+                           "sourceCommit": origin["source"], "sourceTree": origin["tree"], "target": origin["target"],
+                           "buildRun": row["runId"], "removalRun": selection["removal"]["runId"],
+                           "packages": verified, "sha256": {p.name: digest(p) for p in sorted(output.iterdir())}}
+        (output / "MANIFEST.json").write_text(json.dumps(result["asset"], indent=2) + "\n")
+    finally:
+        subprocess.run(["/usr/bin/hdiutil", "detach", "-force", str(mount)], capture_output=True, timeout=120)
 
 
 DECOY_FILES = ("Library/Application Support/dev.mobile-release-kit.desktop.decoy/keep.txt",
