@@ -268,9 +268,9 @@ def window_count(pid, work):
 def recent_crashes(minutes=10):
     names = []
     for folder in (Path("/Library/Logs/DiagnosticReports"), Path.home() / "Library/Logs/DiagnosticReports"):
-        r = subprocess.run(["/usr/bin/sudo", "-n", "/usr/bin/find", str(folder), "-mmin", f"-{minutes}", "-type", "f"],
+        r = subprocess.run(["/usr/bin/sudo", "-n", "/usr/bin/find", str(folder), "-mmin", f"-{minutes}", "-type", "f", "-print0"],
                            capture_output=True, text=True, timeout=60)
-        names += [Path(n).name for n in r.stdout.split()
+        names += [Path(n).name for n in r.stdout.split("\0")
                   if PAYLOAD_PROCESS in n or "mrk-macos" in n or "Mobile Release Kit" in n]
     return sorted(names)
 
@@ -1367,20 +1367,32 @@ def workspace_xctest(selection, work, evidence, steps, result):
         built = subprocess.run([*base, "build-for-testing"], env=env, stdout=log, stderr=subprocess.STDOUT, timeout=600)
     result["xctestBuildReturn"] = built.returncode
     need(built.returncode == 0, "workspace-xctest-build")
+    manifests = list((derived / "Build/Products").glob("MRKNormalAppUI_*.xctestrun"))
+    need(len(manifests) == 1 and manifests[0].is_file() and not manifests[0].is_symlink(),
+         "workspace-xctest-single-original-manifest")
     method = "testSyntheticProjectPathFields"
     bundle = work / "project-test.xcresult"
-    tested = subprocess.run([*base, "test-without-building", "-resultBundlePath", str(bundle),
+    tested = subprocess.run(["/usr/bin/xcodebuild", "test-without-building", "-xctestrun", str(manifests[0]),
+                             "-destination", "platform=macOS,arch=arm64", "-destination-timeout", "15",
+                             "-resultBundlePath", str(bundle), "-disableAutomaticPackageResolution",
                              "-only-testing:MRKNormalAppUITests/NormalAppUITests/" + method,
                              "-parallel-testing-enabled", "NO", "-test-timeouts-enabled", "YES",
                              "-default-test-execution-time-allowance", "300",
                              "-maximum-test-execution-time-allowance", "300"],
                             env=env, capture_output=True, text=True, timeout=600)
     result["xctestReturn"] = tested.returncode
+    transcript = tested.stdout + "\n" + tested.stderr
     result["xctestStages"] = re.findall(r"(?m)^MRK_NORMAL_PROJECT_STAGE=([a-z0-9-]{1,70});result=(started|passed|failed)",
-                                          tested.stdout)[-60:]
+                                          transcript)[-60:]
+    for field, pattern in (
+        ("xctestRequireLine", r"MRK_NORMAL_PROJECT_REQUIRE_FAILURE=v1;method=" + method + r";line=([0-9]{1,5});check="),
+        ("xctestClockRefusalLine", r"MRK_NORMAL_PROJECT_CLOCK_FAILURE=v1;line=([0-9]{1,5})"),
+        ("xctestLaunchStage", r"MRK_NORMAL_PROJECT_LAUNCH_STAGE=(account|identity|proxies|gate-open|gate-free|request|gate-held|owner|window|renderer|dashboard)\b"),
+    ):
+        result[field] = re.findall(pattern, transcript)[-12:]
     marker = "MRK_MACOS_NORMAL_PROJECT_FIELDS_UI=ordinary-four-field-browse-two-cancels-draft-only-invalid-pair-observed"
-    result["workspaceFixtureObserved"] = marker in tested.stdout
-    result["xctestCasePassed"] = bool(re.search(r"(?m)^Test Case .*" + method + r"\]' passed ", tested.stdout))
+    result["workspaceFixtureObserved"] = marker in transcript
+    result["xctestCasePassed"] = bool(re.search(r"(?m)^Test Case .*" + method + r"\]' passed ", transcript))
     need(tested.returncode == 0 and result["workspaceFixtureObserved"] and result["xctestCasePassed"],
          "workspace-xctest-original-result")
 

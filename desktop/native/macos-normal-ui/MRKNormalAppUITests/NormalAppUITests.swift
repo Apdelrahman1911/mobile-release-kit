@@ -96,13 +96,14 @@ final class NormalAppUITests: XCTestCase {
             case artifactValue, quitCancel, postCancel, quitConfirm, termination, terminal
         }
         private let engineeringDiagnostic: Bool
+        private let projectDiagnostic: Bool
         private var engineeringPhase: EngineeringPhase = .admission
         func recordEngineeringPhase(_ phase: EngineeringPhase) {
             // Last ENTERED fixed step only; never completion or a new observation.
             if engineeringDiagnostic && firstFailure == nil { engineeringPhase = phase }
         }
         init(seconds: TimeInterval, androidPositive: Bool = false, iosUnsigned: Bool = false,
-             iosRecovery: Bool = false, engineeringDiagnostic: Bool = false) throws {
+             iosRecovery: Bool = false, engineeringDiagnostic: Bool = false, projectDiagnostic: Bool = false) throws {
             let now = ProcessInfo.processInfo.systemUptime
             guard now.isFinite, now >= 0, [androidPositive, iosUnsigned, iosRecovery].filter({ $0 }).count <= 1,
                   (iosRecovery ? seconds == 525 : ((androidPositive || iosUnsigned) ? seconds == 900 : (seconds == 60 || seconds == 300))),
@@ -112,12 +113,16 @@ final class NormalAppUITests: XCTestCase {
             last = now
             deadline = now + seconds
             self.engineeringDiagnostic = engineeringDiagnostic
+            self.projectDiagnostic = projectDiagnostic
         }
         func fail(_ reason: String, line: UInt = #line) -> Refusal {
             if firstFailure == nil {
                 firstFailure = reason
                 if engineeringDiagnostic && line >= 1 && line <= 65535 {
                     print("MRK_MACOS_ENGINEERING_FIRST_FAILURE=v1;line=\(line);phase=\(engineeringPhase.rawValue)")
+                }
+                if projectDiagnostic && line >= 1 && line <= 65535 {
+                    print("MRK_NORMAL_PROJECT_CLOCK_FAILURE=v1;line=\(line)")
                 }
             }
             return .condition(firstFailure!)
@@ -597,9 +602,21 @@ final class NormalAppUITests: XCTestCase {
                     && !removalQuitObserved && removalChannel == nil,
                     "removal harness channel is exclusive to its fixed case")
         let clock = try CaseClock(seconds: seconds, androidPositive: androidPositive, iosUnsigned: iosUnsigned,
-                                  iosRecovery: iosRecovery, engineeringDiagnostic: engineeringDiagnostic)
+                                  iosRecovery: iosRecovery, engineeringDiagnostic: engineeringDiagnostic,
+                                  projectDiagnostic: projectRequireDiagnosticMethod == .pathFields)
         caseClock = clock
         journeyDeadline = clock.deadline
+    }
+
+    private enum ProjectLaunchStage: String {
+        case account, identity, proxies, gateOpen = "gate-open", gateFree = "gate-free",
+             request, gateHeld = "gate-held", owner, window, renderer, dashboard
+    }
+
+    @MainActor private func projectLaunchStage(_ stage: ProjectLaunchStage) {
+        if projectRequireDiagnosticMethod == .pathFields {
+            print("MRK_NORMAL_PROJECT_LAUNCH_STAGE=\(stage.rawValue)")
+        }
     }
 
     @MainActor private func launchOrdinaryApplication() throws -> XCUIApplication {
@@ -608,18 +625,24 @@ final class NormalAppUITests: XCTestCase {
         try require(originalLaunch == nil && entryGateObservation == nil && !normalQuitObserved && !removalQuitObserved
                     && ProcessInfo.processInfo.environment["MRK_ENGINEERING_UI_WORK"] == nil,
                     "a new ordinary launch requires empty active custody and no engineering profile")
+        projectLaunchStage(.proxies)
         let outer = XCUIApplication(url: OrdinaryLaunch.outerURL)
         let monitor = XCUIApplication(url: OrdinaryLaunch.payloadURL)
         try require(outer.state == .notRunning && monitor.state == .notRunning,
                     "occupied outer or payload must not be launched, adopted or terminated")
         let gate = GateObservation()
         entryGateObservation = gate
+        projectLaunchStage(.gateOpen)
         try gate.openOnce()
+        projectLaunchStage(.gateFree)
         try gate.probe(busy: false)
         let owner = OrdinaryLaunch(clock: clock)
         originalLaunch = owner // Custody before the one fallible request.
+        projectLaunchStage(.request)
         try owner.requestAndAwait()
+        projectLaunchStage(.gateHeld)
         try gate.probe(busy: true)
+        projectLaunchStage(.owner)
         try owner.healthy()
         // This URL proxy is monitoring/UI only, NOT a public original-PID attach.
         // Never launch, activate, open or terminate it.
@@ -5651,8 +5674,10 @@ final class NormalAppUITests: XCTestCase {
     }
 
     @MainActor private func admittedJourneyApplication(profile: SourceProfile = .sameBuild) throws -> (URL, HostedAccount) {
+        projectLaunchStage(.account)
         let account = try admitHostedAccount(profile)
 
+        projectLaunchStage(.identity)
         let url = URL(fileURLWithPath: "/Library/Application Support/MobileReleaseKit/Mobile Release Kit.app",
                       isDirectory: true)
         try require(Bundle(url: url)?.bundleIdentifier == "dev.mobile-release-kit.desktop.entry"
@@ -5667,11 +5692,13 @@ final class NormalAppUITests: XCTestCase {
                                              diagnosticOrdinal: UInt8? = nil) throws -> (XCUIApplication, XCUIElement, XCUIElement) {
         _ = try admittedJourneyApplication(profile: profile) // Defaults remain exact same-build.
         let app = try launchOrdinaryApplication()
+        projectLaunchStage(.window)
         try require(app.wait(for: .runningForeground, timeout: try remaining(5)), "ordinary app did not enter the foreground")
         try require(app.windows.element(boundBy: 0).waitForExistence(timeout: try remaining(5)), "ordinary app has no visible main window")
         let window = try unique(app.windows, "ordinary main window is ambiguous")
         try require(window.isHittable, "ordinary main window is not usable")
         // Shared journey bounded renderer readiness; ambiguity remains terminal.
+        projectLaunchStage(.renderer)
         let rendererQuery = window.webViews
         let rendererCount = rendererQuery.count
         if rendererCount != 1 {
@@ -5687,6 +5714,7 @@ final class NormalAppUITests: XCTestCase {
         try require(observedReadyCount == 1, "ordinary first-party renderer is missing or ambiguous")
         let renderer = rendererQuery.element(boundBy: 0)
         // End shared journey bounded renderer readiness.
+        projectLaunchStage(.dashboard)
         try dashboard(renderer, startup: true, diagnosticOrdinal: diagnosticOrdinal)
         return (app, window, renderer)
     }
