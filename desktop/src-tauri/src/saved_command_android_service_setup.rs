@@ -901,7 +901,17 @@ impl Preparation {
             self.gate.control.poisoned();return false;
         }
         let stop=self.gate.control.stop.subscribe();
-        let checked=self.gate.source_work().is_ok() && identity.check_once(self.gate.control.work,&stop).is_ok();
+        let check=self.gate.source_work().and_then(|()|identity.check_once(self.gate.control.work,&stop));
+        if let Err(failure)=check{
+            if self.retirement.removal.is_some(){
+                let original=self.gate.control.failure();
+                let detail=identity.diagnostic().for_first(original);
+                mrk_macos_installed_native::removal_coordinator::removal_trace(&format!(
+                    "app maintenance-identity-check=refused reason={failure:?} original={:?} detail={detail:?}",
+                    original.map(|(reason,_)|reason)));
+            }
+        }
+        let checked=check.is_ok();
         if checked{self.requested.store(true,Ordering::SeqCst);self.gate.control.changed();}
         let mut files_known=None;
         let main=loop{
