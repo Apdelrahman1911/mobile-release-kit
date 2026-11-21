@@ -770,6 +770,57 @@ def fresh_check(selection, work, evidence, steps, result):
     need(security["gatekeeper"]["returncode"] == 0 and security["gatekeeper"]["notarizedDeveloperId"],
          "installed-app-gatekeeper")
     need("runtime" in (security["codeFlags"] or ""), "installed-app-not-hardened-runtime")
+    if os.environ.get("MRK_CHECK_REFRESHED_RUNTIME") == "true":
+        need(ui.get("runtimeCard") == "bundled", "installed-refresh-first-launch-runtime-unobserved")
+        check_installed_runtime_refresh(row, folder, work, result)
+
+
+def check_installed_runtime_refresh(row, folder, work, result):
+    prepared = json.loads((folder / "PREPARED.json").read_bytes())
+    runtime = STATE / "versions" / row["release"] / "runtime"
+    manifest_path = runtime / "manifest.json"
+    manifest_sha256 = digest(manifest_path)
+    need(manifest_sha256 == prepared["runtimeManifestSha256"], "installed-refresh-runtime-manifest")
+    members = {item["path"]: item for item in json.loads(manifest_path.read_bytes())["files"]}
+    python, ruby, github_ca, store_ca = (runtime / name for name in
+        ("python/bin/python3", "store/bin/ruby", "github-ca.pem", "store/ca.pem"))
+    ca_sha256 = "8a2bfdbfac68ecdda694c8dd46f5d29d4386fa0402f844b59a17b7d073ebbd81"
+    for path in (python, ruby, github_ca, store_ca):
+        relative = path.relative_to(runtime).as_posix()
+        need(path.is_file() and not path.is_symlink() and path.stat().st_size == members[relative]["size"]
+             and digest(path) == members[relative]["sha256"], "installed-refresh-runtime-member")
+    need(digest(github_ca) == digest(store_ca) == ca_sha256, "installed-refresh-trust-anchors")
+    for binary in (python, ruby):
+        signature, _ = run(["/usr/bin/codesign", "--verify", "--strict", str(binary)], 60)
+        need(signature.returncode == 0, "installed-refresh-runtime-signature")
+
+    probe_home = work / "runtime-refresh-probe"
+    probe_home.mkdir(mode=0o700)
+    env = {"PATH": "/usr/bin:/bin", "HOME": str(probe_home), "TMPDIR": str(probe_home),
+           "LC_ALL": "C.UTF-8", "TZ": "UTC"}
+    python_probe = ("import platform,ssl,sys; context=ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT); "
+                    "context.load_verify_locations(cafile=sys.argv[1]); "
+                    "print(platform.python_version(), platform.machine(), ssl.OPENSSL_VERSION.split()[1], "
+                    "len(context.get_ca_certs()))")
+    python_result = subprocess.run([str(python), "-I", "-S", "-B", "-c", python_probe, str(github_ca)],
+                                   env=env, capture_output=True, text=True, timeout=45)
+    ruby_probe = 'puts [RUBY_VERSION, RbConfig::CONFIG.fetch("host_cpu"), OpenSSL::OPENSSL_LIBRARY_VERSION.split[1]].join(" ")'
+    ruby_result = subprocess.run([str(ruby), "--disable=gems", "-rrbconfig", "-ropenssl", "-e", ruby_probe],
+                                 env=env, capture_output=True, text=True, timeout=45)
+    need(python_result.returncode == 0 and python_result.stdout.strip() == "3.14.10 arm64 3.5.9 117",
+         "installed-refresh-python-version-or-trust")
+    need(ruby_result.returncode == 0 and ruby_result.stdout.strip() == "3.3.14 arm64 3.5.9",
+         "installed-refresh-ruby-version")
+    receipt = (Path(__file__).resolve().parents[1] /
+               "macos-installed-inputs/notices/THIRD-PARTY-NOTICES.txt")
+    notices = APP / "Contents/Resources/THIRD-PARTY-NOTICES.txt"
+    notice_sha256 = digest(notices)
+    need(notice_sha256 == digest(receipt), "installed-refresh-notice-content")
+    result["installedRuntime"] = {
+        "manifestSha256": manifest_sha256, "caSha256": ca_sha256, "trustAnchors": 117,
+        "python": "3.14.10", "ruby": "3.3.14", "openssl": "3.5.9", "architecture": "arm64",
+        "runtimeSignaturesVerified": True, "noticesSha256": notice_sha256,
+    }
 
 
 def performance_long_check(selection, work, evidence, steps, result):
