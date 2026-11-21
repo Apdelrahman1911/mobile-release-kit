@@ -525,6 +525,18 @@ class MacStdlibBytecodeDataTests(unittest.TestCase):
 
 
 class RuntimePreparationTests(unittest.TestCase):
+    def test_macos_trust_projection_removes_only_the_reviewed_roots(self):
+        from desktop.tools import prepare_macos_store_inputs, prepare_runtime
+        original = (Path(__file__).resolve().parents[2] / "desktop/cpython-source-inputs/github-ca.pem").read_bytes()
+        projected = prepare_runtime.macos_trust_bundle(original)
+        self.assertEqual(projected.count(b"-----BEGIN CERTIFICATE-----"), 117)
+        self.assertEqual(hashlib.sha256(projected).hexdigest(),
+                         "8a2bfdbfac68ecdda694c8dd46f5d29d4386fa0402f844b59a17b7d073ebbd81")
+        self.assertEqual(prepare_macos_store_inputs.macos_store_ca(), projected)
+        for malformed in (projected, original + original, original.replace(b"-----END CERTIFICATE-----", b"", 1)):
+            with self.assertRaises(ValueError):
+                prepare_runtime.macos_trust_bundle(malformed)
+
     def test_windows_checked_reader_keeps_descriptor_change_time_after_suffix_normalization(self):
         # Exercise the actual bounded reader on inert bytes, mocking only the
         # CPython 3.14 Windows metadata shape. This is not native Windows proof.

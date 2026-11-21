@@ -19,11 +19,18 @@ import tarfile
 
 ROOT = Path(__file__).resolve().parents[2]
 SOURCES = (
-    {"directory": "ruby-3.3.12", "url": "https://cache.ruby-lang.org/pub/ruby/3.3/ruby-3.3.12.tar.gz",
-     "bytes": 21489887, "sha256": "b06d63beae271933033e27f0a389bc582a009e7845357d44365c39de525a051b"},
+    {"directory": "ruby-3.3.14", "url": "https://cache.ruby-lang.org/pub/ruby/3.3/ruby-3.3.14.tar.gz",
+     "bytes": 21512128, "sha256": "d0438ee291b0cacaf97c7a6eafdc5c8c2d1b8ffe27311f71fc680b0"},
     {"directory": "yaml-0.2.5", "url": "https://pyyaml.org/download/libyaml/yaml-0.2.5.tar.gz",
      "bytes": 609454, "sha256": "c642ae9b75fee120b2d96c712538bd2cf283228d2337df2cf2988e3c02678ef4"},
 )
+
+
+def macos_store_ca():
+    spec = importlib.util.spec_from_file_location("mrk_macos_store_ca_policy", ROOT / "desktop/tools/prepare_runtime.py")
+    policy = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(policy)
+    return policy.macos_trust_bundle((ROOT / "desktop/cpython-source-inputs/github-ca.pem").read_bytes())
 
 
 def fetch(asset, destination):
@@ -145,9 +152,9 @@ def main():
     elif not args.gems_only:
         lock = json.loads((ROOT / "desktop/macos-cpython-source-inputs/source-lock.json").read_text())
         openssl, = [row for row in lock["archiveSelections"] if row["id"] == "openssl"]
-        if openssl["version"] != "3.5.8":
+        if openssl["version"] != "3.5.9":
             raise ValueError("Unsupported OpenSSL source version")
-        sources = (*SOURCES, {**openssl, "directory": "openssl-3.5.8"})
+        sources = (*SOURCES, {**openssl, "directory": "openssl-" + openssl["version"]})
         for asset in sources:
             archive = output / (asset["directory"] + ".tar.gz")
             fetch(asset, archive)
@@ -156,7 +163,7 @@ def main():
             tree.rename(output / asset["directory"])
             staging.rmdir()
             archive.unlink()  # Exactly this authenticated downloaded archive.
-        shutil.copyfile(ROOT / "desktop/cpython-source-inputs/github-ca.pem", output / "ca.pem")
+        (output / "ca.pem").write_bytes(macos_store_ca())
     if not args.sources_only:
         spec = importlib.util.spec_from_file_location("mrk_ci_public_inputs", ROOT / ".github/scripts/ci_prepare.py")
         loader = importlib.util.module_from_spec(spec)

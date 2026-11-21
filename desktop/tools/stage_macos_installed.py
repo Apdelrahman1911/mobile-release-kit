@@ -1874,10 +1874,10 @@ def current_source(*, history_provider=False, store_runtime=False, fetch_observa
     with parent(source / name) as (fd, leaf):
       body, info = read_at(fd, leaf, limit)
     captured[name] = (body, stat.S_IMODE(info.st_mode))
+  preparer = current_preparer(captured)
   if store_runtime:
 
 
-    preparer = current_preparer(captured)
     names = preparer._store_tooling_names(core["tooling.py"][0])
     for name in names:
       need(name not in captured, "current-store-source-collision")
@@ -1890,9 +1890,10 @@ def current_source(*, history_provider=False, store_runtime=False, fetch_observa
   projection = {}
   for name, (body, _) in captured.items():
     if name != CURRENT_HELPER_SOURCE:
-      target = "desktop/github-ca.pem" if name == CURRENT_CA_SOURCE else name
-      need(target not in projection, "current-source-projection-collision")
-      projection[target] = (body, 0o444)
+      projected_name = "desktop/github-ca.pem" if name == CURRENT_CA_SOURCE else name
+      projected = preparer.macos_trust_bundle(body) if name == CURRENT_CA_SOURCE else body
+      need(projected_name not in projection, "current-source-projection-collision")
+      projection[projected_name] = (projected, 0o444)
   directories(projection)
   return captured, projection, digest(canonical(rows))
 
