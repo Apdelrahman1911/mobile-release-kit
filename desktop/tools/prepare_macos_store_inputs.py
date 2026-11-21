@@ -20,7 +20,7 @@ import tarfile
 ROOT = Path(__file__).resolve().parents[2]
 SOURCES = (
     {"directory": "ruby-3.3.14", "url": "https://cache.ruby-lang.org/pub/ruby/3.3/ruby-3.3.14.tar.gz",
-     "bytes": 21512128, "sha256": "d0438ee291b0cacaf97c7a6eafdc5c8c2d1b8ffe27311f71fc680b0"},
+     "bytes": 21512128, "sha256": "d0438ee291b0cacaf97c7a71df4c939d7f3265c8c2d1b8ffe27311f71fc680b0"},
     {"directory": "yaml-0.2.5", "url": "https://pyyaml.org/download/libyaml/yaml-0.2.5.tar.gz",
      "bytes": 609454, "sha256": "c642ae9b75fee120b2d96c712538bd2cf283228d2337df2cf2988e3c02678ef4"},
 )
@@ -74,7 +74,7 @@ def unpack(archive, destination, expected_root):
 def unpack_ruby_headers(archive, destination):
     """Select upstream common headers only; generated arch headers stay in base.
 
-    Matches Ruby 3.3.12 tool/rbinstall.rb's common-header selection. The caller
+    Matches the pinned Ruby tool/rbinstall.rb's common-header selection. The caller
     authenticates the complete archive before this ordinary data-only extraction.
     """
     destination.mkdir(mode=0o700)
