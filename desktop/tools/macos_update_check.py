@@ -579,7 +579,7 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--selection", required=True)
     parser.add_argument("--work", required=True)
-    parser.add_argument("--mode", choices=("update", "fresh", "remove", "uninstaller"), default="update")
+    parser.add_argument("--mode", choices=("update", "fresh", "remove", "uninstaller", "delete-data"), default="update")
     args = parser.parse_args()
     work = Path(args.work)
     evidence = work / "evidence"
@@ -589,8 +589,9 @@ def main():
         selection = load_selection(args.selection)
         result["selection"] = selection
         need(not STATE.exists() and not USER_DATA.exists(), "runner-not-fresh")
-        if args.mode in ("fresh", "remove", "uninstaller"):
-            {"fresh": fresh_check, "remove": remove_check, "uninstaller": uninstaller_installed_check}[args.mode](
+        if args.mode != "update":
+            {"fresh": fresh_check, "remove": remove_check, "uninstaller": uninstaller_installed_check,
+             "delete-data": remove_check}[args.mode](
                 selection, work, evidence, steps, result)
             result["passed"] = True
             return 0
@@ -638,7 +639,7 @@ def main():
         result["failure"] = str(error)[:200]
     finally:
         result["steps"] = steps
-        if args.mode == "remove" and "removeReturn" not in result:
+        if args.mode in ("remove", "delete-data") and "removeReturn" not in result:
             result["removeReturn"] = next((step["returncode"] for step in steps if step.get("role") == "remove"), None)
         try:
             install_log_excerpt(evidence)
@@ -1010,7 +1011,7 @@ def removal_refusal_evidence(pid, work, evidence, label):
 
 def remove_check(selection, work, evidence, steps, result):
     """Fresh install, launch, live removal through the matching Remove.pkg
-    (confirming the app's own sheet), then reinstall and launch again."""
+    (confirming the app's own sheet), then check deletion or reinstall."""
     need("removal" in selection, "selection-has-no-removal-carrier")
     row = selection["next"]
     folder = fetch("next", row, work, steps)
@@ -1031,17 +1032,20 @@ def remove_check(selection, work, evidence, steps, result):
     kept = manifest()
     result["userDataPreservedByRemoval"] = all(kept.get(k) == v for k, v in seeded.items())
     need(result["userDataPreservedByRemoval"], "user-data-changed-by-removal")
-    # Reinstall after confirmed removal with the matching installer.
-    rc = install("reinstall", folder, steps, evidence=evidence)
-    result["reinstallReturn"] = rc
-    need(rc == 0, "reinstall-returned-nonzero")
-    again = installed_state()
-    result["afterReinstall"] = again
-    need((again["release"], again["packageVersion"], again["packageSha256"])
-         == (row["release"], row["packageVersion"], row["packageSha256"]), "reinstall-identity")
-    need(all(manifest().get(k) == v for k, v in seeded.items()), "user-data-changed-by-reinstall")
-    result["launchAfterReinstall"] = launch_smoke("after-reinstall", work, evidence, steps)
     try:
+        if result["mode"] == "delete-data":
+            confirmed_data_deletion(mount, work, evidence, result, plant_decoys())
+            return
+        # Reinstall after confirmed removal with the matching installer.
+        rc = install("reinstall", folder, steps, evidence=evidence)
+        result["reinstallReturn"] = rc
+        need(rc == 0, "reinstall-returned-nonzero")
+        again = installed_state()
+        result["afterReinstall"] = again
+        need((again["release"], again["packageVersion"], again["packageSha256"])
+             == (row["release"], row["packageVersion"], row["packageSha256"]), "reinstall-identity")
+        need(all(manifest().get(k) == v for k, v in seeded.items()), "user-data-changed-by-reinstall")
+        result["launchAfterReinstall"] = launch_smoke("after-reinstall", work, evidence, steps)
         uninstaller_check(mount, work, evidence, steps, result)
     finally:
         subprocess.run(["/usr/bin/hdiutil", "detach", "-force", str(mount)], capture_output=True, timeout=120)
@@ -1232,7 +1236,13 @@ def uninstaller_check(mount, work, evidence, steps, result):
     second = live_remove(mount, work, evidence, steps, "remove-again")
     out["secondRemoval"] = second
     need(manifest() == before, "user-data-changed-by-second-removal")
+    confirmed_data_deletion(mount, work, evidence, result, decoys)
 
+
+def confirmed_data_deletion(mount, work, evidence, result, decoys):
+    """Exercise the signed Delete All Data UI after native removal succeeds."""
+    need(not APP.exists() and not LAUNCHER.exists(), "delete-all-data-app-present-before")
+    out = result.setdefault("uninstaller", {})
     # Exact app locations, a link at one of them, a link inside the app data,
     # and keychain items: the app's exact services plus a look-alike decoy.
     for relative in DELETE_TARGETS:

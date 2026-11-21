@@ -69,9 +69,10 @@ class LaunchSmokeSourceTests(unittest.TestCase):
         self.assertIn('fromJSON(\'["update","fresh","remove","uninstaller"]\')', workflow)
         self.assertIn("'[macos-remove-diagnostic]') && fromJSON('[\"remove\"]')", workflow)
         self.assertIn("'[macos-fresh-upgrade-check]') && fromJSON('[\"update\",\"fresh\"]')", workflow)
+        self.assertIn("'[macos-delete-data-check]') && fromJSON('[\"delete-data\"]')", workflow)
         self.assertIn('--mode "${{ matrix.mode }}"', workflow)
         source = (ROOT / "desktop/tools/macos_update_check.py").read_text()
-        self.assertIn('choices=("update", "fresh", "remove", "uninstaller")', source)
+        self.assertIn('choices=("update", "fresh", "remove", "uninstaller", "delete-data")', source)
         # The installed-only uninstaller mode never runs or claims a live removal.
         installed = source.split("def uninstaller_installed_check(", 1)[1].split("\ndef ", 1)[0]
         self.assertNotIn("live_remove(", installed)
@@ -146,7 +147,8 @@ class LaunchSmokeSourceTests(unittest.TestCase):
         # The confirmed path first runs every installed-app path, then removes.
         self.assertLess(confirmed.index("uninstaller_while_installed("),
                         confirmed.index('live_remove(mount, work, evidence, steps, "remove-again")'))
-        check = installed + confirmed
+        deletion = source.split("def confirmed_data_deletion(", 1)[1]
+        check = installed + confirmed + deletion
         order = [check.index(marker) for marker in ('"uninstall-cancel-delete"', '"uninstall-cancel-keep"',
                  '"uninstall-installer-quit"', "p.returncode == 65", 'live_remove(mount, work, evidence, steps, "remove-again")',
                  '"user-data-changed-by-second-removal"', '"uninstall-delete"', '"delete-all-data-left-app-data"',
@@ -160,6 +162,27 @@ class LaunchSmokeSourceTests(unittest.TestCase):
         self.assertTrue(any(d.startswith("Projects/") for d in M.DECOY_FILES))
         self.assertTrue(any(d.startswith(".config/gh/") for d in M.DECOY_FILES))
         self.assertNotIn(M.DECOY_SERVICE, M.KEYCHAIN_SERVICES)
+
+    def test_delete_data_can_run_after_the_first_confirmed_removal(self):
+        from unittest import mock
+
+        row = VALID["next"]
+        selection = {"next": row, "removal": {}}
+        result = {"mode": "delete-data"}
+        state = {"sheet": ["clicked"], "quitSheet": ["clicked"], "returncode": 0,
+                 "remaining": {"app": False, "launcher": False, "process": False}}
+        seeded = {"settings.json": "fixture"}
+        with mock.patch.object(M, "fetch"), mock.patch.object(M, "removal_image", return_value=("mounted", [])), \
+             mock.patch.object(M, "install", return_value=0) as install, mock.patch.object(M, "installed_state", return_value=row), \
+             mock.patch.object(M, "seed_user_data", return_value=seeded), mock.patch.object(M, "manifest", return_value=seeded), \
+             mock.patch.object(M, "live_remove", return_value=state) as removal, mock.patch.object(M, "plant_decoys", return_value={}), \
+             mock.patch.object(M, "confirmed_data_deletion") as deletion, mock.patch.object(M.subprocess, "run"):
+            M.remove_check(selection, "work", "evidence", [], result)
+        self.assertEqual(install.call_count, 1)
+        self.assertEqual(removal.call_count, 1)
+        deletion.assert_called_once_with("mounted", "work", "evidence", result, {})
+        self.assertEqual(result["removeReturn"], 0)
+        self.assertTrue(result["userDataPreservedByRemoval"])
 
     @unittest.skipUnless(sys.platform == "darwin", "uses macOS stat and rm")
     def test_uninstaller_file_cleanup_preserves_linked_ancestors_and_decoys(self):
