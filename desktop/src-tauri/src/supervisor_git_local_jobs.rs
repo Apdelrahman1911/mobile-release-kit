@@ -259,7 +259,19 @@ impl Jobs {
     not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"),
     target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
         if let Some(progress)=invocation.gate.installed_apply_progress() {progress.boundary(crate::service_git_requests::installed_progress::Boundary::ReadyHandoffRequested);}
-        let ready=invocation.gate.host_joined(&owner.id,self.host_ticket.as_ref().ok_or_else(BridgeError::cleanup_unknown)?)?;
+        let original_end=owner.endpoint();
+        let mut stop=owner.stop.subscribe();
+        let ready=loop {
+            if let Some(error)=lock(&owner.state).error.clone() {return Err(error);}
+            let now=Instant::now();
+            if now>=original_end {return Err(BridgeError::timeout());}
+            let ticket=self.host_ticket.as_ref().ok_or_else(BridgeError::cleanup_unknown)?;
+            if let Some(ready)=invocation.gate.host_joined(&owner.id,ticket)? {break ready;}
+            // Control was contended before consuming any ticket state. Drop
+            // the owner guards before waiting and retry this exact handoff.
+            let next=now.checked_add(Duration::from_millis(10)).unwrap_or(original_end).min(original_end);
+            tokio::select! {_=clock_wait(Some(next))=>{}, _=stop.changed()=>{}}
+        };
         #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation",
     not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"),
     target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
