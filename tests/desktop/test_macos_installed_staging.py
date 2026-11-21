@@ -7821,8 +7821,7 @@ sys.exit(status)
         with self.assertRaises(TOOL.Refused):
             TOOL.removal_package_receipt_data(TOOL.canonical(updated),
                 **dict(arguments, expected_workflow=TOOL._CANDIDATE_FINAL_IMAGE_WORKFLOW))
-        # The candidate carrier's own same-run Remove emission: accepted only for
-        # its exact workflow and binding, never with a product/harness split.
+        # Same-source carriers keep the original workflow and product binding.
         carrier = copy.deepcopy(successful)
         carrier["workflow"] = TOOL._CANDIDATE_FINAL_IMAGE_WORKFLOW
         carrier_args = dict(arguments, expected_workflow=TOOL._CANDIDATE_FINAL_IMAGE_WORKFLOW)
@@ -7832,6 +7831,24 @@ sys.exit(status)
                              dict(carrier_args, expected_workflow=TOOL._INSTALLED_FINAL_IMAGE_WORKFLOW)):
             with self.assertRaises(TOOL.Refused):
                 TOOL.removal_package_receipt_data(TOOL.canonical(carrier), **changed_args)
+        from desktop.tools import macos_prepared_package as prepared
+        prepared_consumer = dict(source="b"*40, tree="c"*40, target=prepared.TARGETS[0], runId="123", runAttempt="1")
+        product = dict(origin=dict(source="a"*40, target=target, runId="41", runAttempt="1"),
+                       packageRole="ordinary-image")
+        # This fixture exercises receipt correspondence after DATA admission.
+        admitted = prepared.PreparedBinding(prepared._SEAL, product, prepared_consumer, {}, removal_compatible=True)
+        context = dict(GITHUB_SHA="b"*40, GITHUB_WORKFLOW_SHA="b"*40, GITHUB_RUN_ID="123", GITHUB_RUN_ATTEMPT="1",
+                       GITHUB_REPOSITORY=prepared.REPOSITORY, GITHUB_REF=module.CANDIDATE_REF,
+                       GITHUB_WORKFLOW_REF=TOOL._CANDIDATE_FINAL_IMAGE_WORKFLOW, GITHUB_EVENT_NAME="workflow_dispatch",
+                       MRK_MACOS_NATIVE_SCOPE="disabled", MRK_MACOS_PACKAGE_ROLE="ordinary-image",
+                       MRK_MACOS_LOCAL_DESKTOP_CARRIER="true", MRK_MACOS_TARGET=target)
+        split = dict(carrier, source="b"*40, workflowSource="b"*40)
+        split_args = dict(carrier_args, binding=prepared_consumer, environment=context, prepared_removal=admitted)
+        self.assertEqual(TOOL.removal_package_receipt_data(TOOL.canonical(split), **split_args),
+                         split["removalDistribution"])
+        for change in (dict(source="a"*40), dict(imageSourceCommit="b"*40), dict(runId="124")):
+            with self.subTest(receiptChange=change), self.assertRaises(TOOL.Refused):
+                TOOL.removal_package_receipt_data(TOOL.canonical(dict(split, **change)), **split_args)
         for mutation in ("old-source", "other-run", "install-phase", "pending", "close", "role", "return-bool", "credential", "context", "false-completion", "image-name", "extra"):
             changed = copy.deepcopy(successful)
             if mutation == "old-source": changed["imageSourceCommit"] = "b" * 40

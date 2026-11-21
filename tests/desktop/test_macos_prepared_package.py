@@ -155,6 +155,46 @@ class PreparedPackageData(unittest.TestCase):
         with self.assertRaisesRegex(ValueError,'prepared-binding-constructor'):
             P.PreparedBinding(object(),manifest,consumer,{})
 
+    def test_matching_removal_keeps_original_product_and_current_carrier_sources(self):
+        values, manifest, service, consumer = fixture()
+        consumer.update(source='6'*40, tree='7'*40, runId='50')
+        origin = manifest['origin']
+        base = {'sha': origin['source'], 'commit': {'tree': {'sha': origin['tree']}}}
+        current = {'sha': consumer['source'], 'commit': {'tree': {'sha': consumer['tree']}}}
+        comparison = dict(status='ahead', behind_by=0, ahead_by=1, total_commits=1, base_commit=base,
+                          merge_base_commit=base, commits=[current],
+                          files=[dict(filename='desktop/tools/stage_macos_installed.py', status='modified')])
+        service['compatibility'] = comparison
+        env = dict(GITHUB_SHA=consumer['source'], GITHUB_WORKFLOW_SHA=consumer['source'],
+                   GITHUB_RUN_ID=consumer['runId'], GITHUB_RUN_ATTEMPT=consumer['runAttempt'],
+                   GITHUB_REPOSITORY=P.REPOSITORY, GITHUB_REF='refs/heads/'+P.BRANCH,
+                   GITHUB_WORKFLOW_REF=P.REPOSITORY+'/'+P.WORKFLOW+'@refs/heads/'+P.BRANCH,
+                   GITHUB_EVENT_NAME='workflow_dispatch', MRK_MACOS_NATIVE_SCOPE='disabled',
+                   MRK_MACOS_PACKAGE_ROLE='ordinary-image', MRK_MACOS_TARGET=P.TARGETS[0],
+                   MRK_MACOS_LOCAL_DESKTOP_CARRIER='true')
+        with self.assertRaisesRegex(ValueError, 'prepared-harness-files'):
+            P.admit_data(values, service, consumer)
+        binding = P.admit_data(values, service, consumer, desktop_carrier=P.ordinary_desktop_carrier(env))
+        self.assertFalse(binding.same_source)
+        self.assertEqual(binding.removal_carrier_source(env), origin['source'])
+        self.assertEqual(binding.consumer, consumer)
+        for mutation in (dict(GITHUB_SHA=origin['source']), dict(GITHUB_RUN_ATTEMPT='3'),
+                         dict(GITHUB_EVENT_NAME='push'), dict(GITHUB_WORKFLOW_REF='foreign'),
+                         dict(MRK_MACOS_LOCAL_DESKTOP_CARRIER='false'), dict(MRK_MACOS_NATIVE_SCOPE='git-native')):
+            with self.subTest(mutation=mutation), self.assertRaises(ValueError):
+                binding.removal_carrier_source(dict(env, **mutation))
+        for bad in (dict(filename='desktop/src-tauri/src/bin/macos_install.rs', status='modified'),
+                    dict(filename='desktop/packaging/macos-install-producer-signing.profile', status='modified'),
+                    dict(filename='desktop/tools/stage_macos_installed.py', status='removed')):
+            with self.subTest(bad=bad), self.assertRaisesRegex(ValueError, 'prepared-harness-files'):
+                P.admit_data(values, dict(service, compatibility=dict(comparison, files=[bad])),
+                             consumer, desktop_carrier=True)
+        install_only = dict(comparison, files=[dict(filename='.github/actionlint.yaml', status='modified')])
+        binding = P.admit_data(values, dict(service, compatibility=install_only), consumer, desktop_carrier=True)
+        self.assertTrue(binding.native_compatible)
+        with self.assertRaisesRegex(ValueError, 'prepared-remove-carrier-source'):
+            binding.removal_carrier_source(env)
+
     def test_omission_extra_changed_status_duplicate_json_and_bad_manifest_refuse(self):
         values, manifest, service, consumer=fixture()
         for name in P.NAMES:

@@ -2840,7 +2840,8 @@ def removal_product_source(binding, workflow):
 
 
 def removal_package_receipt_data(body, *, selection, binding, package, descriptor, signed, expected_descriptor,
-                 final_package_sha, release_body, profiles, expected_workflow=None):
+                 final_package_sha, release_body, profiles, expected_workflow=None,
+                 prepared_removal=None, environment=None):
   """Closed prior Remove emission correspondence. Caller retains original0 separately."""
   selection = selected_build(selection)
   source = packaging_signing_data(*profiles)
@@ -2853,11 +2854,16 @@ def removal_package_receipt_data(body, *, selection, binding, package, descripto
     "developerIdOrNotarizationQualified", "productReady", "finalPackageReceiptSha256", "removalDistribution", "directStagerIOPending",
     "cleanupErrors", "imageSourceCommit", "imageReleaseId", "imageReleaseSourceSha256"), "remove-owner-fields")
   workflow = _PREVIEW_FINAL_IMAGE_WORKFLOW if expected_workflow is None else expected_workflow
-  # The candidate carrier emits its matching Remove P in the same run as the
-  # signed Install P; productSource stays exclusive to the candidate-consume split.
   need(workflow in (_PREVIEW_FINAL_IMAGE_WORKFLOW, _UPDATE_FINAL_IMAGE_WORKFLOW, _CANDIDATE_FINAL_IMAGE_WORKFLOW,
                     _CANDIDATE_REMOVE_WORKFLOW), "remove-owner-workflow")
-  product_source = removal_product_source(binding, workflow)
+  if prepared_removal is None:
+    product_source = removal_product_source(binding, workflow)
+  else:
+    from desktop.tools.macos_prepared_package import PreparedBinding
+    need(workflow == _CANDIDATE_FINAL_IMAGE_WORKFLOW and type(prepared_removal) is PreparedBinding
+         and type(environment) is dict and binding == prepared_removal.consumer
+         and binding["target"] == selection.target, "prepared-remove-owner-binding")
+    product_source = prepared_removal.removal_carrier_source(environment)
   need(type(value["schemaVersion"]) is int and value["schemaVersion"] == 1 and value["phase"] == "package-remove"
      and value["target"] == selection.target and value["source"] == value["workflowSource"] == binding["source"]
      and maintenance_hex(value["source"], 40) and value["workflow"] == workflow

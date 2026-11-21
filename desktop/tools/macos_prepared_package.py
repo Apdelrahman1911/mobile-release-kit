@@ -282,9 +282,32 @@ HARNESS_FILES = frozenset({
     'tests/desktop/test_macos_distribution_detach.py',
     'MACOS-CONTINUATION.md', 'MACOS-LOCAL-RESULTS.md', 'docs/macos-ci-retries.md',
 })
+REMOVAL_CARRIER_FILES = frozenset({
+    '.github/workflows/desktop-macos-installed.yml',
+    '.github/workflows/desktop-macos-candidate-tests.yml',
+    'desktop/tools/macos_prepared_package.py',
+    'desktop/tools/macos_android_helper_package.py',
+    'desktop/tools/stage_macos_installed.py',
+    'docs/macos-ci-retries.md',
+    'tests/desktop/test_macos_installed_staging.py',
+    'tests/desktop/test_macos_prepared_package.py',
+})
 
 
-def compatible_harness_data(value, origin, consumer):
+def ordinary_desktop_carrier(environment):
+    return (environment.get('GITHUB_EVENT_NAME') == 'workflow_dispatch'
+            and environment.get('GITHUB_REPOSITORY') == REPOSITORY
+            and environment.get('GITHUB_REF') == 'refs/heads/' + BRANCH
+            and environment.get('GITHUB_WORKFLOW_REF') == REPOSITORY + '/' + WORKFLOW + '@refs/heads/' + BRANCH
+            and hex_data(environment.get('GITHUB_SHA'), 40)
+            and environment.get('GITHUB_WORKFLOW_SHA') == environment.get('GITHUB_SHA')
+            and environment.get('MRK_MACOS_LOCAL_DESKTOP_CARRIER') == 'true'
+            and environment.get('MRK_MACOS_NATIVE_SCOPE') == 'disabled'
+            and environment.get('MRK_MACOS_PACKAGE_ROLE') == 'ordinary-image'
+            and environment.get('MRK_MACOS_TARGET') == TARGETS[0])
+
+
+def compatible_harness_data(value, origin, consumer, *, desktop_carrier=False):
     """Complete GitHub comparison, confined to test/packaging orchestration.
 
     Application, native, runtime, compiler inputs, profiles and pins cannot
@@ -305,9 +328,11 @@ def compatible_harness_data(value, origin, consumer):
          and value['base_commit'].get('commit', {}).get('tree', {}).get('sha') == origin['tree'],
          'prepared-harness-source-tree')
     rows = value.get('files')
+    allowed = HARNESS_FILES | REMOVAL_CARRIER_FILES if desktop_carrier else HARNESS_FILES
     need(type(rows) is list and 0 < len(rows) < 300
-         and all(type(row) is dict and row.get('filename') in HARNESS_FILES
+         and all(type(row) is dict and row.get('filename') in allowed
                  and row.get('status') in ('added', 'modified', 'removed')
+                 and (row['filename'] in HARNESS_FILES or row['status'] == 'modified')
                  and 'previous_filename' not in row for row in rows)
          and len({row['filename'] for row in rows}) == len(rows), 'prepared-harness-files')
     return True
@@ -315,14 +340,15 @@ def compatible_harness_data(value, origin, consumer):
 
 class PreparedBinding:
     """Private admitted provenance, never old live-custody or a caller flag."""
-    __slots__ = ('_manifest', '_consumer', '_artifact', '_compatible', '_compiled_origin')
+    __slots__ = ('_manifest', '_consumer', '_artifact', '_compatible', '_compiled_origin', '_removal_compatible')
 
-    def __init__(self, seal, manifest, consumer, artifact, compatible=False, compiled_origin=None):
+    def __init__(self, seal, manifest, consumer, artifact, compatible=False, compiled_origin=None, removal_compatible=False):
         need(seal is _SEAL, 'prepared-binding-constructor')
         self._manifest = canonical(manifest)
         self._consumer = MappingProxyType(dict(consumer))
         self._artifact = MappingProxyType(dict(artifact))
         self._compatible = compatible
+        self._removal_compatible = removal_compatible
         self._compiled_origin = canonical(compiled_origin) if compiled_origin is not None else None
 
     @property
@@ -349,6 +375,17 @@ class PreparedBinding:
     @property
     def native_compatible(self):
         return self.same_source or self._compatible is True
+
+    @property
+    def removal_compatible(self):
+        return self._removal_compatible is True
+
+    def removal_carrier_source(self, environment):
+        self.finalization_environment(environment)
+        need(self.removal_compatible and not self.same_source and ordinary_desktop_carrier(environment)
+             and self.origin['target'] == TARGETS[0] and 'nativeScope' not in self.origin
+             and self.manifest['packageRole'] == 'ordinary-image', 'prepared-remove-carrier-source')
+        return self.source
 
     @property
     def consumer(self):
@@ -395,7 +432,7 @@ def consumer_data(environment, tree, target):
         runId=environment['GITHUB_RUN_ID'], runAttempt=environment['GITHUB_RUN_ATTEMPT'], **native_origin(environment))
 
 
-def admit_data(values, service, consumer):
+def admit_data(values, service, consumer, *, desktop_carrier=False):
     manifest = cohort_data(values)
     need(type(service) is dict and {'run','job','artifact'} <= set(service)
          and set(service) <= {'run','job','artifact','compatibility','compiledObserver','compiledImage'}, 'prepared-service-records')
@@ -407,14 +444,18 @@ def admit_data(values, service, consumer):
          and all(decimal(consumer[k]) for k in ('runId', 'runAttempt'))
          and consumer['target'] == manifest['origin']['target']
          and (consumer['source'] != manifest['origin']['source'] or consumer['tree'] == manifest['origin']['tree']), 'prepared-consumer')
-    compatible = False
+    compatible = removal_compatible = False
     if native and consumer['source'] != manifest['origin']['source']:
         compatible = compatible_harness_data(service.get('compatibility'), manifest['origin'], consumer)
     elif 'compatibility' in service:
         need(consumer['source'] != manifest['origin']['source'], 'prepared-harness-unnecessary')
         # A held ordinary Desktop comparison is never decorative: the later
         # harness-only consumer must repeat the complete ancestry/file proof.
-        compatible = compatible_harness_data(service['compatibility'], manifest['origin'], consumer)
+        compatible = compatible_harness_data(service['compatibility'], manifest['origin'], consumer,
+                                             desktop_carrier=desktop_carrier)
+        if desktop_carrier:
+            removal_compatible = all(row['filename'] in REMOVAL_CARRIER_FILES and row['status'] == 'modified'
+                                     for row in service['compatibility']['files'])
     compiled = None
     if 'compiledObserver' in service:
         need(bool(native), 'prepared-observer-originals')
@@ -424,7 +465,7 @@ def admit_data(values, service, consumer):
         compiled_image_metadata_data(service['compiledImage'], manifest['origin'])
     elif 'compiledImage' in service:
         raise ValueError('prepared-desktop-unnecessary')
-    return PreparedBinding(_SEAL, manifest, consumer, artifact, compatible, compiled)
+    return PreparedBinding(_SEAL, manifest, consumer, artifact, compatible, compiled, removal_compatible)
 
 
 def quote_data(package_bytes, original_bytes, expanded_bytes, inventory_bytes):
@@ -1051,7 +1092,7 @@ def selected_artifact_data(body, origin):
     return rows[0]
 
 
-def acquire_checkpoint(op, consumer):
+def acquire_checkpoint(op, consumer, *, require_remove_install=False):
     """Standard Action's fresh originals, complete metadata and consuming close.
 
     The action verifies the service ZIP digest; this owner reauthenticates its
@@ -1107,9 +1148,22 @@ def acquire_checkpoint(op, consumer):
         for name, entry in originals.items():
             values[name] = read_prepared_member(op, name, entry)
             op.package_outputs.append((entry, sha(values[name])))
-        binding = admit_data(values, service, consumer)
+        binding = admit_data(values, service, consumer, desktop_carrier=ordinary_desktop_carrier(op.environment))
         op.package_outputs.append((marker, sha(marker_body)))
         op.package_roots.extend(((root, set(NAMES)), (service_root, names)))
+        if require_remove_install and not binding.same_source:
+            binding.removal_carrier_source(op.environment)
+            producer = op.directory(op.work_entry, 'producer-root', 'prepared-remove-install-producer')
+            installed = {'prepared-input/PREPARED.json': marker_body}
+            for name, limit in LOCAL_CARRIER_FILES.items():
+                if name in installed:
+                    continue
+                parent, _, leaf = name.rpartition('/')
+                entry = op.original(producer if parent else op.work_entry, leaf,
+                                    'prepared-remove-install-proof', limit, (0o400, 0o444, 0o600, 0o644))
+                installed[name] = op.read(entry)
+                op.package_outputs.append((entry, sha(installed[name])))
+            ordinary_local_carrier_transport_data(installed, binding.consumer)
         op.package_post()
     finally:
         finish_staging(op, sys.exception())
@@ -1383,9 +1437,11 @@ def main():
         need(hex_data(args.consumer_tree, 40), 'prepared-consumer-tree')
         consumer = consumer_data(environment, args.consumer_tree, args.target)
         operation = helper.Operation(owner, root, work, 'package-install', environment, stager, target=args.target)
-        values, binding = acquire_checkpoint(operation, consumer)
+        values, binding = acquire_checkpoint(operation, consumer,
+                                             require_remove_install=args.phase == 'finalize-remove-package')
         built_root = root if binding.same_source else root / 'prepared-built-source'
         need(stager.read(built_root / '.git/HEAD', 64) == (binding.source + '\n').encode('ascii'), 'prepared-built-source')
+        carrier_stager = stager if not binding.same_source and binding.removal_compatible else None
         if not binding.same_source:
             stager = helper.load_data(built_root, 'stage_macos_installed.py', '_mrk_prepared_built_stager')
         manifest = binding.manifest
@@ -1411,7 +1467,8 @@ def main():
         need(args.phase == 'package-install' or args.phase in REMOVAL_PHASES and environment['GITHUB_EVENT_NAME'] == 'workflow_dispatch'
              and not native_origin(environment)
              or environment['GITHUB_EVENT_NAME'] == 'push' and binding.same_source, 'prepared-cross-source-install-only')
-        operation = helper.Operation(owner, built_root, work, args.phase, environment, stager, target=args.target, prepared=binding)
+        operation = helper.Operation(owner, built_root, work, args.phase, environment, stager,
+                                     target=args.target, prepared=binding, carrier_stager=carrier_stager)
         operation.execute()
         if environment['GITHUB_EVENT_NAME'] == 'workflow_dispatch' and args.phase in REMOVAL_PHASES:
             print(json.dumps(dict(schemaVersion=1, scope='prepared-input-matching-removal-carrier', phase=args.phase,

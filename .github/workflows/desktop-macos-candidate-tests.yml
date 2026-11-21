@@ -49,6 +49,7 @@ jobs:
       MRK_MACOS_NATIVE_SCOPE: ${{ matrix.native_scope }}
       MRK_MACOS_PREPARED_TEST: 'true'
       MRK_MACOS_PREPARED_RESUME: ${{ github.event_name == 'workflow_dispatch' && 'true' || 'false' }}
+      MRK_MACOS_LOCAL_DESKTOP_CARRIER: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.operation == 'local-desktop-carrier' && 'true' || 'false' }}
       MRK_MACOS_STORE_RUNTIME: signed-component
       MRK_MACOS_SAME_PACKAGE_SCOPE: disabled
       MACOSX_DEPLOYMENT_TARGET: '26.0'
@@ -202,7 +203,8 @@ jobs:
           if source != os.environ['GITHUB_SHA']:
               comparison = P.decode((work / 'compatibility.json').read_bytes(), 8 * P.MIB)
               P.compatible_harness_data(comparison, dict(source=source, tree=commit['tree']['sha']),
-                  P.consumer_data(os.environ, os.environ['MRK_CONSUMER_TREE'], os.environ['MRK_MACOS_TARGET']))
+                  P.consumer_data(os.environ, os.environ['MRK_CONSUMER_TREE'], os.environ['MRK_MACOS_TARGET']),
+                  desktop_carrier=P.ordinary_desktop_carrier(os.environ))
           PY
           fi
       - name: Download only the selected prepared artifact with service digest verification

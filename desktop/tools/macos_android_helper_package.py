@@ -999,7 +999,8 @@ def package_staple_observation_data(value):
 
 
 def final_package_receipt(body, environment, target, selection, profile_sha, notary_sha, package_size, package_sha,
-                          image_release, release_sha, *, remove=False, runtime_stager=None, setup=False, setup_originals=None, product_source=None):
+                          image_release, release_sha, *, remove=False, runtime_stager=None, setup=False,
+                          setup_originals=None, product_source=None, prepared_removal=None):
     """Closed preceding original observation AND the current immutable P.
 
     This is not a stand-alone cryptographic authority. The fixed workflow also
@@ -1014,7 +1015,12 @@ def final_package_receipt(body, environment, target, selection, profile_sha, not
               and type(setup_originals) is dict
               and set(setup_originals) == {"helperSha256", "bomSha256", "payloadSha256"}
               and all(tool_hex(v) for v in setup_originals.values())), "final-package-receipt-purpose")
-    if product_source is not None:
+    if prepared_removal is not None:
+        from desktop.tools.macos_prepared_package import PreparedBinding
+        need(remove and product_source is None and type(prepared_removal) is PreparedBinding
+             and prepared_removal.origin["target"] == target, "prepared-remove-package-receipt-purpose")
+        product_source = prepared_removal.removal_carrier_source(environment)
+    elif product_source is not None:
         need(remove and environment.get("GITHUB_EVENT_NAME") == "workflow_dispatch"
              and environment.get("GITHUB_WORKFLOW_REF") == "Apdelrahman1911/mobile-release-kit/.github/workflows/desktop-macos-candidate-consume.yml@refs/heads/task/ci-simplification-20261015"
              and tool_hex(product_source, 40), "candidate-removal-receipt-purpose")
@@ -3320,25 +3326,29 @@ def transport_mount_path_data(environment, target, phase):
 class Operation:
     """Custody for this one fixed packaging operation and its finite outputs."""
 
-    def __init__(self, owner, checkout, work, phase, environment, stager, *, target=ARM_TARGET, support_started=None, prepared=None):
+    def __init__(self, owner, checkout, work, phase, environment, stager, *, target=ARM_TARGET,
+                 support_started=None, prepared=None, carrier_stager=None):
         need(phase in ("candidate-baseline",) + PHASES + SUPPORT_PHASES + STORE_SIGNING_PHASES + PYTHON_PHASES + SIGNING_PHASES + TOOL_SIGNING_PHASES + TOOL_SELECTION_PHASES + TOOL_PROJECT_PHASES + NOTARY_PHASES + FINAL_PACKAGE_PHASES + FINAL_IMAGE_PHASES + REMOVAL_OWNER_PHASES, "closed-phase")
         self.arch, self.runner_arch, self.release_input = build_profile(target)
         self.target = target
         self.owner, self.checkout, self.work = owner, checkout, work
         if prepared is not None:
             from desktop.tools.macos_prepared_package import PreparedBinding
-            # Matching Remove construction: same-source only, manual dispatch on
-            # the candidate ref, after this job's own fresh package-install.
             need(type(prepared) is PreparedBinding and phase in ("package-install", "finalize-image") + REMOVE_PHASES
                  and prepared.origin["target"] == target
-                 and (phase == "package-install" or prepared.same_source)
+                 and (phase == "package-install" or prepared.same_source
+                      or phase in REMOVE_PHASES and prepared.removal_compatible)
                  and (phase not in REMOVE_PHASES or environment.get("GITHUB_EVENT_NAME") == "workflow_dispatch"
                       and environment.get("GITHUB_REF") == CANDIDATE_REF), "prepared-fixed-owner-purpose")
             prepared.finalization_environment(environment)  # Exact current caller, no env mutation.
+            if phase in REMOVE_PHASES and not prepared.same_source:
+                prepared.removal_carrier_source(environment)
+                need(carrier_stager is not None, "prepared-remove-receipt-reader")
         self.candidate_removal_context = None
         self.candidate_removal_inputs = []
         self.candidate_removal_root = None
         self.prepared_binding = prepared
+        self.carrier_stager = carrier_stager
         self.prepared_staging = False
         self.diagnostic_source_entry = None
         self.diagnostic_program = None
@@ -5526,13 +5536,24 @@ class Operation:
              and digest(input_values["install-inventory.json"]) == self.environment.get("MRK_MACOS_INSTALL_INVENTORY_SHA256")
              and digest(input_values[self.stager.REMOVER_NAME]) == self.environment.get("MRK_MACOS_REMOVER_SHA256"), "final-removal-source-originals")
         _, owner_body = retained(self.work_entry, "android-helper-package-remove.json", 16384, (0o600,))
-        binding = ({"source": self.image_source, "runId": self.environment["GITHUB_RUN_ID"], "runAttempt": self.environment["GITHUB_RUN_ATTEMPT"]}
-                   if self.candidate_removal_context is None else self.candidate_removal_binding())
-        distribution = self.stager.removal_package_receipt_data(owner_body, selection=selection, binding=binding,
+        prepared = self.cross_source_removal()
+        reader = self.stager
+        context = {}
+        if prepared is not None:
+            reader = self.carrier_stager
+            selection = reader.BuildSelection(selection.target, selection.package_version, selection.release)
+            binding = prepared.consumer
+            context = {"prepared_removal": prepared, "environment": self.environment}
+        elif self.candidate_removal_context is not None:
+            binding = self.candidate_removal_binding()
+        else:
+            binding = {"source": self.image_source, "runId": self.environment["GITHUB_RUN_ID"],
+                       "runAttempt": self.environment["GITHUB_RUN_ATTEMPT"]}
+        distribution = reader.removal_package_receipt_data(owner_body, selection=selection, binding=binding,
             package=package, descriptor=descriptor, signed=signed, expected_descriptor=expected,
             final_package_sha=self.receipt["finalPackageReceiptSha256"], release_body=self.read(self.release_entry),
             profiles=(self.producer_profile, self.service_profile),
-            expected_workflow=self.environment["GITHUB_WORKFLOW_REF"])
+            expected_workflow=self.environment["GITHUB_WORKFLOW_REF"], **context)
         image_root = self.directory(self.work_entry, self.image_directory, "final-removal-distribution")
         need(os.listdir(image_root["fd"]) == [self.image_filename], "final-removal-image-roster")
         self.final_image_roots.append((image_root, {self.image_filename}))
@@ -6696,6 +6717,10 @@ class Operation:
         self.final_package_complete = True
         self.notary_clock()
 
+    def cross_source_removal(self):
+        binding = self.prepared_binding
+        return binding if self.removal and binding is not None and not binding.same_source else None
+
     def package_finalization_input(self, original, body):
         """Require the actual closed preceding original and exact final P."""
         self.package_clock()
@@ -6717,7 +6742,8 @@ class Operation:
                                       self.installer_profile_sha, digest(profile_body), len(body), digest(body),
                                       self.image_release, digest(self.read(self.release_entry)), remove=self.removal,
                                       runtime_stager=self.stager if self.selected_package_store() else None,
-                                      product_source=None if self.candidate_removal_context is None else self.candidate_removal_context["productSource"])
+                                      product_source=None if self.candidate_removal_context is None else self.candidate_removal_context["productSource"],
+                                      prepared_removal=self.cross_source_removal())
         need(self.read(original) == body, "package-finalization-package-post")
         self.package_outputs.extend(((status, digest(status_body)), (receipt, digest(receipt_body))))
         self.receipt["finalPackageReceiptSha256"] = digest(receipt_body)
@@ -10098,8 +10124,8 @@ class Operation:
         environment = build_environment(self.environment, self.work, self.image_release, target=self.target)
         environment.update(CARGO_TARGET_DIR=str(self.work / self.target_name), TMPDIR=str(self.work / self.target_name / "tmp"),
                            MRK_BUNDLED_RUNTIME_MANIFEST_SHA256=manifest_hash)
-        if candidate:
-            # H's nonshipping emitter still authenticates the unchanged P product.
+        if candidate or self.cross_source_removal() is not None:
+            # The nonshipping emitter authenticates the original product commit.
             environment["MRK_MACOS_INSTALL_SOURCE_COMMIT"] = self.image_source
         compiler_root = self.checkout / ".candidate-consumer-helper" if candidate else self.checkout
         compiled = self.package_call("producer-build", [direct_rust_tools(self.target)[0], "build", "--manifest-path", str(compiler_root / "desktop/src-tauri/Cargo.toml"),
@@ -10209,6 +10235,8 @@ class Operation:
             need((args.target, args.expected_source, args.expected_inventory, args.expected_manifest, args.expected_package)
                  == (self.target, binding.source, manifest["inventorySha256"], manifest["runtimeManifestSha256"], package["sha256"]),
                  "prepared-readback-original-bindings")
+        if binding.removal_compatible:
+            return self.stager
         if self.current_readback_module is None:
             path = self.package_diagnostic_program()
             parent = self.descend(self.diagnostic_source_entry, ("desktop", "macos-installed-inputs"))
