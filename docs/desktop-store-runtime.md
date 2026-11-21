@@ -1,10 +1,18 @@
 # Bundled macOS Store runtime component
 
-This component builds the repository's Ruby **3.3.12**, Bundler **4.0.16**,
-Fastlane **2.235.0** and exact `Gemfile.lock` dependencies. Current macOS runtime
-composition and installed-book loans support this optional component; a shipped
-application consuming it is not yet verified. It does not authorize direct Store
-mutations.
+The refreshed ARM64 component builds Ruby **3.3.14**, OpenSSL **3.5.9**,
+Bundler **4.0.16**, Fastlane **2.235.0** and the exact `Gemfile.lock` gem
+dependencies. The component and installed runtime assembly project the same
+Ruby patch pin from the shared Gemfile and lock. They compare the projected
+dependency bytes before admitting the signed gemset.
+
+The component uses the macOS trust bundle also shipped for GitHub access.
+It excludes four distrusted emSign roots by certificate SHA-256 fingerprint.
+The ARM64 native supplier, Developer ID signing, and retained exact archive
+were verified in separate hosted jobs.
+[Native supplier](https://github.com/Apdelrahman1911/mobile-release-kit/actions/runs/44871835695) ·
+[Signing](https://github.com/Apdelrahman1911/mobile-release-kit/actions/runs/44873133037) ·
+[Retention](https://github.com/Apdelrahman1911/mobile-release-kit/actions/runs/44873570232)
 
 ### Read-only core invocation boundary
 
@@ -31,7 +39,7 @@ build_macos_store_runtime.sh assemble VERIFIED_BASE GEM_CACHE ABSENT_OUTPUT arm6
 ```
 
 The caller supplies reviewed, authenticated, pristine **release source** trees
-for Ruby 3.3.12, OpenSSL 3.5.8 and LibYAML 0.2.5, the locked Ruby-platform `.gem`
+for Ruby 3.3.14, OpenSSL 3.5.9 and LibYAML 0.2.5, the locked Ruby-platform `.gem`
 cache (including Bundler 4.0.16), and an authenticated PEM CA bundle. Source
 version checks are not substitutes for download authentication. Preparation of
 these public inputs is separate; this script downloads nothing, never installs
@@ -118,9 +126,9 @@ refusal boundaries without compiling or executing any native payload.
 
 ## Authoritative implementation references
 
-- [Ruby 3.3.12 build instructions](https://github.com/ruby/ruby/blob/v3_3_12/doc/contributing/building_ruby.md)
-- [Ruby configure load-relative option](https://github.com/ruby/ruby/blob/v3_3_12/configure.ac)
-- [Ruby installation/update-gems targets](https://github.com/ruby/ruby/blob/v3_3_12/common.mk)
+- [Ruby 3.3.14 build instructions](https://github.com/ruby/ruby/blob/v3_3_14/doc/contributing/building_ruby.md)
+- [Ruby configure load-relative option](https://github.com/ruby/ruby/blob/v3_3_14/configure.ac)
+- [Ruby installation/update-gems targets](https://github.com/ruby/ruby/blob/v3_3_14/common.mk)
 - [Bundler 4.0.16 local installation](https://github.com/ruby/rubygems/blob/v4.0.16/bundler/lib/bundler/man/bundle-install.1.ronn)
 - [Bundler frozen/platform/configuration options](https://github.com/ruby/rubygems/blob/v4.0.16/bundler/lib/bundler/man/bundle-config.1.ronn)
 
