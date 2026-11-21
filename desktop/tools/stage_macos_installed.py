@@ -1435,19 +1435,30 @@ def signed_store_selection_data(body, *, target=ARM_TARGET):
   need(type(body) is bytes and 0 < len(body) <= SIGNED_STORE_SELECTION_LIMIT, "store-selection-size")
   value = decode(body.decode("utf-8", "strict"))
   need(type(value) is dict and type(value.get("schemaVersion")) is int
-     and value["schemaVersion"] == 1, "store-selection-shape")
-  need(value != {"schemaVersion": 1, "state": "unconfigured"}, "store-selection-unconfigured")
-  need(set(value) == {"schemaVersion", "state", "source", "runId", "runAttempt", "artifacts"}
-     and value["state"] == "configured" and maintenance_hex(value["source"], 40)
-     and type(value["artifacts"]) is dict and set(value["artifacts"]) == set(MAC_TARGETS),
-     "store-selection-shape")
-  need(all(type(item) is str and re.fullmatch(r"[1-9][0-9]{0,15}", item)
-       and int(item) <= 9007199254740991
-       for item in (value["runId"], value["runAttempt"], *value["artifacts"].values())),
-     "store-selection-identifiers")
-  need(len(set(value["artifacts"].values())) == 2, "store-selection-distinct-artifacts")
-  return {"source": value["source"], "runId": value["runId"], "runAttempt": value["runAttempt"],
-      "artifactId": value["artifacts"][target], "target": target, "selectionSha256": digest(body)}
+     and value["schemaVersion"] in (1, 2), "store-selection-shape")
+  need(value != {"schemaVersion": value["schemaVersion"], "state": "unconfigured"},
+       "store-selection-unconfigured")
+  need(value.get("state") == "configured", "store-selection-shape")
+  common = {"source", "runId", "runAttempt"}
+  if value["schemaVersion"] == 1:
+    need(set(value) == {"schemaVersion", "state", "artifacts"} | common
+       and type(value["artifacts"]) is dict and set(value["artifacts"]) == set(MAC_TARGETS),
+       "store-selection-shape")
+    selected = {name: {**{key: value[key] for key in common}, "artifactId": artifact}
+          for name, artifact in value["artifacts"].items()}
+  else:
+    need(set(value) == {"schemaVersion", "state", "targets"}
+       and type(value["targets"]) is dict and set(value["targets"]) == set(MAC_TARGETS),
+       "store-selection-shape")
+    selected = value["targets"]
+  for row in selected.values():
+    need(type(row) is dict and set(row) == common | {"artifactId"}
+       and maintenance_hex(row["source"], 40), "store-selection-shape")
+    need(all(type(item) is str and re.fullmatch(r"[1-9][0-9]{0,15}", item)
+         and int(item) <= 9007199254740991 for item in (row["runId"], row["runAttempt"], row["artifactId"])),
+         "store-selection-identifiers")
+  need(len({row["artifactId"] for row in selected.values()}) == len(MAC_TARGETS), "store-selection-distinct-artifacts")
+  return {**selected[target], "target": target, "selectionSha256": digest(body)}
 
 
 def signed_store_selection(target=ARM_TARGET):
