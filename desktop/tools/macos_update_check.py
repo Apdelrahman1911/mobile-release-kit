@@ -633,7 +633,7 @@ def main():
     parser.add_argument("--mode", choices=("update", "fresh", "remove", "uninstaller", "delete-data",
                                            "repeat", "repeat-after-dialogs", "prepare-quit", "performance",
                                            "update-credentials", "release-asset", "workspace-cli",
-                                           "workspace-xctest", "prepare-xctest", "performance-long"), default="update")
+                                           "workspace-xctest", "prepare-xctest", "performance-long", "core-recovery"), default="update")
     args = parser.parse_args()
     work = Path(args.work)
     evidence = work / "evidence"
@@ -648,7 +648,8 @@ def main():
              "delete-data": remove_check, "repeat": remove_check, "repeat-after-dialogs": remove_check,
              "prepare-quit": prepare_quit_check, "performance": fresh_check, "release-asset": release_asset_check,
              "workspace-cli": workspace_cli_check, "workspace-xctest": workspace_xctest,
-             "prepare-xctest": workspace_xctest, "performance-long": performance_long_check}[args.mode](
+             "prepare-xctest": workspace_xctest, "performance-long": performance_long_check,
+             "core-recovery": core_recovery_check}[args.mode](
                 selection, work, evidence, steps, result)
             result["passed"] = True
             return 0
@@ -780,6 +781,75 @@ def performance_long_check(selection, work, evidence, steps, result):
     samples = json.loads((evidence / "one-hour-idle-resources.json").read_text())
     need(len(samples) == 720 and all(s["appRssKiB"] and s["processes"] >= 1 for s in samples),
          "performance-original-process-census-incomplete")
+
+
+CORE_RECOVERY_TEST = """import json, pathlib, sys, unittest
+root = pathlib.Path(sys.argv[1])
+sys.path[:0] = [str(root / member) for member in ('src', '', 'tests', 'tests/desktop')]
+import mobile_release
+if not mobile_release.__file__.startswith(str(root / 'src') + '/'):
+    raise RuntimeError('packaged core import did not resolve to the admitted archive')
+modules = ['tests.desktop.test_saved_text_recovery', 'tests.desktop.test_configuration_crash_recovery',
+           'tests.desktop.test_project_crash_recovery']
+suite = unittest.defaultTestLoader.loadTestsFromNames(modules)
+result = unittest.TextTestRunner(verbosity=0).run(suite)
+print(json.dumps({'tests': result.testsRun, 'errors': len(result.errors), 'failures': len(result.failures),
+                  'skipped': len(result.skipped)}), flush=True)
+raise SystemExit(0 if result.wasSuccessful() else 1)
+"""
+
+
+def run_signed_core_recovery(runtime, work, repository, manifest_sha256, result):
+    manifest_path = runtime / "manifest.json"
+    need(digest(manifest_path) == manifest_sha256, "core-recovery-runtime-manifest")
+    manifest = json.loads(manifest_path.read_bytes())
+    members = {row["path"]: row for row in manifest["files"]}
+    for relative in ("core.zip", "python/bin/python3"):
+        path = runtime / relative
+        need(path.is_file() and not path.is_symlink() and path.stat().st_size == members[relative]["size"]
+             and digest(path) == members[relative]["sha256"], "core-recovery-runtime-member")
+    core_sha256 = members["core.zip"]["sha256"]
+    need(core_sha256 == manifest["coreSha256"], "core-recovery-core-binding")
+    fixture = work.resolve() / "signed-core-recovery"
+    fixture.mkdir(mode=0o700)
+    temporary = fixture / "tmp"
+    temporary.mkdir(mode=0o700)
+    shutil.copytree(repository / "tests", fixture / "tests", ignore=shutil.ignore_patterns("__pycache__"))
+    # The existing restart-child tests add ./src to sys.path. It is the exact
+    # packaged archive in this disposable fixture, with no checkout fallback.
+    shutil.copyfile(runtime / "core.zip", fixture / "src")
+    need(digest(fixture / "src") == core_sha256, "core-recovery-test-archive")
+    env = {"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "HOME": str(fixture), "TMPDIR": str(temporary),
+           "LC_ALL": "C", "LANG": "C", "TZ": "UTC"}
+    python = runtime / "python/bin/python3"
+    tested = subprocess.run([str(python), "-I", "-S", "-B", "-c", CORE_RECOVERY_TEST, str(fixture)],
+                            cwd=fixture, env=env, capture_output=True, text=True, timeout=600)
+    result["coreRecoveryReturn"] = tested.returncode
+    result["coreRecoveryArchiveSha256"] = core_sha256
+    summary = re.search(r'(?m)^\{"tests": ([0-9]{1,3}), "errors": ([0-9]{1,3}), '
+                       r'"failures": ([0-9]{1,3}), "skipped": ([0-9]{1,3})\}$', tested.stdout)
+    if summary:
+        result["coreRecoveryCounts"] = dict(zip(("tests", "errors", "failures", "skipped"), map(int, summary.groups())))
+    result["coreRecoveryFailureSites"] = re.findall(r"(?m)^(?:FAIL|ERROR): (test_[a-z0-9_]{1,105})\b",
+                                                   tested.stderr)[-20:]
+    counts = result.get("coreRecoveryCounts", {})
+    need(tested.returncode == 0 and counts.get("tests") == 12
+         and counts.get("errors") == counts.get("failures") == counts.get("skipped") == 0,
+         "core-recovery-original-suite")
+    need(digest(fixture / "src") == core_sha256 and digest(manifest_path) == manifest_sha256,
+         "core-recovery-source-changed")
+
+
+def core_recovery_check(selection, work, evidence, steps, result):
+    row = selection["next"]
+    folder = fetch("next", row, work, steps)
+    need(install("next", folder, steps, evidence=evidence) == 0, "core-recovery-install")
+    state = result["afterInstall"] = installed_state()
+    prepared = json.loads((folder / "PREPARED.json").read_text())
+    need(state["packageSha256"] == row["packageSha256"] and state["sourceCommit"] == prepared["origin"]["source"],
+         "core-recovery-package-identity")
+    runtime = STATE / "versions" / row["release"] / "runtime"
+    run_signed_core_recovery(runtime, work, Path(__file__).resolve().parents[2], prepared["runtimeManifestSha256"], result)
 
 
 SHEET_JXA = """function run(argv) {

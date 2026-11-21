@@ -46,6 +46,7 @@ jobs:
           || contains(github.event.head_commit.message, '[macos-workspace-cli]') && fromJSON('["workspace-cli"]')
           || contains(github.event.head_commit.message, '[macos-workspace-xctest]') && fromJSON('["workspace-xctest","prepare-xctest"]')
           || contains(github.event.head_commit.message, '[macos-hourly-performance]') && fromJSON('["performance-long"]')
+          || contains(github.event.head_commit.message, '[macos-signed-core-recovery]') && fromJSON('["core-recovery"]')
           || fromJSON('["update","fresh","remove","uninstaller"]') }}
     if: github.repository == 'Apdelrahman1911/mobile-release-kit' && github.ref == 'refs/heads/verify/desktop-macos-update-check'
     runs-on: macos-26
