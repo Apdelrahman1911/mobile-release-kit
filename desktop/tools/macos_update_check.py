@@ -1736,6 +1736,10 @@ def workspace_xctest(selection, work, evidence, steps, result):
         result["prepareQuitObserved"] = "MRK_RELEASE_PREPARE_TO_QUIT=confirmed-original-quit-and-gate-release" in transcript
         observed = result["prepareQuitObserved"]
     elif recovery:
+        result["recoveryFacts"] = re.findall(
+            r"(?m)^MRK_RELEASE_RECOVERY_FACT=(before|refused|review);panel=(true|false);review=([0-3])$", transcript)
+        result["recoveryMatches"] = re.findall(
+            r"(?m)^MRK_RELEASE_RECOVERY_MATCH=(before|refused|review);state=([a-z-]{2,24})$", transcript)
         result["guiRecoveryObserved"] = "MRK_RELEASE_GUI_RECOVERY=confirmed-original-rollback-and-quit" in transcript
         result["recoveryProjectMatchesOriginals"] = recovery_project_manifest(project_path) == baseline
         observed = result["guiRecoveryObserved"] and result["recoveryProjectMatchesOriginals"]

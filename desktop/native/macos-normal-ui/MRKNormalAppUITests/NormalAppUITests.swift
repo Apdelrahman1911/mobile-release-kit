@@ -6520,9 +6520,40 @@ final class NormalAppUITests: XCTestCase {
         }
         try stage("recover-replacement") {
             try press(renderer, "Review version & build number", renderer: renderer)
+            func recordRecovery(_ stage: String) {
+                let panel = named(renderer, "Saved-version recovery inspection").firstMatch
+                let action = panel.buttons.matching(identifier: "Review recovery confirmation…")
+                let checks: [(String, String)] = [
+                    ("waiting-native", "Wait for the original native status"),
+                    ("ownership-unverified", "Original native ownership or cleanup is unverified"),
+                    ("selection-pending", "Select a registered project and finish"),
+                    ("service-unavailable", "The native saved-version recovery route"),
+                    ("inspection-pending", "Waiting for the original inspection"),
+                    ("phase-opening", "Original phase: opening"),
+                    ("phase-preparing", "Original phase: preparing"),
+                    ("phase-reviewing", "Original phase: reviewing"),
+                    ("phase-final", "Original phase: final"),
+                    ("phase-unknown", "Original phase: unknown"),
+                    ("conflict", "Conflict category:"),
+                    ("invalidated", "Project, navigation or service context changed"),
+                    ("terminal-refusal", "No successful recovery is confirmed"),
+                ]
+                print("MRK_RELEASE_RECOVERY_FACT=\(stage);panel=\(panel.exists);review=\(min(action.count, 3))")
+                for (kind, marker) in checks {
+                    let matches = panel.staticTexts.matching(NSPredicate(format: "title CONTAINS %@", marker)).count
+                    if matches > 0 { print("MRK_RELEASE_RECOVERY_MATCH=\(stage);state=\(kind)") }
+                }
+            }
+            recordRecovery("before")
             try press(renderer, "Inspect recovery", renderer: renderer, timeout: 24)
-            _ = try waitElement(renderer.buttons.matching(identifier: "Review recovery confirmation…"), in: renderer,
-                                enabled: true, timeout: 48)
+            do {
+                _ = try waitElement(renderer.buttons.matching(identifier: "Review recovery confirmation…"), in: renderer,
+                                    enabled: true, timeout: 48)
+            } catch {
+                recordRecovery("refused")
+                throw error
+            }
+            recordRecovery("review")
             try inventory(renderer, caption: "Inspected journal files — not your current draft", paths: ["public/version.properties"])
             try press(renderer, "Review recovery confirmation…", renderer: renderer, timeout: 48)
             let dialog = try waitElement(controls(renderer, [.dialog, .group], label: "Roll back the interrupted save?"), in: renderer)

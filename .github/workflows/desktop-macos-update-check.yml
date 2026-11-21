@@ -27,7 +27,7 @@ permissions:
   actions: read
 
 concurrency:
-  group: desktop-macos-update-check-${{ github.ref }}${{ contains(github.event.head_commit.message, '[macos-hourly-performance]') && '-hourly-performance' || contains(github.event.head_commit.message, '[macos-prepare-state-check]') && '-prepare' || contains(github.event.head_commit.message, '[macos-refreshed-acceptance]') && '-refreshed-acceptance' || contains(github.event.head_commit.message, '[macos-removal-archive-check]') && '-removal-archive' || '' }}
+  group: desktop-macos-update-check-${{ github.ref }}${{ contains(github.event.head_commit.message, '[macos-hourly-performance]') && '-hourly-performance' || contains(github.event.head_commit.message, '[macos-prepare-state-check]') && '-prepare' || contains(github.event.head_commit.message, '[macos-refreshed-acceptance]') && '-refreshed-acceptance' || contains(github.event.head_commit.message, '[macos-removal-archive-check]') && '-removal-archive' || contains(github.event.head_commit.message, '[macos-signed-gui-recovery]') && '-gui-recovery' || '' }}
   cancel-in-progress: false
 
 jobs:
