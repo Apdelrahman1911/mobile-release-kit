@@ -67,8 +67,9 @@ permissions:
   contents: read
   actions: read
 
+# A saved ordinary package can be carried while the current Git observer builds.
 concurrency:
-  group: desktop-macos-installed-${{ github.ref }}${{ github.ref == 'refs/heads/verify/desktop-macos-candidate' && format('-{0}', github.sha) || '' }}${{ github.event_name == 'workflow_dispatch' && inputs.operation == 'candidate-tests' && format('-{0}', inputs.test_group) || github.event_name == 'workflow_dispatch' && inputs.operation == 'local-carrier' && '-local-carrier' || '' }}
+  group: desktop-macos-installed-${{ github.ref }}${{ github.ref == 'refs/heads/verify/desktop-macos-candidate' && format('-{0}', github.sha) || '' }}${{ github.event_name == 'workflow_dispatch' && inputs.operation == 'candidate-tests' && format('-{0}', inputs.test_group) || github.event_name == 'workflow_dispatch' && (inputs.operation == 'local-carrier' || inputs.operation == 'local-desktop-carrier') && format('-{0}', inputs.operation) || '' }}
   cancel-in-progress: false
 
 jobs:
