@@ -5722,7 +5722,8 @@ final class NormalAppUITests: XCTestCase {
         projectLaunchStage(.dashboard)
         if guided {
             try require(profile == .currentCandidateOrdinary, "guided observation requires the current signed candidate")
-            _ = try waitElement(renderer.staticTexts.matching(identifier: "Get your app ready."), in: renderer,
+            let label = projectRequireDiagnosticMethod == .prepareToQuit ? "Build tools" : "Choose project folder"
+            _ = try waitElement(controls(renderer, [.button], label: label), in: renderer, enabled: true,
                                 timeout: 24, failures: Self.guidedWorkspaceFailures)
         } else {
             try dashboard(renderer, startup: true, diagnosticOrdinal: diagnosticOrdinal)
