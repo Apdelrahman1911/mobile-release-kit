@@ -1848,7 +1848,7 @@ def _git_observation_bootstraps(fetch_observation=False, push_observation=False,
 
 
 def current_source(*, history_provider=False, store_runtime=False, fetch_observation=False, push_observation=False,
-          git_observation=False):
+          git_observation=False, target=ARM_TARGET):
   """Capture DATA, including the committed CA's one explicit projection map."""
   need(type(history_provider) is bool, "current-history-provider-profile")
   need(type(store_runtime) is bool, "current-store-runtime-profile")
@@ -1891,7 +1891,12 @@ def current_source(*, history_provider=False, store_runtime=False, fetch_observa
   for name, (body, _) in captured.items():
     if name != CURRENT_HELPER_SOURCE:
       projected_name = "desktop/github-ca.pem" if name == CURRENT_CA_SOURCE else name
-      projected = preparer.macos_trust_bundle(body) if name == CURRENT_CA_SOURCE else body
+      if name == CURRENT_CA_SOURCE:
+        projected = current_ca_payload(captured, preparer=preparer)
+      elif store_runtime and target == ARM_TARGET and name in ("Gemfile", "Gemfile.lock"):
+        projected = preparer.macos_store_dependency_input(name, body)
+      else:
+        projected = body
       need(projected_name not in projection, "current-source-projection-collision")
       projection[projected_name] = (projected, 0o444)
   directories(projection)
@@ -1972,6 +1977,12 @@ def current_work_root(path, expected_parent):
          "current-work-root-post-changed")
     finally:
       close_once(original)
+
+
+def current_ca_payload(captured, *, preparer=None):
+  if preparer is None:
+    preparer = current_preparer(captured)
+  return preparer.macos_trust_bundle(captured[CURRENT_CA_SOURCE][0])
 
 
 def current_preparer(captured):
@@ -2236,7 +2247,7 @@ def current_runtime_command(args):
     need(sha(args.expected_source) and sha(args.expected_manifest), "current-reviewed-digests")
   parents = current_paths(args)
   captured, projection, source_digest = current_source(history_provider=provider_enabled, store_runtime=store_enabled,
-    fetch_observation=fetch_observation, push_observation=push_observation, git_observation=git_observation)
+    fetch_observation=fetch_observation, push_observation=push_observation, git_observation=git_observation, target=target)
   if provider_enabled:
     need(captured[HISTORY_PROVIDER_PROFILE][0] == provider_source[0], "history-provider-source-projection")
   if final and not composing:
@@ -2316,7 +2327,7 @@ def current_runtime_command(args):
                "qualification": "prepared-not-native-verified"}, "current-preparer-result")
       need(tree(source, current_root_mode=0o555) == projection
          and current_source(history_provider=provider_enabled, store_runtime=store_enabled, fetch_observation=fetch_observation,
-                  push_observation=push_observation, git_observation=git_observation) == (captured, projection, source_digest),
+                  push_observation=push_observation, git_observation=git_observation, target=target) == (captured, projection, source_digest),
          "current-source-post-changed")
       if fresh_inputs is not None:
         need(fresh_supplier(args) == fresh_inputs, "fresh-supplier-post-changed")

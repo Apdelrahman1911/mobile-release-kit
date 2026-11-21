@@ -26,11 +26,16 @@ SOURCES = (
 )
 
 
-def macos_store_ca():
+def macos_runtime_policy():
     spec = importlib.util.spec_from_file_location("mrk_macos_store_ca_policy", ROOT / "desktop/tools/prepare_runtime.py")
     policy = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(policy)
-    return policy.macos_trust_bundle((ROOT / "desktop/cpython-source-inputs/github-ca.pem").read_bytes())
+    return policy
+
+
+def macos_store_ca():
+    return macos_runtime_policy().macos_trust_bundle(
+        (ROOT / "desktop/cpython-source-inputs/github-ca.pem").read_bytes())
 
 
 def fetch(asset, destination):
@@ -120,10 +125,14 @@ def copy_tooling(source_root, destination):
     if not _complete_tooling_root(source_root):
         raise ValueError("Incomplete first-party tooling source")
     destination.mkdir(mode=0o700)
+    policy = macos_runtime_policy()
     for relative in REQUIRED_TOOLING_FILES:
         target = destination / relative
         target.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copyfile(source_root / relative, target)
+        if relative in ("Gemfile", "Gemfile.lock"):
+            target.write_bytes(policy.macos_store_dependency_input(relative, (source_root / relative).read_bytes()))
+        else:
+            shutil.copyfile(source_root / relative, target)
     if not _complete_tooling_root(destination):
         raise ValueError("Incomplete copied first-party tooling")
 

@@ -525,6 +525,25 @@ class MacStdlibBytecodeDataTests(unittest.TestCase):
 
 
 class RuntimePreparationTests(unittest.TestCase):
+    def test_macos_store_ruby_pin_preserves_the_locked_gems(self):
+        from desktop.tools import prepare_macos_store_inputs
+        from mobile_release import stores
+
+        root = Path(__file__).resolve().parents[2]
+        with tempfile.TemporaryDirectory() as temporary:
+            output = Path(temporary) / "tooling"
+            prepare_macos_store_inputs.copy_tooling(root, output)
+            for name in ("Gemfile", "Gemfile.lock"):
+                original = (root / name).read_bytes()
+                self.assertEqual((output / name).read_bytes(), original.replace(b"3.3.12", b"3.3.14", 1))
+            with patch.object(stores.sys, "platform", "darwin"):
+                self.assertIn("MRK_RUNTIME_3.3.14_FIDDLE_1.1.2", stores._fastlane_probe_commands(output)[3][5])
+                self.assertEqual(stores._store_ruby_release(root), "3.3.12")
+            with patch.object(stores.sys, "platform", "linux"):
+                self.assertEqual(stores._store_ruby_release(output), "3.3.12")
+        with self.assertRaises(preparation.PreparationError):
+            preparation.macos_store_dependency_input("Gemfile.lock", b"unreviewed Ruby version")
+
     def test_macos_trust_projection_removes_only_the_reviewed_roots(self):
         from desktop.tools import prepare_macos_store_inputs, prepare_runtime
         original = (Path(__file__).resolve().parents[2] / "desktop/cpython-source-inputs/github-ca.pem").read_bytes()

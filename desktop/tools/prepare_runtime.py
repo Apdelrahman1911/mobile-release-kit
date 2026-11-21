@@ -109,6 +109,22 @@ MACOS_DISTRUSTED_ROOTS = frozenset({
 })
 
 
+def macos_store_dependency_input(name, body):
+    """Select the reviewed macOS Ruby pin without altering locked gems."""
+    if name == "Gemfile":
+        original, refreshed = b'\nruby "3.3.12"\n', b'\nruby "3.3.14"\n'
+    elif name == "Gemfile.lock":
+        original = b"\nRUBY VERSION\n  ruby 3.3.12\n\nBUNDLED WITH\n  4.0.16\n"
+        refreshed = original.replace(b"ruby 3.3.12", b"ruby 3.3.14")
+        if not body.endswith(original):
+            raise PreparationError("Unexpected macOS Store lock footer")
+    else:
+        raise PreparationError("Unexpected macOS Store dependency input")
+    if body.count(original) != 1:
+        raise PreparationError("Unexpected macOS Store Ruby pin")
+    return body.replace(original, refreshed, 1)
+
+
 def macos_trust_bundle(source):
     """Project the checked repository PEM by removing exact DER identities."""
     pattern = rb"(?m)(?:^#[^\n]*\n)*^-----BEGIN CERTIFICATE-----\n([A-Za-z0-9+/=\n]+)^-----END CERTIFICATE-----\n?"
