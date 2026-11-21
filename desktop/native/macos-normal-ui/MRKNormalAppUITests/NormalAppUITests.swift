@@ -6520,7 +6520,7 @@ final class NormalAppUITests: XCTestCase {
         }
         try stage("recover-replacement") {
             try press(renderer, "Review version & build number", renderer: renderer)
-            func recordRecovery(_ stage: String) {
+            @MainActor func recordRecovery(_ stage: String) {
                 let panel = named(renderer, "Saved-version recovery inspection").firstMatch
                 let action = panel.buttons.matching(identifier: "Review recovery confirmation…")
                 let checks: [(String, String)] = [

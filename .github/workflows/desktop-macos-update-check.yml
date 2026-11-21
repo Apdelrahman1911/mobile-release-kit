@@ -27,7 +27,7 @@ permissions:
   actions: read
 
 concurrency:
-  group: desktop-macos-update-check-${{ github.ref }}${{ contains(github.event.head_commit.message, '[macos-hourly-performance]') && '-hourly-performance' || contains(github.event.head_commit.message, '[macos-prepare-state-check]') && '-prepare' || contains(github.event.head_commit.message, '[macos-refreshed-acceptance]') && '-refreshed-acceptance' || contains(github.event.head_commit.message, '[macos-removal-archive-check]') && '-removal-archive' || contains(github.event.head_commit.message, '[macos-signed-gui-recovery]') && '-gui-recovery' || '' }}
+  group: desktop-macos-update-check-${{ github.ref }}${{ contains(github.event.head_commit.message, '[macos-hourly-performance]') && '-hourly-performance' || contains(github.event.head_commit.message, '[macos-prepare-state-check]') && '-prepare' || contains(github.event.head_commit.message, '[macos-refreshed-acceptance]') && '-refreshed-acceptance' || contains(github.event.head_commit.message, '[macos-removal-archive-check]') && '-removal-archive' || contains(github.event.head_commit.message, '[macos-signed-gui-recovery]') && '-gui-recovery' || contains(github.event.head_commit.message, '[macos-archive-recovery-diagnostics]') && '-archive-recovery' || '' }}
   cancel-in-progress: false
 
 jobs:
@@ -40,6 +40,7 @@ jobs:
           ${{ contains(github.event.head_commit.message, '[macos-remove-diagnostic]') && fromJSON('["remove"]')
           || contains(github.event.head_commit.message, '[macos-fresh-upgrade-check]') && fromJSON('["update","fresh"]')
           || contains(github.event.head_commit.message, '[macos-delete-data-check]') && fromJSON('["delete-data"]')
+          || contains(github.event.head_commit.message, '[macos-archive-recovery-diagnostics]') && fromJSON('["removal-archive","recovery-xctest"]')
           || contains(github.event.head_commit.message, '[macos-removal-archive-check]') && fromJSON('["removal-archive"]')
           || contains(github.event.head_commit.message, '[macos-repeat-removal-check]') && fromJSON('["repeat","repeat-after-dialogs"]')
           || contains(github.event.head_commit.message, '[macos-repeat-crash-diagnostics]') && fromJSON('["repeat-after-dialogs"]')

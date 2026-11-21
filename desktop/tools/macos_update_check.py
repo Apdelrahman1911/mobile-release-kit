@@ -1414,13 +1414,13 @@ def remove_check(selection, work, evidence, steps, result):
         need((again["release"], again["packageVersion"], again["packageSha256"])
              == (row["release"], row["packageVersion"], row["packageSha256"]), "reinstall-identity")
         need(all(manifest().get(k) == v for k, v in seeded.items()), "user-data-changed-by-reinstall")
-        result["launchAfterReinstall"] = launch_smoke("after-reinstall", work, evidence, steps)
         if check_archives:
             after = removal_archive_identities()
             result["removalArchiveIdentityPreserved"] = after == archives
             need(after == archives, "reinstall-removal-archive-changed")
         if mode == "removal-archive":
             return
+        result["launchAfterReinstall"] = launch_smoke("after-reinstall", work, evidence, steps)
         if repeat:
             if mode == "repeat-after-dialogs":
                 _, before_repeat = uninstaller_while_installed(mount, work, evidence, steps, result)
