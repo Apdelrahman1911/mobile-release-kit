@@ -1527,6 +1527,36 @@ def workspace_cli_check(selection, work, evidence, steps, result):
         stop_app(payload_pids())
 
 
+def workspace_resource_observations(stop, samples):
+    started = time.monotonic()
+    while not stop.wait(1):
+        try:
+            pids = payload_pids()
+            if len(pids) == 1:
+                sample = resource_sample(pids[0], started, "workspace")
+                if sample["appRssKiB"] is not None:
+                    samples.append(dict(sample, epochMillis=time.time_ns() // 1_000_000))
+        except (OSError, subprocess.TimeoutExpired):
+            return
+
+
+def workspace_resource_summary(transcript, samples):
+    stages = ("project-open", "cli-allow", "cli-revoke")
+    events = re.findall(r"(?m)^MRK_NORMAL_PROJECT_STAGE=([a-z-]+);result=(started|passed);epochMillis=([0-9]{13})$",
+                        transcript)
+    result = {}
+    for stage in stages:
+        times = {event: int(epoch) for name, event, epoch in events if name == stage}
+        if set(times) == {"started", "passed"} and times["started"] <= times["passed"]:
+            window = [sample for sample in samples
+                      if times["started"] <= sample["epochMillis"] <= times["passed"]]
+            result[stage] = {"seconds": (times["passed"] - times["started"]) / 1000, "samples": len(window),
+                             "peakRssKiB": max((s["rssKiB"] for s in window), default=None),
+                             "meanCpuPercent": round(sum(s["cpuPercent"] for s in window) / len(window), 1)
+                             if window else None}
+    return result
+
+
 def workspace_xctest(selection, work, evidence, steps, result):
     row = selection["next"]
     folder = fetch("next", row, work, steps)
@@ -1565,16 +1595,34 @@ def workspace_xctest(selection, work, evidence, steps, result):
         project_path, baseline = seed_signed_gui_recovery(row, folder, work, env, result)
     bundle = work / "project-test.xcresult"
     before_crashes = set(recent_crashes())
-    tested = subprocess.run(["/usr/bin/xcodebuild", "test-without-building", "-xctestrun", str(manifests[0]),
-                             "-destination", "platform=macOS,arch=arm64", "-destination-timeout", "15",
-                             "-resultBundlePath", str(bundle), "-disableAutomaticPackageResolution",
-                             "-only-testing:MRKNormalAppUITests/NormalAppUITests/" + method,
-                             "-parallel-testing-enabled", "NO", "-test-timeouts-enabled", "YES",
-                             "-default-test-execution-time-allowance", "300",
-                             "-maximum-test-execution-time-allowance", "300"],
-                            env=env, capture_output=True, text=True, timeout=600)
+    resource_samples, stop_sampling = [], threading.Event()
+    sampler = None
+    if not (prepare or recovery):
+        sampler = threading.Thread(target=workspace_resource_observations, args=(stop_sampling, resource_samples),
+                                   daemon=True)
+        sampler.start()
+    try:
+        tested = subprocess.run(["/usr/bin/xcodebuild", "test-without-building", "-xctestrun", str(manifests[0]),
+                                 "-destination", "platform=macOS,arch=arm64", "-destination-timeout", "15",
+                                 "-resultBundlePath", str(bundle), "-disableAutomaticPackageResolution",
+                                 "-only-testing:MRKNormalAppUITests/NormalAppUITests/" + method,
+                                 "-parallel-testing-enabled", "NO", "-test-timeouts-enabled", "YES",
+                                 "-default-test-execution-time-allowance", "300",
+                                 "-maximum-test-execution-time-allowance", "300"],
+                                env=env, capture_output=True, text=True, timeout=600)
+    finally:
+        stop_sampling.set()
+        if sampler is not None:
+            sampler.join(timeout=65)
+
     result["xctestReturn"] = tested.returncode
     transcript = tested.stdout + "\n" + tested.stderr
+    if sampler is not None:
+        result["workspaceResources"] = {
+            "method": "ps RSS/%cpu of the signed app process tree, sampled every second during actual XCTest stages",
+            "stages": workspace_resource_summary(transcript, resource_samples),
+        }
+        (evidence / "workspace-resources.json").write_text(json.dumps(resource_samples) + "\n")
     result["xctestStages"] = re.findall(r"(?m)^MRK_NORMAL_PROJECT_STAGE=([a-z0-9-]{1,70});result=(started|passed|failed)",
                                           transcript)[-60:]
     for field, pattern in (

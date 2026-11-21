@@ -45,6 +45,7 @@ jobs:
           || contains(github.event.head_commit.message, '[macos-independent-acceptance]') && fromJSON('["prepare-quit","performance","update-credentials"]')
           || contains(github.event.head_commit.message, '[macos-package-and-maintenance]') && fromJSON('["release-asset","prepare-quit"]')
           || contains(github.event.head_commit.message, '[macos-workspace-cli]') && fromJSON('["workspace-cli"]')
+          || contains(github.event.head_commit.message, '[macos-workspace-performance]') && fromJSON('["workspace-xctest"]')
           || contains(github.event.head_commit.message, '[macos-workspace-xctest]') && fromJSON('["workspace-xctest","prepare-xctest"]')
           || contains(github.event.head_commit.message, '[macos-prepare-state-check]') && fromJSON('["prepare-xctest"]')
           || contains(github.event.head_commit.message, '[macos-hourly-performance]') && fromJSON('["performance-long"]')

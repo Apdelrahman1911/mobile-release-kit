@@ -5103,13 +5103,17 @@ final class NormalAppUITests: XCTestCase {
     @MainActor private func stage(_ name: String, _ body: () throws -> Void) throws {
         journeyStage = name
         _ = try remaining(300)
-        print("MRK_NORMAL_PROJECT_STAGE=\(name);result=started")
+        func report(_ result: String, suffix: String = "") {
+            let epochMillis = Int64(Date().timeIntervalSince1970 * 1000)
+            print("MRK_NORMAL_PROJECT_STAGE=\(name);result=\(result);epochMillis=\(epochMillis)\(suffix)")
+        }
+        report("started")
         do { try body() }
         catch {
-            print("MRK_NORMAL_PROJECT_STAGE=\(name);result=failed;laterStages=not-run")
+            report("failed", suffix: ";laterStages=not-run")
             throw error
         }
-        print("MRK_NORMAL_PROJECT_STAGE=\(name);result=passed")
+        report("passed")
     }
     @MainActor private func named(_ root: XCUIElement, _ label: String) -> XCUIElementQuery {
         root.descendants(matching: .any).matching(identifier: label)
