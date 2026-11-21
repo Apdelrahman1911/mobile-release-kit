@@ -6417,8 +6417,23 @@ final class NormalAppUITests: XCTestCase {
             try press(renderer, "Allow selected project for 1 hour", renderer: renderer)
             // Read the settled permission again through the actual app. This never repeats Allow.
             try press(renderer, "Check access", renderer: renderer)
-            _ = try waitElement(renderer.staticTexts.matching(identifier: "1 project was allowed at last check"), in: renderer,
-                                failures: ["Access is not confirmed"])
+            do {
+                _ = try waitElement(renderer.staticTexts.matching(identifier: "1 project was allowed at last check"), in: renderer,
+                                    failures: ["Access is not confirmed"])
+            } catch {
+                for (kind, label) in [
+                    ("off", "Off at last check"), ("checking", "Checking access…"),
+                    ("allowing", "Allowing the selected project…"), ("unknown", "Access is not confirmed"),
+                    ("retired", "Finishing an earlier access request…"),
+                ] {
+                    if renderer.staticTexts.matching(identifier: label).count != 0 {
+                        print("MRK_RELEASE_CLI_ACCESS_STATE=\(kind)")
+                    }
+                }
+                do { try checkInstalledCliStatus(0) }
+                catch { print("MRK_RELEASE_CLI_ACCESS_STATE=readback-refused") }
+                throw error
+            }
             try checkInstalledCliStatus(0)
         }
         try stage("cli-revoke") {

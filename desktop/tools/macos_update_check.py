@@ -451,11 +451,18 @@ def launch_smoke(label, work, evidence, steps, observe=None, steady_idle_seconds
     subprocess.run(["/usr/sbin/screencapture", "-x", str(shot)], capture_output=True, timeout=60)
     ui = observe(alive[0], work, evidence, label) if observe and alive and settled else None
     reports = recent_crash_paths()
-    crashes = sorted(set(reports) - before)
+    new_reports = sorted(set(reports) - before)
+    # A resource diagnostic from the completed Installer is a separate
+    # observation from an app crash that occurred during this launch.
+    installer_diagnostics = [name for name in new_reports
+                             if name.startswith("mrk-macos-install_") and name.endswith(".diag")]
+    crashes = [name for name in new_reports if name not in installer_diagnostics]
     observed = {"label": label, "processSeen": bool(pids), "secondsToFirstWindow": first_window,
                 "resources": resource_summary(samples),
                 "aliveAfterSettle": bool(alive), "windowsAfterSettle": settled, "newCrashReports": crashes,
                 "screenshot": shot.name if shot.exists() else None}
+    if installer_diagnostics:
+        observed["installerDiagnosticReports"] = installer_diagnostics
     if crashes:
         observed["crashReportFacts"] = [crash_report_facts(reports[name], observed_pids) for name in crashes[:10]]
     if ui is not None:
@@ -1720,6 +1727,8 @@ def workspace_xctest(selection, work, evidence, steps, result):
             "stages": workspace_resource_summary(transcript, resource_samples),
         }
         (evidence / "workspace-resources.json").write_text(json.dumps(resource_samples) + "\n")
+    result["cliAccessFacts"] = re.findall(
+        r"(?m)^MRK_RELEASE_CLI_ACCESS_STATE=([a-z-]{2,24})$", transcript)
     result["xctestStages"] = re.findall(r"(?m)^MRK_NORMAL_PROJECT_STAGE=([a-z0-9-]{1,70});result=(started|passed|failed)",
                                           transcript)[-60:]
     for field, pattern in (
