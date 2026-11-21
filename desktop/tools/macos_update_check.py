@@ -584,7 +584,7 @@ def main():
     parser.add_argument("--work", required=True)
     parser.add_argument("--mode", choices=("update", "fresh", "remove", "uninstaller", "delete-data",
                                            "repeat", "repeat-after-dialogs", "prepare-quit", "performance",
-                                           "update-credentials", "release-asset"), default="update")
+                                           "update-credentials", "release-asset", "workspace-cli"), default="update")
     args = parser.parse_args()
     work = Path(args.work)
     evidence = work / "evidence"
@@ -597,7 +597,8 @@ def main():
         if args.mode not in ("update", "update-credentials"):
             {"fresh": fresh_check, "remove": remove_check, "uninstaller": uninstaller_installed_check,
              "delete-data": remove_check, "repeat": remove_check, "repeat-after-dialogs": remove_check,
-             "prepare-quit": prepare_quit_check, "performance": fresh_check, "release-asset": release_asset_check}[args.mode](
+             "prepare-quit": prepare_quit_check, "performance": fresh_check, "release-asset": release_asset_check,
+             "workspace-cli": workspace_cli_check}[args.mode](
                 selection, work, evidence, steps, result)
             result["passed"] = True
             return 0
@@ -1187,6 +1188,19 @@ def click_when_ready(pid, work, title, role=None):
         time.sleep(1)
 
 
+def start_app_window(work, steps, label):
+    process, step = run(["/usr/bin/open", str(APP)], 60)
+    steps.append(dict(step, role=label + "-launch"))
+    need(process.returncode == 0, label + "-open")
+    deadline = time.monotonic() + 90
+    while time.monotonic() < deadline:
+        live = payload_pids()
+        if len(live) == 1 and window_count(live[0], work):
+            return live[0]
+        time.sleep(2)
+    raise Failed(label + "-window")
+
+
 def prepare_quit_check(selection, work, evidence, steps, result):
     row = selection["next"]
     folder = fetch("next", row, work, steps)
@@ -1194,18 +1208,7 @@ def prepare_quit_check(selection, work, evidence, steps, result):
     state = result["afterInstall"] = installed_state()
     need(state["packageSha256"] == row["packageSha256"], "prepare-quit-install-identity")
     before_crashes = set(recent_crashes())
-    process, step = run(["/usr/bin/open", str(APP)], 60)
-    steps.append(dict(step, role="prepare-quit-launch"))
-    need(process.returncode == 0, "prepare-quit-open")
-    deadline = time.monotonic() + 90
-    pid = None
-    while time.monotonic() < deadline:
-        live = payload_pids()
-        if len(live) == 1 and window_count(live[0], work):
-            pid = live[0]
-            break
-        time.sleep(2)
-    need(pid is not None, "prepare-quit-window")
+    pid = start_app_window(work, steps, "prepare-quit")
     result["prepareQuitNavigation"] = actions = []
     try:
         for title in ("Build tools", "About this installation"):
@@ -1240,6 +1243,100 @@ def prepare_quit_check(selection, work, evidence, steps, result):
         subprocess.run(["/usr/sbin/screencapture", "-x", str(evidence / "screen-prepare-quit.png")],
                        capture_output=True, timeout=60)
     result["reopen"] = launch_smoke("prepare-quit-reopen", work, evidence, steps)
+
+
+PROJECT_PICKER_JXA = """function run(argv) {
+  ObjC.import('Foundation');
+  const se = Application('System Events');
+  const matches = se.processes.whose({unixId: Number(argv[0])});
+  if (matches.length !== 1 || matches[0].windows().length !== 1) return 'no-project-window';
+  const app = matches[0], panels = app.windows[0].sheets();
+  if (panels.length !== 1) return 'no-project-sheet';
+  const panel = panels[0], buttons = panel.buttons();
+  if (!buttons.some(b => b.name() === 'Cancel') || !buttons.some(b => b.name() === 'Open')
+      || panel.sheets().length) return 'unexpected-project-sheet';
+  const titled = panel.name() === 'Choose a mobile project folder' ||
+    panel.staticTexts().some(t => t.value() === 'Choose a mobile project folder');
+  if (!titled) return 'unexpected-project-title';
+  app.frontmost = true;
+  se.keystroke('g', {using: ['command down', 'shift down']});
+  for (let i = 0; i < 15 && !panel.sheets().length; ++i) $.NSThread.sleepForTimeInterval(0.2);
+  if (panel.sheets().length !== 1) return 'missing-project-navigation';
+  se.keystroke(argv[1]);
+  se.keyCode(36);
+  for (let i = 0; i < 15 && panel.sheets().length; ++i) $.NSThread.sleepForTimeInterval(0.2);
+  if (panel.sheets().length) return 'project-navigation-still-open';
+  const open = panel.buttons().filter(b => b.name() === 'Open' && b.enabled());
+  if (open.length !== 1) return 'no-original-open-button';
+  open[0].click();
+  return 'selected';
+}
+"""
+
+
+def workspace_cli_check(selection, work, evidence, steps, result):
+    row = selection["next"]
+    folder = fetch("next", row, work, steps)
+    need(install("next", folder, steps, evidence=evidence) == 0, "workspace-install")
+    result["afterInstall"] = installed_state()
+    need(result["afterInstall"]["packageSha256"] == row["packageSha256"], "workspace-install-identity")
+    fixture = work / "workspace"
+    shutil.copytree(Path(__file__).resolve().parents[2] / "tests/fixtures/macos_android_journey", fixture)
+    originals = {p.relative_to(fixture): digest(p) for p in fixture.rglob("*") if p.is_file()}
+    before_crashes = set(recent_crashes())
+    pid = start_app_window(work, steps, "workspace")
+    try:
+        overview = first_launch_observe(pid, work, evidence, "workspace-first-launch")
+        result["firstConnection"] = overview
+        need(overview["runtimeCard"] == "bundled" and not overview["workspaceErrorMarkers"], "workspace-first-connection")
+        need(overview["cliStatus"]["returncode"] == 3 and overview["cliStatus"]["guidance"], "workspace-default-denial")
+        click_when_ready(pid, work, "Dashboard")
+        opened = click_when_ready(pid, work, "Open project folder", "AXButton")
+        need(opened.get("clicked") == "Open project folder", "workspace-open-project-picker")
+        script = work / "project-picker.js"
+        script.write_text(PROJECT_PICKER_JXA)
+        picked = subprocess.run(["/usr/bin/osascript", "-l", "JavaScript", str(script), str(pid), str(fixture.resolve())],
+                                capture_output=True, text=True, timeout=30)
+        result["picker"] = picked.stdout.strip()
+        need(picked.returncode == 0 and result["picker"] == "selected", "workspace-native-picker")
+        deadline = time.monotonic() + 60
+        while True:
+            texts = ui_query(pid, work, "texts", timeout=10).get("texts") or []
+            need(not any(marker in text for marker in WORKSPACE_ERROR_MARKERS for text in texts), "workspace-view-error")
+            if str(fixture.resolve()) in texts or "org.mrk.fixture" in texts:
+                break
+            need(time.monotonic() < deadline, "workspace-fixture-not-observed")
+            time.sleep(2)
+        result["fixtureWorkspaceObserved"] = True
+        for title in ("Project settings", "Advanced · CLI / AI access", "Check access",
+                      "Allow selected project for 1 hour"):
+            action = click_when_ready(pid, work, title)
+            result.setdefault("accessNavigation", []).append(action)
+            need(action.get("clicked") == title, "workspace-cli-access-control")
+        cli = APP / "Contents/MacOS/mrk"
+        statuses = result["statusReturns"] = []
+        for expected in (0, 3):
+            deadline = time.monotonic() + 25
+            while True:
+                status = subprocess.run([str(cli), "status", "--json"], capture_output=True, text=True, timeout=20)
+                if status.returncode == expected:
+                    break
+                need(time.monotonic() < deadline, "workspace-cli-status")
+                time.sleep(1)
+            statuses.append(status.returncode)
+            if expected == 0:
+                need(isinstance(json.loads(status.stdout), dict), "workspace-cli-json")
+                revoked = click_when_ready(pid, work, "Turn off access", "AXButton")
+                need(revoked.get("clicked") == "Turn off access", "workspace-cli-revoke-control")
+            else:
+                need(CLI_STATUS_GUIDANCE in status.stdout + status.stderr, "workspace-cli-revoke-guidance")
+        result["fixtureUnchanged"] = {p.relative_to(fixture): digest(p) for p in fixture.rglob("*") if p.is_file()} == originals
+        need(result["fixtureUnchanged"], "workspace-cli-modified-fixture")
+        need(set(recent_crashes()) == before_crashes, "workspace-crash")
+    finally:
+        subprocess.run(["/usr/sbin/screencapture", "-x", str(evidence / "screen-workspace-cli.png")],
+                       capture_output=True, timeout=60)
+        stop_app(payload_pids())
 
 
 def package_acceptance(package):
