@@ -584,7 +584,8 @@ def main():
     parser.add_argument("--work", required=True)
     parser.add_argument("--mode", choices=("update", "fresh", "remove", "uninstaller", "delete-data",
                                            "repeat", "repeat-after-dialogs", "prepare-quit", "performance",
-                                           "update-credentials", "release-asset", "workspace-cli"), default="update")
+                                           "update-credentials", "release-asset", "workspace-cli",
+                                           "workspace-xctest"), default="update")
     args = parser.parse_args()
     work = Path(args.work)
     evidence = work / "evidence"
@@ -598,7 +599,7 @@ def main():
             {"fresh": fresh_check, "remove": remove_check, "uninstaller": uninstaller_installed_check,
              "delete-data": remove_check, "repeat": remove_check, "repeat-after-dialogs": remove_check,
              "prepare-quit": prepare_quit_check, "performance": fresh_check, "release-asset": release_asset_check,
-             "workspace-cli": workspace_cli_check}[args.mode](
+             "workspace-cli": workspace_cli_check, "workspace-xctest": workspace_xctest}[args.mode](
                 selection, work, evidence, steps, result)
             result["passed"] = True
             return 0
@@ -1337,6 +1338,51 @@ def workspace_cli_check(selection, work, evidence, steps, result):
         subprocess.run(["/usr/sbin/screencapture", "-x", str(evidence / "screen-workspace-cli.png")],
                        capture_output=True, timeout=60)
         stop_app(payload_pids())
+
+
+def workspace_xctest(selection, work, evidence, steps, result):
+    row = selection["next"]
+    folder = fetch("next", row, work, steps)
+    need(install("next", folder, steps, evidence=evidence) == 0, "workspace-xctest-install")
+    result["afterInstall"] = installed_state()
+    origin = json.loads((folder / "PREPARED.json").read_text())["origin"]
+    source, harness = result["afterInstall"]["sourceCommit"], os.environ["GITHUB_SHA"]
+    need(source == origin["source"] and source != harness and hex_field(harness, 40)
+         and result["afterInstall"]["packageSha256"] == row["packageSha256"], "workspace-xctest-source-binding")
+    temporary = work / "xctest-tmp"
+    temporary.mkdir(mode=0o700)
+    env = {"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "HOME": "/Users/runner", "USER": "runner",
+           "LOGNAME": "runner", "TMPDIR": str(temporary) + "/", "LANG": "en_US.UTF-8", "LC_ALL": "en_US.UTF-8",
+           "TZ": "UTC", "DEVELOPER_DIR": "/Applications/Xcode.app/Contents/Developer",
+           "TEST_RUNNER_MRK_NORMAL_UI_HOSTED_JOB": "github-hosted-macos26-arm64",
+           "TEST_RUNNER_MRK_NORMAL_UI_APPLICATION_SOURCE": source, "TEST_RUNNER_MRK_NORMAL_UI_HARNESS_SOURCE": harness,
+           "TEST_RUNNER_MRK_NORMAL_UI_CURRENT_ORDINARY": "current-candidate-ordinary-only-v1"}
+    project = Path(__file__).resolve().parents[2] / "desktop/native/macos-normal-ui/MRKNormalAppUI.xcodeproj"
+    derived = work / "DerivedData"
+    base = ["/usr/bin/xcodebuild", "-project", str(project), "-scheme", "MRKNormalAppUI",
+            "-configuration", "Debug", "-destination", "platform=macOS,arch=arm64",
+            "-destination-timeout", "15", "-derivedDataPath", str(derived), "-jobs", "2",
+            "-disableAutomaticPackageResolution", "COMPILER_INDEX_STORE_ENABLE=NO"]
+    with (work / "workspace-xctest-build.private.log").open("wb") as log:
+        built = subprocess.run([*base, "build-for-testing"], env=env, stdout=log, stderr=subprocess.STDOUT, timeout=600)
+    result["xctestBuildReturn"] = built.returncode
+    need(built.returncode == 0, "workspace-xctest-build")
+    method = "testSyntheticProjectPathFields"
+    bundle = work / "project-test.xcresult"
+    tested = subprocess.run([*base, "test-without-building", "-resultBundlePath", str(bundle),
+                             "-only-testing:MRKNormalAppUITests/NormalAppUITests/" + method,
+                             "-parallel-testing-enabled", "NO", "-test-timeouts-enabled", "YES",
+                             "-default-test-execution-time-allowance", "300",
+                             "-maximum-test-execution-time-allowance", "300"],
+                            env=env, capture_output=True, text=True, timeout=600)
+    result["xctestReturn"] = tested.returncode
+    result["xctestStages"] = re.findall(r"(?m)^MRK_NORMAL_PROJECT_STAGE=([a-z0-9-]{1,70});result=(started|passed|failed)",
+                                          tested.stdout)[-60:]
+    marker = "MRK_MACOS_NORMAL_PROJECT_FIELDS_UI=ordinary-four-field-browse-two-cancels-draft-only-invalid-pair-observed"
+    result["workspaceFixtureObserved"] = marker in tested.stdout
+    result["xctestCasePassed"] = bool(re.search(r"(?m)^Test Case .*" + method + r"\]' passed ", tested.stdout))
+    need(tested.returncode == 0 and result["workspaceFixtureObserved"] and result["xctestCasePassed"],
+         "workspace-xctest-original-result")
 
 
 def package_acceptance(package):
