@@ -20,6 +20,7 @@ on:
       - .github/workflows/desktop-macos-update-check.yml
       - desktop/macos-installed-inputs/update-check-selection.json
       - desktop/tools/macos_update_check.py
+      - desktop/native/macos-normal-ui/MRKNormalAppUITests/NormalAppUITests.swift
 
 permissions:
   contents: read
