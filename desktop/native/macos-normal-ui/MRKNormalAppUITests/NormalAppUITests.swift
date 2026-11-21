@@ -5454,8 +5454,9 @@ final class NormalAppUITests: XCTestCase {
         try waitGone(dialog)
     }
     @MainActor private func nativeSheet(_ window: XCUIElement, title: String, timeout: TimeInterval = 5,
+                                        failures: [String] = [],
                                         line: UInt = #line) throws -> XCUIElement {
-        let sheet = try waitElement(window.sheets, in: window, timeout: timeout, line: line)
+        let sheet = try waitElement(window.sheets, in: window, timeout: timeout, failures: failures, line: line)
         if sheet.label != title && sheet.staticTexts.matching(identifier: title).count != 1 {
             diagnostic(sheet)
             if packagedRequireDiagnosticActive || engineeringRequireDiagnosticActive || projectRequireDiagnosticMethod != nil {
@@ -6457,7 +6458,24 @@ final class NormalAppUITests: XCTestCase {
         }
         try stage("maintenance-confirmation") {
             // Observe only the sheet emitted by the maintenance operation.
-            let sheet = try nativeSheet(window, title: "Quit and discard unsaved drafts?", timeout: 180)
+            let nativeRefusal = "The original native helper operation was refused or failed. Retain its result and refresh status; do not bypass it by changing installed files."
+            let unknownCleanup = "The original cleanup is unconfirmed. Keep the app open and retain evidence. New preparation, automatic helper registration and file removal are not authorized."
+            let failures = ["Preparation not confirmed", nativeRefusal, unknownCleanup]
+            let sheet: XCUIElement
+            do {
+                sheet = try nativeSheet(window, title: "Quit and discard unsaved drafts?", timeout: 180, failures: failures)
+            } catch {
+                let observations = [("rejected-request", "Preparation not confirmed"), ("refused", "refused"),
+                    ("unknown", "unknown"), ("prepared", "Preparation settled · exit unconfirmed"),
+                    ("started", "Waiting for the original native helper operation and its cleanup. Changing screens does not cancel it or start another request."),
+                    ("native-refused", nativeRefusal), ("cleanup-unknown", unknownCleanup),
+                    ("deadline", "The original operation reached its fixed deadline. A later reply cannot turn this into successful preparation.")]
+                for (key, title) in observations where renderer.staticTexts.matching(NSPredicate(format:
+                    "identifier == %@ OR label == %@ OR title == %@ OR value == %@", title, title, title, title)).count == 1 {
+                    print("MRK_RELEASE_PREPARE_STATUS=\(key)")
+                }
+                throw error
+            }
             try require(sheet.buttons.count == 2 && sheet.buttons.matching(identifier: "Cancel").count == 1,
                         "maintenance produced an unexpected sheet")
             try click(sheet.buttons.matching(identifier: "Quit"), "the maintenance Quit button is not actionable")

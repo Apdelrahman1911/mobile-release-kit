@@ -1528,6 +1528,7 @@ def workspace_xctest(selection, work, evidence, steps, result):
         ("xctestLaunchStage", r"MRK_NORMAL_PROJECT_LAUNCH_STAGE=(account|identity|proxies|gate-open|gate-free|request|gate-held|owner|window|renderer|dashboard)\b"),
         ("xctestWait", r"MRK_NORMAL_WAIT=v1;line=([0-9]{1,5});waiter=(completed|timed-out|other);matches=([0-5]);failures=([0-5])"),
         ("installedCLIStatuses", r"MRK_RELEASE_CLI_STATUS=expected=([034]);exit=(-?[0-9]{1,3})"),
+        ("prepareStatusObservations", r"MRK_RELEASE_PREPARE_STATUS=(rejected-request|refused|unknown|prepared|started|native-refused|cleanup-unknown|deadline)\b"),
     ):
         result[field] = re.findall(pattern, transcript)[-12:]
     if prepare:
