@@ -68,6 +68,7 @@ class LaunchSmokeSourceTests(unittest.TestCase):
         workflow = (ROOT / ".github/workflows/desktop-macos-update-check.yml").read_text()
         self.assertIn('fromJSON(\'["update","fresh","remove","uninstaller"]\')', workflow)
         self.assertIn("'[macos-remove-diagnostic]') && fromJSON('[\"remove\"]')", workflow)
+        self.assertIn("'[macos-fresh-upgrade-check]') && fromJSON('[\"update\",\"fresh\"]')", workflow)
         self.assertIn('--mode "${{ matrix.mode }}"', workflow)
         source = (ROOT / "desktop/tools/macos_update_check.py").read_text()
         self.assertIn('choices=("update", "fresh", "remove", "uninstaller")', source)

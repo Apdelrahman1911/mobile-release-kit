@@ -35,7 +35,10 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        mode: ${{ contains(github.event.head_commit.message, '[macos-remove-diagnostic]') && fromJSON('["remove"]') || fromJSON('["update","fresh","remove","uninstaller"]') }}
+        mode: >-
+          ${{ contains(github.event.head_commit.message, '[macos-remove-diagnostic]') && fromJSON('["remove"]')
+          || contains(github.event.head_commit.message, '[macos-fresh-upgrade-check]') && fromJSON('["update","fresh"]')
+          || fromJSON('["update","fresh","remove","uninstaller"]') }}
     if: github.repository == 'Apdelrahman1911/mobile-release-kit' && github.ref == 'refs/heads/verify/desktop-macos-update-check'
     runs-on: macos-26
     timeout-minutes: 45
