@@ -585,7 +585,7 @@ def main():
     parser.add_argument("--mode", choices=("update", "fresh", "remove", "uninstaller", "delete-data",
                                            "repeat", "repeat-after-dialogs", "prepare-quit", "performance",
                                            "update-credentials", "release-asset", "workspace-cli",
-                                           "workspace-xctest"), default="update")
+                                           "workspace-xctest", "prepare-xctest"), default="update")
     args = parser.parse_args()
     work = Path(args.work)
     evidence = work / "evidence"
@@ -599,7 +599,8 @@ def main():
             {"fresh": fresh_check, "remove": remove_check, "uninstaller": uninstaller_installed_check,
              "delete-data": remove_check, "repeat": remove_check, "repeat-after-dialogs": remove_check,
              "prepare-quit": prepare_quit_check, "performance": fresh_check, "release-asset": release_asset_check,
-             "workspace-cli": workspace_cli_check, "workspace-xctest": workspace_xctest}[args.mode](
+             "workspace-cli": workspace_cli_check, "workspace-xctest": workspace_xctest,
+             "prepare-xctest": workspace_xctest}[args.mode](
                 selection, work, evidence, steps, result)
             result["passed"] = True
             return 0
@@ -1370,8 +1371,10 @@ def workspace_xctest(selection, work, evidence, steps, result):
     manifests = list((derived / "Build/Products").glob("MRKNormalAppUI_*.xctestrun"))
     need(len(manifests) == 1 and manifests[0].is_file() and not manifests[0].is_symlink(),
          "workspace-xctest-single-original-manifest")
-    method = "testSyntheticProjectPathFields"
+    prepare = result["mode"] == "prepare-xctest"
+    method = "testCurrentPrepareToQuit" if prepare else "testCurrentGuidedWorkspaceAndCli"
     bundle = work / "project-test.xcresult"
+    before_crashes = set(recent_crashes())
     tested = subprocess.run(["/usr/bin/xcodebuild", "test-without-building", "-xctestrun", str(manifests[0]),
                              "-destination", "platform=macOS,arch=arm64", "-destination-timeout", "15",
                              "-resultBundlePath", str(bundle), "-disableAutomaticPackageResolution",
@@ -1390,11 +1393,24 @@ def workspace_xctest(selection, work, evidence, steps, result):
         ("xctestLaunchStage", r"MRK_NORMAL_PROJECT_LAUNCH_STAGE=(account|identity|proxies|gate-open|gate-free|request|gate-held|owner|window|renderer|dashboard)\b"),
     ):
         result[field] = re.findall(pattern, transcript)[-12:]
-    marker = "MRK_MACOS_NORMAL_PROJECT_FIELDS_UI=ordinary-four-field-browse-two-cancels-draft-only-invalid-pair-observed"
-    result["workspaceFixtureObserved"] = marker in transcript
+    if prepare:
+        result["prepareQuitObserved"] = "MRK_RELEASE_PREPARE_TO_QUIT=confirmed-original-quit-and-gate-release" in transcript
+        observed = result["prepareQuitObserved"]
+    else:
+        result["workspaceFixtureObserved"] = "MRK_RELEASE_WORKSPACE=selected-saved-identity-files-unchanged" in transcript
+        result["cliGrantAndRevokeObserved"] = "MRK_RELEASE_CLI_ACCESS=denied-allowed-revoked" in transcript
+        observed = result["workspaceFixtureObserved"] and result["cliGrantAndRevokeObserved"]
     result["xctestCasePassed"] = bool(re.search(r"(?m)^Test Case .*" + method + r"\]' passed ", transcript))
-    need(tested.returncode == 0 and result["workspaceFixtureObserved"] and result["xctestCasePassed"],
-         "workspace-xctest-original-result")
+    result["newCrashReports"] = sorted(set(recent_crashes()) - before_crashes)
+    need(tested.returncode == 0 and observed and result["xctestCasePassed"] and not result["newCrashReports"],
+         "xctest-original-result")
+    if prepare:
+        census, _ = run(["/bin/ps", "-A", "-o", "command="], 30)
+        need(census.returncode == 0, "prepare-quit-process-census")
+        result["remainingInstalledProcesses"] = sum(line.lstrip().startswith(str(APP) + "/")
+                                                    for line in census.stdout.splitlines())
+        need(result["remainingInstalledProcesses"] == 0, "prepare-quit-left-installed-processes")
+        result["reopen"] = launch_smoke("prepare-quit-reopen", work, evidence, steps)
 
 
 def package_acceptance(package):

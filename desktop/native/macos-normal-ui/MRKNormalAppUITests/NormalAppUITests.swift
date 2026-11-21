@@ -16,6 +16,8 @@ final class NormalAppUITests: XCTestCase {
     private enum RequireCheck: String { case condition, singleton, actionable }
     private enum ProjectRequireMethod: String {
         case pathFields = "testSyntheticProjectPathFields"
+        case guidedWorkspace = "testCurrentGuidedWorkspaceAndCli"
+        case prepareToQuit = "testCurrentPrepareToQuit"
         case androidSourceSelection = "testSyntheticProjectAndroidSourceSelection"
         case localEditsAndImages = "testSyntheticProjectLocalEditsAndImages"
         case savedReleaseEvidence = "testSyntheticProjectSavedReleaseEvidence"
@@ -25,6 +27,8 @@ final class NormalAppUITests: XCTestCase {
         case savedOfflineChecks = "testSyntheticProjectSavedOfflineChecks"
         case emptyBuildInputInspection = "testSyntheticProjectEmptyBuildInputInspection"
         case androidCandidateInputs = "testSyntheticProjectAndroidCandidateInputs"
+
+        var diagnosesLaunch: Bool { self == .pathFields || self == .guidedWorkspace || self == .prepareToQuit }
     }
     private enum DashboardReason: String {
         case loading, notLoaded = "not-loaded", bridgeUnavailable = "bridge-unavailable"
@@ -603,7 +607,7 @@ final class NormalAppUITests: XCTestCase {
                     "removal harness channel is exclusive to its fixed case")
         let clock = try CaseClock(seconds: seconds, androidPositive: androidPositive, iosUnsigned: iosUnsigned,
                                   iosRecovery: iosRecovery, engineeringDiagnostic: engineeringDiagnostic,
-                                  projectDiagnostic: projectRequireDiagnosticMethod == .pathFields)
+                                  projectDiagnostic: projectRequireDiagnosticMethod?.diagnosesLaunch == true)
         caseClock = clock
         journeyDeadline = clock.deadline
     }
@@ -614,7 +618,7 @@ final class NormalAppUITests: XCTestCase {
     }
 
     @MainActor private func projectLaunchStage(_ stage: ProjectLaunchStage) {
-        if projectRequireDiagnosticMethod == .pathFields {
+        if projectRequireDiagnosticMethod?.diagnosesLaunch == true {
             print("MRK_NORMAL_PROJECT_LAUNCH_STAGE=\(stage.rawValue)")
         }
     }
@@ -5449,9 +5453,9 @@ final class NormalAppUITests: XCTestCase {
         try reveal(ready, in: renderer, line: line); ready.click() // Exactly one Apply.
         try waitGone(dialog)
     }
-    @MainActor private func nativeSheet(_ window: XCUIElement, title: String,
+    @MainActor private func nativeSheet(_ window: XCUIElement, title: String, timeout: TimeInterval = 5,
                                         line: UInt = #line) throws -> XCUIElement {
-        let sheet = try waitElement(window.sheets, in: window, line: line)
+        let sheet = try waitElement(window.sheets, in: window, timeout: timeout, line: line)
         if sheet.label != title && sheet.staticTexts.matching(identifier: title).count != 1 {
             diagnostic(sheet)
             if packagedRequireDiagnosticActive || engineeringRequireDiagnosticActive || projectRequireDiagnosticMethod != nil {
@@ -5689,6 +5693,7 @@ final class NormalAppUITests: XCTestCase {
     }
 
     @MainActor private func launchForJourney(profile: SourceProfile = .sameBuild,
+                                             guided: Bool = false,
                                              diagnosticOrdinal: UInt8? = nil) throws -> (XCUIApplication, XCUIElement, XCUIElement) {
         _ = try admittedJourneyApplication(profile: profile) // Defaults remain exact same-build.
         let app = try launchOrdinaryApplication()
@@ -5715,7 +5720,13 @@ final class NormalAppUITests: XCTestCase {
         let renderer = rendererQuery.element(boundBy: 0)
         // End shared journey bounded renderer readiness.
         projectLaunchStage(.dashboard)
-        try dashboard(renderer, startup: true, diagnosticOrdinal: diagnosticOrdinal)
+        if guided {
+            try require(profile == .currentCandidateOrdinary, "guided observation requires the current signed candidate")
+            _ = try waitElement(renderer.staticTexts.matching(identifier: "Get your app ready."), in: renderer,
+                                timeout: 24, failures: Self.guidedWorkspaceFailures)
+        } else {
+            try dashboard(renderer, startup: true, diagnosticOrdinal: diagnosticOrdinal)
+        }
         return (app, window, renderer)
     }
 
@@ -6327,6 +6338,120 @@ final class NormalAppUITests: XCTestCase {
         // Source selection is not supplier inspection, protected copy, or an Android build.
         try acceptFinalScenario()
         print("MRK_MACOS_NORMAL_ANDROID_SOURCE_UI=ordinary-jdk-sdk-gradle-native-cancel-jdk-reselect-backend-source-refused-selection-only;cleanExitStatus=unavailable;allWorkerFinality=unavailable")
+    }
+
+    private static let guidedWorkspaceFailures = ["Maximum update depth", "Minified React error", "Something went wrong"]
+
+    @MainActor private func checkInstalledCliStatus(_ expected: Int32) throws {
+        guard let clock = caseClock else { throw Refusal.condition("CLI observation requires the original case clock") }
+        let outputURL = FileManager.default.temporaryDirectory.appendingPathComponent("mrk-status-" + UUID().uuidString)
+        try require(FileManager.default.createFile(atPath: outputURL.path, contents: nil,
+                                                   attributes: [.posixPermissions: 0o600]), "CLI output file unavailable")
+        defer { try? FileManager.default.removeItem(at: outputURL) }
+        let output = try FileHandle(forUpdating: outputURL)
+        defer { try? output.close() }
+        let child = Process()
+        child.executableURL = OrdinaryLaunch.outerURL.appendingPathComponent("Contents/MacOS/mrk")
+        child.arguments = ["status", "--json"]
+        child.standardOutput = output
+        child.standardError = output
+        let end = try clock.end(within: 30)
+        try child.run()
+        defer { if child.isRunning { child.terminate() } }
+        while child.isRunning { try clock.progress(until: end) }
+        _ = try clock.remaining(1, before: end)
+        try require(child.terminationReason == .exit && child.terminationStatus == expected,
+                    "original installed CLI status differed")
+        try output.seek(toOffset: 0)
+        let body = try output.read(upToCount: 16385) ?? Data()
+        try require(!body.isEmpty && body.count <= 16384, "original CLI status output bounds exceeded")
+        if expected == 0 {
+            try require((try? JSONSerialization.jsonObject(with: body)) is [String: Any], "original CLI status was not a JSON object")
+        } else {
+            try require(String(decoding: body, as: UTF8.self).contains("CLI / AI access"), "installed CLI guidance is missing")
+        }
+    }
+
+    @MainActor func testCurrentGuidedWorkspaceAndCli() throws {
+        projectRequireDiagnosticMethod = .guidedWorkspace
+        defer { projectRequireDiagnosticMethod = nil }
+        continueAfterFailure = false
+        executionTimeAllowance = 300
+        try beginCase(seconds: 300)
+        var launched: (XCUIApplication, XCUIElement, XCUIElement)?
+        try stage("launch") { launched = try launchForJourney(profile: normalJourneyProfile(for: "project-test.xcresult"), guided: true) }
+        guard let (app, window, renderer) = launched else { throw Refusal.condition("guided launch returned no original") }
+        let fixture = LocalFixture()
+        ownedFixture = fixture
+        try stage("fixture") { try fixture.prepare(.projectEdits) }
+        try stage("cli-denied") { try checkInstalledCliStatus(3) }
+        try stage("project-open") {
+            try press(renderer, "Choose project folder", renderer: renderer, failures: Self.guidedWorkspaceFailures, timeout: 24)
+            let picker = try nativeSheet(window, title: "Choose a mobile project folder")
+            try goToFolder(picker, path: fixture.projectPath)
+            try nativeOpen(picker)
+            try expand(renderer, prefix: "Project details & saved observations", renderer: renderer)
+            _ = try waitElement(renderer.staticTexts.matching(identifier: fixture.projectPath), in: renderer,
+                                timeout: 24, failures: Self.guidedWorkspaceFailures)
+            _ = try waitForSnapshotIdentity(renderer.staticTexts.matching(identifier: "org.fixture.app"), in: renderer)
+            try fixture.assertUnchanged()
+            print("MRK_RELEASE_WORKSPACE=selected-saved-identity-files-unchanged")
+        }
+        try stage("cli-allow") {
+            try press(renderer, "Open all project settings", renderer: renderer, failures: Self.guidedWorkspaceFailures)
+            try expand(renderer, prefix: "Advanced · CLI / AI access", renderer: renderer)
+            try press(renderer, "Check access", renderer: renderer)
+            try press(renderer, "Allow selected project for 1 hour", renderer: renderer)
+            _ = try waitElement(renderer.staticTexts.matching(identifier: "1 project was allowed at last check"), in: renderer)
+            try checkInstalledCliStatus(0)
+        }
+        try stage("cli-revoke") {
+            try press(renderer, "Turn off access", renderer: renderer)
+            _ = try waitElement(renderer.staticTexts.matching(identifier: "Off at last check"), in: renderer)
+            try checkInstalledCliStatus(3)
+            try fixture.assertUnchanged()
+            print("MRK_RELEASE_CLI_ACCESS=denied-allowed-revoked")
+        }
+        try stage("normal-quit") {
+            let sheet = try quitSheet(app, window)
+            try click(sheet.buttons.matching(identifier: "Quit"), "the original Quit button is not actionable")
+            try completeNormalQuit(app)
+            try fixture.assertUnchanged()
+            try acceptFinalScenario()
+        }
+    }
+
+    @MainActor func testCurrentPrepareToQuit() throws {
+        projectRequireDiagnosticMethod = .prepareToQuit
+        defer { projectRequireDiagnosticMethod = nil }
+        continueAfterFailure = false
+        executionTimeAllowance = 300
+        try beginCase(seconds: 300)
+        var launched: (XCUIApplication, XCUIElement, XCUIElement)?
+        try stage("launch") { launched = try launchForJourney(profile: normalJourneyProfile(for: "project-test.xcresult"), guided: true) }
+        guard let (app, window, renderer) = launched else { throw Refusal.condition("maintenance launch returned no original") }
+        try stage("maintenance-ready") {
+            try press(renderer, "Build tools", renderer: renderer)
+            try expand(renderer, prefix: "About this installation", renderer: renderer)
+            try press(renderer, "Refresh preparation status", renderer: renderer, timeout: 24)
+            let consent = "I want to stop the installed Android helper and prepare this application to quit."
+            let check = try waitElement(controls(renderer, [.checkBox], label: consent), in: renderer,
+                                        enabled: true, timeout: 24)
+            try reveal(check, in: renderer)
+            check.click()
+            try require(window.sheets.count == 0, "a sheet was present before preparation")
+            try press(renderer, "Prepare and quit", renderer: renderer)
+        }
+        try stage("maintenance-confirmation") {
+            // Observe only the sheet emitted by the maintenance operation.
+            let sheet = try nativeSheet(window, title: "Quit and discard unsaved drafts?", timeout: 180)
+            try require(sheet.buttons.count == 2 && sheet.buttons.matching(identifier: "Cancel").count == 1,
+                        "maintenance produced an unexpected sheet")
+            try click(sheet.buttons.matching(identifier: "Quit"), "the maintenance Quit button is not actionable")
+            try completeNormalQuit(app)
+            try acceptFinalScenario()
+            print("MRK_RELEASE_PREPARE_TO_QUIT=confirmed-original-quit-and-gate-release")
+        }
     }
 
     @MainActor func testSyntheticProjectPathFields() throws {
