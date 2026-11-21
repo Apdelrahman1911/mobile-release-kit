@@ -333,9 +333,20 @@ def _store_environment(
     return env
 
 
+def _store_ruby_release(tooling_root: Path) -> str:
+    if sys.platform == "darwin":
+        try:
+            with (tooling_root / "Gemfile").open("rb") as gemfile:
+                if b'\nruby "3.3.14"\n' in gemfile.read(64 * 1024):
+                    return "3.3.14"
+        except FileNotFoundError:
+            pass
+    return "3.3.12"
+
+
 def _fastlane_probe_commands(tooling_root: Path) -> tuple[tuple[str, ...], ...]:
     primitive = str(tooling_root / "fastlane/native_process_spawn.rb")
-    marker = "MRK_RUNTIME_3.3.12_FIDDLE_1.1.2"
+    marker = f"MRK_RUNTIME_{_store_ruby_release(tooling_root)}_FIDDLE_1.1.2"
     probe = (
         "require ARGV.fetch(0); "
         "MobileReleaseKit::NativeProcessSpawn.admit_runtime!; "
@@ -357,6 +368,7 @@ def _require_fastlane_bundle(tooling_root: Path, *, cancellation: DefaultCancell
                              source_environment: Mapping[str, str] | None = None,
                              runtime_context: StoreRuntimeContext | None = None) -> None:
     gemfile = tooling_root / "Gemfile"
+    ruby_release = _store_ruby_release(tooling_root)
     if runtime_context is not None:
         if (type(runtime_context) is not StoreRuntimeContext or tooling_root != runtime_context.tooling_root
                 or cancellation is not runtime_context._invocation.cancellation or source_environment is not None):
@@ -376,7 +388,7 @@ def _require_fastlane_bundle(tooling_root: Path, *, cancellation: DefaultCancell
     )
     if shutil.which("ruby", path=environment.get("PATH")) is None:
         raise StoreOperationError(
-            "Pinned Store tooling requires Ruby 3.3.12 and Bundler 4.0.16; "
+            f"Pinned Store tooling requires Ruby {ruby_release} and Bundler 4.0.16; "
             "dependencies are never installed automatically."
         )
 
@@ -400,9 +412,9 @@ def _require_fastlane_bundle(tooling_root: Path, *, cancellation: DefaultCancell
 
     probes = _fastlane_probe_commands(tooling_root)
     ruby = run(list(probes[0]))
-    if ruby is None or ruby.returncode or ruby.stdout.strip() != "3.3.12":
+    if ruby is None or ruby.returncode or ruby.stdout.strip() != ruby_release:
         raise StoreOperationError(
-            "Pinned Store tooling requires Ruby 3.3.12. Select that exact version before running "
+            f"Pinned Store tooling requires Ruby {ruby_release}. Select that exact version before running "
             "online preflight or a Store lane."
         )
     bundler = run(list(probes[1]))
@@ -411,7 +423,7 @@ def _require_fastlane_bundle(tooling_root: Path, *, cancellation: DefaultCancell
     if (bundler is None or bundler.returncode
             or bundler.stdout.strip() != "4.0.16"):
         raise StoreOperationError(
-            "Bundler 4.0.16 is unavailable for the pinned Store tooling. Install it under Ruby 3.3.12; "
+            f"Bundler 4.0.16 is unavailable for the pinned Store tooling. Install it under Ruby {ruby_release}; "
             "dependencies are never installed automatically."
         )
     completed = run(list(probes[2]))
@@ -422,20 +434,20 @@ def _require_fastlane_bundle(tooling_root: Path, *, cancellation: DefaultCancell
         )
         raise StoreOperationError(
             "Pinned Fastlane dependencies from Gemfile.lock are unavailable. "
-            f"Run `{command}` with Ruby 3.3.12 and Bundler 4.0.16, then rerun preflight; dependencies are never "
+            f"Run `{command}` with Ruby {ruby_release} and Bundler 4.0.16, then rerun preflight; dependencies are never "
             "installed automatically."
         )
     # The isolated helpers intentionally disable gems; the outer capture runs
     # under the locked bundle. Admit BOTH actual loaded Fiddle origins, rather
     # than treating one version string as proof of the other runtime.
-    marker = "MRK_RUNTIME_3.3.12_FIDDLE_1.1.2"
-    commands = _fastlane_probe_commands(tooling_root)[3:]
+    marker = f"MRK_RUNTIME_{ruby_release}_FIDDLE_1.1.2"
+    commands = probes[3:]
     for command in commands:
         runtime = run(list(command))
         if (runtime is None or runtime.returncode or runtime.stdout != marker
                 or runtime.stderr):
             raise StoreOperationError(
-                "Pinned Ruby 3.3.12/Fiddle 1.1.2 native-validation tooling is unavailable "
+                f"Pinned Ruby {ruby_release}/Fiddle 1.1.2 native-validation tooling is unavailable "
                 "or its loaded origin is not the pinned distribution. Install the complete "
                 "reviewed Ruby and locked bundle; dependencies are never installed automatically."
             )

@@ -1090,6 +1090,10 @@ def current_supplier_origin(args):
   return "fresh-public-source"
 
 
+def supplier_python_version(target):
+  return "3.14.10" if mac_target(target) == ARM_TARGET else "3.14.7"
+
+
 def fresh_supplier_receipt(body, expected, source_lock, *, target=ARM_TARGET):
   """Validate a pinned receipt, not the native behavior its hashes reference."""
   target = mac_target(target)
@@ -1100,14 +1104,14 @@ def fresh_supplier_receipt(body, expected, source_lock, *, target=ARM_TARGET):
        "files", "notices", "nativeEvidence"}
   need(type(value) is dict and set(value) == fields and type(value["schemaVersion"]) is int
      and value["schemaVersion"] == 1 and value["kind"] == FRESH_SUPPLIER_KIND
-     and value["target"] == target and value["pythonVersion"] == "3.14.7"
+     and value["target"] == target and value["pythonVersion"] == supplier_python_version(target)
      and value["gil"] is True, "fresh-receipt-profile")
   need(all(sha(value[name]) for name in ("sourceLockSha256", "producerSourceSha256", "recipeSha256",
                      "toolchainSha256", "inventorySha256")), "fresh-receipt-hashes")
   need(value["sourceLockSha256"] == digest(source_lock) and type(lock) is dict
      and type(lock.get("schemaVersion")) is int and lock["schemaVersion"] == 1
      and lock.get("target") == {"triple": target, "minimumMacOS": "26.0",
-                 "pythonVersion": "3.14.7", "gil": True}
+                 "pythonVersion": supplier_python_version(target), "gil": True}
      and lock["target"]["gil"] is True, "fresh-source-lock-binding")
   evidence = value["nativeEvidence"]
   need(type(evidence) is dict and set(evidence) == FRESH_EVIDENCE
@@ -1192,7 +1196,7 @@ def signed_python_workflow(target):
 
 
 SIGNED_ORIGINAL_SUPPLIERS = {
-  ARM_TARGET: {'receiptSha256': 'e6b23316078020c513ab1b05b3b55e4f87b8d15908a8dee022ad5ee03b8f763e', 'tarSha256': 'ead75b364118139561a34da6aa48e3c54791e152154ab32c46196b0223962359', 'sourceCommit': 'c6551aa07d0673436aa9587b3a039889d22449c3', 'runId': '40473858216', 'runAttempt': '1', 'artifactId': '12719943283'},
+  ARM_TARGET: {'receiptSha256': '8472de6eaf5c12b9f46d96ff97830c9cf4f02c98943c0c9134eddd48519d589c', 'tarSha256': '2e6efe239af9e7bc6f3688997d41a9607aa2980528d68fcaa8c97e40d611f438', 'sourceCommit': '9a64371c72dc56de3de3bcc63e7a368a91b7437d', 'runId': '44870109681', 'runAttempt': '1', 'artifactId': '14693417053'},
   INTEL_TARGET: {'receiptSha256': 'afba303207b19692b73fb1288b56afcd73378fc29b0b0ede4ff10eb2e0f949b8', 'tarSha256': 'ff976626b48e95abc414d46ff91f1ebb183416356bb4706b8e673b7c9018ca9c', 'sourceCommit': 'a2f7a10b4c86305f5ee65c6779ceaf6b128cd8fa', 'runId': '38343340695', 'runAttempt': '1', 'artifactId': '11787588635'},
 }
 
@@ -1226,7 +1230,7 @@ def signed_python_receipt(body, signed, args, original, original_receipt, produc
   need(type(value) is dict and set(value) == keys and type(value["schemaVersion"]) is int
      and value["schemaVersion"] == 1 and value["kind"] == SIGNED_PYTHON_KIND
      and value["purpose"] == "configured-shipping" and value["target"] == command_target(args)
-     and value["pythonVersion"] == "3.14.7", "signed-python-receipt-kind")
+     and value["pythonVersion"] == supplier_python_version(command_target(args)), "signed-python-receipt-kind")
   supplier = value["originalSupplier"]
   need(type(supplier) is dict and set(supplier) == {"receiptSha256", "tarSha256", "sourceCommit", "runId", "runAttempt", "artifactId"}
      and supplier == SIGNED_ORIGINAL_SUPPLIERS[command_target(args)]
@@ -1431,19 +1435,30 @@ def signed_store_selection_data(body, *, target=ARM_TARGET):
   need(type(body) is bytes and 0 < len(body) <= SIGNED_STORE_SELECTION_LIMIT, "store-selection-size")
   value = decode(body.decode("utf-8", "strict"))
   need(type(value) is dict and type(value.get("schemaVersion")) is int
-     and value["schemaVersion"] == 1, "store-selection-shape")
-  need(value != {"schemaVersion": 1, "state": "unconfigured"}, "store-selection-unconfigured")
-  need(set(value) == {"schemaVersion", "state", "source", "runId", "runAttempt", "artifacts"}
-     and value["state"] == "configured" and maintenance_hex(value["source"], 40)
-     and type(value["artifacts"]) is dict and set(value["artifacts"]) == set(MAC_TARGETS),
-     "store-selection-shape")
-  need(all(type(item) is str and re.fullmatch(r"[1-9][0-9]{0,15}", item)
-       and int(item) <= 9007199254740991
-       for item in (value["runId"], value["runAttempt"], *value["artifacts"].values())),
-     "store-selection-identifiers")
-  need(len(set(value["artifacts"].values())) == 2, "store-selection-distinct-artifacts")
-  return {"source": value["source"], "runId": value["runId"], "runAttempt": value["runAttempt"],
-      "artifactId": value["artifacts"][target], "target": target, "selectionSha256": digest(body)}
+     and value["schemaVersion"] in (1, 2), "store-selection-shape")
+  need(value != {"schemaVersion": value["schemaVersion"], "state": "unconfigured"},
+       "store-selection-unconfigured")
+  need(value.get("state") == "configured", "store-selection-shape")
+  common = {"source", "runId", "runAttempt"}
+  if value["schemaVersion"] == 1:
+    need(set(value) == {"schemaVersion", "state", "artifacts"} | common
+       and type(value["artifacts"]) is dict and set(value["artifacts"]) == set(MAC_TARGETS),
+       "store-selection-shape")
+    selected = {name: {**{key: value[key] for key in common}, "artifactId": artifact}
+          for name, artifact in value["artifacts"].items()}
+  else:
+    need(set(value) == {"schemaVersion", "state", "targets"}
+       and type(value["targets"]) is dict and set(value["targets"]) == set(MAC_TARGETS),
+       "store-selection-shape")
+    selected = value["targets"]
+  for row in selected.values():
+    need(type(row) is dict and set(row) == common | {"artifactId"}
+       and maintenance_hex(row["source"], 40), "store-selection-shape")
+    need(all(type(item) is str and re.fullmatch(r"[1-9][0-9]{0,15}", item)
+         and int(item) <= 9007199254740991 for item in (row["runId"], row["runAttempt"], row["artifactId"])),
+         "store-selection-identifiers")
+  need(len({row["artifactId"] for row in selected.values()}) == len(MAC_TARGETS), "store-selection-distinct-artifacts")
+  return {**selected[target], "target": target, "selectionSha256": digest(body)}
 
 
 def signed_store_selection(target=ARM_TARGET):
@@ -1848,7 +1863,7 @@ def _git_observation_bootstraps(fetch_observation=False, push_observation=False,
 
 
 def current_source(*, history_provider=False, store_runtime=False, fetch_observation=False, push_observation=False,
-          git_observation=False):
+          git_observation=False, target=ARM_TARGET):
   """Capture DATA, including the committed CA's one explicit projection map."""
   need(type(history_provider) is bool, "current-history-provider-profile")
   need(type(store_runtime) is bool, "current-store-runtime-profile")
@@ -1874,10 +1889,10 @@ def current_source(*, history_provider=False, store_runtime=False, fetch_observa
     with parent(source / name) as (fd, leaf):
       body, info = read_at(fd, leaf, limit)
     captured[name] = (body, stat.S_IMODE(info.st_mode))
+  preparer = current_preparer(captured)
   if store_runtime:
 
 
-    preparer = current_preparer(captured)
     names = preparer._store_tooling_names(core["tooling.py"][0])
     for name in names:
       need(name not in captured, "current-store-source-collision")
@@ -1890,9 +1905,15 @@ def current_source(*, history_provider=False, store_runtime=False, fetch_observa
   projection = {}
   for name, (body, _) in captured.items():
     if name != CURRENT_HELPER_SOURCE:
-      target = "desktop/github-ca.pem" if name == CURRENT_CA_SOURCE else name
-      need(target not in projection, "current-source-projection-collision")
-      projection[target] = (body, 0o444)
+      projected_name = "desktop/github-ca.pem" if name == CURRENT_CA_SOURCE else name
+      if name == CURRENT_CA_SOURCE:
+        projected = current_ca_payload(captured, preparer=preparer)
+      elif store_runtime and target == ARM_TARGET and name in ("Gemfile", "Gemfile.lock"):
+        projected = preparer.macos_store_dependency_input(name, body)
+      else:
+        projected = body
+      need(projected_name not in projection, "current-source-projection-collision")
+      projection[projected_name] = (projected, 0o444)
   directories(projection)
   return captured, projection, digest(canonical(rows))
 
@@ -1971,6 +1992,12 @@ def current_work_root(path, expected_parent):
          "current-work-root-post-changed")
     finally:
       close_once(original)
+
+
+def current_ca_payload(captured, *, preparer=None):
+  if preparer is None:
+    preparer = current_preparer(captured)
+  return preparer.macos_trust_bundle(captured[CURRENT_CA_SOURCE][0])
 
 
 def current_preparer(captured):
@@ -2235,7 +2262,7 @@ def current_runtime_command(args):
     need(sha(args.expected_source) and sha(args.expected_manifest), "current-reviewed-digests")
   parents = current_paths(args)
   captured, projection, source_digest = current_source(history_provider=provider_enabled, store_runtime=store_enabled,
-    fetch_observation=fetch_observation, push_observation=push_observation, git_observation=git_observation)
+    fetch_observation=fetch_observation, push_observation=push_observation, git_observation=git_observation, target=target)
   if provider_enabled:
     need(captured[HISTORY_PROVIDER_PROFILE][0] == provider_source[0], "history-provider-source-projection")
   if final and not composing:
@@ -2315,7 +2342,7 @@ def current_runtime_command(args):
                "qualification": "prepared-not-native-verified"}, "current-preparer-result")
       need(tree(source, current_root_mode=0o555) == projection
          and current_source(history_provider=provider_enabled, store_runtime=store_enabled, fetch_observation=fetch_observation,
-                  push_observation=push_observation, git_observation=git_observation) == (captured, projection, source_digest),
+                  push_observation=push_observation, git_observation=git_observation, target=target) == (captured, projection, source_digest),
          "current-source-post-changed")
       if fresh_inputs is not None:
         need(fresh_supplier(args) == fresh_inputs, "fresh-supplier-post-changed")

@@ -104,7 +104,7 @@ PYTHON_PHASES = ("python-engineering", "python-shipping")
 PYTHON_IDENTIFIER = "dev.mobile-release-kit.desktop.python"
 PYTHON_ROLES = ("python-sign", "python-verify", "python-modules", "python-loader", "python-tls", "python-cancellation")
 PYTHON_SUPPLIERS = {
-    ARM_TARGET: {'receiptSha256': 'e6b23316078020c513ab1b05b3b55e4f87b8d15908a8dee022ad5ee03b8f763e', 'tarSha256': 'ead75b364118139561a34da6aa48e3c54791e152154ab32c46196b0223962359', 'sourceCommit': 'c6551aa07d0673436aa9587b3a039889d22449c3', 'runId': '40473858216', 'runAttempt': '1', 'artifactId': '12719943283'},
+    ARM_TARGET: {'receiptSha256': '8472de6eaf5c12b9f46d96ff97830c9cf4f02c98943c0c9134eddd48519d589c', 'tarSha256': '2e6efe239af9e7bc6f3688997d41a9607aa2980528d68fcaa8c97e40d611f438', 'sourceCommit': '9a64371c72dc56de3de3bcc63e7a368a91b7437d', 'runId': '44870109681', 'runAttempt': '1', 'artifactId': '14693417053'},
     INTEL_TARGET: {'receiptSha256': 'afba303207b19692b73fb1288b56afcd73378fc29b0b0ede4ff10eb2e0f949b8', 'tarSha256': 'ff976626b48e95abc414d46ff91f1ebb183416356bb4706b8e673b7c9018ca9c', 'sourceCommit': 'a2f7a10b4c86305f5ee65c6779ceaf6b128cd8fa', 'runId': '38343340695', 'runAttempt': '1', 'artifactId': '11787588635'},
 }
 
@@ -7020,7 +7020,7 @@ class Operation:
                   "producerProfileSha256": digest(self.producer_profile), "serviceProfileSha256": digest(self.service_profile),
                   "entitlementsSha256": digest(self.python_empty), "codeDirectoryFlags": self.python_flags, "timestampRequested": True}
         return {"schemaVersion": 1, "kind": self.stager.SIGNED_PYTHON_KIND, "purpose": "configured-shipping",
-                "target": self.target, "pythonVersion": "3.14.7", "originalSupplier": self.python_pins,
+                "target": self.target, "pythonVersion": self.stager.supplier_python_version(self.target), "originalSupplier": self.python_pins,
                 "originalInventorySha256": self.python_inventory,
                 "originalPython": row(self.python_original[self.stager.SIGNED_PYTHON_PATH][0]), "signedPython": row(self.python_signed),
                 "signer": signer, "nativeEvidence": {record["role"]: {key: record[key] for key in ("stdoutSha256", "stderrSha256")}

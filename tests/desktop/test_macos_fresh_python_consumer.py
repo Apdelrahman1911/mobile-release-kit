@@ -48,12 +48,12 @@ def fixture_data(target="aarch64-apple-darwin"):
         notices.append(name)
         required.append({"component": "inert", "path": str(index), "bytes": len(body), "sha256": TOOL.digest(body)})
     lock = TOOL.canonical({"schemaVersion": 1, "target": {
-        "triple": target, "minimumMacOS": "26.0", "pythonVersion": "3.14.7", "gil": True},
+        "triple": target, "minimumMacOS": "26.0", "pythonVersion": TOOL.supplier_python_version(target), "gil": True},
         "requiredPublicNoticeInputs": required}) + b"\n"
     rows = [{"path": name, "size": len(body), "sha256": TOOL.digest(body),
              "mode": 0o555 if name == "python/bin/python3" else 0o444} for name, body in sorted(files.items())]
     receipt = {"schemaVersion": 1, "kind": TOOL.FRESH_SUPPLIER_KIND, "target": target,
-        "pythonVersion": "3.14.7", "gil": True, "sourceLockSha256": TOOL.digest(lock),
+        "pythonVersion": TOOL.supplier_python_version(target), "gil": True, "sourceLockSha256": TOOL.digest(lock),
         "producerSourceSha256": "1" * 64, "recipeSha256": "2" * 64, "toolchainSha256": "3" * 64,
         "inventorySha256": TOOL.digest(TOOL.canonical(rows)), "files": rows, "notices": notices,
         "nativeEvidence": {name: "4" * 64 for name in TOOL.FRESH_EVIDENCE}}
@@ -79,11 +79,11 @@ def aqua_helpers():
     """Only the two real pure predicates; never native main or owner import."""
     source = (SOURCE / "desktop/tools/macos_aqua_qualification.py").read_text(encoding="utf-8")
     tree = ast.parse(source)
-    names = {"recovery_supplier_route", "recovery_supplier_matches"}
+    names = {"target_data", "recovery_supplier_route", "recovery_supplier_matches"}
     nodes = [node for node in tree.body if isinstance(node, ast.FunctionDef) and node.name in names]
-    if len(nodes) != 2:
+    if len(nodes) != len(names):
         raise AssertionError("missing exact Aqua supplier predicates")
-    namespace = {"need": TOOL.need, "re": re}
+    namespace = {"need": TOOL.need, "re": re, "ARM_TARGET": TOOL.ARM_TARGET, "INTEL_TARGET": TOOL.INTEL_TARGET}
     exec(compile(ast.Module(body=nodes, type_ignores=[]), "<actual-aqua-pure-supplier-predicates>", "exec"), namespace)
     return namespace, source
 
@@ -99,7 +99,7 @@ def prepared_fixture(target="aarch64-apple-darwin"):
         inputs = {"src/mobile_release/__init__.py": b'__version__ = "0.1.0"\n',
                   "src/mobile_release/_desktop_engine.py": engine,
                   TOOL.CURRENT_HELPER_SOURCE: helper,
-                  TOOL.CURRENT_CA_SOURCE: b"INERT CA DATA; NOT A TRUST STORE\n",
+                  TOOL.CURRENT_CA_SOURCE: (SOURCE / TOOL.CURRENT_CA_SOURCE).read_bytes(),
                   TOOL.source_lock_input(target): lock}
         if target == "x86_64-apple-darwin":
             inputs["desktop/macos-installed-inputs/build-release-intel.json"] = TOOL.canonical({
@@ -152,7 +152,7 @@ def signed_fixture_data(target="aarch64-apple-darwin"):
     def row(content):
         return {"path": TOOL.SIGNED_PYTHON_PATH, "size": len(content), "mode": 0o555, "sha256": TOOL.digest(content)}
     value = {"schemaVersion": 1, "kind": "mrk-macos-python-signed-derivation-v1", "purpose": "configured-shipping",
-        "target": target, "pythonVersion": "3.14.7", "originalSupplier": nomination,
+        "target": target, "pythonVersion": TOOL.supplier_python_version(target), "originalSupplier": nomination,
         "originalInventorySha256": receipt["inventorySha256"], "originalPython": row(files[TOOL.SIGNED_PYTHON_PATH]),
         "signedPython": row(signed),
         "signer": {"sourceCommit": "a" * 40,
@@ -546,7 +546,7 @@ class MacFreshPythonConsumerData(unittest.TestCase):
         route, matches = helpers["recovery_supplier_route"], helpers["recovery_supplier_matches"]
         fresh = {"supplierOrigin": "fresh-public-source", "supplierReceiptSha256": "a"*64,
                  "supplierSourceLockSha256": "b"*64, "supplierProfile": TOOL.FRESH_SUPPLIER_KIND,
-                 "pythonVersion": "3.14.7", "gil": True}
+                 "pythonVersion": TOOL.supplier_python_version(TOOL.ARM_TARGET), "gil": True}
         matches(fresh, "fresh-public-source", "a"*64)
         matches({"supplierOnlyReuse": True}, "historical", None)
         for origin,pin in ((None,None),("unknown",None),("fresh-public-source",None),

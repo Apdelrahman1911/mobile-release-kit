@@ -13,7 +13,8 @@ module StoreRuntimeComponent
   # Consumer smoke after the authenticated build-object projection and signing.
   # Read-only, no Store lane, no gem installation, no notice regeneration.
   def self.projected_smoke(root, architecture)
-    abort "Unsupported runtime" unless RUBY_VERSION == "3.3.12" && %w[arm64 x86_64].include?(architecture)
+    expected = { "arm64" => "3.3.14", "x86_64" => "3.3.12" }
+    abort "Unsupported runtime" unless RUBY_VERSION == expected[architecture]
     abort "Runtime architecture differs" unless RbConfig::CONFIG.fetch("host_cpu") == architecture
     root = File.realpath(root)
     require "bundler"
@@ -26,6 +27,8 @@ module StoreRuntimeComponent
     abort "CRC32 extension escaped runtime" unless loaded.length == 1 && File.realpath(loaded.first).start_with?(root + "/")
     abort "CRC32 result differs" unless Digest::CRC32.hexdigest("123456789") == "cbf43926"
     apple_crypto_smoke
+    openssl = architecture == "arm64" ? "3.5.9" : "3.5.8"
+    abort "Projected OpenSSL mismatch" unless OpenSSL::OPENSSL_LIBRARY_VERSION.start_with?("OpenSSL #{openssl} ")
     Fastlane::FastFile.new(File.join(root, "tooling/fastlane/Fastfile"))
     puts "Projected signed runtime: native CRC32, Apple P256 crypto and Fastlane require/parse passed; no lane or Store request."
   end
@@ -132,7 +135,7 @@ module StoreRuntimeComponent
     root = File.realpath(root)
     abort "Unsupported target" unless %w[arm64 x86_64].include?(architecture)
     abort "Unsupported mode" unless %w[default bundle].include?(mode)
-    abort "Ruby mismatch" unless RUBY_VERSION == "3.3.12" && RUBY_ENGINE == "ruby"
+    abort "Ruby mismatch" unless RUBY_VERSION == "3.3.14" && RUBY_ENGINE == "ruby"
     cpu = RbConfig::CONFIG.fetch("host_cpu")
     abort "Ruby architecture mismatch" unless (cpu == architecture || cpu == "aarch64" && architecture == "arm64")
     abort "Not Darwin" unless RbConfig::CONFIG.fetch("host_os").start_with?("darwin")
@@ -146,7 +149,7 @@ module StoreRuntimeComponent
     require "psych"
     require "json"
     require "zlib"
-    abort "OpenSSL mismatch" unless OpenSSL::OPENSSL_LIBRARY_VERSION.start_with?("OpenSSL 3.5.8 ")
+    abort "OpenSSL mismatch" unless OpenSSL::OPENSSL_LIBRARY_VERSION.start_with?("OpenSSL 3.5.9 ")
     abort "JSON smoke failed" unless JSON.parse(JSON.generate({ "ok" => true })) == { "ok" => true }
     abort "YAML smoke failed" unless Psych.safe_load("ok: true\n") == { "ok" => true }
     abort "Zlib smoke failed" unless Zlib::Inflate.inflate(Zlib::Deflate.deflate("offline")) == "offline"
@@ -215,10 +218,10 @@ if $PROGRAM_NAME == __FILE__
   if mode == "projected-smoke"
     StoreRuntimeComponent.projected_smoke(root, architecture)
   elsif mode == "headers"
-    abort "Unsupported runtime" unless RUBY_VERSION == "3.3.12" && %w[arm64 x86_64].include?(architecture)
+    abort "Unsupported runtime" unless RUBY_VERSION == "3.3.14" && %w[arm64 x86_64].include?(architecture)
     StoreRuntimeComponent.install_headers(root, ARGV[3])
   elsif mode == "trim-notifier"
-    abort "Unsupported runtime" unless RUBY_VERSION == "3.3.12" && %w[arm64 x86_64].include?(architecture)
+    abort "Unsupported runtime" unless RUBY_VERSION == "3.3.14" && %w[arm64 x86_64].include?(architecture)
     require "bundler"
     abort "Bundler mismatch" unless Bundler::VERSION == "4.0.16"
     StoreRuntimeComponent.remove_optional_notifier(root, Bundler.load.specs)

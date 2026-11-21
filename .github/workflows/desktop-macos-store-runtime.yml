@@ -19,9 +19,15 @@ on:
       - .github/scripts/ci_prepare.py
       - desktop/macos-cpython-source-inputs/source-lock.json
       - desktop/cpython-source-inputs/github-ca.pem
+      - desktop/tools/prepare_runtime.py
       - .github/workflows/desktop-macos-store-runtime.yml
   workflow_dispatch:
     inputs:
+      architecture:
+        description: Native Store runtime architecture
+        type: choice
+        options: [both, arm64]
+        default: both
       base_run_id:
         description: Optional original base run ID (skip native rebuild; all reuse fields required)
         type: string
@@ -57,11 +63,7 @@ jobs:
       fail-fast: false
       max-parallel: 2
       matrix:
-        include:
-          - runner: macos-26
-            arch: arm64
-          - runner: macos-26-intel
-            arch: x86_64
+        include: ${{ (inputs.architecture == 'arm64' || (github.event_name == 'push' && contains(github.event.head_commit.message, '[macos-arm64-supplier]'))) && fromJSON('[{"runner":"macos-26","arch":"arm64"}]') || fromJSON('[{"runner":"macos-26","arch":"arm64"},{"runner":"macos-26-intel","arch":"x86_64"}]') }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -87,7 +89,7 @@ jobs:
         run: |
           set -euo pipefail
           bash desktop/tools/build_macos_store_runtime.sh base \
-            "$WORK_ROOT/inputs/ruby-3.3.12" "$WORK_ROOT/inputs/openssl-3.5.8" \
+            "$WORK_ROOT/inputs/ruby-3.3.14" "$WORK_ROOT/inputs/openssl-3.5.9" \
             "$WORK_ROOT/inputs/yaml-0.2.5" "$WORK_ROOT/inputs/ca.pem" \
             "$WORK_ROOT/ruby-base" "$TARGET_ARCH"
           python -I -B desktop/tools/macos_store_component.py archive \
@@ -119,11 +121,7 @@ jobs:
       fail-fast: false
       max-parallel: 2
       matrix:
-        include:
-          - runner: macos-26
-            arch: arm64
-          - runner: macos-26-intel
-            arch: x86_64
+        include: ${{ (inputs.architecture == 'arm64' || (github.event_name == 'push' && contains(github.event.head_commit.message, '[macos-arm64-supplier]'))) && fromJSON('[{"runner":"macos-26","arch":"arm64"}]') || fromJSON('[{"runner":"macos-26","arch":"arm64"},{"runner":"macos-26-intel","arch":"x86_64"}]') }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

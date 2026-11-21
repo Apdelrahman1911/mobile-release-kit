@@ -352,7 +352,17 @@ mod selected{
         let facts=if let Some(client)=client.as_mut(){
             original.preparation.run_maintenance(client,original.clock.get().unwrap(),&original.signal)
         }else{original.control.poisoned();service_setup::MaintenanceRun::default()};
-        original.control.changed();WorkerReturn{facts,first:original.control.failure()}
+        original.control.changed();
+        let first=original.control.failure();
+        if !facts.prepared() || first.is_some(){
+            let route=if original.removal.is_some(){"remove"}else{"prepare"};
+            mrk_macos_installed_native::removal_coordinator::removal_trace(&format!(
+                "app maintenance-worker=refused route={route} branch={:?} first={:?} known={} checked={} started={} tail={} unregister={} absent={} callback={} peer={} retained={}",
+                facts.branch,first.map(|(reason,_)|reason),facts.known,facts.checked,facts.started_or_uncertain,
+                facts.tail_received,facts.unregister_accepted,facts.not_registered,facts.callback_retired,
+                facts.peer_ended,facts.retained.is_some()));
+        }
+        WorkerReturn{facts,first}
     }
     async fn coordinate(original:Arc<Original>,mut release:oneshot::Receiver<()>,worker_enter:oneshot::Sender<()>)->bool{
         let mut worker_enter=Some(worker_enter);let mut released=false;let mut worker=original.worker.lock().await;

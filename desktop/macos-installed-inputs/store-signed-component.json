@@ -1,11 +1,18 @@
 {
-  "schemaVersion": 1,
+  "schemaVersion": 2,
   "state": "configured",
-  "source": "f05ec74e3d061e5576e5473a62be809932f8372c",
-  "runId": "38924519973",
-  "runAttempt": "1",
-  "artifacts": {
-    "aarch64-apple-darwin": "12055694185",
-    "x86_64-apple-darwin": "12056731787"
+  "targets": {
+    "aarch64-apple-darwin": {
+      "source": "ac30ab2603dc8f478bbea6b4dc70a1778f7b2570",
+      "runId": "44873133037",
+      "runAttempt": "1",
+      "artifactId": "14694658093"
+    },
+    "x86_64-apple-darwin": {
+      "source": "f05ec74e3d061e5576e5473a62be809932f8372c",
+      "runId": "38924519973",
+      "runAttempt": "1",
+      "artifactId": "12056731787"
+    }
   }
 }

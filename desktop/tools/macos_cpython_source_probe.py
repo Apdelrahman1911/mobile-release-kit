@@ -223,7 +223,8 @@ def modules(context):
 
     payload, _, _ = configuration(context)
     python = payload / "python"
-    need(sys.version_info[:3] == (3, 14, 7) and sys._is_gil_enabled()
+    expected_version = (3, 14, 10) if context["target"] == "aarch64-apple-darwin" else (3, 14, 7)
+    need(sys.version_info[:3] == expected_version and sys._is_gil_enabled()
          and sysconfig.get_config_var("Py_GIL_DISABLED") in (None, 0)
          and sys.platform == "darwin" and os.uname().machine == target_description(context["target"])[0]
          and struct.calcsize("P") == 8, "native-version-gil-architecture")
@@ -300,7 +301,7 @@ def modules(context):
     libc.qsort.restype = None
     libc.qsort(array, len(array), ctypes.sizeof(ctypes.c_int), compare)
     need(list(array) == [-4, 0, 2, 6, 9] and comparisons, "native-ffi-callback")
-    return {"version": "3.14.7", "gil": True, "builtins": sorted(sys.builtin_module_names),
+    return {"version": ".".join(map(str, expected_version)), "gil": True, "builtins": sorted(sys.builtin_module_names),
             "prefix": sys.prefix, "sysPath": sys.path, "moduleOrigins": origins,
             "zlib": "1.3.2", "ffi": "Apple-system-call-variadic-and-callback"}
 
@@ -342,7 +343,9 @@ def tls(context):
         body = read(fixtures / name, size)
         need(len(body) == size and digest(body) == expected, "native-public-tls-fixture")
         originals[name] = expected
-    need(re.fullmatch(r"OpenSSL 3\.5\.8(?: [A-Za-z0-9 ]+)?", ssl.OPENSSL_VERSION), "native-openssl-version")
+    expected_ssl = "3.5.9" if context["target"] == "aarch64-apple-darwin" else "3.5.8"
+    need(re.fullmatch(r"OpenSSL " + re.escape(expected_ssl) + r"(?: [A-Za-z0-9 ]+)?",
+                      ssl.OPENSSL_VERSION), "native-openssl-version")
 
     def handshake(host, ca):
         server_context = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
