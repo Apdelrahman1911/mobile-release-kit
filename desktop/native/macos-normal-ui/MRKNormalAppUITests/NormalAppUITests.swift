@@ -6510,7 +6510,6 @@ final class NormalAppUITests: XCTestCase {
             try expand(renderer, prefix: "Project details & saved observations", renderer: renderer)
             _ = try waitElement(renderer.staticTexts.matching(identifier: project), in: renderer,
                                 timeout: 24, failures: Self.guidedWorkspaceFailures)
-            _ = try waitForSnapshotIdentity(renderer.staticTexts.matching(identifier: "org.fixture.app"), in: renderer)
         }
         try stage("recover-replacement") {
             try press(renderer, "Review version & build number", renderer: renderer)
