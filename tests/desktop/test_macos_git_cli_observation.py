@@ -457,6 +457,16 @@ class GitCliTests(unittest.TestCase):
                     self.assertEqual(after["git"][path][1][3:5], before["git"]["."][1][3:5], path)
                 self.assertTrue(G.compare(before, after, case, HEAD))
                 self.assertEqual(before["files"], after["files"])
+                wrong = copy.deepcopy(after)
+                shape = wrong["directories"]["."]
+                wrong["directories"]["."] = (*shape[:-2], shape[-2] + 1, shape[-1])
+                with self.assertRaisesRegex(ValueError, "git-cli-project-directory-root-mtime-changed"):
+                    G.compare(before, wrong, case, HEAD)
+                wrong = copy.deepcopy(after)
+                file = G.shared.FILES[0]
+                wrong["files"][file] = (wrong["files"][file][0], "f" * 64)
+                with self.assertRaisesRegex(ValueError, "git-cli-project-file-1-content-changed"):
+                    G.compare(before, wrong, case, HEAD)
                 for path in ("HEAD", "config", "refs/heads/main", "logs/HEAD"):
                     wrong = copy.deepcopy(after)
                     row = wrong["git"][path]

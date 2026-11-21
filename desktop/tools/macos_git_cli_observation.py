@@ -327,7 +327,20 @@ def capture(f):
 
 def compare(before, after, case, head):
     policy(case)
-    _need(before["files"] == after["files"] and before["directories"] == after["directories"], "git-cli-project-changed")
+    before_files, after_files = before["files"], after["files"]
+    _need(before_files.keys() == after_files.keys() == set(shared.FILES), "git-cli-project-file-roster")
+    for role, name in enumerate(shared.FILES, start=1):
+        original, current = before_files[name], after_files[name]
+        _need(original[1] == current[1], f"git-cli-project-file-{role}-content-changed")
+        _need(original == current, f"git-cli-project-file-{role}-metadata-changed")
+    before_dirs, after_dirs = before["directories"], after["directories"]
+    roles = {".": "root", "app": "app", "release": "release"}
+    _need(before_dirs.keys() == after_dirs.keys() == roles.keys(), "git-cli-project-directory-roster")
+    fields = ("device", "inode", "mode", "uid", "gid", "link-count", "size", "mtime", "ctime")
+    for directory, role in roles.items():
+        original, current = before_dirs[directory], after_dirs[directory]
+        for field, old_value, new_value in zip(fields, original, current, strict=True):
+            _need(old_value == new_value, f"git-cli-project-directory-{role}-{field}-changed")
     old, new = before["git"], after["git"]
     upstream.fixture_config(old["config"][3])
     branch_paths = {BRANCH_REF, "logs/" + BRANCH_REF}
