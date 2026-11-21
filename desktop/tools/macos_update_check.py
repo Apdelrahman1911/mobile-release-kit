@@ -707,6 +707,11 @@ def main():
         result["steps"] = steps
         if args.mode in ("remove", "delete-data", "repeat", "repeat-after-dialogs") and "removeReturn" not in result:
             result["removeReturn"] = next((step["returncode"] for step in steps if step.get("role") == "remove"), None)
+        if args.mode in ("remove", "repeat", "repeat-after-dialogs"):
+            recorded = [step["returncode"] for step in steps if step.get("role") == "remove-again"
+                        and step.get("argv") == ["installer", "-pkg", "Remove.pkg"]]
+            if recorded:
+                result["secondRemoveReturn"] = recorded[-1]
         try:
             install_log_excerpt(evidence)
         except Exception as error:  # evidence capture must not mask the result
