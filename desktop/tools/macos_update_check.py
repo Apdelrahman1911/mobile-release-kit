@@ -631,7 +631,7 @@ def main():
     parser.add_argument("--selection", required=True)
     parser.add_argument("--work", required=True)
     parser.add_argument("--mode", choices=("update", "fresh", "remove", "uninstaller", "delete-data",
-                                           "repeat", "repeat-after-dialogs", "prepare-quit", "performance",
+                                           "repeat", "repeat-after-dialogs", "removal-archive", "prepare-quit", "performance",
                                            "update-credentials", "release-asset", "workspace-cli",
                                            "workspace-xctest", "prepare-xctest", "performance-long", "core-recovery",
                                            "recovery-xctest"), default="update")
@@ -647,6 +647,7 @@ def main():
         if args.mode not in ("update", "update-credentials"):
             {"fresh": fresh_check, "remove": remove_check, "uninstaller": uninstaller_installed_check,
              "delete-data": remove_check, "repeat": remove_check, "repeat-after-dialogs": remove_check,
+             "removal-archive": remove_check,
              "prepare-quit": prepare_quit_check, "performance": fresh_check, "release-asset": release_asset_check,
              "workspace-cli": workspace_cli_check, "workspace-xctest": workspace_xctest,
              "prepare-xctest": workspace_xctest, "performance-long": performance_long_check,
@@ -705,7 +706,7 @@ def main():
         result["failure"] = str(error)[:200]
     finally:
         result["steps"] = steps
-        if args.mode in ("remove", "delete-data", "repeat", "repeat-after-dialogs") and "removeReturn" not in result:
+        if args.mode in ("remove", "delete-data", "repeat", "repeat-after-dialogs", "removal-archive") and "removeReturn" not in result:
             result["removeReturn"] = next((step["returncode"] for step in steps if step.get("role") == "remove"), None)
         if args.mode in ("remove", "repeat", "repeat-after-dialogs"):
             recorded = [step["returncode"] for step in steps if step.get("role") == "remove-again"
@@ -1350,6 +1351,26 @@ def removal_refusal_evidence(pid, work, evidence, label):
         (evidence / f"{label}-maintenance-probe-error.txt").write_text(type(error).__name__ + "\n")
 
 
+def removal_archive_identities():
+    before = STATE.lstat()
+    need(stat.S_ISDIR(before.st_mode) and before.st_uid == before.st_gid == 0,
+         "removal-archive-parent")
+    entries = {}
+    for path in STATE.iterdir():
+        if not path.name.startswith(".remove-"):
+            continue
+        info = path.lstat()
+        need(re.fullmatch(r"\.remove-[0-9a-f]{32}", path.name) and path.name[8:] != "0" * 32
+             and stat.S_ISDIR(info.st_mode) and stat.S_IMODE(info.st_mode) == 0o700
+             and info.st_uid == info.st_gid == info.st_flags == 0 and info.st_dev == before.st_dev
+             and info.st_ino != 0, "removal-archive-protection")
+        entries[path.name] = (info.st_dev, info.st_ino)
+    after = STATE.lstat()
+    need(os.path.samestat(before, after) and before.st_mtime_ns == after.st_mtime_ns
+         and before.st_ctime_ns == after.st_ctime_ns, "removal-archive-parent-changed")
+    return entries
+
+
 def remove_check(selection, work, evidence, steps, result):
     """Fresh install, launch, live removal through the matching Remove.pkg
     (confirming the app's own sheet), then check deletion or reinstall."""
@@ -1357,6 +1378,7 @@ def remove_check(selection, work, evidence, steps, result):
     row = selection["next"]
     mode = result["mode"]
     repeat = mode in ("repeat", "repeat-after-dialogs")
+    check_archives = repeat or mode == "removal-archive"
     folder = fetch("next", row, work, steps)
     mount, roster = removal_image(selection["removal"], work, steps)
     result["removalImageRoster"] = roster
@@ -1379,6 +1401,10 @@ def remove_check(selection, work, evidence, steps, result):
         if mode == "delete-data":
             confirmed_data_deletion(mount, work, evidence, result, plant_decoys())
             return
+        archives = removal_archive_identities() if check_archives else {}
+        if check_archives:
+            result["removalArchiveCount"] = len(archives)
+            need(len(archives) == 1, "first-removal-archive-roster")
         # Reinstall after confirmed removal with the matching installer.
         rc = install("reinstall", folder, steps, evidence=evidence)
         result["reinstallReturn"] = rc
@@ -1389,6 +1415,12 @@ def remove_check(selection, work, evidence, steps, result):
              == (row["release"], row["packageVersion"], row["packageSha256"]), "reinstall-identity")
         need(all(manifest().get(k) == v for k, v in seeded.items()), "user-data-changed-by-reinstall")
         result["launchAfterReinstall"] = launch_smoke("after-reinstall", work, evidence, steps)
+        if check_archives:
+            after = removal_archive_identities()
+            result["removalArchiveIdentityPreserved"] = after == archives
+            need(after == archives, "reinstall-removal-archive-changed")
+        if mode == "removal-archive":
+            return
         if repeat:
             if mode == "repeat-after-dialogs":
                 _, before_repeat = uninstaller_while_installed(mount, work, evidence, steps, result)
@@ -1396,6 +1428,10 @@ def remove_check(selection, work, evidence, steps, result):
                 before_repeat = manifest()
             result["secondRemoval"] = live_remove(mount, work, evidence, steps, "remove-again", observe_release=row["release"])
             need(manifest() == before_repeat, "user-data-changed-by-second-removal")
+            final = removal_archive_identities()
+            result["finalRemovalArchiveCount"] = len(final)
+            need(len(final) == 2 and all(final.get(name) == identity for name, identity in archives.items()),
+                 "second-removal-archive-roster")
             return
         uninstaller_check(mount, work, evidence, steps, result)
     finally:
