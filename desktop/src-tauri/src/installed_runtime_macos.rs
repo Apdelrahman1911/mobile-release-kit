@@ -329,7 +329,14 @@ impl AndroidServiceIdentitySlots {
     fn recheck_admission(&mut self,recheck:bool,end:Instant,stop:&watch::Receiver<bool>)->Result<()> {
         for index in 0..self.original.records.len() {
             if self.original.records[index].state==State::Owned {
-                self.attempt_admission(recheck,|book|book.check_name(index,end,stop))?;
+                self.attempt_admission(recheck,|book|book.check_name(index,end,stop)).map_err(|failure|{
+                    if recheck&&self.gate.source_has_removal_cutoff(){
+                        mrk_macos_installed_native::removal_coordinator::removal_trace(&format!(
+                            "app maintenance-identity-recheck=refused slot={index} reason={failure:?} parent_veto={}",
+                            self.original.removal_clock_vetoed()));
+                    }
+                    failure
+                })?;
             }
         }
         if self.gate.source_has_removal_cutoff(){self.original.point(end,stop)}else{self.gate.source_work()}
@@ -463,11 +470,11 @@ impl AppRemovalWorkGate {
         use std::sync::atomic::Ordering;
         if at>Instant::now(){self.original.unknown.store(true,Ordering::SeqCst);return;}
         if matches!(failure,AdmissionFailure::Unknown|AdmissionFailure::AlreadyUsed){self.original.unknown.store(true,Ordering::SeqCst);}
-        match self.original.first.try_write(){Ok(mut first)=>*first=earliest_failure(*first,Some((failure,at))),
+        match self.original.first.write(){Ok(mut first)=>*first=earliest_failure(*first,Some((failure,at))),
             Err(_)=>{self.original.unknown.store(true,Ordering::SeqCst);}}
     }
     pub(crate) fn source_first(&self)->Option<(AdmissionFailure,Instant)>{
-        match self.original.first.try_read(){Ok(first)=>*first,Err(_)=>{
+        match self.original.first.read(){Ok(first)=>*first,Err(_)=>{
             self.original.unknown.store(true,std::sync::atomic::Ordering::SeqCst);None}}
     }
     pub(crate) fn source_parent_vetoed(&self)->bool{self.original.clock.unknown()}

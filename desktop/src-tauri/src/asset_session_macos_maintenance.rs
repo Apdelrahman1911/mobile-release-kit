@@ -202,21 +202,36 @@ impl DocumentBinding {
 
     pub(crate) fn start_macos_maintenance(&self,confirmation:&str)
         ->Result<crate::saved_command_owner::MacosMaintenanceStatus,BridgeError>{
+        let mut stage="profile";
+        self.start_macos_maintenance_staged(confirmation,&mut stage).inspect_err(|_|{
+            macos_removal::removal_trace(format_args!("app prepare-admission=refused stage={stage}"));
+        })
+    }
+
+    fn start_macos_maintenance_staged(&self,confirmation:&str,stage:&mut &'static str)
+        ->Result<crate::saved_command_owner::MacosMaintenanceStatus,BridgeError>{
         if !crate::installation::preparation_profile_available(){return Err(unavailable());}
         // Consent, original T and entropy exist before the first Document wait.
+        *stage="confirmation";
         let request=crate::saved_command_owner::MacosMaintenanceRequest::confirmed(confirmation)?;
         self.reconcile();
+        *stage="document-snapshot";
         let snapshot={
             let state=self.lock();self.macos_maintenance_gate(&state)?;
+            *stage="saved-snapshot";
             self.inner.bridge.android_build.maintenance_snapshot(&self.inner.session_identity,request)?
         };
         // Only proof on the actual zero-to-three selected originals, outside
         // BOTH app locks; no source/helper work starts at this point.
+        *stage="check-originals";
         let checked=snapshot.check_originals()?;
+        *stage="document-admission";
         let admitted={
             let mut state=self.lock();self.macos_maintenance_gate(&state)?;
+            *stage="owner-storage-census";
             let census=installation_memory::macos_maintenance_census(self,&state,checked.picker_originals())
                 .map_err(|_|unavailable())?;
+            *stage="saved-admission";
             let admitted=self.inner.bridge.android_build.admit_maintenance(
                 &self.inner.session_identity,&checked,&census)?;
             // The original tasks/Control already exist with GO closed. Install
@@ -228,7 +243,9 @@ impl DocumentBinding {
             self.bump(&mut state);admitted
         };
         let original=admitted.handle();
+        *stage="worker-release";
         admitted.release()?;
+        *stage="original-readback";
         self.reconcile();let state=self.lock();
         // An immediately refused/reopened operation may race another explicit
         // caller. Never return that later caller's acknowledgement as this one.
@@ -346,9 +363,7 @@ impl DocumentBinding {
         if !crate::installation::preparation_profile_available(){return Err(unavailable());}
         #[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"),feature="macos-installed-desktop-image",not(feature="macos-android-registration-helper")))]
         {
-            let original=self.start_macos_maintenance(confirmation).inspect_err(|_|{
-                macos_removal::removal_trace(format_args!("app prepare-admission=refused"));
-            })?;
+            let original=self.start_macos_maintenance(confirmation)?;
             let id:String=original.operation.iter().map(|byte|format!("{byte:02x}")).collect();
             self.installation_preparation_view(Some((id.as_str(),original.generation)))
         }

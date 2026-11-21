@@ -916,6 +916,10 @@ impl Preparation {
         if checked && self.gate.control.failure().is_none() && main.0
             && (self.retirement.removal.is_none() || self.gate.publishable()){
             if let Err(failure)=identity.recheck(self.gate.control.work,&stop){
+                if self.retirement.removal.is_some(){
+                    mrk_macos_installed_native::removal_coordinator::removal_trace(&format!(
+                        "app maintenance-identity-recheck=returned reason={failure:?}"));
+                }
                 let at=Instant::now();self.gate.control.propagated_refusal(wire::Reason::SigningUnavailable,at);
                 identity.capture_recheck_refusal(failure,at);
             }
