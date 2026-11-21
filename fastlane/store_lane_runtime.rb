@@ -39,7 +39,7 @@ module MobileReleaseKit
       def initialize
         @pid, @thread = Process.pid, Thread.current
         @exit = Process.method(:exit!)
-        unless RUBY_ENGINE == "ruby" && RUBY_VERSION == NativeProcessSpawn.expected_ruby_release &&
+        unless RUBY_ENGINE == "ruby" && RUBY_VERSION == "3.3.12" &&
                @exit.receiver.equal?(Process) && @exit.owner.equal?(Process.singleton_class) &&
                @exit.name == :exit! && @exit.source_location.nil? && @exit.arity == -1
           raise Error.new(:exit_api)
@@ -392,7 +392,7 @@ module MobileReleaseKit
         tmp = File.join(root, "tmp")
         raise Error.new(:temporary_scope) unless %w[TMPDIR TMP TEMP].all? { |key| env[key] == tmp }
         raise Error.new(:cwd) unless Dir.pwd == File.join(root, "runner") && File.realpath(Dir.pwd) == Dir.pwd
-        unless RUBY_ENGINE == "ruby" && RUBY_VERSION == NativeProcessSpawn.expected_ruby_release &&
+        unless RUBY_ENGINE == "ruby" && RUBY_VERSION == "3.3.12" &&
                File.const_defined?(:NOFOLLOW) && File.const_defined?(:NONBLOCK) && Dir.respond_to?(:fchdir)
           raise Error.new(:runtime_api)
         end

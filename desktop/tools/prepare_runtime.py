@@ -11,7 +11,6 @@ from __future__ import annotations
 
 import argparse
 import ast
-import base64
 import hashlib
 import importlib.util
 import json
@@ -98,58 +97,6 @@ STORE_PREPARE_BOOTSTRAP = "local_store_prepare_bootstrap.py"
 STORE_EXECUTE_BOOTSTRAP = "local_store_execute_bootstrap.py"
 STORE_RECONCILE_BOOTSTRAP = "local_store_reconcile_bootstrap.py"
 GITHUB_CA_NAME = "github-ca.pem"
-
-# SHA-256 of the original DER trust anchors. These four Mozilla emSign
-# removals/distrust decisions apply to new Mac runtimes and Store components.
-MACOS_DISTRUSTED_ROOTS = frozenset({
-    "40f6af0346a99aa1cd1d555a4e9cce62c7f9634603ee406615833dc8c8d00367",
-    "86a1ecba089c4a8d3bbe2734c612ba341d813e043cf9e8a862cd5c57a36bbe6b",
-    "125609aa301da0a249b97a8239cb6a34216f44dcac9f3954b14292f2e8c8608f",
-    "bc4d809b15189d78db3e1d8cf4f9726a795da1643ca5f1358e1ddb0edc0d7eb3",
-})
-
-
-def macos_store_dependency_input(name, body):
-    """Select the reviewed macOS Ruby pin without altering locked gems."""
-    if name == "Gemfile":
-        original, refreshed = b'\nruby "3.3.12"\n', b'\nruby "3.3.14"\n'
-    elif name == "Gemfile.lock":
-        original = b"\nRUBY VERSION\n  ruby 3.3.12\n\nBUNDLED WITH\n  4.0.16\n"
-        refreshed = original.replace(b"ruby 3.3.12", b"ruby 3.3.14")
-        if not body.endswith(original):
-            raise PreparationError("Unexpected macOS Store lock footer")
-    else:
-        raise PreparationError("Unexpected macOS Store dependency input")
-    if body.count(original) != 1:
-        raise PreparationError("Unexpected macOS Store Ruby pin")
-    return body.replace(original, refreshed, 1)
-
-
-def macos_trust_bundle(source):
-    """Project the checked repository PEM by removing exact DER identities."""
-    pattern = rb"(?m)(?:^#[^\n]*\n)*^-----BEGIN CERTIFICATE-----\n([A-Za-z0-9+/=\n]+)^-----END CERTIFICATE-----\n?"
-    matches = list(re.finditer(pattern, source))
-    if not matches or len(matches) != source.count(b"-----BEGIN CERTIFICATE-----") or len(matches) != source.count(b"-----END CERTIFICATE-----"):
-        raise ValueError("Malformed macOS trust bundle")
-    seen = set()
-    removed = set()
-    output = bytearray()
-    cursor = 0
-    for match in matches:
-        fingerprint = hashlib.sha256(base64.b64decode(match[1].replace(b"\n", b""), validate=True)).hexdigest()
-        if fingerprint in seen:
-            raise ValueError("Duplicate macOS trust anchor")
-        seen.add(fingerprint)
-        output.extend(source[cursor:match.start()])
-        if fingerprint in MACOS_DISTRUSTED_ROOTS:
-            removed.add(fingerprint)
-        else:
-            output.extend(match[0])
-        cursor = match.end()
-    output.extend(source[cursor:])
-    if removed != MACOS_DISTRUSTED_ROOTS or len(seen) == len(removed):
-        raise ValueError("macOS trust source differs from the nominated anchor roster")
-    return bytes(output)
 MAX_GITHUB_CA_BYTES = 512 * 1024
 STORE_EXECUTABLES = frozenset({"bin/ruby", "bin/bundle"})
 STORE_REQUIRED_FILES = frozenset({

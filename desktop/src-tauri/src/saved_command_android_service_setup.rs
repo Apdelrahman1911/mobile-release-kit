@@ -577,9 +577,6 @@ impl CallbackOriginal {
                     failure.note(if observation.status==management::Status::RequiresApproval{
                         wire::Reason::ApprovalRequired
                     }else{wire::Reason::ServiceUnavailable},at);
-                    let route=if self.retirement.removal.is_some(){"remove"}else{"prepare"};
-                    mrk_macos_installed_native::removal_coordinator::removal_trace(&format!(
-                        "app maintenance-status=refused route={route} state={:?} outcome={:?}",observation.status,observation.outcome));
                 }
             }
         }
@@ -1253,12 +1250,6 @@ impl MaintenancePreparation {
             && self.probe.gate.source_work().is_ok() && signal.admitted(false)
             && Instant::now()<control.work;
         let branch=Self::observed_branch(observed,checked);
-        if branch==MaintenanceBranch::Unselected{
-            let route=if self.probe.retirement.removal.is_some(){"remove"}else{"prepare"};
-            mrk_macos_installed_native::removal_coordinator::removal_trace(&format!(
-                "app maintenance-probe=refused route={route} probe-ok={probe_ok} checked={checked} observed-state={:?}",
-                observed.map(|value|value.state)));
-        }
         let enabled=branch==MaintenanceBranch::Unregistered;
         let absent=branch==MaintenanceBranch::ObservedAbsent;
         let mut result;

@@ -1,14 +1,13 @@
 # macOS Python public-source inputs
 
 This is an input nomination, **not a usable Python runtime or an approved build
-recipe**. The ARM64 target is CPython 3.14.10 with the ordinary GIL on macOS 26
+recipe**. The first target is CPython 3.14.7 with the ordinary GIL on macOS 26
 ARM64 (`aarch64-apple-darwin`).
 
-`source-lock.json` records the exact four public upstream archives and their
-inventory hashes. The ARM64 producer checks CPython and OpenSSL against pinned
-decoded TAR digests, file inventories and directory rosters. Libffi and zlib
-retain their existing upstream inventories. Intel retains its separate source
-lock and requires its own qualification.
+`source-lock.json` records the exact four public upstream archives, their hashes
+and source inventories. Only upstream source facts are shared with the existing
+Linux input lock; its compiler, dependency packages, execution permissions,
+runtime layout and ELF configuration do not apply to macOS.
 
 The six notice rows identify required public source inputs, not complete license
 or distribution clearance. Actual incorporated CPython, dependency, compiler and

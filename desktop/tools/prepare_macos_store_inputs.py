@@ -19,23 +19,11 @@ import tarfile
 
 ROOT = Path(__file__).resolve().parents[2]
 SOURCES = (
-    {"directory": "ruby-3.3.14", "url": "https://cache.ruby-lang.org/pub/ruby/3.3/ruby-3.3.14.tar.gz",
-     "bytes": 21512128, "sha256": "d0438ee291b0cacaf97c7a71df4c939d7f3265c8c2d1b8ffe27311f71fc680b0"},
+    {"directory": "ruby-3.3.12", "url": "https://cache.ruby-lang.org/pub/ruby/3.3/ruby-3.3.12.tar.gz",
+     "bytes": 21489887, "sha256": "b06d63beae271933033e27f0a389bc582a009e7845357d44365c39de525a051b"},
     {"directory": "yaml-0.2.5", "url": "https://pyyaml.org/download/libyaml/yaml-0.2.5.tar.gz",
      "bytes": 609454, "sha256": "c642ae9b75fee120b2d96c712538bd2cf283228d2337df2cf2988e3c02678ef4"},
 )
-
-
-def macos_runtime_policy():
-    spec = importlib.util.spec_from_file_location("mrk_macos_store_ca_policy", ROOT / "desktop/tools/prepare_runtime.py")
-    policy = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(policy)
-    return policy
-
-
-def macos_store_ca():
-    return macos_runtime_policy().macos_trust_bundle(
-        (ROOT / "desktop/cpython-source-inputs/github-ca.pem").read_bytes())
 
 
 def fetch(asset, destination):
@@ -79,7 +67,7 @@ def unpack(archive, destination, expected_root):
 def unpack_ruby_headers(archive, destination):
     """Select upstream common headers only; generated arch headers stay in base.
 
-    Matches the pinned Ruby tool/rbinstall.rb's common-header selection. The caller
+    Matches Ruby 3.3.12 tool/rbinstall.rb's common-header selection. The caller
     authenticates the complete archive before this ordinary data-only extraction.
     """
     destination.mkdir(mode=0o700)
@@ -125,14 +113,10 @@ def copy_tooling(source_root, destination):
     if not _complete_tooling_root(source_root):
         raise ValueError("Incomplete first-party tooling source")
     destination.mkdir(mode=0o700)
-    policy = macos_runtime_policy()
     for relative in REQUIRED_TOOLING_FILES:
         target = destination / relative
         target.parent.mkdir(parents=True, exist_ok=True)
-        if relative in ("Gemfile", "Gemfile.lock"):
-            target.write_bytes(policy.macos_store_dependency_input(relative, (source_root / relative).read_bytes()))
-        else:
-            shutil.copyfile(source_root / relative, target)
+        shutil.copyfile(source_root / relative, target)
     if not _complete_tooling_root(destination):
         raise ValueError("Incomplete copied first-party tooling")
 
@@ -161,9 +145,9 @@ def main():
     elif not args.gems_only:
         lock = json.loads((ROOT / "desktop/macos-cpython-source-inputs/source-lock.json").read_text())
         openssl, = [row for row in lock["archiveSelections"] if row["id"] == "openssl"]
-        if openssl["version"] != "3.5.9":
+        if openssl["version"] != "3.5.8":
             raise ValueError("Unsupported OpenSSL source version")
-        sources = (*SOURCES, {**openssl, "directory": "openssl-" + openssl["version"]})
+        sources = (*SOURCES, {**openssl, "directory": "openssl-3.5.8"})
         for asset in sources:
             archive = output / (asset["directory"] + ".tar.gz")
             fetch(asset, archive)
@@ -172,7 +156,7 @@ def main():
             tree.rename(output / asset["directory"])
             staging.rmdir()
             archive.unlink()  # Exactly this authenticated downloaded archive.
-        (output / "ca.pem").write_bytes(macos_store_ca())
+        shutil.copyfile(ROOT / "desktop/cpython-source-inputs/github-ca.pem", output / "ca.pem")
     if not args.sources_only:
         spec = importlib.util.spec_from_file_location("mrk_ci_public_inputs", ROOT / ".github/scripts/ci_prepare.py")
         loader = importlib.util.module_from_spec(spec)

@@ -443,22 +443,10 @@ fn joined_data(request:&wire::RequestData,current:&RemovalCurrent<'_>)->Flow<[[u
     if result[2]!=hex(actual.remover_executable_sha256).ok_or(())?{return Err(());}Ok(result)
 }
 fn source_post(original:&Original,request:&RemovalRequestOriginal,current:&RemovalCurrent<'_>)->Flow<()>{
-    if !original.work_ok(){
-        removal_trace(format_args!("app source-recheck=work-before"));
-        return Err(());
-    }
-    let stop=original.stop.subscribe();
-    request.recheck(original.work,&stop).map_err(|why|{
-        removal_trace(format_args!("app source-recheck=request reason={why:?}"));
-    })?;
-    current.recheck(original.work,&stop,&mut|_,at|original.note_source(at)).map_err(|why|{
-        removal_trace(format_args!("app source-recheck=installed reason={why:?}"));
-    })?;
-    if !original.work_ok(){
-        removal_trace(format_args!("app source-recheck=work-after"));
-        return Err(());
-    }
-    Ok(())
+    if !original.work_ok(){return Err(());}let stop=original.stop.subscribe();
+    request.recheck(original.work,&stop).map_err(|_|())?;
+    current.recheck(original.work,&stop,&mut|_,at|original.note_source(at)).map_err(|_|())?;
+    if !original.work_ok(){return Err(());}Ok(())
 }
 fn signature_gate(original:&Original,parent_veto:&Cell<bool>,point:ProducerCheckpoint)->Decision{
     let(phase,custody)=match point{ProducerCheckpoint::Before{phase,custody}|ProducerCheckpoint::Returned{phase,custody,..}=>(phase,custody)};
@@ -561,11 +549,10 @@ fn exchange(original:&Original,request:&RemovalRequestOriginal,current:&RemovalC
         if offers.state.completion{return Err(());}drop(offers);original.pause();
     }
     let result=completion.as_ref().ok_or(())?;
-    let status=result.status();
-    removal_trace(format_args!("app maintenance=returned phase={:?} reason={:?} started={} unregister={} absent={}",
-        status.phase,status.reason,status.started_or_uncertain,status.unregister_accepted,status.not_registered));
+    removal_trace(format_args!("app maintenance=returned phase={:?}",result.status().phase));
     {let offers=original.offers.try_lock().map_err(|_|())?;
         if !result.matches_removal(offers.saved.as_ref().ok_or(())?,&cutoff)||!result.request_quit(){return Err(());}}
+    let status=result.status();
     let branch=match(status.phase,status.unregister_accepted,status.not_registered){
         (MacosMaintenancePhase::Prepared,true,true)=>wire::PreparationData::UnregisteredNow,
         (MacosMaintenancePhase::Prepared,false,true)=>wire::PreparationData::NeverRegistered,_=>return Err(()),};

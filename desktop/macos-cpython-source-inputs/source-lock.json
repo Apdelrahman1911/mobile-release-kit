@@ -1,34 +1,27 @@
 {
   "schemaVersion": 1,
-  "profile": "cpython-3.14.10-macos26-arm64-source-v1",
+  "profile": "cpython-3.14.7-macos26-arm64-source-v1",
   "state": "public-source-nomination-only-not-build-or-supply-authority",
   "target": {
     "triple": "aarch64-apple-darwin",
     "minimumMacOS": "26.0",
-    "pythonVersion": "3.14.10",
+    "pythonVersion": "3.14.7",
     "gil": true
   },
   "archiveSelections": [
     {
       "id": "cpython",
-      "version": "3.14.10",
-      "url": "https://www.python.org/ftp/python/3.14.10/Python-3.14.10.tar.xz",
-      "bytes": 24240392,
-      "sha256": "de414a57119abef52784d8993e341d53aed635fc2b05c2607d9f98a2c5b72032",
+      "version": "3.14.7",
+      "url": "https://www.python.org/ftp/python/3.14.7/Python-3.14.7.tar.xz",
+      "bytes": 24053924,
+      "sha256": "3b48dac8fb59f62eaa67ac83c1eb12bda1b7a08406dd286e252c11a66be27f81",
       "patches": [],
       "inventory": {
-        "repositoryPath": null,
-        "bytes": 881778,
-        "sha256": "e790337df702715deef9053743df74b219c4974140849b7ca418f6d216f11e5f",
+        "repositoryPath": "desktop/cpython-source-inputs/cpython-source-inventory.json",
+        "bytes": 877950,
+        "sha256": "bd8fa378b7a86c07310e0379b911ef562569d43f5bd9ffed2bd41ea7dd539304",
         "originalPrefix": "/work/inputs/sources/cpython/",
-        "archiveInventory": {
-          "archiveRoot": "Python-3.14.10",
-          "decodedTar": {
-            "sha256": "f7473de81f3f262729589a2f82b4341dd425a81e58ed649d46fa14a471ed25f3",
-            "size": 122316800
-          },
-          "directoryRosterSha256": "2627c8118bcc8117467cdb47262e9071af2f4d562e4511bfe39349f24da70dcd"
-        }
+        "meaning": "whole upstream SOURCE comparison metadata; not a Mac runtime or toolchain"
       }
     },
     {
@@ -48,24 +41,17 @@
     },
     {
       "id": "openssl",
-      "version": "3.5.9",
-      "url": "https://www.openssl.org/source/openssl-3.5.9.tar.gz",
-      "bytes": 53279637,
-      "sha256": "603f5602e2eef00d77fbd429d34dcd5822bb301757a1bc9cdb24c670f1eb859a",
+      "version": "3.5.8",
+      "url": "https://www.openssl.org/source/openssl-3.5.8.tar.gz",
+      "bytes": 53213818,
+      "sha256": "a8f84a39918ec6415ce765d9b429d313ba97b8143169c172e734b9514464f5b2",
       "patches": [],
       "inventory": {
-        "repositoryPath": null,
-        "bytes": 989736,
-        "sha256": "28c7ce464003a3df796fcbb226886a4b4f673d8732b980991a9d78baf16c3435",
+        "repositoryPath": "desktop/cpython-source-inputs/openssl-source-inventory.json",
+        "bytes": 987603,
+        "sha256": "b95c67e8a8f19e7c7717ec58bdfe13fc7c707096b84dfc270c936cb2f032e78b",
         "originalPrefix": "/work/inputs/sources/openssl/",
-        "archiveInventory": {
-          "archiveRoot": "openssl-3.5.9",
-          "decodedTar": {
-            "sha256": "5e90ea7953e72327e84d34b33f2c5754870915c04cc8c342812e1671ea86e0fb",
-            "size": 135884800
-          },
-          "directoryRosterSha256": "d586ccfdb9d439ebbb65fe1c9666d3551aacf12079547f1aaa8703f61a4de961"
-        }
+        "meaning": "whole upstream SOURCE comparison metadata; not a Mac runtime or toolchain"
       }
     },
     {
@@ -88,7 +74,7 @@
     "repositoryPath": "desktop/cpython-source-inputs/source-lock.json",
     "bytes": 24605,
     "sha256": "5a10f7b24b2b081f97fd93de1f363875b570ef372e4464bc5280b632e74b60a6",
-    "claim": "Unchanged libffi/zlib upstream archive and inventory facts only. ARM64 CPython and OpenSSL use their own exact public archive pins."
+    "claim": "upstream archive/version/inventory facts only; Linux execution/projection approval does not transfer"
   },
   "requiredPublicNoticeInputs": [
     {
@@ -101,7 +87,7 @@
       "component": "cpython",
       "path": "Doc/license.rst",
       "bytes": 60039,
-      "sha256": "8a7329b25131f64b2bea284155f0824876b1af9f4a2f970e6335751d97dfa6dd"
+      "sha256": "cd6f471c0bfdb099efefc25ddff9b3df8bf62e10428987f1f05e6f2f9e35d563"
     },
     {
       "component": "cpython",

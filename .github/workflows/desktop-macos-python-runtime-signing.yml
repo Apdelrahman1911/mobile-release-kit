@@ -293,7 +293,17 @@ jobs:
       fail-fast: false
       max-parallel: 2
       matrix:
-        include: ${{ contains(github.event.head_commit.message, '[macos-arm64-supplier]') && fromJSON('[{"target":"aarch64-apple-darwin","runner":"macos-26","architecture":"ARM64","machine":"arm64"}]') || fromJSON('[{"target":"aarch64-apple-darwin","runner":"macos-26","architecture":"ARM64","machine":"arm64"},{"target":"x86_64-apple-darwin","runner":"macos-26-intel","architecture":"X64","machine":"x86_64"}]') }}
+        include:
+          - target: aarch64-apple-darwin
+            runner: macos-26
+            architecture: ARM64
+            machine: arm64
+            supplier_artifact: '12022417782'
+          - target: x86_64-apple-darwin
+            runner: macos-26-intel
+            architecture: X64
+            machine: x86_64
+            supplier_artifact: '12022823630'
     env:
       MRK_EXPECTED_SHA: ${{ github.sha }}
       MRK_MACOS_INSTALL_SOURCE_COMMIT: ${{ github.sha }}
@@ -345,15 +355,13 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           MRK_PYTHON: ${{ steps.python.outputs.python-path }}
-          MRK_STORE_SOURCE: ${{ matrix.machine == 'arm64' && 'af4952883f038313ddeab8879052e12bd7379ba6' || '0039f79baa54318d58d87606335492f7ef2a90dd' }}
-          MRK_STORE_RUN: ${{ matrix.machine == 'arm64' && '44871835695' || '38844616192' }}
-          MRK_STORE_ARTIFACT: ${{ matrix.machine == 'arm64' && '14693449606' || '12022823630' }}
+          MRK_STORE_ARTIFACT: ${{ matrix.supplier_artifact }}
         run: |
           set -euo pipefail
           umask 077
           "$MRK_PYTHON" -I -B desktop/tools/macos_store_component.py restore-runtime \
-            "$MRK_MACOS_WORK/store-original" --source "$MRK_STORE_SOURCE" \
-            --arch "$MRK_NATIVE_MACHINE" --run-id "$MRK_STORE_RUN" --artifact-id "$MRK_STORE_ARTIFACT"
+            "$MRK_MACOS_WORK/store-original" --source 0039f79baa54318d58d87606335492f7ef2a90dd \
+            --arch "$MRK_NATIVE_MACHINE" --run-id 38844616192 --artifact-id "$MRK_STORE_ARTIFACT"
           /bin/chmod 400 "$MRK_MACOS_WORK/store-original/store-runtime.tar.gz" "$MRK_MACOS_WORK/store-original/runtime-origin.json"
       - name: Sign and verify every native member with one original credential scope
         id: sign

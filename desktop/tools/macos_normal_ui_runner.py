@@ -2264,13 +2264,8 @@ class SavedVersionFixture:
         for name in sorted(wrappers):
             body = self._installed_runtime_leaf(runtime_fd, name, 1024 * 1024)
             source_name = "desktop/cpython-source-inputs/github-ca.pem" if name == "github-ca.pem" else "desktop/" + name
-            expected = self.sources[source_name][1]
-            if name == "github-ca.pem" and hasattr(module, "current_ca_payload"):
-                captured = {key: (self.sources[key][1], 0o644)
-                            for key in (module.CURRENT_CA_SOURCE, module.CURRENT_HELPER_SOURCE)}
-                expected = module.current_ca_payload(captured)
             need(name in rows and (len(body), sha(body)) == (rows[name]["size"], rows[name]["sha256"])
-                 and body == expected, "saved-version-installed-current-wrapper")
+                 and body == self.sources[source_name][1], "saved-version-installed-current-wrapper")
         self.runtime_witness = {"scope": SAVED_VERSION_CURRENT_SCOPE, "applicationSourceCommit": self.application_source,
             "harnessSourceCommit": self.source, "target": self.phase_target, "release": selection.release,
             "installedCoreMatched": True, "installedWrappersMatched": True}

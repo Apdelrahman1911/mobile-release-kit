@@ -13,14 +13,13 @@ import hashlib
 import json
 import re
 
-SOURCE_PROFILE = "cpython-3.14.10-macos26-arm64-source-v1"
-SOURCE_LOCK_BYTES = 5577
-SOURCE_LOCK_SHA256 = "408ccb501a49752e5452077580d040654c35f6d4bbf44abf9df6203a8b231cbb"
+SOURCE_PROFILE = "cpython-3.14.7-macos26-arm64-source-v1"
+SOURCE_LOCK_BYTES = 5158
+SOURCE_LOCK_SHA256 = "cbfc5dd6a120131efc8ca3c134b1da9798ffee464282a4ba8774b85a14f44688"
 INTEL_SOURCE_PROFILE = "cpython-3.14.7-macos26-x86_64-source-v1"
 INTEL_SOURCE_LOCK_BYTES = 5158
 INTEL_SOURCE_LOCK_SHA256 = "e5196ca58c79a5381788e596744fee52385698fb1d3cfa998eaefc7295769430"
-PYTHON_VERSION = "3.14.10"
-INTEL_PYTHON_VERSION = "3.14.7"
+PYTHON_VERSION = "3.14.7"
 ARM_TARGET = "aarch64-apple-darwin"
 INTEL_TARGET = "x86_64-apple-darwin"
 MAX_INVENTORY_BYTES = 2 * 1024 * 1024
@@ -83,11 +82,10 @@ class SourceInput:
     url: str
     size: int
     sha256: str
-    inventory_path: str | None
+    inventory_path: str
     inventory_size: int
     inventory_sha256: str
     original_prefix: str
-    archive_inventory: dict | None = None
 
 
 @dataclass(frozen=True)
@@ -157,32 +155,16 @@ def source_nomination(lock_body: bytes, target: str) -> tuple[SourceInput, ...]:
     lock = _bound_json(lock_body, binding["bytes"], binding["sha256"], 64 * 1024)
     _need(lock["schemaVersion"] == 1 and lock["profile"] == binding["profile"]
           and lock["target"] == {"triple": target, "minimumMacOS": "26.0",
-                                 "pythonVersion": PYTHON_VERSION if target == ARM_TARGET else INTEL_PYTHON_VERSION,
-                                 "gil": True},
+                                 "pythonVersion": PYTHON_VERSION, "gil": True},
           "source-nomination-identity")
     rows = lock["archiveSelections"]
     _need(type(rows) is list and tuple(row["id"] for row in rows) == _COMPONENTS,
           "source-component-roster")
-    result = []
-    for row in rows:
-        facts = row["inventory"]
-        derived = facts.get("archiveInventory")
-        if derived is not None:
-            _need(target == ARM_TARGET and row["id"] in {"cpython", "openssl"}
-                  and facts.get("repositoryPath") is None
-                  and set(derived) == {"archiveRoot", "decodedTar", "directoryRosterSha256"}
-                  and derived["archiveRoot"] == ("Python-" if row["id"] == "cpython" else "openssl-") + row["version"]
-                  and set(derived["decodedTar"]) == {"sha256", "size"}
-                  and type(derived["decodedTar"]["size"]) is int and 0 < derived["decodedTar"]["size"] <= 256 * 1024 * 1024
-                  and all(re.fullmatch(r"[0-9a-f]{64}", value) for value in
-                          (derived["decodedTar"]["sha256"], derived["directoryRosterSha256"])),
-                  "derived-source-inventory-binding")
-        else:
-            _need(type(facts.get("repositoryPath")) is str, "source-inventory-path")
-        result.append(SourceInput(row["id"], row["version"], row["url"], row["bytes"], row["sha256"],
-                                  facts.get("repositoryPath"), facts["bytes"], facts["sha256"],
-                                  facts["originalPrefix"], derived))
-    return tuple(result)
+    return tuple(SourceInput(
+        row["id"], row["version"], row["url"], row["bytes"], row["sha256"],
+        row["inventory"]["repositoryPath"], row["inventory"]["bytes"],
+        row["inventory"]["sha256"], row["inventory"]["originalPrefix"],
+    ) for row in rows)
 
 
 def _relative_name(name: str) -> list[str]:

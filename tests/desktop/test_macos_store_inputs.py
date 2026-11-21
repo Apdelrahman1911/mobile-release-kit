@@ -29,19 +29,14 @@ class StoreInputs(unittest.TestCase):
             source = root / 'source'; source.mkdir()
             for relative in REQUIRED_TOOLING_FILES:
                 file = source / relative; file.parent.mkdir(parents=True, exist_ok=True)
-                contents = ((TOOL.ROOT / relative).read_bytes() if relative in ('Gemfile', 'Gemfile.lock')
-                            else ('synthetic:' + relative).encode())
-                file.write_bytes(contents)
+                file.write_bytes(('synthetic:' + relative).encode())
             destination = root / 'tooling'
             TOOL.copy_tooling(source, destination)
             self.assertTrue(_complete_tooling_root(destination))
             self.assertEqual({str(p.relative_to(destination)) for p in destination.rglob('*') if p.is_file()},
                              set(REQUIRED_TOOLING_FILES))
             for relative in REQUIRED_TOOLING_FILES:
-                expected = (source / relative).read_bytes()
-                if relative in ('Gemfile', 'Gemfile.lock'):
-                    expected = expected.replace(b'3.3.12', b'3.3.14', 1)
-                self.assertEqual((destination / relative).read_bytes(), expected)
+                self.assertEqual((destination / relative).read_bytes(), (source / relative).read_bytes())
             with self.assertRaises(FileExistsError): TOOL.copy_tooling(source, destination)
             missing = source / 'schemas/project.schema.json'; missing.unlink()
             with self.assertRaises(ValueError): TOOL.copy_tooling(source, root / 'missing')
@@ -128,7 +123,7 @@ class RubyHeaderInputsTests(unittest.TestCase):
         with tarfile.open(path, 'w:gz') as archive:
             for name, kind in [(name, tarfile.REGTYPE) for name in
                     ('ruby.h', 'ruby/ruby.h', 'ruby/version.h', 'ruby/detail.hpp', 'ruby/win32.h')] + list(extra):
-                member = tarfile.TarInfo('ruby-3.3.14/include/' + name)
+                member = tarfile.TarInfo('ruby-3.3.12/include/' + name)
                 member.type = kind
                 member.mode = 0o644
                 if kind == tarfile.REGTYPE:

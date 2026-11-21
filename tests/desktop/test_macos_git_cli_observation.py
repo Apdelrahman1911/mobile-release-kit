@@ -424,10 +424,8 @@ class GitCliTests(unittest.TestCase):
             f = A.Fixtures(BINDING, os.getuid(), os.getgid(), G.scope(case))
             try:
                 f.projects[case] = f._open(str(root), directory=True)
-                # The synthetic fixture never opens a real macOS selection panel.
-                with patch.object(G, "project_root_access_tag", return_value=None):
-                    before = G.capture(f)
-                    yield f, root, before
+                before = G.capture(f)
+                yield f, root, before
             finally:
                 f.close()
                 self.assertFalse(f.fds)
@@ -459,23 +457,6 @@ class GitCliTests(unittest.TestCase):
                     self.assertEqual(after["git"][path][1][3:5], before["git"]["."][1][3:5], path)
                 self.assertTrue(G.compare(before, after, case, HEAD))
                 self.assertEqual(before["files"], after["files"])
-                tagged = copy.deepcopy(after)
-                tagged["rootAccessTag"] = "f" * 64
-                shape = tagged["directories"]["."]
-                tagged["directories"]["."] = (*shape[:-1], shape[-1] + 1)
-                self.assertTrue(G.compare(before, tagged, case, HEAD))
-                with self.assertRaisesRegex(ValueError, "git-cli-project-directory-root-ctime-changed"):
-                    G.compare(before, dict(tagged, rootAccessTag=None), case, HEAD)
-                with self.assertRaisesRegex(ValueError, "git-cli-project-root-tag-ctime"):
-                    G.compare(before, dict(after, rootAccessTag=tagged["rootAccessTag"]), case, HEAD)
-                tagged["directories"]["."] = (*shape[:-2], shape[-2] + 1, shape[-1] + 1)
-                with self.assertRaisesRegex(ValueError, "git-cli-project-directory-root-mtime-changed"):
-                    G.compare(before, tagged, case, HEAD)
-                wrong = copy.deepcopy(after)
-                file = G.shared.FILES[0]
-                wrong["files"][file] = (wrong["files"][file][0], "f" * 64)
-                with self.assertRaisesRegex(ValueError, "git-cli-project-file-1-content-changed"):
-                    G.compare(before, wrong, case, HEAD)
                 for path in ("HEAD", "config", "refs/heads/main", "logs/HEAD"):
                     wrong = copy.deepcopy(after)
                     row = wrong["git"][path]

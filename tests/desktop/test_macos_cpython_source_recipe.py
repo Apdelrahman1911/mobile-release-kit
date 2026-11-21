@@ -26,13 +26,11 @@ class MacPythonSourceRecipeTests(unittest.TestCase):
     def test_exact_arm_nomination_does_not_admit_intel_or_modified_inputs(self):
         rows = RECIPE.source_nomination(self.lock, RECIPE.ARM_TARGET)
         self.assertEqual(tuple(row.component for row in rows), ("cpython", "libffi", "openssl", "zlib"))
-        self.assertEqual(tuple(row.version for row in rows), ("3.14.10", "3.4.8", "3.5.9", "1.3.2"))
-        self.assertEqual(tuple(row.component for row in rows if row.archive_inventory), ("cpython", "openssl"))
-        self.assertTrue(all(row.inventory_path is None for row in rows if row.archive_inventory))
+        self.assertEqual(tuple(row.version for row in rows), ("3.14.7", "3.4.8", "3.5.8", "1.3.2"))
+        # Two exact nominations may select the same public source, but neither
+        # target's lock can authorize the other's producer or native evidence.
         self.assertEqual(RECIPE.target_description(RECIPE.INTEL_TARGET).architecture, "x86_64")
-        intel = RECIPE.source_nomination(self.intel_lock, RECIPE.INTEL_TARGET)
-        self.assertEqual(tuple(row.version for row in intel), ("3.14.7", "3.4.8", "3.5.8", "1.3.2"))
-        self.assertFalse(any(row.archive_inventory for row in intel))
+        self.assertEqual(RECIPE.source_nomination(self.intel_lock, RECIPE.INTEL_TARGET), rows)
         for lock, target in ((self.lock, RECIPE.INTEL_TARGET), (self.intel_lock, RECIPE.ARM_TARGET)):
             with self.subTest(target=target), self.assertRaises(RECIPE.RecipeRefused):
                 RECIPE.source_nomination(lock, target)
@@ -49,9 +47,8 @@ class MacPythonSourceRecipeTests(unittest.TestCase):
                     RECIPE.source_nomination(body, target)
 
     def test_fixed_complete_inventory_produces_only_source_bound_stdlib(self):
-        rows = RECIPE.stdlib_projection(self.intel_lock, self.inventory, RECIPE.INTEL_TARGET)
-        with self.assertRaises(RECIPE.RecipeRefused):
-            RECIPE.stdlib_projection(self.lock, self.inventory, RECIPE.ARM_TARGET)
+        rows = RECIPE.stdlib_projection(self.lock, self.inventory, RECIPE.ARM_TARGET)
+        self.assertEqual(RECIPE.stdlib_projection(self.intel_lock, self.inventory, RECIPE.INTEL_TARGET), rows)
         self.assertEqual((len(rows), sum(row.size for row in rows)), (555, 10_374_402))
         destinations = [row.destination for row in rows]
         self.assertEqual(destinations, sorted(set(destinations)))
@@ -66,7 +63,7 @@ class MacPythonSourceRecipeTests(unittest.TestCase):
         for body in (self.inventory[:-1], self.inventory.replace(b'"size":526', b'"size":527', 1)):
             self.assertNotEqual(body, self.inventory)
             with self.assertRaises(RECIPE.RecipeRefused):
-                RECIPE.stdlib_projection(self.intel_lock, body, RECIPE.INTEL_TARGET)
+                RECIPE.stdlib_projection(self.lock, body, RECIPE.ARM_TARGET)
 
     def test_projection_refuses_alias_paths_native_pruning_and_generated_substitution(self):
         refused = ("/ssl.py", "../ssl.py", "ctypes//__init__.py", "ctypes/./__init__.py",

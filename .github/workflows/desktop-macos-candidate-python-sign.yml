@@ -78,8 +78,8 @@ jobs:
         with:
           github-token: ${{ github.token }}
           repository: Apdelrahman1911/mobile-release-kit
-          run-id: '44870109681'
-          artifact-ids: '14693417053'
+          run-id: '40473858216'
+          artifact-ids: '12719943283'
           path: ${{ steps.work.outputs.root }}/python-supplier-transport
           merge-multiple: 'false'
           digest-mismatch: error

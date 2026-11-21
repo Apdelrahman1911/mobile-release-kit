@@ -304,9 +304,14 @@ def compatible_harness_data(value, origin, consumer):
          and commits[-1].get('commit', {}).get('tree', {}).get('sha') == consumer['tree']
          and value['base_commit'].get('commit', {}).get('tree', {}).get('sha') == origin['tree'],
          'prepared-harness-source-tree')
+    allowed_files = HARNESS_FILES
+    if (origin['source'] == '572d1d11262b8c6c91ac3b104e19329f969001bc'
+            and consumer.get('nativeScope') == 'git-native'):
+        # Exact external verifier for the already signed Git27 fixture.
+        allowed_files = allowed_files | {'desktop/tools/macos_git_cli_observation.py'}
     rows = value.get('files')
     need(type(rows) is list and 0 < len(rows) < 300
-         and all(type(row) is dict and row.get('filename') in HARNESS_FILES
+         and all(type(row) is dict and row.get('filename') in allowed_files
                  and row.get('status') in ('added', 'modified', 'removed')
                  and 'previous_filename' not in row for row in rows)
          and len({row['filename'] for row in rows}) == len(rows), 'prepared-harness-files')

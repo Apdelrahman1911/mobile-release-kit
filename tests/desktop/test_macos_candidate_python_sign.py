@@ -91,10 +91,10 @@ class CandidatePythonSigningTests(unittest.TestCase):
     def test_helper_stager_and_workflow_bind_one_complete_verified_supplier(self):
         self.assertEqual(HELPER.PYTHON_SUPPLIERS, STAGE.SIGNED_ORIGINAL_SUPPLIERS)
         pins = HELPER.PYTHON_SUPPLIERS[STAGE.ARM_TARGET]
-        self.assertEqual(pins, {"receiptSha256": "8472de6eaf5c12b9f46d96ff97830c9cf4f02c98943c0c9134eddd48519d589c",
-                               "tarSha256": "2e6efe239af9e7bc6f3688997d41a9607aa2980528d68fcaa8c97e40d611f438",
-                               "sourceCommit": "9a64371c72dc56de3de3bcc63e7a368a91b7437d", "runId": "44870109681",
-                               "runAttempt": "1", "artifactId": "14693417053"})
+        self.assertEqual(pins, {"receiptSha256": "e6b23316078020c513ab1b05b3b55e4f87b8d15908a8dee022ad5ee03b8f763e",
+                               "tarSha256": "ead75b364118139561a34da6aa48e3c54791e152154ab32c46196b0223962359",
+                               "sourceCommit": "c6551aa07d0673436aa9587b3a039889d22449c3", "runId": "40473858216",
+                               "runAttempt": "1", "artifactId": "12719943283"})
         workflow = (ROOT / BUILD.CANDIDATE_SIGNING_WORKFLOW).read_text()
         self.assertIn("run-id: '" + pins["runId"] + "'", workflow)
         self.assertIn("artifact-ids: '" + pins["artifactId"] + "'", workflow)

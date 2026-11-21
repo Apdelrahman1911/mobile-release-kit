@@ -26,10 +26,10 @@ if [ "$mode" = base ]; then
     [ -f "$ca" ] && [ ! -L "$ca" ] || { echo 'Supply an authenticated regular CA bundle.' >&2; exit 65; }
     /usr/bin/grep -Eq '^#define RUBY_API_VERSION_MAJOR +3$' "$ruby_source/include/ruby/version.h"
     /usr/bin/grep -Eq '^#define RUBY_API_VERSION_MINOR +3$' "$ruby_source/include/ruby/version.h"
-    /usr/bin/grep -Eq '^#define RUBY_VERSION_TEENY +14$' "$ruby_source/version.h"
+    /usr/bin/grep -Eq '^#define RUBY_VERSION_TEENY +12$' "$ruby_source/version.h"
     /usr/bin/grep -Eq '^MAJOR=3$' "$openssl_source/VERSION.dat"
     /usr/bin/grep -Eq '^MINOR=5$' "$openssl_source/VERSION.dat"
-    /usr/bin/grep -Eq '^PATCH=9$' "$openssl_source/VERSION.dat"
+    /usr/bin/grep -Eq '^PATCH=8$' "$openssl_source/VERSION.dat"
     /usr/bin/grep -Fq "PACKAGE_VERSION='0.2.5'" "$yaml_source/configure"
 else
     base="$(cd -- "$base_arg" && pwd -P)"

@@ -177,20 +177,6 @@ class SignedStoreComponent(unittest.TestCase):
                 'target': target, 'downloads': {f'actions/artifacts/{artifact_id}/zip': inner,
                                                'actions/artifacts/400/zip': outer}}
 
-    def test_distinct_signed_store_producers_are_pinned_per_architecture(self):
-        stager = FIXTURE.STAGER
-        arm = {"source": "a" * 40, "runId": "100", "runAttempt": "2", "artifactId": "300"}
-        intel = {"source": "b" * 40, "runId": "101", "runAttempt": "1", "artifactId": "301"}
-        value = {"schemaVersion": 2, "state": "configured",
-                 "targets": {stager.ARM_TARGET: arm, stager.INTEL_TARGET: intel}}
-        source = json.dumps(value).encode()
-        for target, original in value["targets"].items():
-            self.assertEqual(stager.signed_store_selection_data(source, target=target),
-                             {**original, "target": target, "selectionSha256": stager.digest(source)})
-        intel["artifactId"] = arm["artifactId"]
-        with self.assertRaisesRegex(stager.Refused, "store-selection-distinct-artifacts"):
-            stager.signed_store_selection_data(json.dumps(value).encode())
-
     @contextlib.contextmanager
     def selected_context(self, data, root, *, during_download=None):
         desktop = root / 'source' / 'desktop'
