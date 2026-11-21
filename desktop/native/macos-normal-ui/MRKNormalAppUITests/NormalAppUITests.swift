@@ -6507,18 +6507,18 @@ final class NormalAppUITests: XCTestCase {
             let picker = try nativeSheet(window, title: "Choose a mobile project folder")
             try goToFolder(picker, path: project)
             try nativeOpen(picker)
+            try expand(renderer, prefix: "Project details & saved observations", renderer: renderer)
+            _ = try waitElement(renderer.staticTexts.matching(identifier: project), in: renderer,
+                                timeout: 24, failures: Self.guidedWorkspaceFailures)
+            _ = try waitForSnapshotIdentity(renderer.staticTexts.matching(identifier: "org.fixture.app"), in: renderer)
         }
         try stage("recover-replacement") {
-            let panelQuery = named(renderer, "Saved-version recovery inspection")
-            if !panelQuery.element(boundBy: 0).exists {
-                try expand(renderer, prefix: "Edit version & build number", renderer: renderer)
-            }
-            let panel = try waitElement(panelQuery, in: renderer)
-            try press(panel, "Inspect recovery", renderer: renderer, timeout: 24)
-            _ = try waitElement(panel.buttons.matching(identifier: "Review recovery confirmation…"), in: panel,
+            try press(renderer, "Review version & build number", renderer: renderer)
+            try press(renderer, "Inspect recovery", renderer: renderer, timeout: 24)
+            _ = try waitElement(renderer.buttons.matching(identifier: "Review recovery confirmation…"), in: renderer,
                                 enabled: true, timeout: 48)
-            try inventory(panel, caption: "Inspected journal files — not your current draft", paths: ["public/version.properties"])
-            try press(panel, "Review recovery confirmation…", renderer: renderer, timeout: 48)
+            try inventory(renderer, caption: "Inspected journal files — not your current draft", paths: ["public/version.properties"])
+            try press(renderer, "Review recovery confirmation…", renderer: renderer, timeout: 48)
             let dialog = try waitElement(controls(renderer, [.dialog, .group], label: "Roll back the interrupted save?"), in: renderer)
             let apply = try unique(dialog.buttons.matching(identifier: "Confirm recovery action"), "recovery Apply is ambiguous")
             try require(!apply.isEnabled, "recovery Apply began enabled without consent")
@@ -6530,8 +6530,8 @@ final class NormalAppUITests: XCTestCase {
             try replace(field(dialog, "Type RECOVER to confirm this one original plan"), with: "RECOVER", renderer: renderer)
             try press(dialog, "Confirm recovery action", renderer: renderer)
             try waitGone(dialog)
-            _ = try waitElement(panel.staticTexts.matching(identifier: "Recovery action completed; current draft kept."),
-                                in: panel, timeout: 48)
+            _ = try waitElement(renderer.staticTexts.matching(identifier: "Recovery action completed; current draft kept."),
+                                in: renderer, timeout: 48)
         }
         try stage("normal-quit") {
             let sheet = try quitSheet(app, window)
