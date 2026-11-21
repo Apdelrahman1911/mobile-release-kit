@@ -27,7 +27,7 @@ permissions:
   actions: read
 
 concurrency:
-  group: desktop-macos-update-check-${{ github.ref }}${{ contains(github.event.head_commit.message, '[macos-hourly-performance]') && '-hourly-performance' || '' }}
+  group: desktop-macos-update-check-${{ github.ref }}${{ contains(github.event.head_commit.message, '[macos-hourly-performance]') && '-hourly-performance' || contains(github.event.head_commit.message, '[macos-prepare-state-check]') && '-prepare' || '' }}
   cancel-in-progress: false
 
 jobs:

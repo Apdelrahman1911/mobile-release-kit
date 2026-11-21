@@ -1166,6 +1166,19 @@ def sample_removal_metadata(release, requests, existing_requests, evidence, labe
         (evidence / f"{label}-source-metadata.json").write_text(json.dumps(list(events), indent=2) + "\n")
 
 
+
+def fixed_app_trace(evidence, label):
+    # The original native traces contain closed stage and status atoms only.
+    try:
+        run = subprocess.run(["/usr/bin/log", "show", "--last", "8m", "--style", "compact", "--predicate",
+                              'eventMessage BEGINSWITH "MRK_REMOVAL_TRACE"'],
+                             capture_output=True, text=True, timeout=180)
+        trace = [line[:300] for line in run.stdout.splitlines() if "MRK_REMOVAL_TRACE" in line][-60:]
+    except (OSError, subprocess.TimeoutExpired) as error:
+        trace = [f"capture failed: {type(error).__name__}"]
+    (evidence / f"{label}-app-trace.txt").write_text("\n".join(trace) + "\n")
+    return trace
+
 def live_remove(mount, work, evidence, steps, label, observe_release=None):
     """Open the installed app, run the mounted Remove.pkg with the standard
     Installer and confirm its exact removal sheet and ensuing ordinary Quit
@@ -1240,15 +1253,7 @@ def live_remove(mount, work, evidence, steps, label, observe_release=None):
         # Keep the probe history even when this check fails below.
         (evidence / f"{label}-sheet-probes.json").write_text(json.dumps(sheet[-40:]) + "\n")
         (evidence / f"{label}-quit-sheet-probes.json").write_text(json.dumps(quit_sheet[-40:]) + "\n")
-        # The app's fixed-code removal trace (no paths/ids), pass or fail.
-        try:
-            t = subprocess.run(["/usr/bin/log", "show", "--last", "8m", "--style", "compact", "--predicate",
-                                'eventMessage BEGINSWITH "MRK_REMOVAL_TRACE"'], capture_output=True, text=True, timeout=180)
-            trace = [line[:300] for line in t.stdout.splitlines() if "MRK_REMOVAL_TRACE" in line][-60:]
-        except Exception as error:  # diagnostics must not raise
-            trace = [f"capture failed: {type(error).__name__}"]
-        out["appTrace"] = trace
-        (evidence / f"{label}-app-trace.txt").write_text("\n".join(trace) + "\n")
+        out["appTrace"] = fixed_app_trace(evidence, label)
     out["returncode"] = installer.returncode
     steps.append({"argv": ["installer", "-pkg", "Remove.pkg"], "returncode": installer.returncode, "role": label})
     if clicked and installer.returncode != 0:
@@ -1640,6 +1645,7 @@ def workspace_xctest(selection, work, evidence, steps, result):
     ):
         result[field] = re.findall(pattern, transcript)[-12:]
     if prepare:
+        result["prepareAppTrace"] = fixed_app_trace(evidence, "prepare")
         result["prepareQuitObserved"] = "MRK_RELEASE_PREPARE_TO_QUIT=confirmed-original-quit-and-gate-release" in transcript
         observed = result["prepareQuitObserved"]
     elif recovery:
