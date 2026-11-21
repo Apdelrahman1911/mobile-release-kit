@@ -39,7 +39,7 @@ on:
         required: false
         type: choice
         default: git-local
-        options: [git-local, git-fetch, git-push, git-create, git-upstream, service-cli, public-acquisition, sdk-registration, upload-keys, cold-restart, backup]
+        options: [git-local, git-branch, git-fetch, git-push, git-create, git-upstream, service-cli, public-acquisition, sdk-registration, upload-keys, cold-restart, backup]
       target:
         description: Single selected target; no architecture fallback
         required: true

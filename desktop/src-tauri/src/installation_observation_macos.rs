@@ -475,15 +475,7 @@ impl InstallationSlots {
     }
     fn removal_archive_source_scope(&self)->bool {
         #[cfg(not(feature = "macos-android-registration-helper"))]
-        {
-            self.book.as_ref().is_some_and(|book| {
-                // The confirmed removal's maintenance worker repeats this
-                // inspection. Reinstall preserves the earlier root-only
-                // archives for both reads of the same installed root.
-                (self.removal.is_some() && book.removal_gate.is_some())
-                    || book.registration_gate.as_ref().is_some_and(|gate|gate.source_has_removal_cutoff())
-            })
-        }
+        { self.removal.is_some() && self.book.as_ref().is_some_and(|book|book.removal_gate.is_some()) }
         #[cfg(feature = "macos-android-registration-helper")]
         { false }
     }
