@@ -6415,7 +6415,10 @@ final class NormalAppUITests: XCTestCase {
             try expand(renderer, prefix: "Advanced · CLI / AI access", renderer: renderer)
             try press(renderer, "Check access", renderer: renderer)
             try press(renderer, "Allow selected project for 1 hour", renderer: renderer)
-            _ = try waitElement(renderer.staticTexts.matching(identifier: "1 project was allowed at last check"), in: renderer)
+            // Read the settled permission again through the actual app. This never repeats Allow.
+            try press(renderer, "Check access", renderer: renderer)
+            _ = try waitElement(renderer.staticTexts.matching(identifier: "1 project was allowed at last check"), in: renderer,
+                                failures: ["Access is not confirmed"])
             try checkInstalledCliStatus(0)
         }
         try stage("cli-revoke") {
