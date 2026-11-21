@@ -3011,7 +3011,7 @@ jobs:
   # without starting functional checks. Saved-package dispatches stay explicit.
   candidate-tests:
     needs: [engineering-install, candidate-tool26-final-package, candidate-git27-final-package]
-    if: ${{ !cancelled() && github.ref == 'refs/heads/verify/desktop-macos-candidate' && ((github.event_name == 'push' && !contains(github.event.head_commit.message, '[macos-builds-only]') && needs.candidate-tool26-final-package.result == 'success' && needs.candidate-git27-final-package.result == 'success') || (github.event_name == 'workflow_dispatch' && (inputs.operation == 'candidate-tests' || inputs.operation == 'local-carrier' || inputs.operation == 'git-cli-timing' || inputs.operation == 'git-cli-process-data'))) }}
+    if: ${{ !cancelled() && github.ref == 'refs/heads/verify/desktop-macos-candidate' && ((github.event_name == 'push' && !contains(github.event.head_commit.message, '[macos-builds-only]') && needs.candidate-git27-final-package.result == 'success' && (needs.candidate-tool26-final-package.result == 'success' || contains(github.event.head_commit.message, '[macos-git-only]'))) || (github.event_name == 'workflow_dispatch' && (inputs.operation == 'candidate-tests' || inputs.operation == 'local-carrier' || inputs.operation == 'git-cli-timing' || inputs.operation == 'git-cli-process-data'))) }}
     uses: ./.github/workflows/desktop-macos-candidate-tests.yml
     secrets: inherit
 
@@ -3673,7 +3673,7 @@ jobs:
 
   candidate-tool26-prepare:
     name: "${{ matrix.native_scope == 'tool-setup' && 'macOS part (Tool26 / prepare)' || 'macOS part (Git27 / prepare)' }}"
-    if: "github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-macos-candidate' && !contains(github.event.head_commit.message, '[macos-desktop-update]')"
+    if: "github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-macos-candidate' && !contains(github.event.head_commit.message, '[macos-desktop-update]') && !contains(github.event.head_commit.message, '[macos-git-only]')"
     runs-on: "${{ matrix.runner }}"
     timeout-minutes: 90
     strategy:
@@ -4069,7 +4069,7 @@ jobs:
           overwrite: false
   candidate-tool26-resident:
     name: "${{ matrix.native_scope == 'tool-setup' && 'macOS part (Tool26 / resident)' || 'macOS part (Git27 / resident)' }}"
-    if: "github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-macos-candidate' && !contains(github.event.head_commit.message, '[macos-desktop-update]')"
+    if: "github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-macos-candidate' && !contains(github.event.head_commit.message, '[macos-desktop-update]') && !contains(github.event.head_commit.message, '[macos-git-only]')"
     runs-on: "${{ matrix.runner }}"
     timeout-minutes: 90
     strategy:
@@ -4187,7 +4187,7 @@ jobs:
           overwrite: false
   candidate-tool26-vault:
     name: "${{ matrix.native_scope == 'tool-setup' && 'macOS part (Tool26 / vault)' || 'macOS part (Git27 / vault)' }}"
-    if: "github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-macos-candidate' && !contains(github.event.head_commit.message, '[macos-desktop-update]')"
+    if: "github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-macos-candidate' && !contains(github.event.head_commit.message, '[macos-desktop-update]') && !contains(github.event.head_commit.message, '[macos-git-only]')"
     runs-on: "${{ matrix.runner }}"
     timeout-minutes: 90
     strategy:
@@ -4305,7 +4305,7 @@ jobs:
           overwrite: false
   candidate-tool26-frontend:
     name: "${{ matrix.native_scope == 'tool-setup' && 'macOS part (Tool26 / frontend)' || 'macOS part (Git27 / frontend)' }}"
-    if: "github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-macos-candidate' && !contains(github.event.head_commit.message, '[macos-desktop-update]')"
+    if: "github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-macos-candidate' && !contains(github.event.head_commit.message, '[macos-desktop-update]') && !contains(github.event.head_commit.message, '[macos-git-only]')"
     runs-on: "${{ matrix.runner }}"
     timeout-minutes: 90
     strategy:
@@ -4419,7 +4419,7 @@ jobs:
           overwrite: false
   candidate-tool26-observer:
     name: "${{ matrix.native_scope == 'tool-setup' && 'macOS part (Tool26 / observer)' || 'macOS part (Git27 / observer)' }}"
-    if: "github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-macos-candidate' && !contains(github.event.head_commit.message, '[macos-desktop-update]')"
+    if: "github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-macos-candidate' && !contains(github.event.head_commit.message, '[macos-desktop-update]') && !contains(github.event.head_commit.message, '[macos-git-only]')"
     runs-on: "${{ matrix.runner }}"
     timeout-minutes: 120
     strategy:
@@ -4547,7 +4547,7 @@ jobs:
           overwrite: false
   candidate-tool26-remover:
     name: "${{ matrix.native_scope == 'tool-setup' && 'macOS part (Tool26 / remover)' || 'macOS part (Git27 / remover)' }}"
-    if: "github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-macos-candidate' && !contains(github.event.head_commit.message, '[macos-desktop-update]')"
+    if: "github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-macos-candidate' && !contains(github.event.head_commit.message, '[macos-desktop-update]') && !contains(github.event.head_commit.message, '[macos-git-only]')"
     runs-on: "${{ matrix.runner }}"
     timeout-minutes: 90
     strategy:
@@ -4673,7 +4673,7 @@ jobs:
           overwrite: false
   candidate-tool26-cli:
     name: "${{ matrix.native_scope == 'tool-setup' && 'macOS part (Tool26 / cli)' || 'macOS part (Git27 / cli)' }}"
-    if: "github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-macos-candidate' && !contains(github.event.head_commit.message, '[macos-desktop-update]')"
+    if: "github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-macos-candidate' && !contains(github.event.head_commit.message, '[macos-desktop-update]') && !contains(github.event.head_commit.message, '[macos-git-only]')"
     runs-on: "${{ matrix.runner }}"
     timeout-minutes: 90
     strategy:
@@ -4799,7 +4799,7 @@ jobs:
           overwrite: false
   candidate-tool26-sign-remover:
     name: "${{ matrix.native_scope == 'tool-setup' && 'macOS part (Tool26 / sign-remover)' || 'macOS part (Git27 / sign-remover)' }}"
-    if: "github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-macos-candidate' && !contains(github.event.head_commit.message, '[macos-desktop-update]')"
+    if: "github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-macos-candidate' && !contains(github.event.head_commit.message, '[macos-desktop-update]') && !contains(github.event.head_commit.message, '[macos-git-only]')"
     runs-on: "${{ matrix.runner }}"
     timeout-minutes: 90
     strategy:
@@ -4914,7 +4914,7 @@ jobs:
           overwrite: false
   candidate-tool26-sign-cli:
     name: "${{ matrix.native_scope == 'tool-setup' && 'macOS part (Tool26 / sign-cli)' || 'macOS part (Git27 / sign-cli)' }}"
-    if: "github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-macos-candidate' && !contains(github.event.head_commit.message, '[macos-desktop-update]')"
+    if: "github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-macos-candidate' && !contains(github.event.head_commit.message, '[macos-desktop-update]') && !contains(github.event.head_commit.message, '[macos-git-only]')"
     runs-on: "${{ matrix.runner }}"
     timeout-minutes: 90
     strategy:
@@ -5029,7 +5029,7 @@ jobs:
           overwrite: false
   candidate-tool26-assemble:
     name: "${{ matrix.native_scope == 'tool-setup' && 'macOS part (Tool26 / assemble)' || 'macOS part (Git27 / assemble)' }}"
-    if: "github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-macos-candidate' && !contains(github.event.head_commit.message, '[macos-desktop-update]')"
+    if: "github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-macos-candidate' && !contains(github.event.head_commit.message, '[macos-desktop-update]') && !contains(github.event.head_commit.message, '[macos-git-only]')"
     runs-on: "${{ matrix.runner }}"
     timeout-minutes: 90
     strategy:
@@ -5158,7 +5158,7 @@ jobs:
           overwrite: false
   candidate-tool26-notarize-payload:
     name: "${{ matrix.native_scope == 'tool-setup' && 'macOS part (Tool26 / notarize-payload)' || 'macOS part (Git27 / notarize-payload)' }}"
-    if: "github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-macos-candidate' && !contains(github.event.head_commit.message, '[macos-desktop-update]')"
+    if: "github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-macos-candidate' && !contains(github.event.head_commit.message, '[macos-desktop-update]') && !contains(github.event.head_commit.message, '[macos-git-only]')"
     runs-on: "${{ matrix.runner }}"
     timeout-minutes: 90
     strategy:
@@ -5283,7 +5283,7 @@ jobs:
           overwrite: false
   candidate-tool26-installer:
     name: "${{ matrix.native_scope == 'tool-setup' && 'macOS part (Tool26 / installer)' || 'macOS part (Git27 / installer)' }}"
-    if: "github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-macos-candidate' && !contains(github.event.head_commit.message, '[macos-desktop-update]')"
+    if: "github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-macos-candidate' && !contains(github.event.head_commit.message, '[macos-desktop-update]') && !contains(github.event.head_commit.message, '[macos-git-only]')"
     runs-on: "${{ matrix.runner }}"
     timeout-minutes: 90
     strategy:
@@ -5406,7 +5406,7 @@ jobs:
           overwrite: false
   candidate-tool26-scripts-package:
     name: "${{ matrix.native_scope == 'tool-setup' && 'macOS part (Tool26 / scripts-package)' || 'macOS part (Git27 / scripts-package)' }}"
-    if: "github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-macos-candidate' && !contains(github.event.head_commit.message, '[macos-desktop-update]')"
+    if: "github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-macos-candidate' && !contains(github.event.head_commit.message, '[macos-desktop-update]') && !contains(github.event.head_commit.message, '[macos-git-only]')"
     runs-on: "${{ matrix.runner }}"
     timeout-minutes: 90
     strategy:
@@ -5531,7 +5531,7 @@ jobs:
           overwrite: false
   candidate-tool26-final-package:
     name: "${{ matrix.native_scope == 'tool-setup' && 'Build signed candidate (Tool26)' || 'Build signed candidate (Git27)' }}"
-    if: "github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-macos-candidate' && !contains(github.event.head_commit.message, '[macos-desktop-update]')"
+    if: "github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-macos-candidate' && !contains(github.event.head_commit.message, '[macos-desktop-update]') && !contains(github.event.head_commit.message, '[macos-git-only]')"
     runs-on: "${{ matrix.runner }}"
     timeout-minutes: 90
     strategy:
