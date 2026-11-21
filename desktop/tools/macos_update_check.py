@@ -265,14 +265,44 @@ def window_count(pid, work):
     return int(p.stdout.strip()) if p.returncode == 0 and p.stdout.strip().isdigit() else None
 
 
-def recent_crashes(minutes=10):
-    names = []
+def recent_crash_paths(minutes=10):
+    paths = {}
     for folder in (Path("/Library/Logs/DiagnosticReports"), Path.home() / "Library/Logs/DiagnosticReports"):
         r = subprocess.run(["/usr/bin/sudo", "-n", "/usr/bin/find", str(folder), "-mmin", f"-{minutes}", "-type", "f", "-print0"],
                            capture_output=True, text=True, timeout=60)
-        names += [Path(n).name for n in r.stdout.split("\0")
-                  if PAYLOAD_PROCESS in n or "mrk-macos" in n or "Mobile Release Kit" in n]
-    return sorted(names)
+        for entry in r.stdout.split("\0"):
+            path = Path(entry)
+            if PAYLOAD_PROCESS in path.name or "mrk-macos" in path.name or "Mobile Release Kit" in path.name:
+                paths[path.name] = path
+    return paths
+
+
+def recent_crashes(minutes=10):
+    return sorted(recent_crash_paths(minutes))
+
+
+def crash_report_facts(path, observed_pids):
+    """Return closed process, exception and termination facts from a hosted .ips report."""
+    try:
+        if path.suffix != ".ips":
+            return {"read": False}
+        limit = 4 * 1024 * 1024
+        with path.open("rb") as source:
+            body = source.read(limit + 1)
+        if len(body) > limit:
+            return {"read": False}
+        _, report = body.split(b"\n", 1)
+        facts = json.loads(report)
+        name = facts.get("procName")
+        role = {PAYLOAD_PROCESS: "payload", "mrk-macos-entry": "entry", "mrk-macos-launcher": "launcher",
+                "mrk-macos-remove": "remover", "mrk-macos-install": "installer"}.get(name, "other-product")
+        exception = facts.get("exception", {}).get("type")
+        termination = facts.get("termination", {}).get("namespace")
+        return {"read": True, "role": role, "pidSeenThisLaunch": facts.get("pid") in observed_pids,
+                "exception": exception if re.fullmatch(r"EXC_[A-Z_]{1,32}", str(exception)) else None,
+                "termination": termination if re.fullmatch(r"[A-Z0-9_]{1,24}", str(termination)) else None}
+    except (OSError, ValueError, AttributeError, TypeError):
+        return {"read": False}
 
 
 def stop_app(pids):
@@ -387,8 +417,10 @@ def launch_smoke(label, work, evidence, steps, observe=None, steady_idle_seconds
     steps.append(dict(row, role=label))
     need(p.returncode == 0, f"{label}-open-returned-{p.returncode}")
     pids, windows, samples = [], None, []
+    observed_pids = set()
     while time.monotonic() - started < 90:
         pids = payload_pids()
+        observed_pids.update(pids)
         if pids:
             samples.append(resource_sample(pids[0], started, "startup"))
             windows = window_count(pids[0], work)
@@ -399,6 +431,7 @@ def launch_smoke(label, work, evidence, steps, observe=None, steady_idle_seconds
     for _ in range(15):  # still alive and showing a window after the first paint
         time.sleep(1)
         live = payload_pids()
+        observed_pids.update(live)
         if live:
             samples.append(resource_sample(live[0], started, "idle"))
     steady_samples = []
@@ -412,15 +445,19 @@ def launch_smoke(label, work, evidence, steps, observe=None, steady_idle_seconds
                 break
             steady_samples.append(resource_sample(pids[0], steady_started, "idle"))
     alive = payload_pids()
+    observed_pids.update(alive)
     settled = window_count(alive[0], work) if alive else None
     shot = evidence / f"screen-{label}.png"
     subprocess.run(["/usr/sbin/screencapture", "-x", str(shot)], capture_output=True, timeout=60)
     ui = observe(alive[0], work, evidence, label) if observe and alive and settled else None
-    crashes = sorted(set(recent_crashes()) - before)
+    reports = recent_crash_paths()
+    crashes = sorted(set(reports) - before)
     observed = {"label": label, "processSeen": bool(pids), "secondsToFirstWindow": first_window,
                 "resources": resource_summary(samples),
                 "aliveAfterSettle": bool(alive), "windowsAfterSettle": settled, "newCrashReports": crashes,
                 "screenshot": shot.name if shot.exists() else None}
+    if crashes:
+        observed["crashReportFacts"] = [crash_report_facts(reports[name], observed_pids) for name in crashes[:10]]
     if ui is not None:
         observed["ui"] = ui
     if steady_idle_seconds:

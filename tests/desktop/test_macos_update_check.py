@@ -249,6 +249,19 @@ class LaunchSmokeSourceTests(unittest.TestCase):
         self.assertEqual((summary["peakRssKiB"], summary["idleRssKiB"], summary["idleAppRssKiB"], summary["idleMeanCpuPercent"],
                           summary["peakProcesses"]), (30, 25, 18, 3.0, 3))
 
+    def test_crash_facts_bind_to_the_observed_process_without_including_report_content(self):
+        import tempfile
+        with tempfile.TemporaryDirectory() as directory:
+            report = Path(directory) / "synthetic.ips"
+            report.write_text('{}\n{"procName":"mobile-release-kit-desktop","pid":17,'
+                              '"exception":{"type":"EXC_BAD_ACCESS"},"termination":{"namespace":"SIGNAL"},'
+                              '"path":"unpublished fixture path"}')
+            self.assertEqual(M.crash_report_facts(report, {17}), {"read": True, "role": "payload",
+                             "pidSeenThisLaunch": True, "exception": "EXC_BAD_ACCESS", "termination": "SIGNAL"})
+            self.assertFalse(M.crash_report_facts(report, {18})["pidSeenThisLaunch"])
+            report.write_text("truncated")
+            self.assertEqual(M.crash_report_facts(report, {17}), {"read": False})
+
     def test_uninstaller_sources_match_the_harness(self):
         folder = ROOT / "desktop/macos-installed-inputs/uninstaller"
         script = (folder / "delete-data.sh").read_text()

@@ -40,6 +40,7 @@ jobs:
           || contains(github.event.head_commit.message, '[macos-fresh-upgrade-check]') && fromJSON('["update","fresh"]')
           || contains(github.event.head_commit.message, '[macos-delete-data-check]') && fromJSON('["delete-data"]')
           || contains(github.event.head_commit.message, '[macos-repeat-removal-check]') && fromJSON('["repeat","repeat-after-dialogs"]')
+          || contains(github.event.head_commit.message, '[macos-repeat-crash-diagnostics]') && fromJSON('["repeat-after-dialogs"]')
           || contains(github.event.head_commit.message, '[macos-independent-acceptance]') && fromJSON('["prepare-quit","performance","update-credentials"]')
           || contains(github.event.head_commit.message, '[macos-package-and-maintenance]') && fromJSON('["release-asset","prepare-quit"]')
           || contains(github.event.head_commit.message, '[macos-workspace-cli]') && fromJSON('["workspace-cli"]')
