@@ -296,6 +296,11 @@ impl DocumentBinding {
         // copied DTO. The SAME final cutoff is sampled again immediately here.
         if let Some(completion)=completion {
             if completion.request_quit(){self.request_quit(app);}
+            else{
+                let status=completion.status();
+                macos_removal::removal_trace(format_args!("app prepare-quit=refused phase={:?} reason={:?}",
+                    status.phase,status.reason));
+            }
         }
     }
 }
@@ -341,7 +346,9 @@ impl DocumentBinding {
         if !crate::installation::preparation_profile_available(){return Err(unavailable());}
         #[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"),feature="macos-installed-desktop-image",not(feature="macos-android-registration-helper")))]
         {
-            let original=self.start_macos_maintenance(confirmation)?;
+            let original=self.start_macos_maintenance(confirmation).inspect_err(|_|{
+                macos_removal::removal_trace(format_args!("app prepare-admission=refused"));
+            })?;
             let id:String=original.operation.iter().map(|byte|format!("{byte:02x}")).collect();
             self.installation_preparation_view(Some((id.as_str(),original.generation)))
         }
