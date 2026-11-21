@@ -3645,6 +3645,15 @@ mod installer {
         fn archive_require(ok:bool,why:&'static str)->ArchiveParse<()> {
             if ok {Ok(())} else {Err(ArchiveParseError::Refused(why))}
         }
+        fn archive_identity_flags_data(flags:u32,distribution_sidecar:bool)->bool {
+            if distribution_sidecar {
+                // A signed distribution's read-only mount can expose non-root
+                // ownership. Finder hides these two files with UF_HIDDEN.
+                flags & !nix::libc::UF_HIDDEN == 0
+            } else {
+                flags==0
+            }
+        }
         struct ArchiveCursor<F> {
             read:F,size:u64,loaded:u64,consumed:u64,block:[u8;65536],start:usize,end:usize,digest:Sha256,
         }
@@ -3686,11 +3695,15 @@ mod installer {
                 String::from_utf8(bytes).map_err(|_|ArchiveParseError::Refused("removal-prior-hex"))
             }
             fn identity(&mut self,modes:&[u32])->ArchiveParse<(Identity,u32)> {
+                self.identity_with_metadata(modes,false)
+            }
+            fn identity_with_metadata(&mut self,modes:&[u32],distribution_sidecar:bool)->ArchiveParse<(Identity,u32)> {
                 let dev=self.i64()?;let ino=self.u64()?;archive_require(ino!=0,"removal-prior-identity")?;
                 let mode=self.u32()?;archive_require(modes.contains(&mode),"removal-prior-identity")?;
-                let uid=self.u32()?;archive_require(uid==0,"removal-prior-identity")?;
-                let gid=self.u32()?;archive_require(gid==0,"removal-prior-identity")?;
-                let flags=self.u32()?;archive_require(flags==0,"removal-prior-identity")?;
+                let uid=self.u32()?;archive_require(distribution_sidecar || uid==0,"removal-prior-identity")?;
+                let gid=self.u32()?;archive_require(distribution_sidecar || gid==0,"removal-prior-identity")?;
+                let flags=self.u32()?;
+                archive_require(archive_identity_flags_data(flags,distribution_sidecar),"removal-prior-identity")?;
                 let links=self.u64()?;archive_require(links>0 && (mode&0o170000!=0o100000 || links==1),"removal-prior-identity")?;
                 let size=self.i64()?;archive_require(size>=0 && (mode!=0o100444 || size>0),"removal-prior-identity")?;
                 let mtime=self.i64()?;let mtime_ns=self.i64()?;
@@ -3908,9 +3921,10 @@ mod installer {
                 let kind=cursor.byte()?;archive_require(kind<=5||restore_transport&&kind==6,"removal-prior-control-kind")?;
                 let path=cursor.string(1024,false,false)?;
                 archive_require(archive_control_path_data(kind,&path) && last.as_ref().is_none_or(|old|old<&path),"removal-prior-control-order")?;
-                let (id,flags)=cursor.identity(if matches!(kind,5|6) {&[0o100600,0o100444]}else{&[0o100444]})?;
+                let modes:&[u32]=if matches!(kind,5|6) {&[0o100600,0o100444]}else{&[0o100444]};
+                let (id,flags)=cursor.identity_with_metadata(modes,matches!(kind,1|2))?;
                 archive_require(if kind==5 {noop_recovery::snapshot_prefix_shape(&path,id,flags,id.size as u64)}
-                    else if kind==6 {restore_recovery::snapshot_prefix_shape(&path,id,flags,id.size as u64)}else{id.size>0 && id.size as u64<=installation_record::INVENTORY_LIMIT as u64 && flags==0},
+                    else if kind==6 {restore_recovery::snapshot_prefix_shape(&path,id,flags,id.size as u64)}else{id.size>0 && id.size as u64<=installation_record::INVENTORY_LIMIT as u64},
                     "removal-prior-control-identity")?;
                 let length=cursor.u64()?;archive_require(length==id.size as u64,"removal-prior-control-identity")?;
                 let expected=cursor.array()?;
@@ -6197,9 +6211,14 @@ mod installer {
             bodies.sort_unstable_by(|a,b|a.0.cmp(&b.0));
             let identity=Identity{dev:1,ino:40,mode:0o040755,uid:0,gid:0,links:2,size:64,
                 mtime:1,mtime_ns:0,ctime:1,ctime_ns:0};
-            let controls:Vec<RemovalSnapshotControl>=bodies.iter().enumerate().map(|(index,(path,kind,raw))|RemovalSnapshotControl{
-                path:path.clone(),identity:Identity{ino:100+index as u64,mode:0o100444,links:1,size:raw.len() as i64,..identity},
-                flags:0,size:raw.len() as u64,digest:Sha256::digest(raw).into(),kind:*kind,held:None}).collect();
+            let controls:Vec<RemovalSnapshotControl>=bodies.iter().enumerate().map(|(index,(path,kind,raw))|{
+                let distribution_sidecar=matches!(kind,1|2);
+                let (uid,gid,flags)=if distribution_sidecar {(501,20,nix::libc::UF_HIDDEN)}else{(0,0,0)};
+                RemovalSnapshotControl {
+                    path:path.clone(),identity:Identity{ino:100+index as u64,mode:0o100444,uid,gid,links:1,size:raw.len() as i64,..identity},
+                    flags,size:raw.len() as u64,digest:Sha256::digest(raw).into(),kind:*kind,held:None
+                }
+            }).collect();
             // Real fixed snapshot encoder and sole parser, but inert unsigned
             // bodies/identities. No test claims signature or filesystem proof.
             let phases=format!(".install-{invocation}");
@@ -9105,6 +9124,53 @@ mod installer {
                 let count=out.len().min(bytes.len()-at).min(7);out[..count].copy_from_slice(&bytes[at..at+count]);Ok(count)
             })
         }
+        #[test]
+        fn removal_archive_preserves_hidden_distribution_sidecars() {
+            let (seed,header)=removal_archive_test_snapshot(false,0);
+            let hidden=nix::libc::UF_HIDDEN;
+            let identity=Identity{dev:1,ino:9,mode:0o100444,uid:501,gid:20,links:1,size:3,
+                mtime:1,mtime_ns:2,ctime:3,ctime_ns:4};
+            for (kind,path,identity,flags) in [
+                (1,"@remove/producer.json",identity,hidden),
+                (2,"@remove/producer.sig",Identity{uid:0,gid:0,..identity},hidden),
+                (2,"@remove/producer.sig",identity,0),
+            ] {
+                let row=RemovalSnapshotControl{path:path.into(),identity,flags,size:3,
+                    digest:Sha256::digest(b"raw").into(),kind,held:None};
+                let mut raw=seed[..header].to_vec();
+                raw.extend_from_slice(&removal_snapshot_frame_data(&row).unwrap());
+                raw.extend_from_slice(b"raw");
+                let genesis=parse_removal_genesis_data(raw.len() as u64,&"2".repeat(32),|at,out|{
+                    let at=at as usize;let count=out.len().min(raw.len()-at);
+                    out[..count].copy_from_slice(&raw[at..at+count]);Ok(count)
+                }).unwrap();
+                let span=&genesis.controls_data()[0];
+                assert_eq!(span.kind_data(),kind);
+                assert_eq!(span.path_data(),path);
+                assert!(span.identity_data()==identity);
+                assert_eq!(span.flags_data(),flags);
+                assert_eq!(span.digest_data(),&row.digest);
+            }
+            for (kind,path,identity,flags,expected) in [
+                (0,"control.json",identity,0,"removal-prior-identity"),
+                (0,"control.json",Identity{uid:0,gid:0,..identity},hidden,"removal-prior-identity"),
+                (1,"@remove/producer.json",identity,hidden|nix::libc::UF_IMMUTABLE,"removal-prior-identity"),
+                (2,"@remove/producer.sig",Identity{links:2,..identity},hidden,"removal-prior-identity"),
+                (1,"@remove/producer.json",Identity{mode:0o100644,..identity},hidden,"removal-prior-identity"),
+                (1,"@remove/producer.sig",identity,hidden,"removal-prior-control-order"),
+            ] {
+                let digest:[u8;32]=Sha256::digest(b"raw").into();
+                let row=RemovalSnapshotControl{path:path.into(),identity,flags,size:3,digest,kind,held:None};
+                assert_eq!(removal_snapshot_frame_data(&row).err(),Some("removal-snapshot-frame"));
+                // Use the wire encoder directly to test independent read-side checks.
+                let mut frame=SnapshotBytes::new(2048).unwrap();
+                frame.put(&[kind]).unwrap();frame.string(path).unwrap();frame.identity(identity,flags).unwrap();
+                frame.put(&3u64.to_be_bytes()).unwrap();frame.put(&digest).unwrap();
+                let mut raw=seed[..header].to_vec();
+                raw.extend_from_slice(&frame.0);raw.extend_from_slice(b"raw");
+                assert_eq!(removal_archive_test_parse(&raw,true).err(),Some(expected));
+            }
+        }
         #[cfg(test)]
         pub(super) fn removal_archive_data_checks() {
             removal_rehome_data_checks();
@@ -10575,9 +10641,14 @@ mod installer {
             a.path==b.path && a.identity==b.identity && a.flags==b.flags && a.size==b.size && a.digest==b.digest && a.kind==b.kind
         }
         pub(super) fn removal_snapshot_frame_data(row:&RemovalSnapshotControl)->Result<Vec<u8>> {
+            let distribution_sidecar=matches!(row.kind,1|2);
             check(if row.kind==5 {noop_recovery::snapshot_prefix_shape(&row.path,row.identity,row.flags,row.size)}
-                else if row.kind==6 {restore_recovery::snapshot_prefix_shape(&row.path,row.identity,row.flags,row.size)}else{row.kind<=4 && !row.path.is_empty() && row.size>0
-                    && row.size<=installation_record::INVENTORY_LIMIT as u64},"removal-snapshot-frame")?;
+                else if row.kind==6 {restore_recovery::snapshot_prefix_shape(&row.path,row.identity,row.flags,row.size)}else{
+                    archive_control_path_data(row.kind,&row.path) && row.identity.mode==0o100444
+                    && row.identity.links==1 && row.identity.size==row.size as i64
+                    && (distribution_sidecar || row.identity.uid==0 && row.identity.gid==0)
+                    && archive_identity_flags_data(row.flags,distribution_sidecar)
+                    && row.size>0 && row.size<=installation_record::INVENTORY_LIMIT as u64},"removal-snapshot-frame")?;
             let mut out=SnapshotBytes::new(2048)?;out.put(&[row.kind])?;out.string(&row.path)?;
             out.identity(row.identity,row.flags)?;out.put(&row.size.to_be_bytes())?;out.put(&row.digest)?;Ok(out.0)
         }

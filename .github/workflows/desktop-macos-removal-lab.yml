@@ -141,7 +141,7 @@ jobs:
           retention-days: 30
 
   payload-unlink:
-    name: Verify payload descriptor settlement in Installer
+    name: Verify removal authorization, archive and Installer unlink
     if: >-
       github.repository == 'Apdelrahman1911/mobile-release-kit'
       && github.event_name == 'push'
@@ -184,7 +184,7 @@ jobs:
           export MRK_OUTPUT_DATA_INVENTORY="$fixtures/inventory.json"
           export MRK_OUTPUT_DATA_PATH_QUOTES="$fixtures/path-quotes.json"
           # Two unrelated pinned-data tests need paths at compile time. This
-          # job runs only the explicitly selected native unlink regression.
+          # job runs only the explicitly selected removal regressions.
           export MRK_PHASE_AUDIT_INVENTORY="$fixtures/inventory.json"
           export MRK_PHASE_AUDIT_PRODUCER="$fixtures/corpus.json"
           cargo fetch --manifest-path desktop/src-tauri/Cargo.toml --locked --target "$target"
@@ -202,6 +202,17 @@ jobs:
           PY
           )"
           printf 'MRK_PAYLOAD_UNLINK_TEST=%s\n' "$binary" >> "$GITHUB_ENV"
+
+      - name: Check the original locks and the signed sidecar archive format
+        shell: bash
+        run: |
+          set -euo pipefail
+          locks=installer::worker::tests::launcher_removal_requires_both_original_locks
+          archive=installer::maintenance::removal_archive_preserves_hidden_distribution_sidecars
+          "$MRK_PAYLOAD_UNLINK_TEST" "$locks" "$archive" --exact --test-threads=1 |
+            tee "$RUNNER_TEMP/removal-preflight-test.log"
+          grep -F "test $locks ... ok" "$RUNNER_TEMP/removal-preflight-test.log"
+          grep -F "test $archive ... ok" "$RUNNER_TEMP/removal-preflight-test.log"
 
       - name: Exercise the original unlink and close inside Installer
         shell: bash
@@ -233,6 +244,7 @@ jobs:
         with:
           name: macos-payload-unlink-lab-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
+            ${{ runner.temp }}/removal-preflight-test.log
             ${{ runner.temp }}/payload-unlink-test.log
             ${{ runner.temp }}/payload-unlink-installer.log
           if-no-files-found: warn
