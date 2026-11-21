@@ -70,9 +70,10 @@ class LaunchSmokeSourceTests(unittest.TestCase):
         self.assertIn("'[macos-remove-diagnostic]') && fromJSON('[\"remove\"]')", workflow)
         self.assertIn("'[macos-fresh-upgrade-check]') && fromJSON('[\"update\",\"fresh\"]')", workflow)
         self.assertIn("'[macos-delete-data-check]') && fromJSON('[\"delete-data\"]')", workflow)
+        self.assertIn("'[macos-repeat-removal-check]') && fromJSON('[\"repeat\",\"repeat-after-dialogs\"]')", workflow)
         self.assertIn('--mode "${{ matrix.mode }}"', workflow)
         source = (ROOT / "desktop/tools/macos_update_check.py").read_text()
-        self.assertIn('choices=("update", "fresh", "remove", "uninstaller", "delete-data")', source)
+        self.assertIn('"repeat", "repeat-after-dialogs")', source)
         # The installed-only uninstaller mode never runs or claims a live removal.
         installed = source.split("def uninstaller_installed_check(", 1)[1].split("\ndef ", 1)[0]
         self.assertNotIn("live_remove(", installed)
@@ -95,10 +96,24 @@ class LaunchSmokeSourceTests(unittest.TestCase):
         self.assertEqual(order, sorted(order))
 
         source = text.split("def remove_check(", 1)[1].split("\ndef ", 1)[0]
-        order = [source.index(marker) for marker in ('live_remove(mount, work, evidence, steps, "remove")',
+        order = [source.index(marker) for marker in ('live_remove(mount, work, evidence, steps, "remove",',
                  '"user-data-changed-by-removal"', 'install("reinstall"',
                  '"user-data-changed-by-reinstall"', 'launch_smoke("after-reinstall"', "uninstaller_check(", '"detach"')]
         self.assertEqual(order, sorted(order))
+
+    def test_removal_metadata_changes_records_fields_without_paths_or_values(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "private-name"
+            path.write_bytes(b"x")
+            paths = {"producer": path}
+            first, changes = M.removal_metadata_changes(paths, {})
+            self.assertEqual(changes, {})
+            path.chmod(0o444)
+            second, changes = M.removal_metadata_changes(paths, first)
+            self.assertIn("st_mode", changes["producer"])
+            self.assertNotIn(str(path), json.dumps(changes))
+            path.unlink()
+            self.assertEqual(M.removal_metadata_changes(paths, second)[1], {"producer": ["availability"]})
 
     def test_remove_result_retains_installer_status_when_acceptance_raises(self):
         from contextlib import redirect_stdout

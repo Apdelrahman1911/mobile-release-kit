@@ -1,6 +1,6 @@
 """Hosted install, update and first-launch check for the installed macOS app.
 
-Fresh disposable runner only. Three modes, each on its own fresh runner:
+Each check runs on its own fresh disposable runner.
 
 update (#49): installs the selected previous signed package, seeds per-user
 application data, installs the selected next signed package over it with the
@@ -579,7 +579,8 @@ def main():
     parser = argparse.ArgumentParser()
     parser.add_argument("--selection", required=True)
     parser.add_argument("--work", required=True)
-    parser.add_argument("--mode", choices=("update", "fresh", "remove", "uninstaller", "delete-data"), default="update")
+    parser.add_argument("--mode", choices=("update", "fresh", "remove", "uninstaller", "delete-data",
+                                           "repeat", "repeat-after-dialogs"), default="update")
     args = parser.parse_args()
     work = Path(args.work)
     evidence = work / "evidence"
@@ -591,7 +592,7 @@ def main():
         need(not STATE.exists() and not USER_DATA.exists(), "runner-not-fresh")
         if args.mode != "update":
             {"fresh": fresh_check, "remove": remove_check, "uninstaller": uninstaller_installed_check,
-             "delete-data": remove_check}[args.mode](
+             "delete-data": remove_check, "repeat": remove_check, "repeat-after-dialogs": remove_check}[args.mode](
                 selection, work, evidence, steps, result)
             result["passed"] = True
             return 0
@@ -639,7 +640,7 @@ def main():
         result["failure"] = str(error)[:200]
     finally:
         result["steps"] = steps
-        if args.mode in ("remove", "delete-data") and "removeReturn" not in result:
+        if args.mode in ("remove", "delete-data", "repeat", "repeat-after-dialogs") and "removeReturn" not in result:
             result["removeReturn"] = next((step["returncode"] for step in steps if step.get("role") == "remove"), None)
         try:
             install_log_excerpt(evidence)
@@ -848,13 +849,17 @@ def removal_file_summary(trace):
     return " -> ".join(summary)
 
 
-def sample_removal_start(pid, evidence, label, stop):
+def removal_requests(directory):
+    return {path for path in directory.glob("r-*") if re.fullmatch(r"r-[0-9a-f]{32}", path.name)}
+
+
+def sample_removal_start(pid, evidence, label, stop, existing_requests):
     """Capture short-lived app work while Installer publishes the request."""
     requests = STATE.with_name("MobileReleaseKit-RemovalRequests")
     deadline = time.monotonic() + 60
     try:
         while not stop.is_set() and time.monotonic() < deadline:
-            if next(requests.glob("r-*/request.json"), None) is not None:
+            if any((path / "request.json").is_file() for path in removal_requests(requests) - existing_requests):
                 break
             stop.wait(0.025)
         else:
@@ -890,7 +895,66 @@ def sample_removal_start(pid, evidence, label, stop):
     (evidence / f"{label}-app-start-sample.txt").write_text("\n".join(report) + "\n")
 
 
-def live_remove(mount, work, evidence, steps, label):
+REMOVAL_METADATA_FIELDS = ("st_dev", "st_ino", "st_mode", "st_uid", "st_gid", "st_flags",
+                           "st_nlink", "st_size", "st_mtime_ns", "st_ctime_ns")
+
+
+def removal_metadata_changes(paths, previous):
+    snapshot, changes = {}, {}
+    for role, path in paths.items():
+        try:
+            info = path.lstat()
+            identity = tuple(getattr(info, name) for name in REMOVAL_METADATA_FIELDS)
+        except OSError as error:
+            identity = (error.errno,)
+        snapshot[role] = identity
+        if role not in previous or identity == previous[role]:
+            continue
+        before = previous[role]
+        changes[role] = (
+            [name for name, old, new in zip(REMOVAL_METADATA_FIELDS, before, identity) if old != new]
+            if len(before) == len(identity) == len(REMOVAL_METADATA_FIELDS)
+            else ["availability"]
+        )
+    return snapshot, changes
+
+
+def sample_removal_metadata(release, requests, existing_requests, evidence, label, stop):
+    """Observe fixed source roles without exporting paths, metadata values, or contents."""
+    contents = APP / "Contents"
+    payload = contents / "Helpers/MobileReleaseKitPayload.app/Contents"
+    generation = STATE / "versions" / release
+    paths = {
+        "system-root": Path("/"), "system-library": Path("/Library"), "system-support": STATE.parent,
+        "installed-root": STATE, "versions": generation.parent, "generation": generation,
+        "record": generation / "installation-v1.json", "inventory": generation / "install-inventory.json",
+        "runtime": generation / "runtime", "producer": STATE / f".producer-{release}.json",
+        "signature": STATE / f".producer-{release}.sig", "app": APP, "app-contents": contents,
+        "app-macos": contents / "MacOS", "entry": contents / "MacOS/mrk-macos-entry",
+        "app-helpers": contents / "Helpers", "payload": payload.parent, "payload-contents": payload,
+        "payload-macos": payload / "MacOS", "payload-entry": payload / f"MacOS/{PAYLOAD_PROCESS}",
+        "payload-helpers": payload / "Helpers", "remover": payload / "Helpers/mrk-macos-remove",
+        "request-root": requests,
+    }
+    snapshot, events = {}, deque(maxlen=160)
+    deadline = time.monotonic() + 30
+    try:
+        while not stop.is_set() and time.monotonic() < deadline:
+            if "request" not in paths:
+                new = removal_requests(requests) - existing_requests
+                if len(new) == 1:
+                    request = next(iter(new))
+                    paths.update(request=request, **{"request-json": request / "request.json", "socket": request / "s"})
+                    events.append({"utcMs": time.time_ns() // 1_000_000, "newRequest": True})
+            snapshot, changes = removal_metadata_changes(paths, snapshot)
+            if changes:
+                events.append({"utcMs": time.time_ns() // 1_000_000, "changes": changes})
+            stop.wait(0.025)
+    finally:
+        (evidence / f"{label}-source-metadata.json").write_text(json.dumps(list(events), indent=2) + "\n")
+
+
+def live_remove(mount, work, evidence, steps, label, observe_release=None):
     """Open the installed app, run the mounted Remove.pkg with the standard
     Installer and confirm its exact removal sheet and ensuing ordinary Quit
     sheet. Require Installer 0 and no app, launcher or process left."""
@@ -908,13 +972,20 @@ def live_remove(mount, work, evidence, steps, label):
     time.sleep(10)
     script = work / "sheet.js"
     script.write_text(SHEET_JXA)
+    requests = STATE.with_name("MobileReleaseKit-RemovalRequests")
+    existing_requests = removal_requests(requests)
     log = open(evidence / f"{label}-installer.log", "w")
     installer = subprocess.Popen(["/usr/bin/sudo", "-n", "/usr/sbin/installer", "-verbose", "-pkg",
                                   str(mount / "Remove.pkg"), "-target", "/"], stdout=log, stderr=subprocess.STDOUT, text=True)
     sample_stop = threading.Event()
     sample_thread = threading.Thread(target=sample_removal_start,
-                                     args=(pids[0], evidence, label, sample_stop), daemon=True)
+                                     args=(pids[0], evidence, label, sample_stop, existing_requests), daemon=True)
     sample_thread.start()
+    metadata_thread = None
+    if observe_release is not None:
+        metadata_thread = threading.Thread(target=sample_removal_metadata, daemon=True,
+                                           args=(observe_release, requests, existing_requests, evidence, label, sample_stop))
+        metadata_thread.start()
     sheet, quit_sheet = [], []
     clicked, quit_clicked = False, False
     try:
@@ -949,6 +1020,8 @@ def live_remove(mount, work, evidence, steps, label):
     finally:
         sample_stop.set()
         sample_thread.join(timeout=87)
+        if metadata_thread is not None:
+            metadata_thread.join(timeout=1)
         log.close()
         out["sheet"] = sheet[-12:]
         out["quitSheet"] = quit_sheet[-12:]
@@ -1014,6 +1087,8 @@ def remove_check(selection, work, evidence, steps, result):
     (confirming the app's own sheet), then check deletion or reinstall."""
     need("removal" in selection, "selection-has-no-removal-carrier")
     row = selection["next"]
+    mode = result["mode"]
+    repeat = mode in ("repeat", "repeat-after-dialogs")
     folder = fetch("next", row, work, steps)
     mount, roster = removal_image(selection["removal"], work, steps)
     result["removalImageRoster"] = roster
@@ -1024,7 +1099,7 @@ def remove_check(selection, work, evidence, steps, result):
          == (row["release"], row["packageVersion"], row["packageSha256"]), "remove-baseline-identity")
     seeded = seed_user_data()
     result["seededFiles"] = len(seeded)
-    out = live_remove(mount, work, evidence, steps, "remove")
+    out = live_remove(mount, work, evidence, steps, "remove", observe_release=row["release"] if repeat else None)
     result.update(removalSheet=out["sheet"], removalQuitSheet=out["quitSheet"],
                   removeReturn=out["returncode"], afterRemoval=out["remaining"])
     if out.get("timedOut"):
@@ -1033,7 +1108,7 @@ def remove_check(selection, work, evidence, steps, result):
     result["userDataPreservedByRemoval"] = all(kept.get(k) == v for k, v in seeded.items())
     need(result["userDataPreservedByRemoval"], "user-data-changed-by-removal")
     try:
-        if result["mode"] == "delete-data":
+        if mode == "delete-data":
             confirmed_data_deletion(mount, work, evidence, result, plant_decoys())
             return
         # Reinstall after confirmed removal with the matching installer.
@@ -1046,6 +1121,14 @@ def remove_check(selection, work, evidence, steps, result):
              == (row["release"], row["packageVersion"], row["packageSha256"]), "reinstall-identity")
         need(all(manifest().get(k) == v for k, v in seeded.items()), "user-data-changed-by-reinstall")
         result["launchAfterReinstall"] = launch_smoke("after-reinstall", work, evidence, steps)
+        if repeat:
+            if mode == "repeat-after-dialogs":
+                _, before_repeat = uninstaller_while_installed(mount, work, evidence, steps, result)
+            else:
+                before_repeat = manifest()
+            result["secondRemoval"] = live_remove(mount, work, evidence, steps, "remove-again", observe_release=row["release"])
+            need(manifest() == before_repeat, "user-data-changed-by-second-removal")
+            return
         uninstaller_check(mount, work, evidence, steps, result)
     finally:
         subprocess.run(["/usr/bin/hdiutil", "detach", "-force", str(mount)], capture_output=True, timeout=120)
