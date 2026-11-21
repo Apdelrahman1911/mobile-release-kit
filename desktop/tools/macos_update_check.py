@@ -299,7 +299,7 @@ UI_JXA = """function run(argv) {
   const label = (e) => { for (const k of ['name', 'title', 'description']) { try { const v = e[k](); if (typeof v === 'string' && v) return v; } catch (x) {} } return ''; };
   const role = (e) => { try { return e.role(); } catch (x) { return ''; } };
   if (argv[1] === 'click') {
-    const preferred = ['AXLink', 'AXButton', 'AXRadioButton', 'AXTab', 'AXMenuItem'];
+    const preferred = ['AXLink', 'AXButton', 'AXCheckBox', 'AXRadioButton', 'AXTab', 'AXMenuItem'];
     for (const pass of [true, false]) {
       for (const e of all) {
         if (label(e) !== argv[2] || preferred.includes(role(e)) !== pass) continue;
@@ -427,6 +427,7 @@ def launch_smoke(label, work, evidence, steps, observe=None, steady_idle_seconds
             plannedSamples=steady_idle_seconds,
             sampleWindowSeconds=steady_samples[-1]["t"] if steady_samples else None,
             method="ps rss/%cpu of the same app process tree every 1 s after the initial idle sample")
+    (evidence / f"{label}-launch.json").write_text(json.dumps(observed, indent=2) + "\n")
     if alive:
         stop_app(alive)
     need(pids, f"{label}-app-process-not-started")
@@ -580,7 +581,8 @@ def main():
     parser.add_argument("--selection", required=True)
     parser.add_argument("--work", required=True)
     parser.add_argument("--mode", choices=("update", "fresh", "remove", "uninstaller", "delete-data",
-                                           "repeat", "repeat-after-dialogs"), default="update")
+                                           "repeat", "repeat-after-dialogs", "prepare-quit", "performance",
+                                           "update-credentials"), default="update")
     args = parser.parse_args()
     work = Path(args.work)
     evidence = work / "evidence"
@@ -590,9 +592,10 @@ def main():
         selection = load_selection(args.selection)
         result["selection"] = selection
         need(not STATE.exists() and not USER_DATA.exists(), "runner-not-fresh")
-        if args.mode != "update":
+        if args.mode not in ("update", "update-credentials"):
             {"fresh": fresh_check, "remove": remove_check, "uninstaller": uninstaller_installed_check,
-             "delete-data": remove_check, "repeat": remove_check, "repeat-after-dialogs": remove_check}[args.mode](
+             "delete-data": remove_check, "repeat": remove_check, "repeat-after-dialogs": remove_check,
+             "prepare-quit": prepare_quit_check, "performance": fresh_check}[args.mode](
                 selection, work, evidence, steps, result)
             result["passed"] = True
             return 0
@@ -607,6 +610,7 @@ def main():
                  selection["previous"]["packageSha256"]), "previous-installed-identity")
         seeded = seed_user_data()
         result["seededFiles"] = len(seeded)
+        credential = seed_update_credential() if args.mode == "update-credentials" else None
 
         update_rc = install("next", upgraded, steps, evidence=evidence)
         result["updateReturn"] = update_rc
@@ -624,6 +628,9 @@ def main():
         preserved = manifest()
         result["userDataPreserved"] = preserved == seeded
         need(preserved == seeded, "user-data-changed-by-update")
+        if credential is not None:
+            result["credentialPreserved"] = update_credential_matches(credential)
+            need(result["credentialPreserved"], "app-keychain-fixture-changed-by-update")
 
         downgrade_rc = install("downgrade", previous, steps, expect_success=False)
         result["downgradeReturn"] = downgrade_rc
@@ -633,6 +640,9 @@ def main():
         need((final["release"], final["packageVersion"]) == (after["release"], after["packageVersion"]),
              "downgrade-changed-installation")
         need(manifest() == seeded, "user-data-changed-by-downgrade-attempt")
+        if credential is not None:
+            result["credentialPreservedAfterDowngrade"] = update_credential_matches(credential)
+            need(result["credentialPreservedAfterDowngrade"], "app-keychain-fixture-changed-by-downgrade-attempt")
         # Last: launching writes the app's own data beside the seeded files.
         result["launchAfterUpdate"] = launch_smoke("after-update", work, evidence, steps)
         result["passed"] = True
@@ -666,7 +676,9 @@ def fresh_check(selection, work, evidence, steps, result):
     need(state["bundleShortVersion"] == row["packageVersion"], "fresh-bundle-version")
     need(state["receiptVersion"] is None, "fresh-unexpected-package-receipt")
     need(state["cliReturn"] == 0 and state["cliVersionLine"].startswith("mrk "), "fresh-cli-runs")
-    result["firstLaunch"] = launch_smoke("first-launch", work, evidence, steps, observe=first_launch_observe)
+    performance = result["mode"] == "performance"
+    result["firstLaunch"] = launch_smoke("first-launch", work, evidence, steps, observe=first_launch_observe,
+                                         steady_idle_seconds=300 if performance else 0)
     ui = result["firstLaunch"].get("ui") or {}
     # A missing accessibility read is recorded as not-observed, never a pass;
     # only a definite unavailable card, error marker or wrong CLI refusal fails.
@@ -674,6 +686,10 @@ def fresh_check(selection, work, evidence, steps, result):
     need(not ui.get("workspaceErrorMarkers"), "fresh-first-launch-workspace-error")
     need(ui.get("cliStatus", {}).get("returncode") == 3 and ui.get("cliStatus", {}).get("guidance"),
          "fresh-cli-status-guidance")
+    if performance:
+        need(ui.get("runtimeCard") == "bundled", "resource-first-launch-runtime-unproven")
+        need(result["firstLaunch"]["steadyIdleResources"]["samples"] == 300, "resource-sample-incomplete")
+        return
     data = manifest() if USER_DATA.exists() else {}
     result["appDataFilesAfterFirstLaunch"] = len(data)
     # Same package again: the no-op route keeps the installation and app data.
@@ -1136,6 +1152,82 @@ def remove_check(selection, work, evidence, steps, result):
 
 def home_path(relative):
     return Path.home() / relative
+
+
+def update_credential_query():
+    return subprocess.run(["/usr/bin/security", "find-generic-password", "-s", KEYCHAIN_SERVICES[0],
+                           "-a", "mrk-upgrade-fixture", "-w"], capture_output=True, timeout=30)
+
+
+def update_credential_matches(expected):
+    observed = update_credential_query()
+    return observed.returncode == 0 and observed.stdout.strip() == expected
+
+
+def seed_update_credential():
+    """An exact app service with a separate fixture account on the hosted user."""
+    need(update_credential_query().returncode == 44, "upgrade-keychain-fixture-preexists-or-unavailable")
+    value = os.urandom(24).hex()
+    created = subprocess.run(["/usr/bin/security", "add-generic-password", "-s", KEYCHAIN_SERVICES[0],
+                              "-a", "mrk-upgrade-fixture", "-w", value, "-T", "/usr/bin/security"],
+                             capture_output=True, timeout=30)
+    need(created.returncode == 0 and update_credential_matches(value.encode()), "upgrade-keychain-fixture-unreadable")
+    return value.encode()
+
+
+def prepare_quit_check(selection, work, evidence, steps, result):
+    row = selection["next"]
+    folder = fetch("next", row, work, steps)
+    need(install("next", folder, steps, evidence=evidence) == 0, "prepare-quit-install")
+    state = result["afterInstall"] = installed_state()
+    need(state["packageSha256"] == row["packageSha256"], "prepare-quit-install-identity")
+    before_crashes = set(recent_crashes())
+    process, step = run(["/usr/bin/open", str(APP)], 60)
+    steps.append(dict(step, role="prepare-quit-launch"))
+    need(process.returncode == 0, "prepare-quit-open")
+    deadline = time.monotonic() + 90
+    pid = None
+    while time.monotonic() < deadline:
+        live = payload_pids()
+        if len(live) == 1 and window_count(live[0], work):
+            pid = live[0]
+            break
+        time.sleep(2)
+    need(pid is not None, "prepare-quit-window")
+    result["prepareQuitNavigation"] = actions = []
+    try:
+        for title in ("Build tools", "About this installation"):
+            action = ui_query(pid, work, "click", title, timeout=20)
+            actions.append(action)
+            need(action.get("clicked") == title, "prepare-quit-navigation")
+        ui_query(pid, work, "click", "Refresh preparation status", timeout=20)
+        consent = "I want to stop the installed Android helper and prepare this application to quit."
+        for title in (consent, "Prepare and quit"):
+            action = ui_query(pid, work, "click", title, timeout=20)
+            actions.append(action)
+            need(action.get("clicked") == title, "prepare-quit-control")
+        script = work / "sheet.js"
+        script.write_text(SHEET_JXA)
+        deadline = time.monotonic() + 180
+        while time.monotonic() < deadline and pid in payload_pids():
+            cmd = ["/usr/bin/osascript", "-l", "JavaScript", str(script), str(pid)]
+            probe = subprocess.run([*cmd, "probe", "quit"], capture_output=True, text=True, timeout=30)
+            if probe.stdout.strip() == "present":
+                clicked = subprocess.run([*cmd, "click", "quit"], capture_output=True, text=True, timeout=30)
+                result["ordinaryQuitSheet"] = clicked.stdout.strip()
+            time.sleep(2)
+        need(not payload_pids(), "prepare-quit-app-still-running")
+        result["newCrashReports"] = sorted(set(recent_crashes()) - before_crashes)
+        need(not result["newCrashReports"], "prepare-quit-crash")
+        census, _ = run(["/bin/ps", "-A", "-o", "command="], 30)
+        need(census.returncode == 0, "prepare-quit-process-census")
+        result["remainingInstalledProcesses"] = sum(line.lstrip().startswith(str(APP) + "/")
+                                                    for line in census.stdout.splitlines())
+        need(result["remainingInstalledProcesses"] == 0, "prepare-quit-left-installed-processes")
+    finally:
+        subprocess.run(["/usr/sbin/screencapture", "-x", str(evidence / "screen-prepare-quit.png")],
+                       capture_output=True, timeout=60)
+    result["reopen"] = launch_smoke("prepare-quit-reopen", work, evidence, steps)
 
 
 DECOY_FILES = ("Library/Application Support/dev.mobile-release-kit.desktop.decoy/keep.txt",
