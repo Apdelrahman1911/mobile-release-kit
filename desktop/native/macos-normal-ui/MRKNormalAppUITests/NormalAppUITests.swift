@@ -5731,8 +5731,17 @@ final class NormalAppUITests: XCTestCase {
         if guided {
             try require(profile == .currentCandidateOrdinary, "guided observation requires the current signed candidate")
             let label = projectRequireDiagnosticMethod == .prepareToQuit ? "Build tools" : "Choose project folder"
-            _ = try waitElement(controls(renderer, [.button], label: label), in: renderer, enabled: true,
-                                timeout: 24, failures: Self.guidedWorkspaceFailures)
+            do {
+                _ = try waitElement(controls(renderer, [.button], label: label), in: renderer, enabled: true,
+                                    timeout: 24, failures: Self.guidedWorkspaceFailures)
+            } catch {
+                if projectRequireDiagnosticMethod == .guidedWorkspace && (try? remaining(1)) != nil {
+                    let button = controls(renderer, [.button], label: label)
+                    if button.count == 0 { print("MRK_RELEASE_CLI_ACCESS_STATE=dashboard-button-absent") }
+                    else { print("MRK_RELEASE_CLI_ACCESS_STATE=dashboard-button-present") }
+                }
+                throw error
+            }
         } else {
             try dashboard(renderer, startup: true, diagnosticOrdinal: diagnosticOrdinal)
         }
@@ -6418,23 +6427,23 @@ final class NormalAppUITests: XCTestCase {
             // Read the settled permission again through the actual app. This never repeats Allow.
             try press(renderer, "Check access", renderer: renderer)
             do {
+                try checkInstalledCliStatus(0)
                 _ = try waitElement(renderer.staticTexts.matching(identifier: "1 project was allowed at last check"), in: renderer,
                                     failures: ["Access is not confirmed"])
             } catch {
                 for (kind, label) in [
                     ("off", "Off at last check"), ("checking", "Checking access…"),
                     ("allowing", "Allowing the selected project…"), ("unknown", "Access is not confirmed"),
-                    ("retired", "Finishing an earlier access request…"),
+                    ("retired", "Finishing an earlier access request…"), ("unchecked", "Access not checked"),
+                    ("needs-check", "Access needs another check"),
                 ] {
+                    guard (try? remaining(1)) != nil else { break }
                     if renderer.staticTexts.matching(identifier: label).count != 0 {
                         print("MRK_RELEASE_CLI_ACCESS_STATE=\(kind)")
                     }
                 }
-                do { try checkInstalledCliStatus(0) }
-                catch { print("MRK_RELEASE_CLI_ACCESS_STATE=readback-refused") }
                 throw error
             }
-            try checkInstalledCliStatus(0)
         }
         try stage("cli-revoke") {
             try press(renderer, "Turn off access", renderer: renderer)
