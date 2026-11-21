@@ -6361,15 +6361,19 @@ final class NormalAppUITests: XCTestCase {
         defer { if child.isRunning { child.terminate() } }
         while child.isRunning { try clock.progress(until: end) }
         _ = try clock.remaining(1, before: end)
-        try require(child.terminationReason == .exit && child.terminationStatus == expected,
-                    "original installed CLI status differed")
         try output.seek(toOffset: 0)
         let body = try output.read(upToCount: 16385) ?? Data()
         try require(!body.isEmpty && body.count <= 16384, "original CLI status output bounds exceeded")
+        let payload = (try? JSONSerialization.jsonObject(with: body)) as? [String: Any]
+        let exit = child.terminationReason == .exit ? child.terminationStatus : -1
+        print("MRK_RELEASE_CLI_STATUS=expected=\(expected);exit=\(exit)")
+        try require(exit == expected && payload != nil, "original installed CLI status differed")
         if expected == 0 {
-            try require((try? JSONSerialization.jsonObject(with: body)) is [String: Any], "original CLI status was not a JSON object")
-        } else {
+            try require(payload?["error"] == nil, "original installed CLI granted response contained an error")
+        } else if expected == 3 {
             try require(String(decoding: body, as: UTF8.self).contains("CLI / AI access"), "installed CLI guidance is missing")
+        } else {
+            try require(payload?["error"] as? String == "access_denied", "the running service did not return its explicit revoked denial")
         }
     }
 
@@ -6409,7 +6413,9 @@ final class NormalAppUITests: XCTestCase {
         try stage("cli-revoke") {
             try press(renderer, "Turn off access", renderer: renderer)
             _ = try waitElement(renderer.staticTexts.matching(identifier: "Off at last check"), in: renderer)
-            try checkInstalledCliStatus(3)
+            // The ordinary service is still running, so its revoked handshake
+            // returns access_denied (4). The unopened service returned 3.
+            try checkInstalledCliStatus(4)
             try fixture.assertUnchanged()
             print("MRK_RELEASE_CLI_ACCESS=denied-allowed-revoked")
         }
@@ -6439,7 +6445,13 @@ final class NormalAppUITests: XCTestCase {
             let check = try waitElement(controls(renderer, [.checkBox], label: consent), in: renderer,
                                         enabled: true, timeout: 24)
             try reveal(check, in: renderer)
-            check.click()
+            try require((check.value as? String) == "0" || (check.value as? NSNumber)?.intValue == 0,
+                        "maintenance consent did not start unchecked")
+            check.coordinate(withNormalizedOffset: CGVector(dx: 0.04, dy: 0.5)).click()
+            let checked = XCTNSPredicateExpectation(predicate: NSPredicate(format: "value == %@ OR value == %@",
+                                                      "1", NSNumber(value: 1)), object: check)
+            try require(XCTWaiter.wait(for: [checked], timeout: try remaining(5)) == .completed,
+                        "maintenance consent checkbox did not become checked")
             try require(window.sheets.count == 0, "a sheet was present before preparation")
             try press(renderer, "Prepare and quit", renderer: renderer)
         }
