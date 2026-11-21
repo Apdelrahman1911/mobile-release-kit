@@ -5664,7 +5664,7 @@ class Fixtures:
         # Current stager output, NOT the historical supplier digest. The same
         # actual reviewed workflow builds and installs these exact bytes first.
         result = private_json(work / "runtime-result.json", 16384)
-        recovery_supplier_matches(result, supplier_origin, supplier_receipt_sha256)
+        recovery_supplier_matches(result, supplier_origin, supplier_receipt_sha256, target=self.binding.target)
         if supplier_origin == "fresh-public-source":
             _, source_lock_sha, _ = self._recovery_read(None,
                 str(source / "desktop/macos-cpython-source-inputs" / target["sourceLock"]), self.uid, 16*1024)
@@ -6464,7 +6464,7 @@ def recovery_supplier_route(origin, expected):
     return origin, expected
 
 
-def recovery_supplier_matches(result, origin, expected):
+def recovery_supplier_matches(result, origin, expected, *, target=ARM_TARGET):
     recovery_supplier_route(origin, expected)
     fresh = {"supplierOrigin", "supplierReceiptSha256", "supplierSourceLockSha256", "supplierProfile", "pythonVersion", "gil"}
     historical = {"acceptedArchiveSha256", "acceptedTarSha256", "originalManifestSha256", "supplierOnlyReuse", "addedNotices"}
@@ -6472,10 +6472,12 @@ def recovery_supplier_matches(result, origin, expected):
     if origin == "historical":
         need(result.get("supplierOnlyReuse") is True and not fresh.intersection(result), "recovery-historical-supplier")
     else:
+        target_data(target)
+        version = "3.14.10" if target == ARM_TARGET else "3.14.7"
         need(fresh <= result.keys() and not historical.intersection(result)
              and result["supplierOrigin"] == origin and result["supplierReceiptSha256"] == expected
              and result["supplierProfile"] == "mrk-macos-cpython-source-supplier-v1"
-             and result["pythonVersion"] == "3.14.7" and result["gil"] is True
+             and result["pythonVersion"] == version and result["gil"] is True
              and type(result["supplierSourceLockSha256"]) is str
              and re.fullmatch(r"[0-9a-f]{64}", result["supplierSourceLockSha256"]), "recovery-fresh-supplier")
 

@@ -1090,6 +1090,10 @@ def current_supplier_origin(args):
   return "fresh-public-source"
 
 
+def supplier_python_version(target):
+  return "3.14.10" if mac_target(target) == ARM_TARGET else "3.14.7"
+
+
 def fresh_supplier_receipt(body, expected, source_lock, *, target=ARM_TARGET):
   """Validate a pinned receipt, not the native behavior its hashes reference."""
   target = mac_target(target)
@@ -1100,14 +1104,14 @@ def fresh_supplier_receipt(body, expected, source_lock, *, target=ARM_TARGET):
        "files", "notices", "nativeEvidence"}
   need(type(value) is dict and set(value) == fields and type(value["schemaVersion"]) is int
      and value["schemaVersion"] == 1 and value["kind"] == FRESH_SUPPLIER_KIND
-     and value["target"] == target and value["pythonVersion"] == "3.14.7"
+     and value["target"] == target and value["pythonVersion"] == supplier_python_version(target)
      and value["gil"] is True, "fresh-receipt-profile")
   need(all(sha(value[name]) for name in ("sourceLockSha256", "producerSourceSha256", "recipeSha256",
                      "toolchainSha256", "inventorySha256")), "fresh-receipt-hashes")
   need(value["sourceLockSha256"] == digest(source_lock) and type(lock) is dict
      and type(lock.get("schemaVersion")) is int and lock["schemaVersion"] == 1
      and lock.get("target") == {"triple": target, "minimumMacOS": "26.0",
-                 "pythonVersion": "3.14.7", "gil": True}
+                 "pythonVersion": supplier_python_version(target), "gil": True}
      and lock["target"]["gil"] is True, "fresh-source-lock-binding")
   evidence = value["nativeEvidence"]
   need(type(evidence) is dict and set(evidence) == FRESH_EVIDENCE
@@ -1192,7 +1196,7 @@ def signed_python_workflow(target):
 
 
 SIGNED_ORIGINAL_SUPPLIERS = {
-  ARM_TARGET: {'receiptSha256': 'e6b23316078020c513ab1b05b3b55e4f87b8d15908a8dee022ad5ee03b8f763e', 'tarSha256': 'ead75b364118139561a34da6aa48e3c54791e152154ab32c46196b0223962359', 'sourceCommit': 'c6551aa07d0673436aa9587b3a039889d22449c3', 'runId': '40473858216', 'runAttempt': '1', 'artifactId': '12719943283'},
+  ARM_TARGET: {'receiptSha256': '8472de6eaf5c12b9f46d96ff97830c9cf4f02c98943c0c9134eddd48519d589c', 'tarSha256': '2e6efe239af9e7bc6f3688997d41a9607aa2980528d68fcaa8c97e40d611f438', 'sourceCommit': '9a64371c72dc56de3de3bcc63e7a368a91b7437d', 'runId': '44870109681', 'runAttempt': '1', 'artifactId': '14693417053'},
   INTEL_TARGET: {'receiptSha256': 'afba303207b19692b73fb1288b56afcd73378fc29b0b0ede4ff10eb2e0f949b8', 'tarSha256': 'ff976626b48e95abc414d46ff91f1ebb183416356bb4706b8e673b7c9018ca9c', 'sourceCommit': 'a2f7a10b4c86305f5ee65c6779ceaf6b128cd8fa', 'runId': '38343340695', 'runAttempt': '1', 'artifactId': '11787588635'},
 }
 
@@ -1226,7 +1230,7 @@ def signed_python_receipt(body, signed, args, original, original_receipt, produc
   need(type(value) is dict and set(value) == keys and type(value["schemaVersion"]) is int
      and value["schemaVersion"] == 1 and value["kind"] == SIGNED_PYTHON_KIND
      and value["purpose"] == "configured-shipping" and value["target"] == command_target(args)
-     and value["pythonVersion"] == "3.14.7", "signed-python-receipt-kind")
+     and value["pythonVersion"] == supplier_python_version(command_target(args)), "signed-python-receipt-kind")
   supplier = value["originalSupplier"]
   need(type(supplier) is dict and set(supplier) == {"receiptSha256", "tarSha256", "sourceCommit", "runId", "runAttempt", "artifactId"}
      and supplier == SIGNED_ORIGINAL_SUPPLIERS[command_target(args)]

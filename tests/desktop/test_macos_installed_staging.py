@@ -6938,11 +6938,11 @@ sys.exit(status)
         original = dict(sorted(original.items()))
         rows = {name: {"path": name, "size": len(body), "sha256": module.digest(body), "mode": mode}
                 for name, (body, mode) in original.items()}
-        lock = TOOL.canonical({"schemaVersion": 1, "target": {"triple": target, "minimumMacOS": "26.0", "pythonVersion": "3.14.7", "gil": True},
+        lock = TOOL.canonical({"schemaVersion": 1, "target": {"triple": target, "minimumMacOS": "26.0", "pythonVersion": TOOL.supplier_python_version(target), "gil": True},
                                "requiredPublicNoticeInputs": required})
         source(TOOL.source_lock_input(target), lock)
         receipt = TOOL.canonical({"schemaVersion": 1, "kind": TOOL.FRESH_SUPPLIER_KIND, "target": target,
-            "pythonVersion": "3.14.7", "gil": True, "sourceLockSha256": module.digest(lock),
+            "pythonVersion": TOOL.supplier_python_version(target), "gil": True, "sourceLockSha256": module.digest(lock),
             "producerSourceSha256": "1" * 64, "recipeSha256": "2" * 64, "toolchainSha256": "3" * 64,
             "inventorySha256": module.digest(TOOL.canonical(list(rows.values()))), "files": list(rows.values()),
             "notices": sorted(name for name in original if name.startswith("python/licenses/")),
@@ -17213,7 +17213,7 @@ def current_data_fixture():
         engine = b"# Inert protocol DATA, never imported.\n"
         inputs = {"src/mobile_release/__init__.py": b'__version__ = "0.1.0"\n',
                   "src/mobile_release/_desktop_engine.py": engine,
-                  TOOL.CURRENT_CA_SOURCE: b"SYNTHETIC CA DATA, not a trust store\n",
+                  TOOL.CURRENT_CA_SOURCE: (Path(__file__).resolve().parents[2] / TOOL.CURRENT_CA_SOURCE).read_bytes(),
                   TOOL.CURRENT_HELPER_SOURCE: helper}
         inputs.update({"desktop/" + name: ("# current inert " + name + "\n").encode() for name in TOOL.CURRENT_BOOTSTRAPS})
         for name, body in inputs.items():
@@ -17263,7 +17263,9 @@ class MacCurrentRuntimeData(unittest.TestCase):
             self.assertEqual(len(projection) + 1, len(captured))
             self.assertNotIn(TOOL.CURRENT_HELPER_SOURCE, projection)
             self.assertNotIn(TOOL.CURRENT_CA_SOURCE, projection)
-            self.assertEqual(projection["desktop/github-ca.pem"], (fixture.inputs[TOOL.CURRENT_CA_SOURCE], 0o444))
+            self.assertEqual(projection["desktop/github-ca.pem"][1], 0o444)
+            self.assertEqual(TOOL.digest(projection["desktop/github-ca.pem"][0]),
+                "8a2bfdbfac68ecdda694c8dd46f5d29d4386fa0402f844b59a17b7d073ebbd81")
             description = TOOL.current_runtime_command(self.args(fixture))
             args = self.args(fixture, "current-runtime", "final")
             args.expected_source = source_digest
