@@ -18,6 +18,7 @@ final class NormalAppUITests: XCTestCase {
         case pathFields = "testSyntheticProjectPathFields"
         case guidedWorkspace = "testCurrentGuidedWorkspaceAndCli"
         case prepareToQuit = "testCurrentPrepareToQuit"
+        case guidedRecovery = "testCurrentSavedVersionRecovery"
         case androidSourceSelection = "testSyntheticProjectAndroidSourceSelection"
         case localEditsAndImages = "testSyntheticProjectLocalEditsAndImages"
         case savedReleaseEvidence = "testSyntheticProjectSavedReleaseEvidence"
@@ -28,7 +29,9 @@ final class NormalAppUITests: XCTestCase {
         case emptyBuildInputInspection = "testSyntheticProjectEmptyBuildInputInspection"
         case androidCandidateInputs = "testSyntheticProjectAndroidCandidateInputs"
 
-        var diagnosesLaunch: Bool { self == .pathFields || self == .guidedWorkspace || self == .prepareToQuit }
+        var diagnosesLaunch: Bool {
+            self == .pathFields || self == .guidedWorkspace || self == .prepareToQuit || self == .guidedRecovery
+        }
     }
     private enum DashboardReason: String {
         case loading, notLoaded = "not-loaded", bridgeUnavailable = "bridge-unavailable"
@@ -6483,6 +6486,60 @@ final class NormalAppUITests: XCTestCase {
             try acceptFinalScenario()
             print("MRK_RELEASE_PREPARE_TO_QUIT=confirmed-original-quit-and-gate-release")
         }
+    }
+
+    @MainActor func testCurrentSavedVersionRecovery() throws {
+        projectRequireDiagnosticMethod = .guidedRecovery
+        defer { projectRequireDiagnosticMethod = nil }
+        continueAfterFailure = false
+        executionTimeAllowance = 300
+        try beginCase(seconds: 300)
+        guard let project = ProcessInfo.processInfo.environment["MRK_RELEASE_RECOVERY_PROJECT"],
+              project.range(of: #"^/private/tmp/mrk-normal-project-[A-Za-z0-9_]{6,24}/project$"#,
+                            options: .regularExpression) != nil else {
+            throw Refusal.condition("no admitted disposable recovery project")
+        }
+        var launched: (XCUIApplication, XCUIElement, XCUIElement)?
+        try stage("launch") { launched = try launchForJourney(profile: normalJourneyProfile(for: "project-test.xcresult"), guided: true) }
+        guard let (app, window, renderer) = launched else { throw Refusal.condition("recovery launch returned no original") }
+        try stage("project-open") {
+            try press(renderer, "Choose project folder", renderer: renderer, failures: Self.guidedWorkspaceFailures, timeout: 24)
+            let picker = try nativeSheet(window, title: "Choose a mobile project folder")
+            try goToFolder(picker, path: project)
+            try nativeOpen(picker)
+        }
+        try stage("recover-replacement") {
+            let panelQuery = named(renderer, "Saved-version recovery inspection")
+            if !panelQuery.element(boundBy: 0).exists {
+                try expand(renderer, prefix: "Edit version & build number", renderer: renderer)
+            }
+            let panel = try waitElement(panelQuery, in: renderer)
+            try press(panel, "Inspect recovery", renderer: renderer, timeout: 24)
+            _ = try waitElement(panel.buttons.matching(identifier: "Review recovery confirmation…"), in: panel,
+                                enabled: true, timeout: 48)
+            try inventory(panel, caption: "Inspected journal files — not your current draft", paths: ["public/version.properties"])
+            try press(panel, "Review recovery confirmation…", renderer: renderer, timeout: 48)
+            let dialog = try waitElement(controls(renderer, [.dialog, .group], label: "Roll back the interrupted save?"), in: renderer)
+            let apply = try unique(dialog.buttons.matching(identifier: "Confirm recovery action"), "recovery Apply is ambiguous")
+            try require(!apply.isEnabled, "recovery Apply began enabled without consent")
+            let consent = "I reviewed the action, exact file effects, both byte/digest/mode summaries and private cleanup scope."
+            let checkbox = try waitElement(controls(dialog, [.checkBox], label: consent), in: dialog, enabled: true)
+            try reveal(checkbox, in: renderer)
+            checkbox.coordinate(withNormalizedOffset: CGVector(dx: 0.04, dy: 0.5)).click()
+            try require(!apply.isEnabled, "recovery typed confirmation was not required")
+            try replace(field(dialog, "Type RECOVER to confirm this one original plan"), with: "RECOVER", renderer: renderer)
+            try press(dialog, "Confirm recovery action", renderer: renderer)
+            try waitGone(dialog)
+            _ = try waitElement(panel.staticTexts.matching(identifier: "Recovery action completed; current draft kept."),
+                                in: panel, timeout: 48)
+        }
+        try stage("normal-quit") {
+            let sheet = try quitSheet(app, window)
+            try click(sheet.buttons.matching(identifier: "Quit"), "the original Quit button is not actionable")
+            try completeNormalQuit(app)
+            try acceptFinalScenario()
+        }
+        print("MRK_RELEASE_GUI_RECOVERY=confirmed-original-rollback-and-quit")
     }
 
     @MainActor func testSyntheticProjectPathFields() throws {

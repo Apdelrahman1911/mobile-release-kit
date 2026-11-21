@@ -633,7 +633,8 @@ def main():
     parser.add_argument("--mode", choices=("update", "fresh", "remove", "uninstaller", "delete-data",
                                            "repeat", "repeat-after-dialogs", "prepare-quit", "performance",
                                            "update-credentials", "release-asset", "workspace-cli",
-                                           "workspace-xctest", "prepare-xctest", "performance-long", "core-recovery"), default="update")
+                                           "workspace-xctest", "prepare-xctest", "performance-long", "core-recovery",
+                                           "recovery-xctest"), default="update")
     args = parser.parse_args()
     work = Path(args.work)
     evidence = work / "evidence"
@@ -649,7 +650,7 @@ def main():
              "prepare-quit": prepare_quit_check, "performance": fresh_check, "release-asset": release_asset_check,
              "workspace-cli": workspace_cli_check, "workspace-xctest": workspace_xctest,
              "prepare-xctest": workspace_xctest, "performance-long": performance_long_check,
-             "core-recovery": core_recovery_check}[args.mode](
+             "core-recovery": core_recovery_check, "recovery-xctest": workspace_xctest}[args.mode](
                 selection, work, evidence, steps, result)
             result["passed"] = True
             return 0
@@ -799,7 +800,7 @@ raise SystemExit(0 if result.wasSuccessful() else 1)
 """
 
 
-def run_signed_core_recovery(runtime, work, repository, manifest_sha256, result):
+def prepare_signed_core_fixture(runtime, work, repository, manifest_sha256):
     manifest_path = runtime / "manifest.json"
     need(digest(manifest_path) == manifest_sha256, "core-recovery-runtime-manifest")
     manifest = json.loads(manifest_path.read_bytes())
@@ -812,16 +813,20 @@ def run_signed_core_recovery(runtime, work, repository, manifest_sha256, result)
     need(core_sha256 == manifest["coreSha256"], "core-recovery-core-binding")
     fixture = work.resolve() / "signed-core-recovery"
     fixture.mkdir(mode=0o700)
-    temporary = fixture / "tmp"
-    temporary.mkdir(mode=0o700)
     shutil.copytree(repository / "tests", fixture / "tests", ignore=shutil.ignore_patterns("__pycache__"))
     # The existing restart-child tests add ./src to sys.path. It is the exact
     # packaged archive in this disposable fixture, with no checkout fallback.
     shutil.copyfile(runtime / "core.zip", fixture / "src")
     need(digest(fixture / "src") == core_sha256, "core-recovery-test-archive")
+    return fixture, runtime / "python/bin/python3", core_sha256
+
+
+def run_signed_core_recovery(runtime, work, repository, manifest_sha256, result):
+    fixture, python, core_sha256 = prepare_signed_core_fixture(runtime, work, repository, manifest_sha256)
+    temporary = fixture / "tmp"
+    temporary.mkdir(mode=0o700)
     env = {"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "HOME": str(fixture), "TMPDIR": str(temporary),
            "LC_ALL": "C", "LANG": "C", "TZ": "UTC"}
-    python = runtime / "python/bin/python3"
     tested = subprocess.run([str(python), "-I", "-S", "-B", "-c", CORE_RECOVERY_TEST, str(fixture)],
                             cwd=fixture, env=env, capture_output=True, text=True, timeout=600)
     result["coreRecoveryReturn"] = tested.returncode
@@ -836,7 +841,7 @@ def run_signed_core_recovery(runtime, work, repository, manifest_sha256, result)
     need(tested.returncode == 0 and counts.get("tests") == 12
          and counts.get("errors") == counts.get("failures") == counts.get("skipped") == 0,
          "core-recovery-original-suite")
-    need(digest(fixture / "src") == core_sha256 and digest(manifest_path) == manifest_sha256,
+    need(digest(fixture / "src") == core_sha256 and digest(runtime / "manifest.json") == manifest_sha256,
          "core-recovery-source-changed")
 
 
@@ -850,6 +855,52 @@ def core_recovery_check(selection, work, evidence, steps, result):
          "core-recovery-package-identity")
     runtime = STATE / "versions" / row["release"] / "runtime"
     run_signed_core_recovery(runtime, work, Path(__file__).resolve().parents[2], prepared["runtimeManifestSha256"], result)
+
+
+def recovery_project_manifest(project):
+    rows = {}
+    for path in project.rglob("*"):
+        info = path.lstat()
+        need(stat.S_ISREG(info.st_mode) or stat.S_ISDIR(info.st_mode), "recovery-ui-project-roster")
+        rows[path.relative_to(project).as_posix()] = (digest(path) if stat.S_ISREG(info.st_mode) else None,
+                                                      info.st_ino, stat.S_IMODE(info.st_mode))
+    return rows
+
+
+def seed_signed_gui_recovery(row, folder, work, env, result):
+    runtime = STATE / "versions" / row["release"] / "runtime"
+    prepared = json.loads((folder / "PREPARED.json").read_text())
+    fixture, python, core_sha256 = prepare_signed_core_fixture(runtime, work, Path(__file__).resolve().parents[2],
+                                                              prepared["runtimeManifestSha256"])
+    project = Path(tempfile.mkdtemp(prefix="mrk-normal-project-", dir="/private/tmp")) / "project"
+    seed = """import pathlib, sys
+root, project = map(pathlib.Path, sys.argv[1:])
+sys.path[:0] = [str(root / 'src'), str(root)]
+from tests.desktop.test_saved_text_recovery import _init_project
+_init_project(project, 'version')
+"""
+    environment = {key: env[key] for key in ("PATH", "LANG", "LC_ALL", "TZ", "TMPDIR")}
+    environment["HOME"] = str(fixture)
+    initial = subprocess.run([str(python), "-I", "-S", "-B", "-c", seed, str(fixture), str(project)],
+                             cwd=fixture, env=environment, capture_output=True, timeout=30)
+    need(initial.returncode == 0 and not initial.stderr, "recovery-ui-synthetic-project")
+    baseline = recovery_project_manifest(project)
+    control = "public/version.properties"
+    worker = fixture / "tests/desktop/test_saved_text_recovery.py"
+    killed = subprocess.run([str(python), "-I", "-S", "-B", str(worker), "--restart-child", str(project),
+                             "release_version", "crash-replacement"], cwd=project, env=environment,
+                            capture_output=True, timeout=20)
+    need(killed.returncode == -signal.SIGKILL and not killed.stderr, "recovery-ui-original-writer-kill")
+    need(len(killed.stdout) <= 65536 and [json.loads(line)["kind"] for line in killed.stdout.splitlines()]
+         == ["opened", "prepared"], "recovery-ui-original-writer-frames")
+    journal = project / ".mobile-release-version"
+    old = journal / "old-0"
+    need(digest(old) == baseline[control][0] and old.stat().st_ino == baseline[control][1]
+         and digest(project / control) != baseline[control][0], "recovery-ui-retained-replacement-journal")
+    env["TEST_RUNNER_MRK_RELEASE_RECOVERY_PROJECT"] = str(project)
+    result.update(recoveryWriterReturn=killed.returncode, recoveryCoreSha256=core_sha256,
+                  recoveryOriginalFiles=sum(row[0] is not None for row in baseline.values()))
+    return project, baseline
 
 
 SHEET_JXA = """function run(argv) {
@@ -1507,7 +1558,11 @@ def workspace_xctest(selection, work, evidence, steps, result):
     need(len(manifests) == 1 and manifests[0].is_file() and not manifests[0].is_symlink(),
          "workspace-xctest-single-original-manifest")
     prepare = result["mode"] == "prepare-xctest"
-    method = "testCurrentPrepareToQuit" if prepare else "testCurrentGuidedWorkspaceAndCli"
+    recovery = result["mode"] == "recovery-xctest"
+    method = {"prepare-xctest": "testCurrentPrepareToQuit", "workspace-xctest": "testCurrentGuidedWorkspaceAndCli",
+              "recovery-xctest": "testCurrentSavedVersionRecovery"}[result["mode"]]
+    if recovery:
+        project_path, baseline = seed_signed_gui_recovery(row, folder, work, env, result)
     bundle = work / "project-test.xcresult"
     before_crashes = set(recent_crashes())
     tested = subprocess.run(["/usr/bin/xcodebuild", "test-without-building", "-xctestrun", str(manifests[0]),
@@ -1534,6 +1589,10 @@ def workspace_xctest(selection, work, evidence, steps, result):
     if prepare:
         result["prepareQuitObserved"] = "MRK_RELEASE_PREPARE_TO_QUIT=confirmed-original-quit-and-gate-release" in transcript
         observed = result["prepareQuitObserved"]
+    elif recovery:
+        result["guiRecoveryObserved"] = "MRK_RELEASE_GUI_RECOVERY=confirmed-original-rollback-and-quit" in transcript
+        result["recoveryProjectMatchesOriginals"] = recovery_project_manifest(project_path) == baseline
+        observed = result["guiRecoveryObserved"] and result["recoveryProjectMatchesOriginals"]
     else:
         result["workspaceFixtureObserved"] = "MRK_RELEASE_WORKSPACE=selected-saved-identity-files-unchanged" in transcript
         result["cliGrantAndRevokeObserved"] = "MRK_RELEASE_CLI_ACCESS=denied-allowed-revoked" in transcript
