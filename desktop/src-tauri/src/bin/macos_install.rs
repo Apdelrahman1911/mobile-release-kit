@@ -17787,7 +17787,7 @@ mod installer {
             const INVENTORY:&str="f4ec6419c8816eaf75111154e12b0766a52e6e44819ac91f118564b393443fa9";
             fn enabled()->bool {
                 cfg!(all(target_arch="aarch64",not(feature="macos-installed-removal-abrupt-fixture")))
-                    && paths::RELEASE=="macos26-arm64-desktop-10" && paths::PACKAGE_VERSION=="0.2.4"
+                    && paths::RELEASE=="macos26-arm64-desktop-11" && paths::PACKAGE_VERSION=="0.2.5"
             }
             fn epoch(state_sha:[u8;32])->Result<([u8;20],[[u8;32];4])> {
                 Ok((removal_hex_data(Self::SOURCE)?,[
