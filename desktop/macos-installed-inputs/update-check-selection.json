@@ -27,15 +27,15 @@
   "next": {
     "runId": "45067119635",
     "artifactId": "14775010623",
-    "carrierArtifactId": "14776136200",
+    "carrierArtifactId": "14778750067",
     "packageSha256": "825c6724fd675e6d08d09c99eb519cb098541c23217a7fb8b18cd9eb3257a9df",
     "packageVersion": "0.2.6",
     "release": "macos26-arm64-desktop-12"
   },
   "removal": {
-    "runId": "45076603850",
-    "artifactId": "14776201066",
-    "imageSha256": "faf995a41f15a241fefc253e0b4212b9d3248b400a092de8c13f0a117a915068"
+    "runId": "45082983317",
+    "artifactId": "14778621389",
+    "imageSha256": "d32daaeb1780b091ecbacbe9517622516da02b29bab6d1ba711f0420ba49df7f"
   },
   "bridge": {
     "runId": "44991962101",
