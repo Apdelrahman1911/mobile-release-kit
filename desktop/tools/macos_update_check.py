@@ -1059,8 +1059,8 @@ GATEKEEPER_UNINSTALLER_JXA = """function run() {
     for (const panel of [w].concat(w.sheets())) {
       const text = [panel.name()].concat(panel.staticTexts().map(t => t.value())).join(' ');
       if (!text.includes(app)) continue;
-      const buttons = panel.buttons().map(b => b.name()).sort();
-      if (buttons.join('|') !== 'Cancel|Open'
+      const buttons = panel.buttons().map(b => b.name()).sort().join('|');
+      if (!['Cancel|Open', 'Cancel|Open|Show Disk Image'].includes(buttons)
           || !/downloaded from the internet/i.test(text)
           || !/are you sure you want to open/i.test(text)
           || /malware|unidentified developer|could not verify|cannot be opened|is damaged/i.test(text)) {
