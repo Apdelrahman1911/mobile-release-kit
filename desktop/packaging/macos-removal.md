@@ -3,10 +3,10 @@
 This is the separate **removal** disk image, not the application installer. It is built for the matching managed Mobile Release Kit source/release shown in `REMOVAL.json`. Keep the matching application installer if you may reinstall.
 
 1. Save your work and stop release/build operations in Mobile Release Kit.
-2. Open `MobileReleaseKit-Remove.dmg`. Keep all three files together on the read-only mounted image. Do not copy only `Remove.pkg` into Downloads.
-3. Open `Remove.pkg` only when you intend to remove this managed installation **or explicitly resume an interrupted removal**. macOS Installer requests administrator authorization.
-4. For an existing application, the authenticated app asks you to confirm removal, finishes its own work and unregisters its service. Cancellation is not successful removal.
-5. The remover refuses an unknown installation, unrelated files, an active/unknown original operation, or unmatched signing/source evidence. Do not force-delete files or retry by changing permissions.
+2. Open `MobileReleaseKit-Remove.dmg`, then open **Uninstall Mobile Release Kit** from the mounted image. The app uses the signed `Remove.pkg` and its two signed sidecars beside it on the read-only volume.
+3. Choose **Uninstall App (Keep My Data)** to preserve your data. Choose **Uninstall App & Delete All Data** only when you want to erase this app's own settings, drafts, history, caches, and saved credentials after successful removal. Confirm that choice separately.
+4. Choose **Continue**, follow macOS Installer, and enter administrator authorization when prompted. The running app asks you to confirm removal, finishes its work, and unregisters its service. Quit Installer when it finishes to see the uninstaller's result.
+5. If Installer reports a problem, keep the removal image and its diagnostic result for recovery. The remover refuses unknown installations, unrelated files, active or unknown original operations, or unmatched signing evidence.
 
 ## What stays
 
