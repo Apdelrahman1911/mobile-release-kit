@@ -51,9 +51,12 @@ class UpdateCheckSelectionTests(unittest.TestCase):
         history = json.loads((ROOT / "desktop/macos-installed-inputs/producer-history.json").read_text())
         accepted = history["targets"]["aarch64-apple-darwin"]["acceptedPredecessors"]
         self.assertIn(previous["packageSha256"], [row["packageSha256"] for row in accepted])
-        build = json.loads((ROOT / "desktop/macos-installed-inputs/build-release.json").read_text())
-        self.assertEqual((selection["next"]["packageVersion"], selection["next"]["release"]),
-                         (build["packageVersion"], build["release"]))
+        # Signing and hosted verification use separate refs. This committed
+        # historical selection stays fixed until the check ref is prepared.
+        self.assertEqual((selection["next"]["packageVersion"], selection["next"]["release"],
+                          selection["next"]["packageSha256"]),
+                         ("0.1.5", "macos26-arm64-desktop-05",
+                          "4cb8eb69140a7870da7bfb19892fa5c7ff77c4214e8548ee3838e25f9364a7a7"))
 
 
 class LaunchSmokeSourceTests(unittest.TestCase):
@@ -128,6 +131,9 @@ class LaunchSmokeSourceTests(unittest.TestCase):
         for app_id in M.APP_IDS:
             self.assertIn(app_id, script)
         self.assertIn("exit 65", script)
+        self.assertIn("exit 66", script)
+        self.assertIn("MobileReleaseKit-RemovalComplete-v1-$state_hash", script)
+        self.assertLess(script.index("if ! removal_confirmed; then"), script.index('home=${HOME:-}'))
         self.assertIn("rm -r -f -x --", script)
         self.assertNotIn("sudo", script)
         for label in (M.KEEP_LABEL, M.DELETE_LABEL, "Delete All Data", "still installed, so none of your data was deleted",
@@ -135,6 +141,8 @@ class LaunchSmokeSourceTests(unittest.TestCase):
             self.assertIn(label, applet)
         self.assertIn("default button keepLabel", applet)
         self.assertIn('default button "Cancel" cancel button "Cancel"', applet)
+        self.assertIn('" --check-removal"', applet)
+        self.assertLess(applet.index("if completion is not 0 then"), applet.index("set report to do shell script"))
         # No top-level state an applet would save into its signed bundle.
         self.assertNotRegex(applet, r"(?m)^\s*(property|global)\s")
 

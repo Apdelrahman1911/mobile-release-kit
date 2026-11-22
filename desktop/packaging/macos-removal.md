@@ -10,7 +10,7 @@ This is the separate **removal** disk image, not the application installer. It i
 
 ## What stays
 
-Your projects, project releases, signing assets, saved vault contents and Keychain credentials are preserved. This operation is not a request to erase your data. Unknown files are not treated as disposable application files.
+Keep My Data preserves your projects, project releases, signing assets, saved vault contents and Keychain credentials. Delete All Data requires a second confirmation and a protected completion report for the same installation. If Installer is cancelled or removal is interrupted before completion, user data is kept.
 
 ## Interrupted removal
 
