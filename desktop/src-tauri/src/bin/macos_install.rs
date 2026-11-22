@@ -22855,9 +22855,9 @@ exec ./mrk-macos-remove --fixture-supervise "$1"
                         assert!(std::process::Command::new("/usr/bin/xattr")
                             .args(["-wx",tag,hex]).arg(&path).status().unwrap().success());
                     };
+                    book.originals[enrolled].existing_app_metadata=None;
                     set(TAG,&"07".repeat(72));
                     let original=book.open(Some(0),"Old.app",true).unwrap();
-                    book.originals[enrolled].existing_app_metadata=None;
                     assert_eq!(removal_payload_node_attributes(&mut book,original,true,true),Err(REFUSAL));
 
                     book.capture_existing_app_metadata(original,true,REFUSAL).unwrap();
@@ -22876,6 +22876,12 @@ exec ./mrk-macos-remove --fixture-supervise "$1"
                         .args(["-wx",TAG,&"07".repeat(72)]).arg(&replacement).status().unwrap().success());
                     let substitute=book.open(Some(0),"Replacement.app",true).unwrap();
                     assert_eq!(removal_payload_node_attributes(&mut book,substitute,true,true),Err(REFUSAL));
+                    book.capture_existing_app_metadata(substitute,true,REFUSAL).unwrap();
+                    assert_eq!(removal_payload_node_attributes(&mut book,substitute,true,true),Ok(()));
+                    unistd::unlinkat(book.fd(0).unwrap(),"Replacement.app",unistd::UnlinkatFlags::RemoveDir).unwrap();
+                    let mut retired=RemovalNodeState {original:Some(substitute),effect:RemovalNodeEffect::Removed,
+                        roster_observed:true,returned:Some(Ok(()))};
+                    assert_eq!(retired.settle_unlinked_original(&mut book,substitute),Ok(()));
 
                     set(TAG,&"08".repeat(72));
                     let changed=book.open(Some(0),"Old.app",true).unwrap();

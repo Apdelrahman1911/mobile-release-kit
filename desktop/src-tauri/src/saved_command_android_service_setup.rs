@@ -239,10 +239,10 @@ mod removal_prompt {
                         return if this.binding.clock.work_sample().is_some(){Returned::Closed(None)}else{Returned::Unknown{native_retired:false}};};
                     *slot=Some(MainOriginal{binding:this.binding.clone(),native,close_attempted:false});
                     let Some(original)=slot.as_mut()else{return Returned::Unknown{native_retired:false};};
-                    // SAFETY: Tauri's same original main window is held by the
-                    // dispatcher on this callback's main thread. AppKit retains
-                    // the window itself before attaching the sheet.
-                    if !unsafe{original.native.start(parent)}{original.binding.stop.store(true,Ordering::SeqCst);}
+                    // The dispatcher holds Tauri's original window on this
+                    // main-queue callback. AppKit matches and retains its own
+                    // window before attaching the sheet.
+                    if !original.native.start(parent as usize){original.binding.stop.store(true,Ordering::SeqCst);}
                 }
                 let Some(original)=slot.as_mut()else{return Returned::Unknown{native_retired:false};};
                 if !Arc::ptr_eq(&original.binding,&this.binding){return Returned::Unknown{native_retired:false};}
