@@ -37,7 +37,8 @@ jobs:
       fail-fast: false
       matrix:
         mode: >-
-          ${{ contains(github.event.head_commit.message, '[macos-retained-transition-only]') && fromJSON('["retained-transition","retained-prepare"]')
+          ${{ contains(github.event.head_commit.message, '[macos-retained-remove-only]') && fromJSON('["retained-transition"]')
+          || contains(github.event.head_commit.message, '[macos-retained-transition-only]') && fromJSON('["retained-transition","retained-prepare"]')
           || contains(github.event.head_commit.message, '[macos-retained-transition]') && fromJSON('["retained-transition","retained-prepare","fresh","update-credentials","delete-data","release-asset"]')
           || contains(github.event.head_commit.message, '[macos-remove-diagnostic]') && fromJSON('["remove"]')
           || contains(github.event.head_commit.message, '[macos-fresh-upgrade-check]') && fromJSON('["update","fresh"]')

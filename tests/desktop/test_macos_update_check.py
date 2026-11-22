@@ -322,6 +322,45 @@ class LaunchSmokeSourceTests(unittest.TestCase):
 
 
 
+class RetainedRemovalTests(unittest.TestCase):
+    def test_keep_data_checks_credential_before_reinstall_and_never_deletes_it(self):
+        from unittest import mock
+
+        row = VALID["next"]
+        selection = {"next": row, "removal": {}}
+        work = Path("unused-fixture")
+        seeded = {"fixture": "file-digest"}
+        archive = {".remove-fixture": (1, 2)}
+        credential = b"keychain-fixture"
+        for preserved in (True, False):
+            with self.subTest(preserved=preserved):
+                result = {"mode": "retained-transition"}
+                install = mock.Mock(return_value=0)
+                uninstaller = mock.Mock()
+                check_credential = mock.Mock(return_value=preserved)
+                order = mock.Mock()
+                order.attach_mock(check_credential, "credential")
+                order.attach_mock(install, "install")
+                with mock.patch.multiple(
+                    M, removal_image=mock.Mock(return_value=(work, [])), installed_state=mock.Mock(return_value=row),
+                    live_remove=mock.Mock(return_value={"sheet": [], "quitSheet": [], "returncode": 0, "remaining": {}}),
+                    manifest=mock.Mock(return_value=seeded), install=install, update_credential_matches=check_credential,
+                    removal_archive_identities=mock.Mock(return_value=archive), uninstaller_check=uninstaller,
+                    launch_smoke=mock.Mock(return_value={"ui": {"runtimeCard": "bundled"}}),
+                ), mock.patch.object(M.subprocess, "run"):
+                    if preserved:
+                        M.remove_check(selection, work, work, [], result, folder=work, seeded=seeded, credential=credential)
+                        install.assert_called_once()
+                        self.assertEqual(result["reinstallReturn"], 0)
+                    else:
+                        with self.assertRaisesRegex(M.Failed, "retained-credential-changed-by-removal"):
+                            M.remove_check(selection, work, work, [], result, folder=work, seeded=seeded, credential=credential)
+                        install.assert_not_called()
+                self.assertEqual(order.mock_calls[0], mock.call.credential(credential))
+                uninstaller.assert_not_called()
+                self.assertEqual(result["credentialPreservedAfterRemoval"], preserved)
+
+
 class FirstLaunchObservationTests(unittest.TestCase):
     """#45/#46/#50 first-launch evidence; no app, osascript or CLI runs."""
 

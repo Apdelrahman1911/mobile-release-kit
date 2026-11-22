@@ -1382,7 +1382,7 @@ def removal_archive_identities():
     return entries
 
 
-def remove_check(selection, work, evidence, steps, result, *, folder=None, seeded=None):
+def remove_check(selection, work, evidence, steps, result, *, folder=None, seeded=None, credential=None):
     """Fresh install, launch, live removal through the matching Remove.pkg
     (confirming the app's own sheet), then check deletion or reinstall."""
     need("removal" in selection, "selection-has-no-removal-carrier")
@@ -1413,6 +1413,10 @@ def remove_check(selection, work, evidence, steps, result, *, folder=None, seede
     result["userDataPreservedByRemoval"] = all(kept.get(k) == v for k, v in seeded.items())
     need(result["userDataPreservedByRemoval"], "user-data-changed-by-removal")
     try:
+        if mode == "retained-transition":
+            kept_credential = credential is not None and update_credential_matches(credential)
+            result["credentialPreservedAfterRemoval"] = kept_credential
+            need(kept_credential, "retained-credential-changed-by-removal")
         if mode == "delete-data":
             confirmed_data_deletion(mount, work, evidence, result, plant_decoys())
             return
@@ -1439,6 +1443,7 @@ def remove_check(selection, work, evidence, steps, result, *, folder=None, seede
         result["launchAfterReinstall"] = launch_smoke("after-reinstall", work, evidence, steps, observe=observer)
         if observer is not None:
             require_runtime(result["launchAfterReinstall"], "retained-reinstall-runtime")
+            return
         if repeat:
             if mode == "repeat-after-dialogs":
                 _, before_repeat = uninstaller_while_installed(mount, work, evidence, steps, result)
@@ -1606,7 +1611,8 @@ def retained_transition_check(selection, work, evidence, steps, result):
         result["userDataPreservedByPrepare"] = all(current.get(key) == value for key, value in seeded.items())
         need(result["userDataPreservedByPrepare"], "retained-prepare-data")
     else:
-        remove_check(selection, work, evidence, steps, result, folder=folders["next"], seeded=seeded)
+        remove_check(selection, work, evidence, steps, result, folder=folders["next"], seeded=seeded,
+                     credential=credential)
     result["credentialPreserved"] = update_credential_matches(credential)
     need(result["credentialPreserved"], "retained-credential-changed")
 
