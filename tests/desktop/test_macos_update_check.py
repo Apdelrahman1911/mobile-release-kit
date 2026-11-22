@@ -98,7 +98,7 @@ class UpdateCheckSelectionTests(unittest.TestCase):
                                  ("0.2.1", "macos26-arm64-desktop-07",
                                   "3cc29dda7841022c993bea447ec1090a105caa43cfd647da66d3a586ff8bac8b"))
                 self.assertEqual((selection["next"]["packageVersion"], selection["next"]["release"]),
-                                 ("0.2.2", "macos26-arm64-desktop-08"))
+                                 ("0.2.3", "macos26-arm64-desktop-09"))
                 return
             self.assertEqual((selection["next"]["packageVersion"], selection["next"]["release"]),
                              ("0.2.1", "macos26-arm64-desktop-07"))
