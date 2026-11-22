@@ -219,10 +219,16 @@ def carrier_image(role, folder, steps):
         os.link(origin, source / name) if name == "Install.pkg" else (source / name).write_bytes(origin.read_bytes())
     image, volume = folder / f"carrier-{role}.dmg", f"MRK-Update-{role}"
     p, row = run(["/usr/bin/hdiutil", "create", "-srcfolder", str(source), "-fs", "HFS+", "-format", "UDRO",
-                  "-volname", volume, str(image)], 600, check=True)
+                  "-volname", volume, str(image)], 600)
     steps.append(dict(row, role=role))
-    p, row = run(["/usr/bin/hdiutil", "attach", "-readonly", "-nobrowse", "-noautoopen", str(image)], 300, check=True)
+    if p.returncode != 0:
+        steps[-1]["stderr"] = tail_text(p.stderr, 8)
+        raise Failed(f"{role}-carrier-create")
+    p, row = run(["/usr/bin/hdiutil", "attach", "-readonly", "-nobrowse", "-noautoopen", str(image)], 300)
     steps.append(dict(row, role=role))
+    if p.returncode != 0:
+        steps[-1]["stderr"] = tail_text(p.stderr, 8)
+        raise Failed(f"{role}-carrier-attach")
     mount = Path("/Volumes") / volume
     need(sorted(os.listdir(mount)) == ["Install.pkg", "producer.json", "producer.sig"], f"{role}-carrier-roster")
     need(digest(mount / "Install.pkg") == digest(folder / "Install.pkg"), f"{role}-carrier-digest")
@@ -231,15 +237,24 @@ def carrier_image(role, folder, steps):
 
 def install(role, folder, steps, expect_success=True, evidence=None):
     mount = carrier_image(role, folder, steps)
-    p, row = run(["/usr/bin/sudo", "-n", "/usr/sbin/installer", "-verbose", "-pkg", str(mount / "Install.pkg"),
-                  "-target", "/"], 1500)
-    row.update(role=role, expected="success" if expect_success else "refusal")
-    steps.append(row)
-    if expect_success and p.returncode != 0 and evidence is not None:
+    try:
+        p, row = run(["/usr/bin/sudo", "-n", "/usr/sbin/installer", "-verbose", "-pkg", str(mount / "Install.pkg"),
+                      "-target", "/"], 1500)
+        row.update(role=role, expected="success" if expect_success else "refusal")
+        steps.append(row)
+        if expect_success and p.returncode != 0 and evidence is not None:
+            try:
+                failure_diagnostics(evidence, role, p)
+            except Exception as error:  # diagnostics must not mask the result
+                row["diagnostics"] = type(error).__name__
+    finally:
         try:
-            failure_diagnostics(evidence, role, p)
-        except Exception as error:  # diagnostics must not mask the result
-            row["diagnostics"] = type(error).__name__
+            detached, row = run(["/usr/bin/hdiutil", "detach", str(mount)], 45)
+            steps.append(dict(row, role=role))
+            if detached.returncode != 0:
+                steps[-1]["stderr"] = tail_text(detached.stderr, 8)
+        except (OSError, subprocess.TimeoutExpired) as error:
+            steps.append({"role": role, "mediaDetach": type(error).__name__})
     return p.returncode
 
 
