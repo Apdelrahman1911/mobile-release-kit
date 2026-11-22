@@ -6546,25 +6546,37 @@ final class NormalAppUITests: XCTestCase {
             try press(renderer, "Review version & build number", renderer: renderer)
             @MainActor func recordRecovery(_ stage: String) {
                 let panel = named(renderer, "Saved-version recovery inspection").firstMatch
-                let action = panel.buttons.matching(identifier: "Review recovery confirmation…")
+                let action = renderer.buttons.matching(identifier: "Review recovery confirmation…")
+                let inspect = renderer.buttons.matching(identifier: "Inspect recovery").firstMatch
+                let close = renderer.buttons.matching(identifier: "Close inspection, keep drafts").firstMatch
                 let checks: [(String, String)] = [
                     ("waiting-native", "Wait for the original native status"),
                     ("ownership-unverified", "Original native ownership or cleanup is unverified"),
                     ("selection-pending", "Select a registered project and finish"),
                     ("service-unavailable", "The native saved-version recovery route"),
+                    ("service-required", "Recovery inspection requires the qualified native saved-version service"),
+                    ("other-journal", "Configuration recovery is required"),
+                    ("other-operation", "Close the original edit/recovery review"),
+                    ("attempt-retained", "Recovery project:"),
                     ("inspection-pending", "Waiting for the original inspection"),
                     ("phase-opening", "Original phase: opening"),
                     ("phase-preparing", "Original phase: preparing"),
                     ("phase-reviewing", "Original phase: reviewing"),
                     ("phase-final", "Original phase: final"),
                     ("phase-unknown", "Original phase: unknown"),
+                    ("recoverable", "The original journal and current dependencies identify exactly this action"),
+                    ("no-journal", "No selected-domain journal was found"),
                     ("conflict", "Conflict category:"),
                     ("invalidated", "Project, navigation or service context changed"),
                     ("terminal-refusal", "No successful recovery is confirmed"),
                 ]
                 print("MRK_RELEASE_RECOVERY_FACT=\(stage);panel=\(panel.exists);review=\(min(action.count, 3))")
+                print("MRK_RELEASE_RECOVERY_CONTROL=\(stage);inspect=\(inspect.exists && inspect.isEnabled);close=\(close.exists)")
                 for (kind, marker) in checks {
-                    let matches = panel.staticTexts.matching(NSPredicate(format: "title CONTAINS %@", marker)).count
+                    // WebKit can publish text outside the named section or as
+                    // an accessibility value. Keep diagnostics to fixed labels.
+                    let matches = renderer.staticTexts.matching(NSPredicate(
+                        format: "label CONTAINS %@ OR title CONTAINS %@ OR value CONTAINS %@", marker, marker, marker)).count
                     if matches > 0 { print("MRK_RELEASE_RECOVERY_MATCH=\(stage);state=\(kind)") }
                 }
             }

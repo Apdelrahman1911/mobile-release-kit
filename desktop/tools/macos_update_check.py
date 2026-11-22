@@ -1847,6 +1847,9 @@ def run_workspace_xctest(mode, row, folder, installed, work, evidence, steps, re
             r"(?m)^MRK_RELEASE_RECOVERY_FACT=(before|refused|review);panel=(true|false);review=([0-3])$", transcript)
         result["recoveryMatches"] = re.findall(
             r"(?m)^MRK_RELEASE_RECOVERY_MATCH=(before|refused|review);state=([a-z-]{2,24})$", transcript)
+        result["recoveryControls"] = re.findall(
+            r"(?m)^MRK_RELEASE_RECOVERY_CONTROL=(before|refused|review);inspect=(true|false);close=(true|false)$",
+            transcript)
         result["guiRecoveryObserved"] = "MRK_RELEASE_GUI_RECOVERY=confirmed-original-rollback-and-quit" in transcript
         result["recoveryProjectMatchesOriginals"] = recovery_project_manifest(project_path) == baseline
         observed = result["guiRecoveryObserved"] and result["recoveryProjectMatchesOriginals"]
