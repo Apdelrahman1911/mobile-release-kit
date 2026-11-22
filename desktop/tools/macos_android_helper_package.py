@@ -8914,8 +8914,15 @@ class Operation:
              and set(os.listdir(root["fd"])) == {"Remove.pkg", "remove-producer.json", "remove-producer.sig"}, "uninstaller-purpose")
         self.stage = "remove-uninstaller"
         bodies = {}
+        carrier = self.cross_source_removal()
         for name, limit in (("main.applescript", 32 * 1024), ("delete-data.sh", 16 * 1024)):
-            entry = self.source_original("desktop/macos-installed-inputs/uninstaller/" + name, "source-uninstaller-" + name, limit)
+            role = "source-uninstaller-" + name
+            if carrier is not None and name == "main.applescript":
+                carrier.removal_carrier_source(self.environment)
+                parent = self.descend(self.prepared_consumer_source(), ("desktop", "macos-installed-inputs", "uninstaller"))
+                entry = self.original(parent, name, role, limit, (0o444, 0o644))
+            else:
+                entry = self.source_original("desktop/macos-installed-inputs/uninstaller/" + name, role, limit)
             bodies[name] = self.read(entry)
             self.package_sources.append((entry, bodies[name]))
         source_root = self.package_directory("uninstaller-source")
@@ -10189,14 +10196,9 @@ class Operation:
         except BaseException:
             pass
 
-    def package_diagnostic_program(self):
-        # Product readers/compiler remain rooted in the built source. Only the
-        # nonroot diagnostics and explicit cross-source readback use the current harness.
-        if self.prepared_binding is None:
-            return self.checkout / "desktop/tools/stage_macos_installed.py"
-        need(self.phase == "package-install", "installer-diagnostic-source-purpose")
+    def prepared_consumer_source(self):
         self.prepared_binding.finalization_environment(self.environment)
-        if self.diagnostic_program is None:
+        if self.diagnostic_source_entry is None:
             fd = os.open(CHECKOUT, READ_FLAGS | os.O_DIRECTORY)
             root = self.diagnostic_source_entry = self.register(fd, "diagnostic-source-root", "directory")
             root["identity"] = directory_identity(os.fstat(fd))
@@ -10205,6 +10207,16 @@ class Operation:
             body = self.read(head)
             need(body == (self.environment["GITHUB_SHA"] + "\n").encode("ascii"), "installer-diagnostic-source-head")
             self.package_sources.append((head, body))
+        return self.diagnostic_source_entry
+
+    def package_diagnostic_program(self):
+        # Product readers/compiler stay in the built source. The current
+        # checkout supplies the separately admitted nonroot diagnostics.
+        if self.prepared_binding is None:
+            return self.checkout / "desktop/tools/stage_macos_installed.py"
+        need(self.phase == "package-install", "installer-diagnostic-source-purpose")
+        root = self.prepared_consumer_source()
+        if self.diagnostic_program is None:
             entry = self.original(self.descend(root, ("desktop", "tools")), "stage_macos_installed.py",
                 "diagnostic-source-program", 1024 * 1024, (0o444, 0o644))
             self.package_sources.append((entry, self.read(entry)))
