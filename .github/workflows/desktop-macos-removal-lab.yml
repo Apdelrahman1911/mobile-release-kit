@@ -188,9 +188,24 @@ jobs:
           export MRK_PHASE_AUDIT_INVENTORY="$fixtures/inventory.json"
           export MRK_PHASE_AUDIT_PRODUCER="$fixtures/corpus.json"
           cargo fetch --manifest-path desktop/src-tauri/Cargo.toml --locked --target "$target"
-          cargo test --manifest-path desktop/src-tauri/Cargo.toml --locked --offline --jobs 2 \
+          if ! cargo test --manifest-path desktop/src-tauri/Cargo.toml --locked --offline --jobs 2 \
             --no-default-features --features macos-installed-remover --bin mrk-macos-remove \
-            --target "$target" --no-run --message-format=json > "$RUNNER_TEMP/payload-unlink-compile.jsonl"
+            --target "$target" --no-run --message-format=json > "$RUNNER_TEMP/payload-unlink-compile.jsonl"; then
+            /usr/bin/python3 -I -B - "$RUNNER_TEMP/payload-unlink-compile.jsonl" <<'PY'
+          import json, pathlib, sys
+          emitted = 0
+          with pathlib.Path(sys.argv[1]).open() as log:
+              for line in log:
+                  row = json.loads(line)
+                  message = row.get("message", {})
+                  if row.get("reason") == "compiler-message" and message.get("level") == "error":
+                      print((message.get("rendered") or message["message"])[:8192])
+                      emitted += 1
+                      if emitted == 10:
+                          break
+          PY
+            exit 1
+          fi
           binary="$(/usr/bin/python3 -I -B - "$RUNNER_TEMP/payload-unlink-compile.jsonl" "$CARGO_TARGET_DIR/$target/debug/deps" <<'PY'
           import json, pathlib, re, sys
           rows = [json.loads(line) for line in pathlib.Path(sys.argv[1]).read_text().splitlines()]
