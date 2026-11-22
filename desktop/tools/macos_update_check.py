@@ -644,7 +644,7 @@ def main():
                                            "repeat", "repeat-after-dialogs", "removal-archive", "prepare-quit", "performance",
                                            "update-credentials", "release-asset", "workspace-cli",
                                            "workspace-xctest", "prepare-xctest", "performance-long", "core-recovery",
-                                           "recovery-xctest", "retained-transition"), default="update")
+                                           "recovery-xctest", "retained-transition", "retained-prepare"), default="update")
     args = parser.parse_args()
     work = Path(args.work)
     evidence = work / "evidence"
@@ -658,7 +658,7 @@ def main():
             {"fresh": fresh_check, "remove": remove_check, "uninstaller": uninstaller_installed_check,
              "delete-data": remove_check, "repeat": remove_check, "repeat-after-dialogs": remove_check,
              "removal-archive": remove_check,
-             "retained-transition": retained_transition_check,
+             "retained-transition": retained_transition_check, "retained-prepare": retained_transition_check,
              "prepare-quit": prepare_quit_check, "performance": fresh_check, "release-asset": release_asset_check,
              "workspace-cli": workspace_cli_check, "workspace-xctest": workspace_xctest,
              "prepare-xctest": workspace_xctest, "performance-long": performance_long_check,
@@ -1558,8 +1558,9 @@ def require_runtime(observation, failure):
 
 
 def retained_transition_check(selection, work, evidence, steps, result):
-    """Match the owner's two signed upgrades before testing live preparation and removal."""
-    need("initial" in selection and "removal" in selection, "retained-transition-selection")
+    """Match the owner's two signed upgrades before independently testing preparation or removal."""
+    preparing = result["mode"] == "retained-prepare"
+    need("initial" in selection and (preparing or "removal" in selection), "retained-transition-selection")
     folders = {}
     for role in ("initial", "previous", "next"):
         package = selection[role]
@@ -1598,12 +1599,14 @@ def retained_transition_check(selection, work, evidence, steps, result):
             "hasMacl": b"com.apple.macl" in attributes.stdout.splitlines()})
     result["firstLaunch"] = launch_smoke("retained-first-launch", work, evidence, steps, observe=first_launch_observe)
     require_runtime(result["firstLaunch"], "retained-first-launch-runtime")
-    exercise_prepare_quit(work, evidence, steps, result)
-    need(result.get("ordinaryQuitSheet") == "clicked", "retained-prepare-quit-sheet-not-confirmed")
-    service = subprocess.run(["/bin/launchctl", "print", "system/dev.mobile-release-kit.desktop.android-register"],
-                             capture_output=True, timeout=10)
-    need(service.returncode == 113, "retained-prepare-quit-helper-still-registered")
-    remove_check(selection, work, evidence, steps, result, folder=folders["next"], seeded=seeded)
+    if preparing:
+        run_workspace_xctest("prepare-xctest", selection["next"], folders["next"],
+                             result["retainedInstall-next"], work, evidence, steps, result)
+        current = manifest()
+        result["userDataPreservedByPrepare"] = all(current.get(key) == value for key, value in seeded.items())
+        need(result["userDataPreservedByPrepare"], "retained-prepare-data")
+    else:
+        remove_check(selection, work, evidence, steps, result, folder=folders["next"], seeded=seeded)
     result["credentialPreserved"] = update_credential_matches(credential)
     need(result["credentialPreserved"], "retained-credential-changed")
 
@@ -1737,10 +1740,15 @@ def workspace_xctest(selection, work, evidence, steps, result):
     folder = fetch("next", row, work, steps)
     need(install("next", folder, steps, evidence=evidence) == 0, "workspace-xctest-install")
     result["afterInstall"] = installed_state()
+    run_workspace_xctest(result["mode"], row, folder, result["afterInstall"], work, evidence, steps, result)
+
+
+def run_workspace_xctest(mode, row, folder, installed, work, evidence, steps, result):
+    """Run the original production UI check on the caller's verified installed package."""
     origin = json.loads((folder / "PREPARED.json").read_text())["origin"]
-    source, harness = result["afterInstall"]["sourceCommit"], os.environ["GITHUB_SHA"]
+    source, harness = installed["sourceCommit"], os.environ["GITHUB_SHA"]
     need(source == origin["source"] and source != harness and hex_field(harness, 40)
-         and result["afterInstall"]["packageSha256"] == row["packageSha256"], "workspace-xctest-source-binding")
+         and installed["packageSha256"] == row["packageSha256"], "workspace-xctest-source-binding")
     temporary = work / "xctest-tmp"
     temporary.mkdir(mode=0o700)
     env = {"PATH": "/usr/bin:/bin:/usr/sbin:/sbin", "HOME": "/Users/runner", "USER": "runner",
@@ -1762,10 +1770,10 @@ def workspace_xctest(selection, work, evidence, steps, result):
     manifests = list((derived / "Build/Products").glob("MRKNormalAppUI_*.xctestrun"))
     need(len(manifests) == 1 and manifests[0].is_file() and not manifests[0].is_symlink(),
          "workspace-xctest-single-original-manifest")
-    prepare = result["mode"] == "prepare-xctest"
-    recovery = result["mode"] == "recovery-xctest"
+    prepare = mode == "prepare-xctest"
+    recovery = mode == "recovery-xctest"
     method = {"prepare-xctest": "testCurrentPrepareToQuit", "workspace-xctest": "testCurrentGuidedWorkspaceAndCli",
-              "recovery-xctest": "testCurrentSavedVersionRecovery"}[result["mode"]]
+              "recovery-xctest": "testCurrentSavedVersionRecovery"}[mode]
     if recovery:
         project_path, baseline = seed_signed_gui_recovery(row, folder, work, env, result)
     bundle = work / "project-test.xcresult"
@@ -1837,6 +1845,11 @@ def workspace_xctest(selection, work, evidence, steps, result):
         result["remainingInstalledProcesses"] = sum(line.lstrip().startswith(str(APP) + "/")
                                                     for line in census.stdout.splitlines())
         need(result["remainingInstalledProcesses"] == 0, "prepare-quit-left-installed-processes")
+        if result["mode"] == "retained-prepare":
+            service = subprocess.run(["/bin/launchctl", "print", "system/dev.mobile-release-kit.desktop.android-register"],
+                                     capture_output=True, timeout=10)
+            result["helperStatusAfterPrepare"] = service.returncode
+            need(service.returncode == 113, "retained-prepare-quit-helper-still-registered")
         result["reopen"] = launch_smoke("prepare-quit-reopen", work, evidence, steps)
 
 
