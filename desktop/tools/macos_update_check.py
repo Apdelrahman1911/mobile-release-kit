@@ -1716,10 +1716,10 @@ def install_macl_fixture(paths):
 
 
 def macl_journal_recovery_check(selection, work, evidence, steps, result):
-    """Exercise the exact signed 0.2.3-to-0.2.5 interrupted removal transition."""
+    """Exercise the exact signed 0.2.3-to-0.2.6 interrupted removal transition."""
     need("previousRemoval" in selection and "removal" in selection
          and selection["previous"]["release"] == "macos26-arm64-desktop-09"
-         and selection["next"]["release"] == "macos26-arm64-desktop-11", "macl-recovery-selection")
+         and selection["next"]["release"] == "macos26-arm64-desktop-12", "macl-recovery-selection")
     need(not STATE.exists(), "macl-recovery-existing-installation")
     next_folder = fetch("next", selection["next"], work, steps)
     for role in selected_release_roles(selection)[:-1]:
@@ -1764,6 +1764,16 @@ def macl_journal_recovery_check(selection, work, evidence, steps, result):
 
     repair_mount, _ = removal_image(selection["removal"], work, steps)
     try:
+        # The prior process withdrew the app and launcher, but its removal
+        # never finished. Signing and both data confirmations cannot turn that
+        # missing pathname into permission to clean up this hosted user's data.
+        refusal = uninstaller_run(repair_mount, work, evidence, "macl-incomplete-delete",
+                                  [DELETE_LABEL, "Delete All Data", "Continue", None, "OK"])
+        result["uninstallerIncompleteRemovalRefused"] = dialog_says(
+            refusal, "removal could not be confirmed. Your data was kept.")
+        need(result["uninstallerIncompleteRemovalRefused"], "macl-incomplete-deletion-reported-success")
+        need(all(manifest().get(key) == value for key, value in seeded.items())
+             and update_credential_matches(credential), "macl-incomplete-deletion-touched-fake-data")
         p, step = run(["/usr/bin/sudo", "-n", "/usr/sbin/installer", "-verbose", "-pkg",
                        str(repair_mount / "Remove.pkg"), "-target", "/"], 240)
         steps.append(dict(step, role="macl-signed-resume"))
@@ -1772,6 +1782,10 @@ def macl_journal_recovery_check(selection, work, evidence, steps, result):
         if p.returncode != 0:
             removal_script_diagnostics(evidence, "macl-recovery")
         need(p.returncode == 0, "macl-signed-recovery-returned-nonzero")
+        keep = uninstaller_run(repair_mount, work, evidence, "macl-completed-keep",
+                               [KEEP_LABEL, "Continue", None, "OK"])
+        result["uninstallerCompletedKeepConfirmed"] = dialog_says(keep, "was removed. Your data was kept.")
+        need(result["uninstallerCompletedKeepConfirmed"], "macl-complete-report-not-recognized")
     finally:
         run(["/usr/bin/hdiutil", "detach", str(repair_mount)], 45, check=True)
 
