@@ -136,10 +136,15 @@ def hex_field(value, size):
     return type(value) is str and re.fullmatch(f"[0-9a-f]{{{size}}}", value) is not None
 
 
+def selected_release_roles(data):
+    return [role for role in ("initial", "intermediate", "previous", "next") if role in data]
+
+
 def load_selection(path):
     data = json.loads(Path(path).read_text())
     required = {"schemaVersion", "previous", "next"}
-    need(type(data) is dict and required <= set(data) <= required | {"initial", "removal"}
+    need(type(data) is dict and required <= set(data) <= required | {"initial", "intermediate", "removal"}
+         and ("intermediate" not in data or "initial" in data)
          and data["schemaVersion"] == 1, "selection-shape")
     if "removal" in data:
         # The matching Remove carrier produced by the carrier run for "next".
@@ -147,7 +152,7 @@ def load_selection(path):
         need(set(row) == {"runId", "artifactId", "imageSha256"}
              and re.fullmatch(r"[1-9][0-9]{0,19}", row["runId"]) and re.fullmatch(r"[1-9][0-9]{0,19}", row["artifactId"])
              and hex_field(row["imageSha256"], 64), "selection-removal-fields")
-    roles = ("initial", "previous", "next") if "initial" in data else ("previous", "next")
+    roles = selected_release_roles(data)
     for role in roles:
         row = data[role]
         need(set(row) == {"runId", "artifactId", "carrierArtifactId", "packageSha256", "packageVersion", "release"}, f"selection-{role}")
@@ -1563,14 +1568,15 @@ def require_runtime(observation, failure):
 
 
 def retained_transition_check(selection, work, evidence, steps, result):
-    """Match the owner's two signed upgrades before independently testing preparation or removal."""
+    """Replay the owner's signed upgrade history before testing preparation or removal."""
     preparing = result["mode"] == "retained-prepare"
     need("initial" in selection and (preparing or "removal" in selection), "retained-transition-selection")
+    roles = selected_release_roles(selection)
     folders = {}
-    for role in ("initial", "previous", "next"):
+    for role in roles:
         package = selection[role]
         folders[role] = fetch(role, package, work, steps)
-    for role in ("initial", "previous", "next"):
+    for role in roles:
         need(install(role, folders[role], steps, evidence=evidence) == 0, f"retained-{role}-install")
         observed = installed_state()
         result[f"retainedInstall-{role}"] = observed
@@ -1581,13 +1587,14 @@ def retained_transition_check(selection, work, evidence, steps, result):
             seeded = seed_user_data()
             credential = seed_update_credential()
         else:
-            need(all(manifest().get(key) == value for key, value in seeded.items())
+            current = manifest()
+            need(all(current.get(key) == value for key, value in seeded.items())
                  and update_credential_matches(credential), f"retained-{role}-data")
-            if role == "previous":
-                launch_smoke("retained-previous-launch", work, evidence, steps)
+            if role != "next":
+                launch_smoke(f"retained-{role}-launch", work, evidence, steps)
 
     state = json.loads((STATE / "installation-v2.json").read_text())
-    expected = [selection[role]["packageSha256"] for role in ("initial", "previous")]
+    expected = [selection[role]["packageSha256"] for role in roles[:-1]]
     need([row["release"]["packageSha256"] for row in state["retained"]] == expected,
          "retained-original-generations")
     result["retainedBundles"] = []
@@ -1605,6 +1612,7 @@ def retained_transition_check(selection, work, evidence, steps, result):
     result["firstLaunch"] = launch_smoke("retained-first-launch", work, evidence, steps, observe=first_launch_observe)
     require_runtime(result["firstLaunch"], "retained-first-launch-runtime")
     if preparing:
+        result["helperStatusBeforePrepare"] = android_helper_status()
         run_workspace_xctest("prepare-xctest", selection["next"], folders["next"],
                              result["retainedInstall-next"], work, evidence, steps, result)
         current = manifest()
@@ -1749,6 +1757,11 @@ def workspace_xctest(selection, work, evidence, steps, result):
     run_workspace_xctest(result["mode"], row, folder, result["afterInstall"], work, evidence, steps, result)
 
 
+def android_helper_status():
+    return subprocess.run(["/bin/launchctl", "print", "system/dev.mobile-release-kit.desktop.android-register"],
+                          capture_output=True, timeout=10).returncode
+
+
 def run_workspace_xctest(mode, row, folder, installed, work, evidence, steps, result):
     """Run the original production UI check on the caller's verified installed package."""
     origin = json.loads((folder / "PREPARED.json").read_text())["origin"]
@@ -1852,10 +1865,8 @@ def run_workspace_xctest(mode, row, folder, installed, work, evidence, steps, re
                                                     for line in census.stdout.splitlines())
         need(result["remainingInstalledProcesses"] == 0, "prepare-quit-left-installed-processes")
         if result["mode"] == "retained-prepare":
-            service = subprocess.run(["/bin/launchctl", "print", "system/dev.mobile-release-kit.desktop.android-register"],
-                                     capture_output=True, timeout=10)
-            result["helperStatusAfterPrepare"] = service.returncode
-            need(service.returncode == 113, "retained-prepare-quit-helper-still-registered")
+            result["helperStatusAfterPrepare"] = android_helper_status()
+            need(result["helperStatusAfterPrepare"] == 113, "retained-prepare-quit-helper-still-registered")
         result["reopen"] = launch_smoke("prepare-quit-reopen", work, evidence, steps)
 
 

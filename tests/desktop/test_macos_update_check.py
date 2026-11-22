@@ -47,6 +47,22 @@ class UpdateCheckSelectionTests(unittest.TestCase):
                     path.write_text(json.dumps(broken))
                     M.load_selection(path)
 
+    def test_three_upgrade_hops_validate_the_intermediate_artifact_in_order(self):
+        selection = copy.deepcopy(VALID)
+        selection["initial"] = dict(selection["previous"], packageVersion="0.1.2")
+        selection["intermediate"] = dict(selection["previous"], packageVersion="0.1.3")
+        with tempfile.TemporaryDirectory() as work:
+            path = Path(work) / "selection.json"
+            path.write_text(json.dumps(selection))
+            self.assertEqual(M.selected_release_roles(M.load_selection(path)),
+                             ["initial", "intermediate", "previous", "next"])
+            ambiguous = dict(selection, intermediate=selection["previous"])
+            without_initial = {key: value for key, value in selection.items() if key != "initial"}
+            for invalid in (ambiguous, without_initial):
+                path.write_text(json.dumps(invalid))
+                with self.assertRaises(M.Failed):
+                    M.load_selection(path)
+
     def test_refuses_non_upgrade_and_malformed_rows(self):
         cases = []
         same = copy.deepcopy(VALID); same["next"]["packageVersion"] = "0.1.4"; cases.append(same)
@@ -70,10 +86,20 @@ class UpdateCheckSelectionTests(unittest.TestCase):
         accepted = history["targets"]["aarch64-apple-darwin"]["acceptedPredecessors"]
         self.assertIn(previous["packageSha256"], [row["packageSha256"] for row in accepted])
         if "initial" in selection:
-            self.assertEqual((selection["previous"]["packageVersion"], selection["previous"]["release"],
-                              selection["previous"]["packageSha256"]),
+            installed_020 = selection.get("intermediate", selection["previous"])
+            self.assertEqual((installed_020["packageVersion"], installed_020["release"],
+                              installed_020["packageSha256"]),
                              ("0.2.0", "macos26-arm64-desktop-06",
                               "db9d76b1b3c137ba398cda6fb234ddf702219fbb89cff3d2d1c1bf0ef6926111"))
+            if "intermediate" in selection:
+                installed_021 = selection["previous"]
+                self.assertEqual((installed_021["packageVersion"], installed_021["release"],
+                                  installed_021["packageSha256"]),
+                                 ("0.2.1", "macos26-arm64-desktop-07",
+                                  "3cc29dda7841022c993bea447ec1090a105caa43cfd647da66d3a586ff8bac8b"))
+                self.assertEqual((selection["next"]["packageVersion"], selection["next"]["release"]),
+                                 ("0.2.2", "macos26-arm64-desktop-08"))
+                return
             self.assertEqual((selection["next"]["packageVersion"], selection["next"]["release"]),
                              ("0.2.1", "macos26-arm64-desktop-07"))
             return
