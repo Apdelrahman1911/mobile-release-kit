@@ -1051,26 +1051,40 @@ DIALOG_JXA = """function run(argv) {
 """
 
 
-GATEKEEPER_UNINSTALLER_JXA = """function run() {
+GATEKEEPER_UNINSTALLER_JXA = r"""function run() {
   const app = 'Uninstall Mobile Release Kit';
+  const emit = (state, checks) => JSON.stringify({state, checks});
   const agent = Application('System Events').processes.whose({name: 'CoreServicesUIAgent'});
-  if (agent.length !== 1) return 'no-agent';
+  if (agent.length !== 1) return emit('no-agent', null);
   for (const w of agent[0].windows()) {
     for (const panel of [w].concat(w.sheets())) {
-      const text = [panel.name()].concat(panel.staticTexts().map(t => t.value())).join(' ');
-      if (!text.includes(app)) continue;
-      const buttons = panel.buttons().map(b => b.name()).sort().join('|');
-      if (!['Cancel|Open', 'Cancel|Open|Show Disk Image'].includes(buttons)
-          || !/downloaded from the internet/i.test(text)
-          || !/are you sure you want to open/i.test(text)
-          || /malware|unidentified developer|could not verify|cannot be opened|is damaged/i.test(text)) {
-        return 'unexpected-dialog';
+      const descendants = panel.entireContents().slice(0, 64);
+      const lines = [panel.name()];
+      for (const element of descendants) {
+        if (element.role() !== 'AXStaticText') continue;
+        const value = element.value();
+        if (typeof value === 'string') lines.push(value);
       }
-      panel.buttons.byName('Open').click();
-      return 'standard-open-confirmed';
+      const text = lines.join(' ').replace(/\s+/g, ' ');
+      if (!text.includes(app)) continue;
+      const buttons = panel.buttons();
+      const names = buttons.map(b => b.name());
+      const open = buttons.filter((_, index) => names[index] === 'Open');
+      const actions = names.filter(name => name && !['Help', '?'].includes(name)).sort().join('|');
+      const checks = {
+        actionSet: ['Cancel|Open', 'Cancel|Open|Show Disk Image'].includes(actions),
+        download: /downloaded from the internet/i.test(text),
+        confirmation: /are you sure you want to open/i.test(text),
+        hardBlock: /malware|unidentified developer|could not verify|cannot be opened|is damaged/i.test(text),
+        uniqueOpen: open.length === 1,
+      };
+      if (!checks.actionSet || !checks.download || !checks.confirmation || checks.hardBlock || !checks.uniqueOpen)
+        return emit('unexpected-dialog', checks);
+      open[0].click();
+      return emit('standard-open-confirmed', checks);
     }
   }
-  return 'no-matching-dialog';
+  return emit('no-matching-dialog', null);
 }
 """
 
@@ -2077,6 +2091,7 @@ def open_quarantined_uninstaller(mount, work, evidence, label):
     script = work / "uninstaller-gatekeeper.js"
     script.write_text(GATEKEEPER_UNINSTALLER_JXA)
     observations = set()
+    prompt_checks = None
     deadline = time.monotonic() + 60
     with subprocess.Popen(["/usr/bin/open", "-n", str(mount / UNINSTALLER)],
                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL) as launch:
@@ -2087,8 +2102,11 @@ def open_quarantined_uninstaller(mount, work, evidence, label):
                         reply = subprocess.run(["/usr/bin/osascript", "-l", "JavaScript", str(script)],
                                                capture_output=True, text=True,
                                                timeout=min(10, max(0.1, deadline - time.monotonic())))
-                        state = reply.stdout.strip()
-                    except subprocess.TimeoutExpired:
+                        probe = json.loads(reply.stdout)
+                        state = probe["state"]
+                        if probe["checks"] is not None:
+                            prompt_checks = probe["checks"]
+                    except (subprocess.TimeoutExpired, json.JSONDecodeError):
                         state = "probe-error"
                     observations.add(state if state in ("no-agent", "no-matching-dialog", "unexpected-dialog",
                                                           "standard-open-confirmed") else "probe-error")
@@ -2110,6 +2128,7 @@ def open_quarantined_uninstaller(mount, work, evidence, label):
                            if name.strip().endswith("/" + UNINSTALLER + "/Contents/MacOS/applet")]
             (evidence / f"{label}-open.json").write_text(json.dumps({
                 "observations": sorted(observations),
+                "promptChecks": prompt_checks,
                 "appTranslocated": any("/AppTranslocation/" in name for name in uninstaller),
                 "atMount": str(mount / UNINSTALLER / "Contents/MacOS/applet") in uninstaller,
             }) + "\n")
