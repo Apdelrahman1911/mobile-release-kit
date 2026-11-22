@@ -17787,7 +17787,7 @@ mod installer {
             const INVENTORY:&str="f4ec6419c8816eaf75111154e12b0766a52e6e44819ac91f118564b393443fa9";
             fn enabled()->bool {
                 cfg!(all(target_arch="aarch64",not(feature="macos-installed-removal-abrupt-fixture")))
-                    && paths::RELEASE=="macos26-arm64-desktop-10" && paths::PACKAGE_VERSION=="0.2.4"
+                    && paths::RELEASE=="macos26-arm64-desktop-11" && paths::PACKAGE_VERSION=="0.2.5"
             }
             fn epoch(state_sha:[u8;32])->Result<([u8;20],[[u8;32];4])> {
                 Ok((removal_hex_data(Self::SOURCE)?,[
@@ -22927,13 +22927,33 @@ exec ./mrk-macos-remove --fixture-supervise "$1"
             }
             if !finality {
                 let line=removal_failure_line_data(parent.errors.first().copied(),resume,originals);
-                // One bounded best-effort write; no retry, panic, or success-path output.
+                // One bounded best-effort write; no retry or panic.
                 let _ = std::io::Write::write(&mut std::io::stderr().lock(),line.as_bytes());
                 if let Some(native)=removal_peer_native_line_data(parent.removal_peer_native_first) {
                     let _ = std::io::Write::write(&mut std::io::stderr().lock(),native.as_bytes());
                 }
+            } else if let Err(reason) = export_removal_completion(&parent) {
+                // The native removal has settled. A missing report prevents
+                // the uninstaller from deleting user data or claiming success.
+                let line = format!("MRK_MACOS_REMOVE_REPORT_REFUSED={reason}\n");
+                let _ = std::io::Write::write(&mut std::io::stderr().lock(), line.as_bytes());
             }
             if finality {0}else{1}
+        }
+        fn export_removal_completion(parent: &Parent) -> Result<()> {
+            let record = parent.removal_payload_execution.as_ref().and_then(|owner| owner.record.as_ref())
+                .ok_or("removal-report-terminal-record")?;
+            let state = record.binding_data().installation_state_sha256;
+            let name = format!("MobileReleaseKit-RemovalComplete-v1-{state}");
+            check(sha(state) && component(&name), "removal-report-state-binding")?;
+            let deadline = parent.book.shared_deadline()?;
+            let now = Instant::now();
+            let remaining = deadline.original_endpoint().checked_sub(deadline.check_total()?)
+                .ok_or("removal-report-deadline")?;
+            let mut export = Export::new(now + Duration::from_nanos(remaining));
+            let document = format!("Mobile Release Kit removal complete v1\n{state}\n");
+            let result = export.write(&name, document.as_bytes());
+            export.finish(result)
         }
         // A refusal before any run is entered (argument shape, deadline or
         // parent setup): the same hashed line, originals never settled.

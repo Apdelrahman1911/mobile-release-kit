@@ -28,9 +28,6 @@ installed-removal-abrupt-fixture = []
 installed-restore-cut-fixture = []
 # Explicit nonshipping package signer; excluded from every ordinary/image role.
 package-producer-signing = []
-# Nonshipping removal lab (hosted disposable runner only); refused with every
-# shipping role. Compiles the production coordinator verbatim.
-removal-lab = []
 
 [build-dependencies]
 cc = "=1.4.6"
@@ -49,14 +46,6 @@ name = "wrapping_private_cohort"
 path = "examples/wrapping_private_cohort.rs"
 test = false
 required-features = ["installed-observation"]
-
-# Nonshipping removal lab driver: real Parent/App peers up to the identity
-# boundary, real fixed paths, APFS, sockets, census and readiness notice.
-[[example]]
-name = "removal_lab"
-path = "examples/removal_lab.rs"
-test = false
-required-features = ["removal-lab"]
 
 # Fixed fixture client image; never an ordinary executable or default example.
 [[example]]

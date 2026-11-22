@@ -10,13 +10,13 @@ This is the separate **removal** disk image, not the application installer. It i
 
 ## What stays
 
-Your projects, project releases, signing assets, saved vault contents and Keychain credentials are preserved. This operation is not a request to erase your data. Unknown files are not treated as disposable application files.
+Keep My Data preserves your projects, project releases, signing assets, saved vault contents and Keychain credentials. Delete All Data requires a second confirmation and a protected completion report for the same installation. If Installer is cancelled or removal is interrupted before completion, user data is kept.
 
 ## Interrupted removal
 
 If removal was interrupted, preserve its result and use this same matching removal image again. This is a **new explicitly authorized attempt**, not evidence that the previous attempt succeeded. Recovery authenticates the protected prior admission and every remaining original under fresh exclusive maintenance ownership; missing files alone are not success evidence. There is no automatic fallback from a failed live-app attempt to the recovery route.
 
-The ARM64 0.2.4 removal image also recognizes one enrolled 0.2.3 removal artifact. It can resume a protected attempt that recorded a post-check failure at the payload-removal stage after the original app was withdrawn. The new package and current removal program must authenticate independently. The archived 0.2.3 removal and installed-producer files must still match the enrolled artifact and the remaining payload. Use this image only with a fresh explicit authorization to resume the interrupted removal.
+The ARM64 0.2.5 removal image also recognizes one enrolled 0.2.3 removal artifact. It can resume a protected attempt that recorded a post-check failure at the payload-removal stage after the original app was withdrawn. The new package and current removal program must authenticate independently. The archived 0.2.3 removal and installed-producer files must still match the enrolled artifact and the remaining payload. Use this image only with a fresh explicit authorization to resume the interrupted removal.
 
 After confirmed removal, use the matching application installer to reinstall. Protected recovery/control state and preserved user data are reauthenticated; reinstall does not silently relabel an earlier unknown result or restore signing identities from the package. A refused recovery should be investigated rather than bypassed.
 

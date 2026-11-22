@@ -32,7 +32,7 @@ jobs:
     name: removal lab
     if: >-
       github.repository == 'Apdelrahman1911/mobile-release-kit'
-      && (github.event_name != 'push' || !contains(github.event.head_commit.message, '[macos-payload-unlink-lab]'))
+      && (github.event_name != 'push' || !contains(github.event.head_commit.message, '[macos-payload-unlink-lab]') && !contains(github.event.head_commit.message, '[macos-uninstaller-completion-lab]'))
     runs-on: macos-26
     timeout-minutes: 30
     env:
@@ -277,3 +277,85 @@ jobs:
             ${{ runner.temp }}/payload-unlink-test.log
             ${{ runner.temp }}/payload-unlink-installer.log
           if-no-files-found: warn
+
+
+  uninstaller-completion:
+    name: Verify the uninstaller refuses incomplete or stale removal
+    if: >-
+      github.repository == 'Apdelrahman1911/mobile-release-kit'
+      && github.event_name == 'push'
+      && contains(github.event.head_commit.message, '[macos-uninstaller-completion-lab]')
+    runs-on: macos-26
+    timeout-minutes: 8
+    env:
+      BASH_ENV: ''
+      ENV: ''
+    steps:
+      - name: Check out the exact lab source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+
+      - name: Verify exact removal completion against a disposable installation epoch
+        shell: bash
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: |
+          set -euo pipefail
+          umask 077
+          support='/Library/Application Support'
+          managed="$support/MobileReleaseKit"
+          launcher='/Applications/Mobile Release Kit.app'
+          [[ "$RUNNER_ENVIRONMENT" == github-hosted && "$RUNNER_OS" == macOS && "$RUNNER_ARCH" == ARM64 ]]
+          [[ "$(/usr/bin/sw_vers -productVersion)" == 26.* && "$(/usr/bin/id -u)" != 0 ]]
+          [[ ! -e "$managed" && ! -L "$managed" && ! -e "$launcher" && ! -L "$launcher" ]]
+          fixture="$(mktemp -d "$RUNNER_TEMP/uninstaller-completion.XXXXXXXX")"
+          profile="$fixture/home/Library/Application Support/dev.mobile-release-kit.desktop"
+          decoy="$fixture/home/Library/Application Support/dev.mobile-release-kit.desktop.decoy"
+          mkdir -p "$profile" "$decoy"
+          printf 'synthetic-app-profile\n' > "$profile/test-data"
+          printf 'synthetic-unrelated-profile\n' > "$decoy/test-data"
+          script="$GITHUB_WORKSPACE/desktop/macos-installed-inputs/uninstaller/delete-data.sh"
+          /usr/bin/osacompile -o "$fixture/uninstaller.scpt" \
+            "$GITHUB_WORKSPACE/desktop/macos-installed-inputs/uninstaller/main.applescript"
+
+          need_status() {
+            local wanted="$1" label="$2" actual=0
+            shift 2
+            HOME="$fixture/home" /bin/sh "$script" "$@" > "$fixture/last-output" 2>&1 || actual=$?
+            printf '%s %s\n' "$label" "$actual"
+            if [[ "$actual" != "$wanted" ]]; then cat "$fixture/last-output"; return 1; fi
+          }
+          state="$managed/installation-v2.json"
+          /usr/bin/sudo -n /usr/bin/install -d -m 0755 -o root -g wheel "$managed"
+          printf 'original protected installation epoch\n' > "$fixture/state"
+          /usr/bin/sudo -n /usr/bin/install -m 0444 -o root -g wheel "$fixture/state" "$state"
+          digest="$(/usr/bin/shasum -a 256 < "$state")"
+          digest="${digest%% *}"
+          receipt="$support/MobileReleaseKit-RemovalComplete-v1-$digest"
+          [[ ! -e "$receipt" && ! -L "$receipt" ]]
+
+          need_status 66 absent-before-program-finished --check-removal
+          need_status 66 interrupted-purge-refused
+          [[ "$(cat "$profile/test-data")" == synthetic-app-profile ]]
+          printf 'Mobile Release Kit removal complete v1\n%s\n' "$digest" > "$fixture/receipt"
+          /usr/bin/sudo -n /bin/ln -s "$fixture/receipt" "$receipt"
+          need_status 66 linked-report-refused --check-removal
+          /usr/bin/sudo -n /bin/unlink "$receipt"
+          /usr/bin/sudo -n /usr/bin/install -m 0644 -o root -g wheel "$fixture/receipt" "$receipt"
+          need_status 66 mutable-report-refused --check-removal
+
+          /usr/bin/sudo -n /bin/chmod 0444 "$receipt"
+          need_status 0 same-epoch-completion --check-removal
+          [[ "$(cat "$profile/test-data")" == synthetic-app-profile ]]
+          /usr/bin/sudo -n /usr/bin/install -d -m 0755 -o root -g wheel "$launcher"
+          need_status 65 launcher-still-present
+          /usr/bin/sudo -n /bin/rmdir "$launcher"
+          printf 'next protected installation epoch\n' > "$fixture/new-state"
+          /usr/bin/sudo -n /usr/bin/install -m 0444 -o root -g wheel "$fixture/new-state" "$state"
+          need_status 66 stale-epoch-report-refused
+          [[ "$(cat "$profile/test-data")" == synthetic-app-profile ]]
+          /usr/bin/sudo -n /usr/bin/install -m 0444 -o root -g wheel "$fixture/state" "$state"
+          need_status 0 confirmed-purge
+          [[ ! -e "$profile" && "$(cat "$decoy/test-data")" == synthetic-unrelated-profile ]]

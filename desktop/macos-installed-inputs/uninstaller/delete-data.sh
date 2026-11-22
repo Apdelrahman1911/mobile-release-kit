@@ -1,25 +1,78 @@
 #!/bin/sh
 # Mobile Release Kit: delete the app's OWN per-user data (#83, OD-05c).
 #
-# Runs as the signed-in user, never as root, and only after Remove.pkg has
-# confirmed removal (the managed app is absent). It deletes nothing else:
+# Runs as the signed-in user, never as root, and requires the native remover's
+# completion report for the current installation. It deletes nothing else:
 # only the exact, fixed locations below, each only if it is a real (non-link)
 # entry owned by this user. Projects, documents, ~/.config/gh and any other
 # file are never touched. Every outcome is printed; exit 0 means everything
 # that existed was deleted, 1 means something was kept (listed), 64/65 mean
-# the request itself was refused and nothing was deleted.
+# the request itself was refused and nothing was deleted (66 if unconfirmed).
 set -u
 PATH=/usr/bin:/bin:/usr/sbin:/sbin
 export PATH
 umask 077
 
-INSTALLED='/Library/Application Support/MobileReleaseKit/Mobile Release Kit.app'
+support='/Library/Application Support'
+managed="$support/MobileReleaseKit"
+installed="$managed/Mobile Release Kit.app"
+launcher='/Applications/Mobile Release Kit.app'
+state="$managed/installation-v2.json"
 uid=$(id -u) || exit 64
 [ "$uid" -ne 0 ] || { echo "refused: run as the signed-in user, not root"; exit 64; }
-if [ -e "$INSTALLED" ] || [ -L "$INSTALLED" ]; then
+
+app_present() {
+    [ -e "$installed" ] || [ -L "$installed" ] || [ -e "$launcher" ] || [ -L "$launcher" ]
+}
+
+no_acl() {
+    listed=$(LC_ALL=C /bin/ls -lde "$1") || return 1
+    [ "$(printf '%s\n' "$listed" | /usr/bin/wc -l | /usr/bin/tr -d ' ')" = 1 ]
+}
+
+protected_file_stamp() {
+    [ ! -L "$1" ] && [ -f "$1" ] && no_acl "$1" || return 1
+    /usr/bin/stat -f '%Op:%u:%g:%l:%z:%d:%i:%m:%c' "$1"
+}
+
+removal_confirmed() {
+    # The success document is a sealed root original outside the managed
+    # root. Its key comes from the current protected installation state, so
+    # a receipt from an earlier installation cannot authorize cleanup.
+    for parent in / /Library "$support" "$managed"; do
+        [ ! -L "$parent" ] && [ -d "$parent" ] && no_acl "$parent" || return 1
+        [ "$(/usr/bin/stat -f '%Op:%u' "$parent")" = 40755:0 ] || return 1
+    done
+    state_stamp=$(protected_file_stamp "$state") || return 1
+    case "$state_stamp" in 100444:0:0:1:*) ;; *) return 1 ;; esac
+    payload_size=$(/usr/bin/stat -f '%z' "$state") || return 1
+    [ "$payload_size" -gt 0 ] && [ "$payload_size" -le 16384 ] || return 1
+    hashline=$(/usr/bin/shasum -a 256 < "$state") || return 1
+    state_hash=${hashline%% *}
+    [ "${#state_hash}" = 64 ] || return 1
+    case "$state_hash" in *[!0123456789abcdef]*) return 1 ;; esac
+    report="$support/MobileReleaseKit-RemovalComplete-v1-$state_hash"
+    report_stamp=$(protected_file_stamp "$report") || return 1
+    message='Mobile Release Kit removal complete v1'
+    report_size=$((${#message} + 1 + ${#state_hash} + 1))
+    case "$report_stamp" in "100444:0:0:1:$report_size:"*) ;; *) return 1 ;; esac
+    report_body=$(/bin/cat "$report") || return 1
+    [ "$report_body" = "$(printf '%s\n%s\n' "$message" "$state_hash")" ] &&
+        [ "$(protected_file_stamp "$report")" = "$report_stamp" ] &&
+        [ "$(protected_file_stamp "$state")" = "$state_stamp" ] && ! app_present
+}
+
+case "$#:${1-}" in 0:|1:--check-removal) ;; *) exit 64 ;; esac
+if app_present; then
     echo "refused: Mobile Release Kit is still installed; no data was deleted"
     exit 65
 fi
+if ! removal_confirmed; then
+    echo "refused: removal is unconfirmed; no data was deleted"
+    exit 66
+fi
+[ "$#" -eq 0 ] || exit 0
+
 home=${HOME:-}
 lib="$home/Library"
 case "$home" in /*) ;; *) echo "refused: no home folder"; exit 64 ;; esac

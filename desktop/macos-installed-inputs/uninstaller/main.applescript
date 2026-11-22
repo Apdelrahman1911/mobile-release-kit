@@ -37,7 +37,9 @@ on run
 		do shell script "/usr/bin/open -W -a Installer " & quoted form of package
 	end try
 
-	if not removed() then
+	set script_ to (POSIX path of (path to resource "delete-data.sh"))
+	set completion to removalStatus(script_)
+	if completion is 65 then
 		if deleteData then
 			display dialog "Mobile Release Kit is still installed, so none of your data was deleted." & return & return & ¬
 				"If Installer was cancelled or reported a problem, you can run this uninstaller again." buttons {"OK"} default button "OK" with title appTitle with icon caution
@@ -46,13 +48,17 @@ on run
 		end if
 		return
 	end if
+	if completion is not 0 then
+		display dialog "Mobile Release Kit removal could not be confirmed. Your data was kept." & return & return & ¬
+			"Check macOS Installer for the result before trying another operation." buttons {"OK"} default button "OK" with title appTitle with icon caution
+		return
+	end if
 
 	if not deleteData then
 		display dialog "Mobile Release Kit was removed. Your data was kept." buttons {"OK"} default button "OK" with title appTitle with icon note
 		return
 	end if
 
-	set script_ to (POSIX path of (path to resource "delete-data.sh"))
 	-- The script's own report goes to stdout; its exit status is appended as
 	-- the last line so the report is shown whatever the outcome.
 	try
@@ -77,12 +83,11 @@ on run
 	end if
 end run
 
-on removed()
-	set installedApp to "/Library/Application Support/MobileReleaseKit/Mobile Release Kit.app"
+on removalStatus(script_)
 	try
-		do shell script "/bin/test ! -e " & quoted form of installedApp & " -a ! -L " & quoted form of installedApp
-		return true
-	on error
-		return false
+		do shell script "/bin/sh " & quoted form of script_ & " --check-removal"
+		return 0
+	on error number statusCode
+		return statusCode
 	end try
-end removed
+end removalStatus
