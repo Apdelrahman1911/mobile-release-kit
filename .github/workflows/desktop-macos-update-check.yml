@@ -38,6 +38,7 @@ jobs:
       matrix:
         mode: >-
           ${{ contains(github.event.head_commit.message, '[macos-retained-maintenance]') && fromJSON('["release-asset","retained-transition","retained-prepare","workspace-xctest","performance-long","fresh","update-credentials","delete-data","uninstaller","recovery-xctest","core-recovery"]')
+          || contains(github.event.head_commit.message, '[macos-retained-removal-scale]') && fromJSON('["retained-transition","release-asset","retained-prepare","fresh","workspace-xctest","update-credentials","delete-data","uninstaller","recovery-xctest"]')
           || contains(github.event.head_commit.message, '[macos-retained-remove-only]') && fromJSON('["retained-transition"]')
           || contains(github.event.head_commit.message, '[macos-retained-transition-only]') && fromJSON('["retained-transition","retained-prepare"]')
           || contains(github.event.head_commit.message, '[macos-retained-transition]') && fromJSON('["retained-transition","retained-prepare","fresh","update-credentials","delete-data","release-asset"]')
@@ -87,8 +88,8 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
-          MRK_CHECK_REFRESHED_RUNTIME: ${{ (contains(github.event.head_commit.message, '[macos-refreshed-acceptance]') || contains(github.event.head_commit.message, '[macos-retained-transition]') || contains(github.event.head_commit.message, '[macos-retained-maintenance]')) && matrix.mode == 'fresh' }}
-          MRK_CHECK_DURABLE_CLI_STATE: ${{ contains(github.event.head_commit.message, '[macos-retained-maintenance]') && matrix.mode == 'workspace-xctest' }}
+          MRK_CHECK_REFRESHED_RUNTIME: ${{ (contains(github.event.head_commit.message, '[macos-refreshed-acceptance]') || contains(github.event.head_commit.message, '[macos-retained-transition]') || contains(github.event.head_commit.message, '[macos-retained-maintenance]') || contains(github.event.head_commit.message, '[macos-retained-removal-scale]')) && matrix.mode == 'fresh' }}
+          MRK_CHECK_DURABLE_CLI_STATE: ${{ (contains(github.event.head_commit.message, '[macos-retained-maintenance]') || contains(github.event.head_commit.message, '[macos-retained-removal-scale]')) && matrix.mode == 'workspace-xctest' }}
         run: |
           set -euo pipefail
           umask 077

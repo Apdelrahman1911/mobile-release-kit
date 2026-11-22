@@ -722,8 +722,13 @@ def main():
         result["failure"] = str(error)[:200]
     finally:
         result["steps"] = steps
-        if args.mode in ("remove", "delete-data", "repeat", "repeat-after-dialogs", "removal-archive") and "removeReturn" not in result:
-            result["removeReturn"] = next((step["returncode"] for step in steps if step.get("role") == "remove"), None)
+        if args.mode in ("remove", "delete-data", "repeat", "repeat-after-dialogs", "removal-archive", "retained-transition"):
+            removed = next((step for step in steps if step.get("role") == "remove"), {})
+            result.setdefault("removeReturn", removed.get("returncode"))
+            if removed.get("watchdogTimedOut"):
+                result["removeTimedOut"] = True
+            if "seconds" in removed:
+                result["removeSeconds"] = removed["seconds"]
         if args.mode in ("remove", "repeat", "repeat-after-dialogs"):
             recorded = [step["returncode"] for step in steps if step.get("role") == "remove-again"
                         and step.get("argv") == ["installer", "-pkg", "Remove.pkg"]]
@@ -1282,7 +1287,8 @@ def live_remove(mount, work, evidence, steps, label, observe_release=None):
     sheet, quit_sheet = [], []
     clicked, quit_clicked = False, False
     try:
-        deadline = time.monotonic() + 240
+        started = time.monotonic()
+        deadline = started + 240
         while time.monotonic() < deadline and installer.poll() is None:
             live = payload_pids()
             if pids[0] in live and not quit_clicked:
@@ -1310,6 +1316,7 @@ def live_remove(mount, work, evidence, steps, label, observe_release=None):
             installer.kill()
             out["timedOut"] = True
         installer.wait(timeout=60)
+        out["seconds"] = round(time.monotonic() - started, 1)
     finally:
         sample_stop.set()
         sample_thread.join(timeout=87)
@@ -1323,10 +1330,12 @@ def live_remove(mount, work, evidence, steps, label, observe_release=None):
         (evidence / f"{label}-quit-sheet-probes.json").write_text(json.dumps(quit_sheet[-40:]) + "\n")
         out["appTrace"] = fixed_app_trace(evidence, label)
     out["returncode"] = installer.returncode
-    steps.append({"argv": ["installer", "-pkg", "Remove.pkg"], "returncode": installer.returncode, "role": label})
+    steps.append({"argv": ["installer", "-pkg", "Remove.pkg"], "returncode": installer.returncode,
+                  "role": label, "seconds": out["seconds"], "watchdogTimedOut": bool(out.get("timedOut"))})
     if clicked and installer.returncode != 0:
         removal_refusal_evidence(pids[0], work, evidence, label)
     need(clicked, "removal-sheet-not-confirmed")
+    need(not out.get("timedOut"), "removal-watchdog-timed-out")
     need(installer.returncode == 0, "remove-returned-nonzero")
     need(quit_clicked, "removal-quit-sheet-not-confirmed")
     time.sleep(5)
