@@ -178,7 +178,12 @@ mod removal_prompt {
             let capture=held.clone();*state=Main::Queued(held);
             if installed_native::main_thread(){self.unknown();return;}
             #[cfg(feature="desktop-shell")]
-            if self.dispatcher.window.run_on_main_thread(move||Callback::perform(&capture)).is_err(){self.unknown();}
+            {
+                let dispatcher=self.dispatcher.clone();
+                if self.dispatcher.window.run_on_main_thread(move||Callback::perform(&capture,&dispatcher.window)).is_err(){
+                    self.unknown();
+                }
+            }
             #[cfg(not(feature="desktop-shell"))]
             {let _=capture;self.unknown();}
         }
@@ -214,11 +219,13 @@ mod removal_prompt {
                 .checked_add(native_removal::RemovalConfirmation::project_owned_upper_bound()?)?
                 .checked_add(native_removal::RemovalConfirmed::project_owned_upper_bound()?)?
                 .checked_add(registration_native::RemovalClock::project_owned_upper_bound()?)?
+                .checked_add(std::mem::size_of::<Arc<Dispatcher>>())?
                 .checked_add(arc_bytes::<Dispatcher>()?)
         }
     }
     impl Callback {
-        fn perform(this:&Self){
+        #[cfg(feature="desktop-shell")]
+        fn perform(this:&Self,window:&tauri::WebviewWindow){
             let returned=if !installed_native::main_thread(){Returned::Unknown{native_retired:false}}
             else{ORIGINAL.with(|cell|{
                 let Ok(mut slot)=cell.try_borrow_mut()else{return Returned::Unknown{native_retired:false};};
@@ -227,11 +234,15 @@ mod removal_prompt {
                     if this.binding.stop.load(Ordering::SeqCst){return Returned::Closed(None);}
                     let Some(cutoff)=this.binding.clock.cutoff()else{return Returned::Unknown{native_retired:false};};
                     if this.binding.clock.work_sample().is_none(){return Returned::Unknown{native_retired:false};}
+                    let Ok(parent)=window.ns_window()else{return Returned::Closed(None);};
                     let Some(native)=native_removal::RemovalConfirmation::reserve(cutoff)else{
                         return if this.binding.clock.work_sample().is_some(){Returned::Closed(None)}else{Returned::Unknown{native_retired:false}};};
                     *slot=Some(MainOriginal{binding:this.binding.clone(),native,close_attempted:false});
                     let Some(original)=slot.as_mut()else{return Returned::Unknown{native_retired:false};};
-                    if !original.native.start(){original.binding.stop.store(true,Ordering::SeqCst);}
+                    // SAFETY: Tauri's same original main window is held by the
+                    // dispatcher on this callback's main thread. AppKit retains
+                    // the window itself before attaching the sheet.
+                    if !unsafe{original.native.start(parent)}{original.binding.stop.store(true,Ordering::SeqCst);}
                 }
                 let Some(original)=slot.as_mut()else{return Returned::Unknown{native_retired:false};};
                 if !Arc::ptr_eq(&original.binding,&this.binding){return Returned::Unknown{native_retired:false};}

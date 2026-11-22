@@ -232,7 +232,7 @@ jobs:
           grep -F "test $archive ... ok" "$RUNNER_TEMP/removal-preflight-test.log"
           grep -F "test $live ... ok" "$RUNNER_TEMP/removal-preflight-test.log"
 
-      - name: Exercise the original unlink and close inside Installer
+      - name: Verify bundle metadata conservation and original unlink inside Installer
         shell: bash
         run: |
           set -euo pipefail
@@ -241,8 +241,9 @@ jobs:
           mkdir -m 0755 "$work/scripts" "$work/fixtures"
           chmod 0755 "$work"
           test_case=installer::worker::tests::payload_removal_settles_the_same_original_after_unlink
-          printf '#!/bin/sh\nset -eu\numask 022\nexport TMPDIR="%s"\nexec "%s" "%s" --ignored --exact --nocapture >"%s" 2>&1\n' \
-            "$work/fixtures" "$MRK_PAYLOAD_UNLINK_TEST" "$test_case" "$RUNNER_TEMP/payload-unlink-test.log" \
+          metadata_case=installer::worker::tests::payload_removal_conserves_the_enrolled_app_tag
+          printf '#!/bin/sh\nset -eu\numask 022\nexport TMPDIR="%s"\nexec "%s" "%s" "%s" --ignored --exact --nocapture --test-threads=1 >"%s" 2>&1\n' \
+            "$work/fixtures" "$MRK_PAYLOAD_UNLINK_TEST" "$test_case" "$metadata_case" "$RUNNER_TEMP/payload-unlink-test.log" \
             >"$work/scripts/postinstall"
           chmod 0755 "$work/scripts/postinstall"
           /usr/bin/pkgbuild --nopayload --scripts "$work/scripts" --identifier dev.mobile-release-kit.fixture.payload-unlink \
@@ -255,6 +256,7 @@ jobs:
           cat "$RUNNER_TEMP/payload-unlink-test.log" || cat "$RUNNER_TEMP/payload-unlink-installer.log"
           [[ $status == 0 ]]
           grep -F "test $test_case ... ok" "$RUNNER_TEMP/payload-unlink-test.log"
+          grep -F "test $metadata_case ... ok" "$RUNNER_TEMP/payload-unlink-test.log"
 
       - name: Retain bounded test evidence
         if: ${{ !cancelled() }}

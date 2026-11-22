@@ -7,7 +7,7 @@
 // general dialog or synchronous runModal entry is accepted by this ABI.
 size_t mrk_removal_confirmation_bytes(void);
 void *mrk_removal_confirmation_reserve(uint64_t start, uint64_t work, uint64_t hard);
-int mrk_removal_confirmation_start(void *original);
+int mrk_removal_confirmation_start(void *original, void *parent);
 // 0 pending, 1 accepted, 2 declined, 3 closed, -2 known work refusal, -1 unknown.
 int mrk_removal_confirmation_poll(void *original);
 int mrk_removal_confirmation_close(void *original);

@@ -69,7 +69,7 @@ mod confirmation {
     unsafe extern "C" {
         fn mrk_removal_confirmation_bytes()->usize;
         fn mrk_removal_confirmation_reserve(start:u64,work:u64,hard:u64)->*mut c_void;
-        fn mrk_removal_confirmation_start(original:*mut c_void)->i32;
+        fn mrk_removal_confirmation_start(original:*mut c_void,parent:*mut c_void)->i32;
         fn mrk_removal_confirmation_poll(original:*mut c_void)->i32;
         fn mrk_removal_confirmation_close(original:*mut c_void)->i32;
         fn mrk_removal_confirmation_retire(original:*mut c_void,accepted:*mut u32,nonce:*mut u8)->i32;
@@ -126,11 +126,14 @@ mod confirmation {
             Some(Self{original:Some(original),cutoff:cutoff.clone(),started:false,
                 close_attempted:false,retire_attempted:false,_main:PhantomData})
         }
-        pub fn start(&mut self)->bool{
+        /// # Safety
+        /// Called on AppKit's main thread with the live original NSWindow held
+        /// by the app's dispatcher for the duration of this call.
+        pub unsafe fn start(&mut self,parent:*mut c_void)->bool{
             if self.started || self.close_attempted{return false;}
             let Some(original)=self.original else{return false;};self.started=true;
             // SAFETY: exclusive original, native main check, no Rust callback.
-            unsafe{mrk_removal_confirmation_start(original.as_ptr())==1}
+            unsafe{mrk_removal_confirmation_start(original.as_ptr(),parent)==1}
         }
         pub fn poll(&mut self)->ConfirmationPoll{
             let Some(original)=self.original else{return ConfirmationPoll::Closed;};
