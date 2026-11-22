@@ -137,18 +137,20 @@ def hex_field(value, size):
 
 
 def selected_release_roles(data):
-    return [role for role in ("initial", "intermediate", "previous", "next") if role in data]
+    return [role for role in ("initial", "intermediate", "bridge", "previous", "next") if role in data]
 
 
 def load_selection(path):
     data = json.loads(Path(path).read_text())
     required = {"schemaVersion", "previous", "next"}
-    need(type(data) is dict and required <= set(data) <= required | {"initial", "intermediate", "removal"}
+    need(type(data) is dict and required <= set(data) <= required | {"initial", "intermediate", "bridge", "removal", "previousRemoval"}
          and ("intermediate" not in data or "initial" in data)
+         and ("bridge" not in data or {"intermediate", "previousRemoval"} <= set(data))
          and data["schemaVersion"] == 1, "selection-shape")
-    if "removal" in data:
-        # The matching Remove carrier produced by the carrier run for "next".
-        row = data["removal"]
+    for key in ("removal", "previousRemoval"):
+        if key not in data:
+            continue
+        row = data[key]
         need(set(row) == {"runId", "artifactId", "imageSha256"}
              and re.fullmatch(r"[1-9][0-9]{0,19}", row["runId"]) and re.fullmatch(r"[1-9][0-9]{0,19}", row["artifactId"])
              and hex_field(row["imageSha256"], 64), "selection-removal-fields")
@@ -667,7 +669,8 @@ def main():
                                            "repeat", "repeat-after-dialogs", "removal-archive", "prepare-quit", "performance",
                                            "update-credentials", "release-asset", "workspace-cli",
                                            "workspace-xctest", "prepare-xctest", "performance-long", "core-recovery",
-                                           "recovery-xctest", "retained-transition", "retained-prepare"), default="update")
+                                           "recovery-xctest", "retained-transition", "retained-prepare",
+                                           "macl-journal-recovery"), default="update")
     args = parser.parse_args()
     work = Path(args.work)
     evidence = work / "evidence"
@@ -682,6 +685,7 @@ def main():
              "delete-data": remove_check, "repeat": remove_check, "repeat-after-dialogs": remove_check,
              "removal-archive": remove_check,
              "retained-transition": retained_transition_check, "retained-prepare": retained_transition_check,
+             "macl-journal-recovery": macl_journal_recovery_check,
              "prepare-quit": prepare_quit_check, "performance": fresh_check, "release-asset": release_asset_check,
              "workspace-cli": workspace_cli_check, "workspace-xctest": workspace_xctest,
              "prepare-xctest": workspace_xctest, "performance-long": performance_long_check,
@@ -1337,7 +1341,7 @@ def fixed_app_trace(evidence, label):
     (evidence / f"{label}-app-trace.txt").write_text("\n".join(trace) + "\n")
     return trace
 
-def live_remove(mount, work, evidence, steps, label, observe_release=None):
+def live_remove(mount, work, evidence, steps, label, observe_release=None, *, refuse_at=None, background=False):
     """Open the installed app, run the mounted Remove.pkg with the standard
     Installer and confirm its exact removal sheet and ensuing ordinary Quit
     sheet. Require Installer 0 and no app, launcher or process left."""
@@ -1355,6 +1359,21 @@ def live_remove(mount, work, evidence, steps, label, observe_release=None):
     time.sleep(10)
     script = work / "sheet.js"
     script.write_text(SHEET_JXA)
+    if background:
+        focus = work / "background-app.js"
+        focus.write_text("""function run(argv) {
+  const se = Application('System Events');
+  const app = se.processes.whose({unixId: Number(argv[0])});
+  const finder = se.processes.whose({bundleIdentifier: 'com.apple.finder'});
+  if (app.length !== 1 || finder.length !== 1) return 'missing-process';
+  finder[0].frontmost = true;
+  delay(1);
+  return finder[0].frontmost() && !app[0].frontmost() ? 'background' : 'focus-unconfirmed';
+}
+""")
+        p, step = run(["/usr/bin/osascript", "-l", "JavaScript", str(focus), str(pids[0])], 15)
+        steps.append(dict(step, role=f"{label}-app-background"))
+        need(p.returncode == 0 and p.stdout.strip() == "background", "remove-app-not-background")
     requests = STATE.with_name("MobileReleaseKit-RemovalRequests")
     existing_requests = removal_requests(requests)
     log = open(evidence / f"{label}-installer.log", "w")
@@ -1421,7 +1440,11 @@ def live_remove(mount, work, evidence, steps, label, observe_release=None):
         removal_refusal_evidence(pids[0], work, evidence, label)
     need(clicked, "removal-sheet-not-confirmed")
     need(not out.get("timedOut"), "removal-watchdog-timed-out")
-    need(installer.returncode == 0, "remove-returned-nonzero")
+    if refuse_at is not None:
+        logged = (evidence / f"{label}-installer.log").read_text(errors="replace")
+        need(installer.returncode != 0 and refuse_at in logged, "expected-removal-refusal-not-observed")
+    else:
+        need(installer.returncode == 0, "remove-returned-nonzero")
     need(quit_clicked, "removal-quit-sheet-not-confirmed")
     time.sleep(5)
     remaining = {"app": APP.exists(), "launcher": LAUNCHER.exists(), "process": bool(payload_pids())}
@@ -1503,7 +1526,11 @@ def remove_check(selection, work, evidence, steps, result, *, folder=None, seede
     if seeded is None:
         seeded = seed_user_data()
     result["seededFiles"] = len(seeded)
-    out = live_remove(mount, work, evidence, steps, "remove", observe_release=row["release"] if repeat else None)
+    background = os.environ.get("MRK_CHECK_REMOVE_INACTIVE") == "true"
+    if background:
+        install_macl_fixture((APP,))
+    out = live_remove(mount, work, evidence, steps, "remove", observe_release=row["release"] if repeat else None,
+                      background=background)
     result.update(removalSheet=out["sheet"], removalQuitSheet=out["quitSheet"],
                   removeReturn=out["returncode"], afterRemoval=out["remaining"])
     if out.get("timedOut"):
@@ -1659,6 +1686,105 @@ def exercise_prepare_quit(work, evidence, steps, result):
 def require_runtime(observation, failure):
     ui = observation.get("ui") or {}
     need(ui.get("runtimeCard") == "bundled" and not ui.get("workspaceErrorMarkers"), failure)
+
+
+def install_macl_fixture(paths):
+    # This is used only on fresh hosted verification installations. Preserve
+    # the signed resources while reproducing the OS metadata on the app roots.
+    for path in paths:
+        p, _ = run(["/usr/bin/sudo", "-n", "/usr/bin/xattr", "-wx", "com.apple.macl", "07" * 72, str(path)], 15)
+        need(p.returncode == 0, "macl-fixture-tag")
+        p, _ = run(["/usr/bin/sudo", "-n", "/usr/bin/xattr", str(path)], 15)
+        need(p.returncode == 0 and p.stdout.splitlines() == ["com.apple.macl"], "macl-fixture-attributes")
+        p, _ = run(["/usr/bin/codesign", "--verify", "--deep", "--strict", str(path)], 60)
+        need(p.returncode == 0, "macl-fixture-signature")
+
+
+def macl_journal_recovery_check(selection, work, evidence, steps, result):
+    """Exercise the exact signed 0.2.3-to-0.2.4 interrupted removal transition."""
+    need("previousRemoval" in selection and "removal" in selection
+         and selection["previous"]["release"] == "macos26-arm64-desktop-09"
+         and selection["next"]["release"] == "macos26-arm64-desktop-10", "macl-recovery-selection")
+    need(not STATE.exists(), "macl-recovery-existing-installation")
+    next_folder = fetch("next", selection["next"], work, steps)
+    for role in selected_release_roles(selection)[:-1]:
+        expected = selection[role]
+        folder = fetch(role, expected, work, steps)
+        need(install(role, folder, steps, evidence=evidence) == 0, "macl-recovery-install-" + role)
+        actual = installed_state()
+        need(all(actual[key] == expected[key] for key in ("release", "packageVersion", "packageSha256")),
+             "macl-recovery-identity-" + role)
+    seeded, credential = seed_user_data(), seed_update_credential()
+    original = APP.lstat()
+    state = json.loads((STATE / "installation-v2.json").read_bytes())
+    retained = [STATE / (".retained-app-" + row["app"]["invocation"]) for row in state["retained"]]
+    need(len(retained) >= 1 and all(path.is_dir() for path in retained), "macl-recovery-retained-originals")
+    install_macl_fixture((APP, *retained))
+
+    old_work = work / "previous-removal"
+    old_work.mkdir(mode=0o700)
+    old_mount, _ = removal_image(selection["previousRemoval"], old_work, steps)
+    try:
+        need(digest(old_mount / "Remove.pkg") == "3b5d40ff516c429df98147d57dbf9be36f5ea07bf71564e54dc440266fc469d6",
+             "macl-recovery-previous-removal-digest")
+        reason = hashlib.sha256(b"removal-payload-node-attributes").hexdigest()
+        result["interruptedReturn"] = live_remove(old_mount, work, evidence, steps, "macl-interrupted", refuse_at=reason)["returncode"]
+    finally:
+        run(["/usr/bin/hdiutil", "detach", str(old_mount)], 45, check=True)
+    archives = removal_archive_identities()
+    need(len(archives) == 1, "macl-recovery-original-journal")
+    archived = STATE / next(iter(archives))
+    p, _ = run(["/usr/bin/sudo", "-n", "/usr/bin/stat", "-f", "%i", str(archived / "app")], 15)
+    need(p.returncode == 0 and p.stdout.strip() == str(original.st_ino) and all(path.is_dir() for path in retained),
+         "macl-recovery-withdrawn-originals")
+    p, _ = run(["/usr/bin/sudo", "-n", "/bin/cat", str(archived / "first-failure.json")], 15)
+    need(p.returncode == 0 and 0 < len(p.stdout) <= 4096, "macl-recovery-failure-record")
+    first_failure = json.loads(p.stdout)
+    need(first_failure["firstFailure"] == {"phase": "payload-roster-removal", "kind": "post-mismatch"},
+         "macl-recovery-failure-phase")
+    result["interruptedFailure"] = first_failure["firstFailure"]
+    first_digest = hashlib.sha256(p.stdout.encode()).hexdigest()
+    need(all(manifest().get(key) == value for key, value in seeded.items())
+         and update_credential_matches(credential), "macl-recovery-interrupted-data")
+
+    repair_mount, _ = removal_image(selection["removal"], work, steps)
+    try:
+        p, step = run(["/usr/bin/sudo", "-n", "/usr/sbin/installer", "-verbose", "-pkg",
+                       str(repair_mount / "Remove.pkg"), "-target", "/"], 240)
+        steps.append(dict(step, role="macl-signed-resume"))
+        result["resumeReturn"] = p.returncode
+        (evidence / "macl-recovery-installer.log").write_text("\n".join(tail_text(p.stdout + p.stderr, 80)) + "\n")
+        need(p.returncode == 0, "macl-signed-recovery-returned-nonzero")
+    finally:
+        run(["/usr/bin/hdiutil", "detach", str(repair_mount)], 45, check=True)
+
+    result["payloadAbsent"] = (not APP.exists() and not LAUNCHER.exists()
+                               and not payload_pids() and not any(path.exists() for path in retained))
+    need(result["payloadAbsent"], "macl-recovery-payload-present")
+    after = removal_archive_identities()
+    added = set(after) - set(archives)
+    need(len(added) == 1 and all(after.get(key) == value for key, value in archives.items()),
+         "macl-recovery-linked-journal")
+    p, _ = run(["/usr/bin/sudo", "-n", "/bin/cat",
+                str(STATE / next(iter(added)) / "payload-absent-observed.json")], 15)
+    need(p.returncode == 0 and 0 < len(p.stdout) <= 4096, "macl-recovery-terminal-record")
+    terminal = json.loads(p.stdout)
+    need(terminal["prefix"] == "payload-absent-observed"
+         and terminal["previousAttempt"]["recordSha256"] == first_digest, "macl-recovery-record-link")
+    result["priorFailureLinked"] = True
+    need(all(manifest().get(key) == value for key, value in seeded.items())
+         and update_credential_matches(credential), "macl-recovery-resumed-data")
+
+    result["reinstallReturn"] = install("macl-reinstall", next_folder, steps, evidence=evidence)
+    need(result["reinstallReturn"] == 0, "macl-recovery-reinstall-returned-nonzero")
+    actual = installed_state()
+    need(all(actual[key] == selection["next"][key] for key in ("release", "packageVersion", "packageSha256")),
+         "macl-recovery-reinstalled-identity")
+    result["launchAfterReinstall"] = launch_smoke("macl-reinstalled", work, evidence, steps, observe=first_launch_observe)
+    require_runtime(result["launchAfterReinstall"], "macl-recovery-reinstalled-runtime")
+    result["dataPreserved"] = (all(manifest().get(key) == value for key, value in seeded.items())
+                               and update_credential_matches(credential))
+    need(result["dataPreserved"], "macl-recovery-reinstalled-data")
 
 
 def retained_transition_check(selection, work, evidence, steps, result):
