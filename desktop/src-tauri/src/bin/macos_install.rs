@@ -17115,7 +17115,9 @@ mod installer {
                         }
                     }
                 }
-                native::no_xattrs(book.fd(parent)?.as_fd()).map_err(|_|"removal-payload-parent-attributes")?;
+                // Removing a child changes the parent's stat baseline, but
+                // cannot change an enrolled app directory's original tag.
+                book.app_attributes(parent,"removal-payload-parent-attributes")?;
                 book.check_name(parent,true)?;book.clock()
             }
             fn transfer(&mut self,book:&mut Install)->Result<()> {
@@ -17724,6 +17726,50 @@ mod installer {
                     "removal-resume-genesis-hash")?;self.post(book)
             }
         }
+        struct MaclRemovalRecovery {
+            signature:native::install_producer::RemovalProducerVerifier,
+        }
+        impl MaclRemovalRecovery {
+            // The frozen ARM64 0.2.3 removal carrier. Only the next reviewed
+            // release may repair its phase-3 refusal, under the original R/M.
+            const SOURCE:&str="9a995eea8106682db582544c505e82874addeed2";
+            const RELEASE:&str="macos26-arm64-desktop-09";
+            const REMOVE:&str="b67d360cab2f8a629a4dd16d23e3ad0a989e4149d2776c7e685f78306423046f";
+            const REMOVE_SIGNATURE:&str="afb965e3619c814ce57092a34a6044d5846ae1c606090add061cf14408689cdb";
+            const PACKAGE:&str="3b5d40ff516c429df98147d57dbf9be36f5ea07bf71564e54dc440266fc469d6";
+            const INSTALLED:&str="a61cafd15654eb92222453235db7f3dab001330c5989dc7bf7c20b12c83ebe87";
+            const INVENTORY:&str="f4ec6419c8816eaf75111154e12b0766a52e6e44819ac91f118564b393443fa9";
+            fn enabled()->bool {
+                cfg!(all(target_arch="aarch64",not(feature="macos-installed-removal-abrupt-fixture")))
+                    && paths::RELEASE=="macos26-arm64-desktop-10" && paths::PACKAGE_VERSION=="0.2.4"
+            }
+            fn epoch(state_sha:[u8;32])->Result<([u8;20],[[u8;32];4])> {
+                Ok((removal_hex_data(Self::SOURCE)?,[
+                    removal_hex_data(Self::REMOVE)?,removal_hex_data(Self::INSTALLED)?,
+                    removal_hex_data(Self::INVENTORY)?,state_sha]))
+            }
+            fn matches_archived_pair(descriptor:&[u8],signature:&[u8],installed:&[u8])->Result<bool> {
+                let hashes:[[u8;32];2]=[Sha256::digest(descriptor).into(),Sha256::digest(signature).into()];
+                if hashes!=[removal_hex_data(Self::REMOVE)?,removal_hex_data(Self::REMOVE_SIGNATURE)?]{
+                    return Ok(false);
+                }
+                let old=mobile_release_desktop::macos_remove_producer::RemovalData::parse_data(descriptor,removal_resume_target())
+                    .map_err(|_|"removal-repair-archived-descriptor")?;
+                let binding=old.binding_data();
+                Ok(binding.release==Self::RELEASE && binding.source_commit==Self::SOURCE
+                    && binding.package_sha256==Self::PACKAGE && old.installed_data(installed).is_ok())
+            }
+            fn repairable_failure(slot:usize,failure:Option<mobile_release_desktop::macos_remove_record::FirstFailureData>)->bool {
+                use mobile_release_desktop::macos_remove_record::{FailureKindData,FirstFailureData,PrefixData};
+                slot==5 && failure==Some(FirstFailureData{
+                    phase:PrefixData::PayloadRosterRemoval,kind:FailureKindData::PostMismatch,
+                })
+            }
+            fn signed(&self)->bool {
+                let custody=self.signature.custody();
+                custody.remove_signature_matched && !custody.failed && !custody.unknown && self.signature.settled()
+            }
+        }
         // A borrowed view of genuine current originals, not metadata-created
         // source or peer authority. The live case requires the actual fresh
         // peer exit and same R/M exclusion; recovery retains its own verifier.
@@ -17764,9 +17810,21 @@ mod installer {
                 Self::Observer(source)=>[source.originals.input.descriptor_data(),source.originals.input.signature_data(),
                     &source.originals.installed_raw[0],&source.originals.installed_raw[1]],
             })}
+            fn matches_raw4(&self,raw:&[Vec<u8>;4])->Result<bool> {
+                let expected=self.raw4()?;
+                if matches!(self,Self::Resume(source) if source.macl_recovery.is_some()) {
+                    return Ok(raw[2]==expected[2] && raw[3]==expected[3]
+                        && MaclRemovalRecovery::matches_archived_pair(&raw[0],&raw[1],&raw[2])?);
+                }
+                Ok(raw.iter().zip(expected).all(|(actual,expected)|actual.as_slice()==expected))
+            }
             fn epoch(&self,book:&Install,state_sha:[u8;32])->Result<(mobile_release_desktop::macos_install_maintenance::MaintenanceTargetData,
                 [u8;20],[[u8;32];4])> {
                 self.post(book)?;
+                if matches!(self,Self::Resume(source) if source.macl_recovery.is_some()) {
+                    let (source,digests)=MaclRemovalRecovery::epoch(state_sha)?;
+                    return Ok((removal_resume_target(),source,digests));
+                }
                 let removal=match self {Self::Live{source,..}=>source.removal.as_ref().ok_or("removal-current-descriptor")?,
                     Self::Resume(source)=>&source.removal,
                     #[cfg(feature="macos-installed-removal-observer")]
@@ -17857,7 +17915,8 @@ mod installer {
                 .ok_or("removal-resume-tip")?.binding_data(),"removal-resume-genesis-binding")?;
             check(data.selected_bytes_data()==read.selected(book)?.encode_data().map_err(|_|"removal-resume-selected")?,
                 "removal-resume-selected")?;
-            let names=mobile_release_desktop::macos_install_producer::installed_control_names_data(removal_resume_target(),paths::RELEASE)
+            let selected=read.selected(book)?.current_data().binding_data();
+            let names=mobile_release_desktop::macos_install_producer::installed_control_names_data(removal_resume_target(),selected.release)
                 .map_err(|_|"removal-resume-control-name")?;
             let raw=[
                 removal_resume_span(book,snapshot,RemovalResumeGenesis::span(&data,1,"@remove/producer.json")?,
@@ -17868,9 +17927,12 @@ mod installer {
                 removal_resume_span(book,snapshot,RemovalResumeGenesis::span(&data,0,&names.1)?,
                     mobile_release_desktop::macos_install_producer::SIGNATURE_LIMIT)?,
             ];
-            let expected_raw=read.raw4()?;
-            check(raw.iter().zip(expected_raw).all(|(actual,expected)|actual.as_slice()==expected),
-                "removal-resume-same-artifact-required")?;
+            check(read.matches_raw4(&raw)?,"removal-resume-same-artifact-required")?;
+            if matches!(&read,RemovalGenesisRead::Resume(source) if source.macl_recovery.is_some()) {
+                let admission=row.attempt_data().ok_or("removal-repair-admission")?;
+                check(MaclRemovalRecovery::repairable_failure(admission.tip_slot_data(),admission.first_failure_data()),
+                    "removal-repair-admission")?;
+            }
             let tip=&census.rows()[tip_index];let attempt=tip.attempt_data().ok_or("removal-resume-tip")?;
             let tip_archive=if tip_index==genesis_index{archive}else{
                 check(removal_archive_name_data(tip.name()),"removal-resume-tip-name")?;
@@ -18410,6 +18472,7 @@ exec ./mrk-macos-remove --fixture-supervise "$1"
             program:native::install_producer::RemovalRecoveryProgramVerifier,
             remove:native::install_producer::RemovalProducerVerifier,
             installed:native::install_producer::ProducerVerifier,
+            macl_recovery:Option<MaclRemovalRecovery>,
             self_verified:bool,verified:bool,first:Option<&'static str>,existing_maintenance:Option<usize>,
             descriptor:mobile_release_desktop::macos_install_producer::ProducerData,
             removal:mobile_release_desktop::macos_remove_producer::RemovalData,
@@ -18426,6 +18489,7 @@ exec ./mrk-macos-remove --fixture-supervise "$1"
                 let bound=RemovalRecoveryProgramVerifier::project_owned_upper_bound()
                     .and_then(|n|n.checked_add(RemovalProducerVerifier::project_owned_upper_bound()?))
                     .and_then(|n|n.checked_add(ProducerVerifier::project_owned_upper_bound()?))
+                    .and_then(|n|n.checked_add(if MaclRemovalRecovery::enabled(){RemovalProducerVerifier::project_owned_upper_bound()?}else{0}))
                     .and_then(|n|n.checked_add(REMOVAL_RESUME_RAW+512*1024+std::mem::size_of::<Self>()))
                     .filter(|n|*n<=installation_record::CONTROL_LIMIT).ok_or("removal-resume-resource")?;
                 book.removal_control_reserved=bound as u64;
@@ -18453,26 +18517,50 @@ exec ./mrk-macos-remove --fixture-supervise "$1"
                 removal_resume_stat(book,root,true,Some(0o755))?;book.absent(root,paths::APP_NAME)?;
                 let mut root_chain=Vec::new();let mut at=Some(root);
                 while let Some(n)=at{check(root_chain.len()<4,"removal-resume-root-chain")?;root_chain.push(n);at=book.originals[n].parent;}
-                let names=mobile_release_desktop::macos_install_producer::installed_control_names_data(removal_resume_target(),paths::RELEASE)
+                let control_names=mobile_release_desktop::macos_install_producer::installed_control_names_data;
+                let mut names=control_names(removal_resume_target(),paths::RELEASE)
                     .map_err(|_|"removal-resume-control-name")?;
+                let repair=MaclRemovalRecovery::enabled()
+                    && matches!(book.named(Some(root),&names.0),Err(Errno::ENOENT))
+                    && matches!(book.named(Some(root),&names.1),Err(Errno::ENOENT));
+                if repair {
+                    names=control_names(removal_resume_target(),MaclRemovalRecovery::RELEASE)
+                        .map_err(|_|"removal-repair-control-name")?;
+                }
                 let (descriptor_original,raw)=maintenance::metadata_original(book,root,&names.0,mobile_release_desktop::macos_install_producer::DESCRIPTOR_LIMIT)?;
                 let (signature_original,sig)=maintenance::metadata_original(book,root,&names.1,mobile_release_desktop::macos_install_producer::SIGNATURE_LIMIT)?;
                 // Only a bounded comparison prelude. These parser results
                 // select no effects or payload roots until native3 completes.
                 let removal=mobile_release_desktop::macos_remove_producer::RemovalData::parse_data(input.descriptor_data(),removal_resume_target())
                     .map_err(|_|"removal-resume-remove-data")?;
-                let descriptor=removal.installed_data(&raw).map_err(|_|"removal-resume-installed-data")?;
+                let descriptor=if repair {
+                    check(<[u8;32]>::from(Sha256::digest(&raw))==removal_hex_data(MaclRemovalRecovery::INSTALLED)?,
+                        "removal-repair-installed")?;
+                    mobile_release_desktop::macos_install_producer::ProducerData::parse_data(&raw,removal_resume_target())
+                        .map_err(|_|"removal-repair-installed")?
+                }else{removal.installed_data(&raw).map_err(|_|"removal-resume-installed-data")?};
                 let binding=descriptor.release_set_data().current_data().binding_data();
-                check(removal_source_binding_data(&binding,option_env!("MRK_MACOS_INSTALL_SOURCE_COMMIT"),
-                    option_env!("MRK_BUNDLED_RUNTIME_MANIFEST_SHA256"),removal.binding_data().package_sha256,input.package_sha256_data()),
-                    "removal-resume-source-data")?;
+                let transport=removal.binding_data();
+                if repair {
+                    check(transport.release==paths::RELEASE && transport.package_version==paths::PACKAGE_VERSION
+                        && transport.protocol_sha256==paths::PROTOCOL_SHA
+                        && Some(transport.source_commit)==option_env!("MRK_MACOS_INSTALL_SOURCE_COMMIT")
+                        && transport.package_sha256==input.package_sha256_data()
+                        && binding.release==MaclRemovalRecovery::RELEASE && binding.source_commit==MaclRemovalRecovery::SOURCE,
+                        "removal-repair-source-data")?;
+                }else{
+                    check(removal_source_binding_data(&binding,option_env!("MRK_MACOS_INSTALL_SOURCE_COMMIT"),
+                        option_env!("MRK_BUNDLED_RUNTIME_MANIFEST_SHA256"),transport.package_sha256,input.package_sha256_data()),
+                        "removal-resume-source-data")?;
+                }
                 check(removal_hex_data::<32>(removal.binding_data().remover_executable_sha256)?==program_sha,"removal-resume-program-hash")?;
                 let originals=RemovalResumeOriginals{input,bootstrap,executed,parent_path,program,script,program_sha,root,root_chain,
                     installed_pair:[descriptor_original,signature_original],installed_raw:[raw,sig],genesis:None,pending_genesis:None};
                 originals.fixed_absence(book)?;
                 check(book.originals.iter().filter(|n|n.fd.is_some()).count().checked_add(32+EXTRA_LIVE)
                     .is_some_and(|n|n<=96),"removal-resume-source-live-reservation")?;
-                Ok(Self {originals,program:RemovalRecoveryProgramVerifier::new(),remove:RemovalProducerVerifier::new(),
+                let macl_recovery=repair.then(||MaclRemovalRecovery{signature:RemovalProducerVerifier::new()});
+                Ok(Self {originals,program:RemovalRecoveryProgramVerifier::new(),remove:RemovalProducerVerifier::new(),macl_recovery,
                     installed:ProducerVerifier::new(),self_verified:false,verified:false,first:None,existing_maintenance:None,descriptor,removal})
             }
             fn inspect_self(&mut self,book:&Install)->Result<()> {
@@ -18483,6 +18571,14 @@ exec ./mrk-macos-remove --fixture-supervise "$1"
                         &mut |point|removal_resume_point(book,originals,first,point))};
                 check(result==native::install_producer::RemovalRecoveryProgramResult::ExecutingSourceVerified && self.program.settled(),
                     self.first.unwrap_or("removal-resume-self-refused"))?;
+                if let Some(repair)=self.macl_recovery.as_mut() {
+                    let originals=&self.originals;let first=&mut self.first;
+                    let signature=repair.signature.verify_and_close(originals.input.descriptor_data(),originals.input.signature_data(),
+                        &mut |point|removal_resume_point(book,originals,first,point));
+                    check(signature==native::install_producer::SignatureResult::SignatureVerified && repair.signed(),
+                        first.unwrap_or("removal-repair-signature"))?;
+                    originals.input.content_post(book)?;
+                }
                 self.self_verified=true;self.originals.fixed_absence(book)
             }
             fn reserve_existing(&mut self,book:&mut Install)->Result<()> {
@@ -18525,11 +18621,13 @@ exec ./mrk-macos-remove --fixture-supervise "$1"
                 check(flags&OFlag::O_ACCMODE.bits()==OFlag::O_RDONLY.bits(),"removal-resume-m-readonly")?;
                 book.gate_protected(n)?;maintenance::held_bytes(book,n,paths::MAINTENANCE_GATE_BYTES)
             }
-            fn native_settled(&self)->bool {self.program.settled()&&self.remove.settled()&&self.installed.settled()}
+            fn native_settled(&self)->bool {self.program.settled()&&self.remove.settled()&&self.installed.settled()
+                && self.macl_recovery.as_ref().is_none_or(|repair|repair.signature.settled())}
             fn settle(&mut self,book:&Install)->bool {
                 let mut gate=|point|producer_cleanup_point(book,point);
                 let installed=self.installed.close(&mut gate);let remove=self.remove.close(&mut gate);let program=self.program.close(&mut gate);
-                installed&&remove&&program&&self.native_settled()
+                let repair=self.macl_recovery.as_mut().is_none_or(|repair|repair.signature.close(&mut gate));
+                installed&&remove&&program&&repair&&self.native_settled()
             }
         }
         impl RemovalResumeSource {
@@ -18591,6 +18689,7 @@ exec ./mrk-macos-remove --fixture-supervise "$1"
                     && self.self_verified && self.first.is_none() && self.native_settled()
                     && self.program.custody().operation==native::install_producer::ProducerOperation::RemoveRecoveryProgram
                     && !self.program.custody().failed && !self.program.custody().unknown
+                    && self.macl_recovery.as_ref().is_none_or(MaclRemovalRecovery::signed)
                     && self.remove.custody().remove_signature_matched && self.installed.custody().signature_matched,
                     "removal-resume-pending-signatures")?;
                 self.existing_maintenance_post(book)
@@ -18612,6 +18711,7 @@ exec ./mrk-macos-remove --fixture-supervise "$1"
                 check(self.verified && self.self_verified && self.first.is_none() && self.native_settled()
                     && self.program.custody().operation==native::install_producer::ProducerOperation::RemoveRecoveryProgram
                     && !self.program.custody().failed && !self.program.custody().unknown
+                    && self.macl_recovery.as_ref().is_none_or(MaclRemovalRecovery::signed)
                     && self.remove.custody().remove_signature_matched && self.installed.custody().signature_matched,
                     "removal-resume-authenticated-source")?;
                 self.existing_maintenance_post(book)?;
@@ -18682,6 +18782,7 @@ exec ./mrk-macos-remove --fixture-supervise "$1"
             }
             fn pending_native_data(&self)->bool {
                 [self.program.custody(),self.remove.custody(),self.installed.custody()].iter().any(removal_resume_pending_data)
+                    || self.macl_recovery.as_ref().is_some_and(|repair|removal_resume_pending_data(&repair.signature.custody()))
             }
         }
         #[cfg(feature="macos-installed-removal-observer")]
@@ -22842,6 +22943,29 @@ exec ./mrk-macos-remove --fixture-supervise "$1"
         mod tests {
             use super::*;
             #[test]
+            fn macl_repair_requires_the_frozen_epoch_and_post_mismatch_failure() {
+                use mobile_release_desktop::macos_remove_record::{FailureKindData,FirstFailureData,PrefixData};
+                let failure=FirstFailureData{phase:PrefixData::PayloadRosterRemoval,kind:FailureKindData::PostMismatch};
+                assert!(MaclRemovalRecovery::repairable_failure(5,Some(failure)));
+                assert!(!MaclRemovalRecovery::repairable_failure(3,Some(failure)));
+                assert!(!MaclRemovalRecovery::repairable_failure(5,None));
+                assert!(!MaclRemovalRecovery::repairable_failure(5,Some(FirstFailureData{
+                    kind:FailureKindData::OriginalUnknown,..failure
+                })));
+                assert!(!MaclRemovalRecovery::repairable_failure(5,Some(FirstFailureData{
+                    phase:PrefixData::AppWithdrawn,..failure
+                })));
+                let (source,digests)=MaclRemovalRecovery::epoch([9;32]).unwrap();
+                let target=removal_resume_target();
+                assert_eq!(removal_epoch_tip_rows_data(target,source,digests,
+                    [(0,target,source,digests)]),Ok(Some(0)));
+                let mut wrong=digests;
+                wrong[0][0]^=1;
+                assert!(removal_epoch_tip_rows_data(target,source,digests,[(0,target,source,wrong)]).is_err());
+                assert_eq!(MaclRemovalRecovery::matches_archived_pair(b"{}", &[0;256],b"{}"),Ok(false));
+            }
+
+            #[test]
             #[ignore = "requires a disposable macOS runner without automatic provenance on directories"]
             fn payload_removal_conserves_the_enrolled_app_tag() {
                 use super::super::tests::unlinked_snapshot_book;
@@ -22871,13 +22995,19 @@ exec ./mrk-macos-remove --fixture-supervise "$1"
                     book.forward_close(original,REFUSAL).unwrap();
 
                     let replacement=fixture.join("Replacement.app");
-                    std::fs::create_dir(&replacement).unwrap();
+                    std::fs::create_dir_all(replacement.join("Contents")).unwrap();
                     assert!(std::process::Command::new("/usr/bin/xattr")
                         .args(["-wx",TAG,&"07".repeat(72)]).arg(&replacement).status().unwrap().success());
                     let substitute=book.open(Some(0),"Replacement.app",true).unwrap();
                     assert_eq!(removal_payload_node_attributes(&mut book,substitute,true,true),Err(REFUSAL));
                     book.capture_existing_app_metadata(substitute,true,REFUSAL).unwrap();
                     assert_eq!(removal_payload_node_attributes(&mut book,substitute,true,true),Ok(()));
+                    unistd::unlinkat(book.fd(substitute).unwrap(),"Contents",unistd::UnlinkatFlags::RemoveDir).unwrap();
+                    let changed=Identity::of(&stat::fstat(book.fd(substitute).unwrap()).unwrap());
+                    book.originals[substitute].identity=Some(changed);
+                    assert_eq!(book.app_attributes(substitute,"removal-payload-parent-attributes"),Ok(()));
+                    assert!(native::no_xattrs(book.fd(substitute).unwrap().as_fd()).is_err());
+                    book.check_name(substitute,true).unwrap();
                     unistd::unlinkat(book.fd(0).unwrap(),"Replacement.app",unistd::UnlinkatFlags::RemoveDir).unwrap();
                     let mut retired=RemovalNodeState {original:Some(substitute),effect:RemovalNodeEffect::Removed,
                         roster_observed:true,returned:Some(Ok(()))};

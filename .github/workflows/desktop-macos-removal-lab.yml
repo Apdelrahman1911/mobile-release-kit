@@ -226,11 +226,13 @@ jobs:
           locks=installer::worker::tests::launcher_removal_requires_both_original_locks
           archive=installer::maintenance::removal_archive_preserves_hidden_distribution_sidecars
           live=installer::tests::removal_live_index_keeps_original_open_and_close_finality
-          "$MRK_PAYLOAD_UNLINK_TEST" "$locks" "$archive" "$live" --exact --test-threads=1 |
+          repair=installer::worker::tests::macl_repair_requires_the_frozen_epoch_and_post_mismatch_failure
+          "$MRK_PAYLOAD_UNLINK_TEST" "$locks" "$archive" "$live" "$repair" --exact --test-threads=1 |
             tee "$RUNNER_TEMP/removal-preflight-test.log"
           grep -F "test $locks ... ok" "$RUNNER_TEMP/removal-preflight-test.log"
           grep -F "test $archive ... ok" "$RUNNER_TEMP/removal-preflight-test.log"
           grep -F "test $live ... ok" "$RUNNER_TEMP/removal-preflight-test.log"
+          grep -F "test $repair ... ok" "$RUNNER_TEMP/removal-preflight-test.log"
 
       - name: Verify bundle metadata conservation and original unlink inside Installer
         shell: bash

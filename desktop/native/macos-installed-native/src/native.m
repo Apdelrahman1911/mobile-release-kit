@@ -662,6 +662,16 @@ static int mrk_panel_start_inner(void *opaque, int kind, const uint8_t *initial,
         // This application has exactly one normal window; never attach to a
         // picker, another sheet or a renderer-supplied object/path.
         NSWindow *main = [NSApp mainWindow];
+        if (!main && kind == 2) {
+            // The authenticated removal flow may ask Quit while another app
+            // is active. Require the only visible main-capable app window.
+            for (NSWindow *window in [NSApp windows]) {
+                if (![window isVisible] || ![window canBecomeMainWindow]
+                    || [window isKindOfClass:[NSPanel class]]) continue;
+                if (main) return EPERM;
+                main = window;
+            }
+        }
         if (!main || [main isKindOfClass:[NSPanel class]] || [main attachedSheet]) return EPERM;
         s->started = YES;
         s->parent = [main retain];
