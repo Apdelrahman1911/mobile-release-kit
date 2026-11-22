@@ -27,7 +27,7 @@ permissions:
   actions: read
 
 concurrency:
-  group: desktop-macos-update-check-${{ github.ref }}${{ contains(github.event.head_commit.message, '[macos-hourly-performance]') && '-hourly-performance' || contains(github.event.head_commit.message, '[macos-prepare-state-check]') && '-prepare' || contains(github.event.head_commit.message, '[macos-retained-prepare-only]') && '-retained-prepare' || contains(github.event.head_commit.message, '[macos-refreshed-acceptance]') && '-refreshed-acceptance' || contains(github.event.head_commit.message, '[macos-removal-archive-check]') && '-removal-archive' || contains(github.event.head_commit.message, '[macos-signed-gui-recovery]') && '-gui-recovery' || contains(github.event.head_commit.message, '[macos-archive-recovery-diagnostics]') && '-archive-recovery' || contains(github.event.head_commit.message, '[macos-repeat-cli-diagnostics]') && '-repeat-cli' || '' }}
+  group: desktop-macos-update-check-${{ github.ref }}${{ contains(github.event.head_commit.message, '[macos-hourly-performance]') && '-hourly-performance' || contains(github.event.head_commit.message, '[macos-prepare-state-check]') && '-prepare' || contains(github.event.head_commit.message, '[macos-retained-prepare-only]') && '-retained-prepare' || contains(github.event.head_commit.message, '[macos-physical-cli-only]') && '-physical-cli' || contains(github.event.head_commit.message, '[macos-refreshed-acceptance]') && '-refreshed-acceptance' || contains(github.event.head_commit.message, '[macos-removal-archive-check]') && '-removal-archive' || contains(github.event.head_commit.message, '[macos-signed-gui-recovery]') && '-gui-recovery' || contains(github.event.head_commit.message, '[macos-archive-recovery-diagnostics]') && '-archive-recovery' || contains(github.event.head_commit.message, '[macos-repeat-cli-diagnostics]') && '-repeat-cli' || '' }}
   cancel-in-progress: false
 
 jobs:
@@ -54,6 +54,7 @@ jobs:
           || contains(github.event.head_commit.message, '[macos-independent-acceptance]') && fromJSON('["prepare-quit","performance","update-credentials"]')
           || contains(github.event.head_commit.message, '[macos-package-and-maintenance]') && fromJSON('["release-asset","prepare-quit"]')
           || contains(github.event.head_commit.message, '[macos-workspace-cli]') && fromJSON('["workspace-cli"]')
+          || contains(github.event.head_commit.message, '[macos-physical-cli-only]') && fromJSON('["workspace-xctest"]')
           || contains(github.event.head_commit.message, '[macos-workspace-performance]') && fromJSON('["workspace-xctest"]')
           || contains(github.event.head_commit.message, '[macos-workspace-xctest]') && fromJSON('["workspace-xctest","prepare-xctest"]')
           || contains(github.event.head_commit.message, '[macos-prepare-state-check]') && fromJSON('["prepare-xctest"]')
@@ -90,7 +91,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           MRK_CHECK_REFRESHED_RUNTIME: ${{ (contains(github.event.head_commit.message, '[macos-refreshed-acceptance]') || contains(github.event.head_commit.message, '[macos-retained-transition]') || contains(github.event.head_commit.message, '[macos-retained-maintenance]') || contains(github.event.head_commit.message, '[macos-retained-removal-scale]')) && matrix.mode == 'fresh' }}
-          MRK_CHECK_DURABLE_CLI_STATE: ${{ (contains(github.event.head_commit.message, '[macos-retained-maintenance]') || contains(github.event.head_commit.message, '[macos-retained-removal-scale]')) && matrix.mode == 'workspace-xctest' }}
+          MRK_CHECK_DURABLE_CLI_STATE: ${{ (contains(github.event.head_commit.message, '[macos-retained-maintenance]') || contains(github.event.head_commit.message, '[macos-retained-removal-scale]') || contains(github.event.head_commit.message, '[macos-physical-cli-only]')) && matrix.mode == 'workspace-xctest' }}
         run: |
           set -euo pipefail
           umask 077

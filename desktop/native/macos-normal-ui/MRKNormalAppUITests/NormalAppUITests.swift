@@ -6424,12 +6424,14 @@ final class NormalAppUITests: XCTestCase {
             try expand(renderer, prefix: "Advanced · CLI / AI access", renderer: renderer)
             try press(renderer, "Check access", renderer: renderer)
             try press(renderer, "Allow selected project for 1 hour", renderer: renderer)
-            // Read the settled permission again through the actual app. This never repeats Allow.
-            try press(renderer, "Check access", renderer: renderer)
             do {
+                // Check is disabled while the one original grant is pending.
+                // Observe its returned permission before requesting readback.
+                let granted = renderer.staticTexts.matching(identifier: "1 project was allowed at last check")
+                _ = try waitElement(granted, in: renderer, timeout: 24, failures: ["Access is not confirmed"])
+                try press(renderer, "Check access", renderer: renderer)
                 try checkInstalledCliStatus(0)
-                _ = try waitElement(renderer.staticTexts.matching(identifier: "1 project was allowed at last check"), in: renderer,
-                                    failures: ["Access is not confirmed"])
+                _ = try waitElement(granted, in: renderer, failures: ["Access is not confirmed"])
             } catch {
                 for (kind, label) in [
                     ("off", "Off at last check"), ("checking", "Checking access…"),
