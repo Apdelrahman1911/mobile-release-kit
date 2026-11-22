@@ -1858,6 +1858,21 @@ def run_workspace_xctest(mode, row, folder, installed, work, evidence, steps, re
     result["newCrashReports"] = sorted(set(recent_crashes()) - before_crashes)
     need(tested.returncode == 0 and observed and result["xctestCasePassed"] and not result["newCrashReports"],
          "xctest-original-result")
+    if mode == "workspace-xctest" and os.environ.get("MRK_CHECK_DURABLE_CLI_STATE") == "true":
+        binding = USER_DATA / "service-v1.reservation"
+        info = binding.lstat()
+        header = b"MRK service root v2\n"
+        need(stat.S_ISREG(info.st_mode) and stat.S_IMODE(info.st_mode) == 0o600
+             and info.st_uid == os.getuid() and info.st_nlink == 1
+             and info.st_size == len(header) + 16, "workspace-cli-volume-binding-protection")
+        with binding.open("rb") as original:
+            need(os.path.samestat(info, os.fstat(original.fileno()))
+                 and original.read(len(header)) == header, "workspace-cli-volume-binding-format")
+        service = USER_DATA / "service-v1"
+        for name in ("s", "agent.connection"):
+            need(not (service / name).exists() and not (service / name).is_symlink(),
+                 "workspace-cli-original-endpoint-left-after-quit")
+        result["durableCliStateAndCleanEndpointShutdown"] = True
     if prepare:
         census, _ = run(["/bin/ps", "-A", "-o", "command="], 30)
         need(census.returncode == 0, "prepare-quit-process-census")
