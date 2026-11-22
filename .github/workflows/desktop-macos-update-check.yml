@@ -37,7 +37,7 @@ jobs:
       fail-fast: false
       matrix:
         mode: >-
-          ${{ contains(github.event.head_commit.message, '[macos-retained-transition]') && fromJSON('["retained-transition","fresh","update-credentials","delete-data"]')
+          ${{ contains(github.event.head_commit.message, '[macos-retained-transition]') && fromJSON('["retained-transition","fresh","update-credentials","delete-data","release-asset"]')
           || contains(github.event.head_commit.message, '[macos-remove-diagnostic]') && fromJSON('["remove"]')
           || contains(github.event.head_commit.message, '[macos-fresh-upgrade-check]') && fromJSON('["update","fresh"]')
           || contains(github.event.head_commit.message, '[macos-delete-data-check]') && fromJSON('["delete-data"]')
@@ -84,7 +84,7 @@ jobs:
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
-          MRK_CHECK_REFRESHED_RUNTIME: ${{ contains(github.event.head_commit.message, '[macos-refreshed-acceptance]') && matrix.mode == 'fresh' }}
+          MRK_CHECK_REFRESHED_RUNTIME: ${{ (contains(github.event.head_commit.message, '[macos-refreshed-acceptance]') || contains(github.event.head_commit.message, '[macos-retained-transition]')) && matrix.mode == 'fresh' }}
         run: |
           set -euo pipefail
           umask 077
@@ -98,7 +98,7 @@ jobs:
         if: ${{ matrix.mode == 'release-asset' }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
-          name: MobileReleaseKit-0.2.0-macos-arm64-${{ github.run_id }}-${{ github.run_attempt }}
+          name: MobileReleaseKit-macos-arm64-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ env.MRK_UPDATE_WORK }}/release-assets
           if-no-files-found: error
           compression-level: 0
