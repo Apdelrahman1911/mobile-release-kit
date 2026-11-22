@@ -142,7 +142,9 @@ class LaunchSmokeSourceTests(unittest.TestCase):
         self.assertIn("default button keepLabel", applet)
         self.assertIn('default button "Cancel" cancel button "Cancel"', applet)
         self.assertIn('" --check-removal"', applet)
-        self.assertLess(applet.index("if completion is not 0 then"), applet.index("set report to do shell script"))
+        self.assertEqual(applet.count('set report to do shell script "/bin/sh '), 1)
+        self.assertIn('if completion is "status=66" or completion is "status=64" then', applet)
+        self.assertIn('if detail starts with "kept " or detail starts with "could not delete:" then', applet)
         # No top-level state an applet would save into its signed bundle.
         self.assertNotRegex(applet, r"(?m)^\s*(property|global)\s")
 

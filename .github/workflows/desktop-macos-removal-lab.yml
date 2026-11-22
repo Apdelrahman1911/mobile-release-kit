@@ -32,7 +32,7 @@ jobs:
     name: removal lab
     if: >-
       github.repository == 'Apdelrahman1911/mobile-release-kit'
-      && (github.event_name != 'push' || !contains(github.event.head_commit.message, '[macos-payload-unlink-lab]') && !contains(github.event.head_commit.message, '[macos-uninstaller-completion-lab]'))
+      && (github.event_name != 'push' || !contains(github.event.head_commit.message, '[macos-payload-unlink-lab]') && !contains(github.event.head_commit.message, '[macos-uninstaller-completion-lab]') && !contains(github.event.head_commit.message, '[macos-uninstaller-result-lab]'))
     runs-on: macos-26
     timeout-minutes: 30
     env:
@@ -359,3 +359,96 @@ jobs:
           /usr/bin/sudo -n /usr/bin/install -m 0444 -o root -g wheel "$fixture/state" "$state"
           need_status 0 confirmed-purge
           [[ ! -e "$profile" && "$(cat "$decoy/test-data")" == synthetic-unrelated-profile ]]
+
+
+  uninstaller-result:
+    name: Verify the applet result on a read-only disk image
+    if: >-
+      github.repository == 'Apdelrahman1911/mobile-release-kit'
+      && github.event_name == 'push'
+      && contains(github.event.head_commit.message, '[macos-uninstaller-result-lab]')
+    runs-on: macos-26
+    timeout-minutes: 12
+    steps:
+      - name: Check out exact lab and applet source
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Run the actual applet on a disposable image and user profile
+        shell: bash
+        env:
+          BASH_ENV: ''
+          ENV: ''
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: |
+          set -euo pipefail
+          umask 077
+          [[ "$RUNNER_ENVIRONMENT" == github-hosted && "$RUNNER_OS" == macOS && "$RUNNER_ARCH" == ARM64 ]]
+          [[ "$(/usr/bin/sw_vers -productVersion)" == 26.* && "$(/usr/bin/id -u)" != 0 ]]
+          support='/Library/Application Support'
+          managed="$support/MobileReleaseKit"
+          realprofile="$HOME/Library/Application Support/dev.mobile-release-kit.desktop"
+          [[ ! -e "$managed" && ! -L "$managed" && ! -e "$realprofile" && ! -L "$realprofile" ]]
+          fixture="$(mktemp -d "$RUNNER_TEMP/uninstaller-result.XXXXXXXX")"
+          evidence="$RUNNER_TEMP/uninstaller-result-evidence"
+          mkdir -p "$fixture/image" "$fixture/scripts" "$evidence"
+          /usr/bin/sudo -n /usr/bin/install -d -m 0755 -o root -g wheel "$managed"
+          printf 'synthetic protected installation state\n' > "$fixture/state"
+          /usr/bin/sudo -n /usr/bin/install -m 0444 -o root -g wheel "$fixture/state" "$managed/installation-v2.json"
+          hash="$(/usr/bin/shasum -a 256 < "$fixture/state")"
+          hash="${hash%% *}"
+          printf 'Mobile Release Kit removal complete v1\n%s\n' "$hash" > "$fixture/receipt"
+          receipt="$support/MobileReleaseKit-RemovalComplete-v1-$hash"
+          /usr/bin/sudo -n /usr/bin/install -m 0444 -o root -g wheel "$fixture/receipt" "$receipt"
+          printf '#!/bin/sh\nexit 77\n' > "$fixture/scripts/postinstall"
+          chmod 0555 "$fixture/scripts/postinstall"
+          /usr/bin/pkgbuild --nopayload --scripts "$fixture/scripts" --identifier dev.mobile-release-kit.test.applet             --version 1 "$fixture/image/Remove.pkg" >/dev/null
+          app="$fixture/image/Uninstall Mobile Release Kit.app"
+          src="$GITHUB_WORKSPACE/desktop/macos-installed-inputs/uninstaller"
+          /usr/bin/osacompile -o "$app" "$src/main.applescript"
+          /usr/bin/plutil -replace CFBundleIdentifier -string dev.mobile-release-kit.desktop.uninstaller "$app/Contents/Info.plist"
+          /usr/bin/install -m 0444 "$src/delete-data.sh" "$app/Contents/Resources/delete-data.sh"
+          /usr/bin/codesign --force --sign - --identifier dev.mobile-release-kit.desktop.uninstaller "$app"
+          /usr/bin/hdiutil create -srcfolder "$fixture/image" -volname MRK-Uninstaller-Lab -format UDZO -fs APFS "$fixture/app.dmg"
+          /usr/bin/hdiutil attach -readonly -nobrowse -noautoopen -plist "$fixture/app.dmg" > "$fixture/mount.plist"
+          /usr/bin/python3 -B - "$fixture" "$evidence" "$receipt" <<'PYTEST'
+          import importlib.util, json, os, plistlib, subprocess, sys
+          from pathlib import Path
+          fixture,evidence,receipt=map(Path,sys.argv[1:])
+          spec=importlib.util.spec_from_file_location("lab",Path(os.environ["GITHUB_WORKSPACE"])/".github/fixtures/mrk-uninstaller-result-lab.py")
+          check=importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(check)
+          mount,=[Path(x["mount-point"]) for x in plistlib.loads((fixture/"mount.plist").read_bytes())["system-entities"] if "mount-point" in x]
+          profile=Path.home()/"Library/Application Support/dev.mobile-release-kit.desktop"
+          decoy=fixture/"kept-target"
+          decoy.write_bytes(b"test decoy")
+          linked=Path.home()/"Library/Caches/dev.mobile-release-kit.desktop.launcher"
+          assert not linked.exists() and not linked.is_symlink()
+          linked.symlink_to(decoy)
+          try:
+              for label in ("confirmed", "incomplete"):
+                  profile.mkdir(mode=0o700)
+                  (profile/"test-file").write_bytes(b"fixture data")
+                  seen=check.uninstaller_diagnostic_run(mount,fixture,evidence,label,
+                      [check.DELETE_LABEL,"Delete All Data","Continue",None,"OK"])
+                  (evidence/f"{label}-dialogs.json").write_text(json.dumps(seen,indent=2))
+                  assert linked.is_symlink() and decoy.read_bytes()==b"test decoy"
+                  if label=="confirmed":
+                      assert not profile.exists()
+                      assert check.dialog_says(seen,"was removed, but some data was kept.")
+                      assert check.dialog_says(seen,"kept (link, not followed)")
+                      subprocess.run(["/usr/bin/sudo","-n","/bin/unlink",str(receipt)],check=True)
+                  else:
+                      assert (profile/"test-file").read_bytes()==b"fixture data"
+                      assert check.dialog_says(seen,"removal could not be confirmed. Your data was kept.")
+          finally:
+              subprocess.run(["/usr/bin/hdiutil","detach","-force",str(mount)],capture_output=True,timeout=30)
+          PYTEST
+      - name: Retain applet result and timing evidence
+        if: ${{ !cancelled() }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: macos-uninstaller-result-lab-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/uninstaller-result-evidence
+          retention-days: 30
