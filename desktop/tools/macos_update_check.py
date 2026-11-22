@@ -1051,6 +1051,30 @@ DIALOG_JXA = """function run(argv) {
 """
 
 
+GATEKEEPER_UNINSTALLER_JXA = """function run() {
+  const app = 'Uninstall Mobile Release Kit';
+  const agent = Application('System Events').processes.whose({name: 'CoreServicesUIAgent'});
+  if (agent.length !== 1) return 'no-agent';
+  for (const w of agent[0].windows()) {
+    for (const panel of [w].concat(w.sheets())) {
+      const text = [panel.name()].concat(panel.staticTexts().map(t => t.value())).join(' ');
+      if (!text.includes(app)) continue;
+      const buttons = panel.buttons().map(b => b.name()).sort();
+      if (buttons.join('|') !== 'Cancel|Open'
+          || !/downloaded from the internet/i.test(text)
+          || !/are you sure you want to open/i.test(text)
+          || /malware|unidentified developer|could not verify|cannot be opened|is damaged/i.test(text)) {
+        return 'unexpected-dialog';
+      }
+      panel.buttons.byName('Open').click();
+      return 'standard-open-confirmed';
+    }
+  }
+  return 'no-matching-dialog';
+}
+"""
+
+
 def open_quarantined_removal_image(image, steps):
     """Use the same Launch Services handoff as a Finder double-click."""
     deadline = time.monotonic() + 300
@@ -2048,6 +2072,50 @@ def installer_running():
     return subprocess.run(["/usr/bin/pgrep", "-x", "Installer"], capture_output=True, timeout=30).returncode == 0
 
 
+def open_quarantined_uninstaller(mount, work, evidence, label):
+    """Observe the ordinary first-launch prompt while Launch Services waits."""
+    script = work / "uninstaller-gatekeeper.js"
+    script.write_text(GATEKEEPER_UNINSTALLER_JXA)
+    observations = set()
+    deadline = time.monotonic() + 60
+    with subprocess.Popen(["/usr/bin/open", "-n", str(mount / UNINSTALLER)],
+                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL) as launch:
+        try:
+            while launch.poll() is None and time.monotonic() < deadline:
+                if "standard-open-confirmed" not in observations:
+                    try:
+                        reply = subprocess.run(["/usr/bin/osascript", "-l", "JavaScript", str(script)],
+                                               capture_output=True, text=True,
+                                               timeout=min(10, max(0.1, deadline - time.monotonic())))
+                        state = reply.stdout.strip()
+                    except subprocess.TimeoutExpired:
+                        state = "probe-error"
+                    observations.add(state if state in ("no-agent", "no-matching-dialog", "unexpected-dialog",
+                                                          "standard-open-confirmed") else "probe-error")
+                    if state == "unexpected-dialog":
+                        break
+                time.sleep(min(1, max(0, deadline - time.monotonic())))
+            returncode = launch.poll()
+        finally:
+            if launch.poll() is None:
+                try:
+                    subprocess.run(["/usr/sbin/screencapture", "-x", str(evidence / f"screen-{label}-open.png")],
+                                   capture_output=True, timeout=15)
+                except (OSError, subprocess.TimeoutExpired):
+                    pass
+                finally:
+                    launch.kill()
+            processes, _ = run(["/bin/ps", "-axo", "comm="], 15)
+            uninstaller = [name.strip() for name in processes.stdout.splitlines()
+                           if name.strip().endswith("/" + UNINSTALLER + "/Contents/MacOS/applet")]
+            (evidence / f"{label}-open.json").write_text(json.dumps({
+                "observations": sorted(observations),
+                "appTranslocated": any("/AppTranslocation/" in name for name in uninstaller),
+                "atMount": str(mount / UNINSTALLER / "Contents/MacOS/applet") in uninstaller,
+            }) + "\n")
+    need(returncode == 0, f"{label}-quarantined-open-{returncode}")
+
+
 def uninstaller_run(mount, work, evidence, label, answers, timeout=240):
     """Open the mounted uninstaller as the owner would and answer its dialogs
     in order. An answer is a button name, or None to quit Installer once the
@@ -2065,8 +2133,11 @@ def uninstaller_run(mount, work, evidence, label, answers, timeout=240):
             return {"state": "error", "detail": q.stderr.strip()[-160:]}
 
     need(not installer_running(), f"{label}-installer-already-running")
-    p, _ = run(["/usr/bin/open", "-n", str(mount / UNINSTALLER)], 60)
-    need(p.returncode == 0, f"{label}-open-returned-{p.returncode}")
+    if os.environ.get("MRK_CHECK_QUARANTINED_REMOVE_MEDIA") == "true":
+        open_quarantined_uninstaller(mount, work, evidence, label)
+    else:
+        p, _ = run(["/usr/bin/open", "-n", str(mount / UNINSTALLER)], 60)
+        need(p.returncode == 0, f"{label}-open-returned-{p.returncode}")
     seen, deadline = [], time.monotonic() + timeout
     for step, answer in enumerate(answers):
         if answer is None:
