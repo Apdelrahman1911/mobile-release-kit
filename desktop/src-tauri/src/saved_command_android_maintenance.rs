@@ -354,13 +354,16 @@ mod selected{
         }else{original.control.poisoned();service_setup::MaintenanceRun::default()};
         original.control.changed();
         let first=original.control.failure();
+        let route=if original.removal.is_some(){"remove"}else{"prepare"};
         if !facts.prepared() || first.is_some(){
-            let route=if original.removal.is_some(){"remove"}else{"prepare"};
             mrk_macos_installed_native::removal_coordinator::removal_trace(&format!(
-                "app maintenance-worker=refused route={route} branch={:?} first={:?} known={} checked={} started={} tail={} unregister={} absent={} callback={} peer={} retained={}",
+                "app maintenance-worker=refused route={route} branch={:?} first={:?} known={} checked={} started={} tail={} unregister={} absent={} callback={} peer={} retained={} retainedBytes={:?}",
                 facts.branch,first.map(|(reason,_)|reason),facts.known,facts.checked,facts.started_or_uncertain,
                 facts.tail_received,facts.unregister_accepted,facts.not_registered,facts.callback_retired,
-                facts.peer_ended,facts.retained.is_some()));
+                facts.peer_ended,facts.retained.is_some(),facts.retained));
+        }else{
+            mrk_macos_installed_native::removal_coordinator::removal_trace(&format!(
+                "app maintenance-worker=settled route={route} branch={:?} retainedBytes={:?}",facts.branch,facts.retained));
         }
         WorkerReturn{facts,first}
     }

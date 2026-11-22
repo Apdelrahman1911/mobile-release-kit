@@ -76,6 +76,11 @@ pub(crate) struct AndroidServiceIdentitySlots {
 }
 #[cfg(not(feature = "macos-android-registration-helper"))]
 impl AndroidServiceIdentitySlots {
+    // Protected app ancestry, the fixed code group, two install records and
+    // six fixed signature paths fit in this book. The full inventory uses the
+    // separate InstallationSlots book, which is consumed before this one.
+    const FIXED_RECORDS: usize = 64;
+
     pub(crate) fn new(gate: crate::saved_command_owner::AndroidRegistrationWorkGate) -> Self {
         let mut original=Book::new();original.registration_gate=Some(gate.clone());
         Self { installation:InstallationSlots::new_registered(gate.clone()),original,
@@ -164,7 +169,7 @@ impl AndroidServiceIdentitySlots {
     fn fixed_payload(&mut self,end:Instant,stop:&watch::Receiver<bool>)->Result<()> {
         use crate::macos_install_record as data;
         self.attempt(|book|book.arm_acl_once(end,stop))?;
-        let roles=self.attempt(|book|book.protected_app_once(end,stop))?;
+        let roles=self.attempt(|book|book.protected_app_with_records(Self::FIXED_RECORDS,end,stop))?;
         let (contents,app,install)=(roles.contents,roles.payload,roles.install);
         self.attempt(|book|Self::mode(book,roles.entry,0o555,end,stop))?;
         self.attempt(|book|Self::mode(book,app,0o555,end,stop))?;
@@ -228,6 +233,7 @@ impl AndroidServiceIdentitySlots {
                 return Err(AdmissionFailure::Inventory);
             }
         }
+        if self.original.records.capacity()>Self::FIXED_RECORDS{return Err(AdmissionFailure::Bounds);}
         self.recheck_admission(false,end,stop)
     }
     pub(crate) fn check_once(&mut self,end:Instant,stop:&watch::Receiver<bool>)->Result<()> {
@@ -359,6 +365,21 @@ impl AndroidServiceIdentitySlots {
         std::mem::size_of::<Self>().checked_add(self.original.retained_heap_bytes()?)?
             .checked_add(self.installation.control_bytes()?)
     }
+}
+
+#[cfg(all(test,not(feature = "macos-android-registration-helper")))]
+#[test]
+fn fixed_android_identity_record_capacity_fits_both_settled_maintenance_checks() {
+    let record_bytes = std::mem::size_of::<Record>();
+    let mut probe = Vec::<Record>::new();
+    let mut enabled = Vec::<Record>::new();
+    for records in [&mut probe, &mut enabled] {
+        records.try_reserve_exact(AndroidServiceIdentitySlots::FIXED_RECORDS).unwrap();
+    }
+    // The service-enabled path retains both ledgers until the owner's final
+    // cut. The old shared reservation exceeded the 2 MiB cap on its own.
+    assert!(2 * 8256 * record_bytes > 2 * 1024 * 1024);
+    assert!((probe.capacity() + enabled.capacity()) * record_bytes < 32 * 1024);
 }
 
 pub(crate) use crate::macos_install_paths::{APP, PROTOCOL_SHA, runtime_root};
@@ -1373,13 +1394,16 @@ impl Book {
     // Private factoring of the existing installed-app proof, not a Resources
     // capability. FixedSupport uses the SAME retained Contents ancestor.
     fn protected_app_once(&mut self, end: Instant, stop: &watch::Receiver<bool>) -> Result<ProtectedApp> {
+        self.protected_app_with_records(8256,end,stop)
+    }
+    fn protected_app_with_records(&mut self, records: usize, end: Instant, stop: &watch::Receiver<bool>) -> Result<ProtectedApp> {
         if !self.inspection_ready() { return Err(AdmissionFailure::AlreadyUsed); }
         // Diagnostic DATA only: callers outside inspect() never report it.
         self.inspection_phase = inspection_phase::Phase::ProtectedProfile;
         let layout=installed_code_layout()?;
-        // Fixed support/seal callers retain their existing small quote. Full
-        // runtime inspection reserves its larger ledger before entering here.
-        self.records.try_reserve_exact(8256).map_err(native_error)?; self.started = true;
+        // A full runtime walk reserves its larger ledger before entering here.
+        // A fixed identity check retains only the capacity its own proof needs.
+        self.records.try_reserve_exact(records).map_err(native_error)?; self.started = true;
         self.point(end, stop)?; native::real_user().map_err(native_error)?; self.point(end, stop)?;
         // A user-writable drag-copy or checkout app cannot select this runtime.
         let executable = Path::new(crate::macos_install_paths::PAYLOAD_EXECUTABLE);
