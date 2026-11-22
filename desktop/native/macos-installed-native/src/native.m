@@ -204,16 +204,18 @@ int mrk_no_xattrs(int fd) {
 // Bounded read only. Never remove, interpret or copy an OS permission tag.
 // The caller separately authenticates the recorded existing app and conserves
 // its first digest on this same original. All incoming objects use mrk_no_xattrs.
-int mrk_existing_app_macl(int fd, uint8_t *bytes, size_t capacity, size_t *used) {
+static int mrk_app_macl(int fd, uint8_t *bytes, size_t capacity, size_t *used, int *opening_change) {
     static const char tag[] = "com.apple.macl";
     if (!bytes || !used || capacity != 1024) return EINVAL;
     *used = 0;
+    if (opening_change) *opening_change = 0;
     struct stat before, after;
     if (fstat(fd, &before)) return errno ? errno : EIO;
     if (!S_ISDIR(before.st_mode)) return EPERM;
     ssize_t names_size = flistxattr(fd, NULL, 0, 0);
     if (names_size < 0) return errno ? errno : EIO;
     size_t length = 0;
+    int appeared = 0;
     if (names_size != 0) {
         char names[sizeof(tag)];
         if (names_size != sizeof(tag)) return EPERM;
@@ -233,7 +235,13 @@ int mrk_existing_app_macl(int fd, uint8_t *bytes, size_t capacity, size_t *used)
     } else {
         ssize_t listed = flistxattr(fd, NULL, 0, 0);
         if (listed < 0) return errno ? errno : EIO;
-        if (listed != 0) return EPERM;
+        if (listed != 0) {
+            char names[sizeof(tag)];
+            if (!opening_change || listed != sizeof(tag)
+                || flistxattr(fd, names, sizeof(names), 0) != sizeof(tag)
+                || memcmp(names, tag, sizeof(tag))) return EPERM;
+            appeared = 1;
+        }
     }
     if (fstat(fd, &after)) return errno ? errno : EIO;
     if (before.st_dev != after.st_dev || before.st_ino != after.st_ino
@@ -241,11 +249,29 @@ int mrk_existing_app_macl(int fd, uint8_t *bytes, size_t capacity, size_t *used)
         || before.st_gid != after.st_gid || before.st_nlink != after.st_nlink
         || before.st_size != after.st_size || before.st_flags != after.st_flags
         || before.st_mtimespec.tv_sec != after.st_mtimespec.tv_sec
-        || before.st_mtimespec.tv_nsec != after.st_mtimespec.tv_nsec
-        || before.st_ctimespec.tv_sec != after.st_ctimespec.tv_sec
-        || before.st_ctimespec.tv_nsec != after.st_ctimespec.tv_nsec) return EPERM;
+        || before.st_mtimespec.tv_nsec != after.st_mtimespec.tv_nsec) return EPERM;
+    if (appeared || before.st_ctimespec.tv_sec != after.st_ctimespec.tv_sec
+        || before.st_ctimespec.tv_nsec != after.st_ctimespec.tv_nsec) {
+        if (opening_change && (appeared || length != 0)
+            && (after.st_ctimespec.tv_sec > before.st_ctimespec.tv_sec
+                || (after.st_ctimespec.tv_sec == before.st_ctimespec.tv_sec
+                    && after.st_ctimespec.tv_nsec > before.st_ctimespec.tv_nsec))) {
+            *opening_change = 1;
+            *used = length;
+        }
+        return EPERM;
+    }
     *used = length;
     return 0;
+}
+int mrk_existing_app_macl(int fd, uint8_t *bytes, size_t capacity, size_t *used) {
+    return mrk_app_macl(fd, bytes, capacity, used, NULL);
+}
+// Refusal-only hint for the canonical entry's INITIAL observation. A caller
+// must still prove the original and independently capture a stable tag.
+int mrk_initial_app_macl(int fd, uint8_t *bytes, size_t capacity, size_t *used, int *opening_change) {
+    if (!opening_change) return EINVAL;
+    return mrk_app_macl(fd, bytes, capacity, used, opening_change);
 }
 // Bounded read only. macOS may attach its own provenance tag to an EXISTING
 // enrolled payload file (observed on macOS 27 after an App Management-mediated

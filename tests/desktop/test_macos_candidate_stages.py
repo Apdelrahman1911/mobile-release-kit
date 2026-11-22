@@ -1269,7 +1269,7 @@ class CandidateWorkflowTests(unittest.TestCase):
             runner='macos-26',hosted_job='github-hosted-macos26-arm64',timeout=65)])
         self.assertEqual(carrier,[dict(target='aarch64-apple-darwin',group='local-carrier',native_scope='tool-setup',
             runner='macos-26',hosted_job='github-hosted-macos26-arm64',timeout=65)])
-        self.assertEqual(set(singles),{'git-local','git-fetch','git-push','git-create','git-upstream',
+        self.assertEqual(set(singles),{'git-local','git-branch','git-fetch','git-push','git-create','git-upstream',
             'service-cli','public-acquisition','sdk-registration','upload-keys','cold-restart','backup'})
         self.assertEqual(initial,[singles['git-local'][0]])
         # Service lifecycle is qualified separately on the owner's Mac, where
