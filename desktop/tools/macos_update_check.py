@@ -1850,6 +1850,13 @@ def run_workspace_xctest(mode, row, folder, installed, work, evidence, steps, re
         result["recoveryControls"] = re.findall(
             r"(?m)^MRK_RELEASE_RECOVERY_CONTROL=(before|refused|review);inspect=(true|false);close=(true|false)$",
             transcript)
+        result["recoveryTestRunnerEvents"] = [event for event, fragment in (
+            ("objective-c-exception", "NSInvalidArgumentException"),
+            ("unsupported-predicate", "Unsupported predicate"),
+            ("execution-timeout", "exceeded execution time allowance"),
+            ("runner-exited", "Test runner exited"),
+            ("test-crashed", "TEST CRASHED"),
+        ) if fragment.lower() in transcript.lower()]
         result["guiRecoveryObserved"] = "MRK_RELEASE_GUI_RECOVERY=confirmed-original-rollback-and-quit" in transcript
         result["recoveryProjectMatchesOriginals"] = recovery_project_manifest(project_path) == baseline
         observed = result["guiRecoveryObserved"] and result["recoveryProjectMatchesOriginals"]

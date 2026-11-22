@@ -6572,11 +6572,12 @@ final class NormalAppUITests: XCTestCase {
                 ]
                 print("MRK_RELEASE_RECOVERY_FACT=\(stage);panel=\(panel.exists);review=\(min(action.count, 3))")
                 print("MRK_RELEASE_RECOVERY_CONTROL=\(stage);inspect=\(inspect.exists && inspect.isEnabled);close=\(close.exists)")
+                guard stage == "refused" else { return }
                 for (kind, marker) in checks {
-                    // WebKit can publish text outside the named section or as
-                    // an accessibility value. Keep diagnostics to fixed labels.
+                    // The accessibility label is a string. Some static text
+                    // elements expose non-string values to XCTest predicates.
                     let matches = renderer.staticTexts.matching(NSPredicate(
-                        format: "label CONTAINS %@ OR title CONTAINS %@ OR value CONTAINS %@", marker, marker, marker)).count
+                        format: "label CONTAINS %@", marker)).count
                     if matches > 0 { print("MRK_RELEASE_RECOVERY_MATCH=\(stage);state=\(kind)") }
                 }
             }
