@@ -138,7 +138,8 @@ def hex_field(value, size):
 
 def load_selection(path):
     data = json.loads(Path(path).read_text())
-    need(set(data) in ({"schemaVersion", "previous", "next"}, {"schemaVersion", "previous", "next", "removal"})
+    required = {"schemaVersion", "previous", "next"}
+    need(type(data) is dict and required <= set(data) <= required | {"initial", "removal"}
          and data["schemaVersion"] == 1, "selection-shape")
     if "removal" in data:
         # The matching Remove carrier produced by the carrier run for "next".
@@ -146,7 +147,8 @@ def load_selection(path):
         need(set(row) == {"runId", "artifactId", "imageSha256"}
              and re.fullmatch(r"[1-9][0-9]{0,19}", row["runId"]) and re.fullmatch(r"[1-9][0-9]{0,19}", row["artifactId"])
              and hex_field(row["imageSha256"], 64), "selection-removal-fields")
-    for role in ("previous", "next"):
+    roles = ("initial", "previous", "next") if "initial" in data else ("previous", "next")
+    for role in roles:
         row = data[role]
         need(set(row) == {"runId", "artifactId", "carrierArtifactId", "packageSha256", "packageVersion", "release"}, f"selection-{role}")
         need(re.fullmatch(r"[1-9][0-9]{0,19}", row["runId"]) and re.fullmatch(r"[1-9][0-9]{0,19}", row["artifactId"])
@@ -154,7 +156,8 @@ def load_selection(path):
              and hex_field(row["packageSha256"], 64) and re.fullmatch(r"\d+\.\d+\.\d+", row["packageVersion"])
              and re.fullmatch(r"macos26-arm64-desktop-[0-9]+", row["release"]), f"selection-{role}-fields")
     key = lambda v: tuple(int(x) for x in v.split("."))
-    need(key(data["previous"]["packageVersion"]) < key(data["next"]["packageVersion"]), "selection-not-an-upgrade")
+    need(all(key(data[old]["packageVersion"]) < key(data[new]["packageVersion"])
+             for old, new in zip(roles, roles[1:])), "selection-not-an-upgrade")
     return data
 
 
@@ -641,7 +644,7 @@ def main():
                                            "repeat", "repeat-after-dialogs", "removal-archive", "prepare-quit", "performance",
                                            "update-credentials", "release-asset", "workspace-cli",
                                            "workspace-xctest", "prepare-xctest", "performance-long", "core-recovery",
-                                           "recovery-xctest"), default="update")
+                                           "recovery-xctest", "retained-transition"), default="update")
     args = parser.parse_args()
     work = Path(args.work)
     evidence = work / "evidence"
@@ -655,6 +658,7 @@ def main():
             {"fresh": fresh_check, "remove": remove_check, "uninstaller": uninstaller_installed_check,
              "delete-data": remove_check, "repeat": remove_check, "repeat-after-dialogs": remove_check,
              "removal-archive": remove_check,
+             "retained-transition": retained_transition_check,
              "prepare-quit": prepare_quit_check, "performance": fresh_check, "release-asset": release_asset_check,
              "workspace-cli": workspace_cli_check, "workspace-xctest": workspace_xctest,
              "prepare-xctest": workspace_xctest, "performance-long": performance_long_check,
@@ -1378,23 +1382,27 @@ def removal_archive_identities():
     return entries
 
 
-def remove_check(selection, work, evidence, steps, result):
+def remove_check(selection, work, evidence, steps, result, *, folder=None, seeded=None):
     """Fresh install, launch, live removal through the matching Remove.pkg
     (confirming the app's own sheet), then check deletion or reinstall."""
     need("removal" in selection, "selection-has-no-removal-carrier")
     row = selection["next"]
     mode = result["mode"]
     repeat = mode in ("repeat", "repeat-after-dialogs")
-    check_archives = repeat or mode == "removal-archive"
-    folder = fetch("next", row, work, steps)
+    check_archives = repeat or mode in ("removal-archive", "retained-transition")
+    need((folder is None) == (seeded is None), "remove-baseline-selection")
+    if folder is None:
+        folder = fetch("next", row, work, steps)
     mount, roster = removal_image(selection["removal"], work, steps)
     result["removalImageRoster"] = roster
-    need(install("next", folder, steps, evidence=evidence) == 0, "remove-baseline-install-returned-nonzero")
+    if seeded is None:
+        need(install("next", folder, steps, evidence=evidence) == 0, "remove-baseline-install-returned-nonzero")
     state = installed_state()
     result["afterInstall"] = state
     need((state["release"], state["packageVersion"], state["packageSha256"])
          == (row["release"], row["packageVersion"], row["packageSha256"]), "remove-baseline-identity")
-    seeded = seed_user_data()
+    if seeded is None:
+        seeded = seed_user_data()
     result["seededFiles"] = len(seeded)
     out = live_remove(mount, work, evidence, steps, "remove", observe_release=row["release"] if repeat else None)
     result.update(removalSheet=out["sheet"], removalQuitSheet=out["quitSheet"],
@@ -1427,7 +1435,10 @@ def remove_check(selection, work, evidence, steps, result):
             need(after == archives, "reinstall-removal-archive-changed")
         if mode == "removal-archive":
             return
-        result["launchAfterReinstall"] = launch_smoke("after-reinstall", work, evidence, steps)
+        observer = first_launch_observe if mode == "retained-transition" else None
+        result["launchAfterReinstall"] = launch_smoke("after-reinstall", work, evidence, steps, observe=observer)
+        if observer is not None:
+            require_runtime(result["launchAfterReinstall"], "retained-reinstall-runtime")
         if repeat:
             if mode == "repeat-after-dialogs":
                 _, before_repeat = uninstaller_while_installed(mount, work, evidence, steps, result)
@@ -1499,6 +1510,10 @@ def prepare_quit_check(selection, work, evidence, steps, result):
     need(install("next", folder, steps, evidence=evidence) == 0, "prepare-quit-install")
     state = result["afterInstall"] = installed_state()
     need(state["packageSha256"] == row["packageSha256"], "prepare-quit-install-identity")
+    exercise_prepare_quit(work, evidence, steps, result)
+
+
+def exercise_prepare_quit(work, evidence, steps, result):
     before_crashes = set(recent_crashes())
     pid = start_app_window(work, steps, "prepare-quit")
     result["prepareQuitNavigation"] = actions = []
@@ -1535,6 +1550,62 @@ def prepare_quit_check(selection, work, evidence, steps, result):
         subprocess.run(["/usr/sbin/screencapture", "-x", str(evidence / "screen-prepare-quit.png")],
                        capture_output=True, timeout=60)
     result["reopen"] = launch_smoke("prepare-quit-reopen", work, evidence, steps)
+
+
+def require_runtime(observation, failure):
+    ui = observation.get("ui") or {}
+    need(ui.get("runtimeCard") == "bundled" and not ui.get("workspaceErrorMarkers"), failure)
+
+
+def retained_transition_check(selection, work, evidence, steps, result):
+    """Match the owner's two signed upgrades before testing live preparation and removal."""
+    need("initial" in selection and "removal" in selection, "retained-transition-selection")
+    folders = {}
+    for role in ("initial", "previous", "next"):
+        package = selection[role]
+        folders[role] = fetch(role, package, work, steps)
+    for role in ("initial", "previous", "next"):
+        need(install(role, folders[role], steps, evidence=evidence) == 0, f"retained-{role}-install")
+        observed = installed_state()
+        result[f"retainedInstall-{role}"] = observed
+        need(all(observed[key] == selection[role][key] for key in ("release", "packageVersion", "packageSha256")),
+             f"retained-{role}-identity")
+        if role == "initial":
+            launch_smoke("retained-initial-launch", work, evidence, steps)
+            seeded = seed_user_data()
+            credential = seed_update_credential()
+        else:
+            need(all(manifest().get(key) == value for key, value in seeded.items())
+                 and update_credential_matches(credential), f"retained-{role}-data")
+            if role == "previous":
+                launch_smoke("retained-previous-launch", work, evidence, steps)
+
+    state = json.loads((STATE / "installation-v2.json").read_text())
+    expected = [selection[role]["packageSha256"] for role in ("initial", "previous")]
+    need([row["release"]["packageSha256"] for row in state["retained"]] == expected,
+         "retained-original-generations")
+    result["retainedBundles"] = []
+    for row in state["retained"]:
+        original = row["app"]
+        invocation = original["invocation"]
+        need(original["location"] == "retained" and hex_field(invocation, 32), "retained-original-path")
+        path = STATE / (".retained-app-" + invocation)
+        info = path.lstat()
+        need(stat.S_ISDIR(info.st_mode) and info.st_uid == info.st_gid == 0
+             and info.st_ino == original["identity"]["inode"], "retained-original-inode")
+        attributes = subprocess.run(["/usr/bin/xattr", str(path)], capture_output=True, timeout=10, check=True)
+        result["retainedBundles"].append({"release": row["release"]["release"],
+            "hasMacl": b"com.apple.macl" in attributes.stdout.splitlines()})
+    result["firstLaunch"] = launch_smoke("retained-first-launch", work, evidence, steps, observe=first_launch_observe)
+    require_runtime(result["firstLaunch"], "retained-first-launch-runtime")
+    exercise_prepare_quit(work, evidence, steps, result)
+    need(result.get("ordinaryQuitSheet") == "clicked", "retained-prepare-quit-sheet-not-confirmed")
+    service = subprocess.run(["/bin/launchctl", "print", "system/dev.mobile-release-kit.desktop.android-register"],
+                             capture_output=True, timeout=10)
+    need(service.returncode == 113, "retained-prepare-quit-helper-still-registered")
+    remove_check(selection, work, evidence, steps, result, folder=folders["next"], seeded=seeded)
+    result["credentialPreserved"] = update_credential_matches(credential)
+    need(result["credentialPreserved"], "retained-credential-changed")
 
 
 PROJECT_PICKER_JXA = """function run(argv) {

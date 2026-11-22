@@ -37,7 +37,8 @@ jobs:
       fail-fast: false
       matrix:
         mode: >-
-          ${{ contains(github.event.head_commit.message, '[macos-remove-diagnostic]') && fromJSON('["remove"]')
+          ${{ contains(github.event.head_commit.message, '[macos-retained-transition]') && fromJSON('["retained-transition","fresh","update-credentials","delete-data"]')
+          || contains(github.event.head_commit.message, '[macos-remove-diagnostic]') && fromJSON('["remove"]')
           || contains(github.event.head_commit.message, '[macos-fresh-upgrade-check]') && fromJSON('["update","fresh"]')
           || contains(github.event.head_commit.message, '[macos-delete-data-check]') && fromJSON('["delete-data"]')
           || contains(github.event.head_commit.message, '[macos-archive-recovery-diagnostics]') && fromJSON('["removal-archive","recovery-xctest"]')

@@ -31,6 +31,22 @@ class UpdateCheckSelectionTests(unittest.TestCase):
     def test_valid_upgrade_selection(self):
         self.assertEqual(M.load_selection(write(VALID))["next"]["release"], "macos26-arm64-desktop-05")
 
+    def test_two_upgrade_hops_require_strict_versions_and_full_artifact_references(self):
+        path_data = copy.deepcopy(VALID)
+        path_data["initial"] = dict(path_data["previous"], packageVersion="0.1.3",
+                                    release="macos26-arm64-desktop-03", packageSha256="a" * 64)
+        with tempfile.TemporaryDirectory() as work:
+            path = Path(work) / "selection.json"
+            path.write_text(json.dumps(path_data))
+            self.assertEqual(M.load_selection(path), path_data)
+            for field, invalid in (("packageVersion", "0.1.4"), ("packageSha256", ""),
+                                   ("carrierArtifactId", "0")):
+                with self.subTest(field=field, invalid=invalid), self.assertRaises(M.Failed):
+                    broken = copy.deepcopy(path_data)
+                    broken["initial"][field] = invalid
+                    path.write_text(json.dumps(broken))
+                    M.load_selection(path)
+
     def test_refuses_non_upgrade_and_malformed_rows(self):
         cases = []
         same = copy.deepcopy(VALID); same["next"]["packageVersion"] = "0.1.4"; cases.append(same)
@@ -46,13 +62,21 @@ class UpdateCheckSelectionTests(unittest.TestCase):
     def test_committed_selection_is_the_installed_ac506_predecessor(self):
         path = ROOT / "desktop/macos-installed-inputs/update-check-selection.json"
         selection = M.load_selection(path)
-        previous = selection["previous"]
+        previous = selection.get("initial", selection["previous"])
         self.assertEqual((previous["packageVersion"], previous["release"], previous["packageSha256"]),
                          ("0.1.4", "macos26-arm64-desktop-04",
                           "ed44a41a0b286ce831fe18c36e5178afbab492ce12e77aff294ce3dfaa0a4f15"))
         history = json.loads((ROOT / "desktop/macos-installed-inputs/producer-history.json").read_text())
         accepted = history["targets"]["aarch64-apple-darwin"]["acceptedPredecessors"]
         self.assertIn(previous["packageSha256"], [row["packageSha256"] for row in accepted])
+        if "initial" in selection:
+            self.assertEqual((selection["previous"]["packageVersion"], selection["previous"]["release"],
+                              selection["previous"]["packageSha256"]),
+                             ("0.2.0", "macos26-arm64-desktop-06",
+                              "db9d76b1b3c137ba398cda6fb234ddf702219fbb89cff3d2d1c1bf0ef6926111"))
+            self.assertEqual((selection["next"]["packageVersion"], selection["next"]["release"]),
+                             ("0.2.1", "macos26-arm64-desktop-07"))
+            return
         build = json.loads((ROOT / "desktop/macos-installed-inputs/build-release.json").read_text())
         self.assertEqual((selection["next"]["packageVersion"], selection["next"]["release"]),
                          (build["packageVersion"], build["release"]))
