@@ -17115,7 +17115,9 @@ mod installer {
                         }
                     }
                 }
-                native::no_xattrs(book.fd(parent)?.as_fd()).map_err(|_|"removal-payload-parent-attributes")?;
+                // Removing a child changes the parent's stat baseline, but
+                // cannot change an enrolled app directory's original tag.
+                book.app_attributes(parent,"removal-payload-parent-attributes")?;
                 book.check_name(parent,true)?;book.clock()
             }
             fn transfer(&mut self,book:&mut Install)->Result<()> {
@@ -22993,13 +22995,19 @@ exec ./mrk-macos-remove --fixture-supervise "$1"
                     book.forward_close(original,REFUSAL).unwrap();
 
                     let replacement=fixture.join("Replacement.app");
-                    std::fs::create_dir(&replacement).unwrap();
+                    std::fs::create_dir_all(replacement.join("Contents")).unwrap();
                     assert!(std::process::Command::new("/usr/bin/xattr")
                         .args(["-wx",TAG,&"07".repeat(72)]).arg(&replacement).status().unwrap().success());
                     let substitute=book.open(Some(0),"Replacement.app",true).unwrap();
                     assert_eq!(removal_payload_node_attributes(&mut book,substitute,true,true),Err(REFUSAL));
                     book.capture_existing_app_metadata(substitute,true,REFUSAL).unwrap();
                     assert_eq!(removal_payload_node_attributes(&mut book,substitute,true,true),Ok(()));
+                    unistd::unlinkat(book.fd(substitute).unwrap(),"Contents",unistd::UnlinkatFlags::RemoveDir).unwrap();
+                    let changed=Identity::of(&stat::fstat(book.fd(substitute).unwrap()).unwrap());
+                    book.originals[substitute].identity=Some(changed);
+                    assert_eq!(book.app_attributes(substitute,"removal-payload-parent-attributes"),Ok(()));
+                    assert!(native::no_xattrs(book.fd(substitute).unwrap().as_fd()).is_err());
+                    book.check_name(substitute,true).unwrap();
                     unistd::unlinkat(book.fd(0).unwrap(),"Replacement.app",unistd::UnlinkatFlags::RemoveDir).unwrap();
                     let mut retired=RemovalNodeState {original:Some(substitute),effect:RemovalNodeEffect::Removed,
                         roster_observed:true,returned:Some(Ok(()))};
