@@ -1047,6 +1047,9 @@ DIALOG_JXA = """function run(argv) {
   const texts = w.staticTexts().map(t => { try { return t.value(); } catch (x) { return ''; } });
   if (argv[1] === 'click') {
     if (buttons.indexOf(argv[2]) < 0) return JSON.stringify({state: 'missing-button', buttons: buttons});
+    matches[0].frontmost = true;
+    delay(0.5);
+    if (!matches[0].frontmost()) return JSON.stringify({state: 'uninstaller-not-frontmost'});
     w.buttons.byName(argv[2]).click();
     return JSON.stringify({state: 'clicked', buttons: buttons, texts: texts});
   }
@@ -2348,29 +2351,42 @@ def uninstaller_run(mount, work, evidence, label, answers, timeout=240):
             while time.monotonic() < deadline and not installer_running():
                 time.sleep(1)
             need(installer_running(), f"{label}-installer-not-opened")
-            window_deadline = min(time.monotonic() + 25, deadline)
+            window_deadline = min(time.monotonic() + 30, deadline)
+            probes = []
+            count = None
             while time.monotonic() < window_deadline:
-                p, _ = run(["/usr/bin/osascript", "-e",
-                            'tell application "System Events" to count windows of first application process whose bundle identifier is "com.apple.installer"'],
-                           8)
-                if p.returncode == 0 and p.stdout.strip().isdigit() and int(p.stdout.strip()) > 0:
+                p = subprocess.run(["/usr/bin/pgrep", "-x", "Installer"], capture_output=True, text=True, timeout=5)
+                pids = [int(pid) for pid in p.stdout.split() if pid.isdigit()]
+                count = window_count(pids[0], work) if len(pids) == 1 else None
+                probes.append({"pids": pids, "visibleWindows": count})
+                if count:
                     break
                 time.sleep(.5)
-            else:
-                raise Failed(label + "-installer-welcome-window-missing")
+            (evidence / f"{label}-installer-window-probes.json").write_text(json.dumps(probes))
             subprocess.run(["/usr/sbin/screencapture", "-x", str(evidence / f"screen-{label}-installer.png")],
                            capture_output=True, timeout=60)
+            need(count, f"{label}-installer-visible-window-missing")
+            quit_script = work / "installer-normal-quit.js"
+            quit_script.write_text("""function run() {
+  const se = Application('System Events');
+  const apps = se.processes.whose({bundleIdentifier: 'com.apple.installer'});
+  if (apps.length !== 1) return 'installer-not-unique';
+  apps[0].frontmost = true;
+  delay(0.6);
+  if (!apps[0].frontmost()) return 'installer-not-frontmost';
+  se.keystroke('q', {using: ['command down']});
+  return 'quit-key';
+}
+""")
             quit_started = time.monotonic()
-            closed = subprocess.run(["/usr/bin/osascript", "-e", 'tell application id "com.apple.installer" to quit'],
+            closed = subprocess.run(["/usr/bin/osascript", "-l", "JavaScript", str(quit_script)],
                                     capture_output=True, text=True, timeout=30)
-            quit_by = time.monotonic() + 15
+            need(closed.returncode == 0 and closed.stdout.strip() == "quit-key", f"{label}-installer-quit-key")
+            quit_by = time.monotonic() + 20
             while installer_running() and time.monotonic() < quit_by:
-                time.sleep(1)
-            needed_fallback = installer_running()
-            if needed_fallback:
-                subprocess.run(["/usr/bin/pkill", "-x", "Installer"], capture_output=True, timeout=30)
-            seen.append({"installer": "quit", "returncode": closed.returncode,
-                         "stderr": closed.stderr[-300:], "fallback": needed_fallback,
+                time.sleep(.5)
+            need(not installer_running(), f"{label}-installer-normal-quit-did-not-exit")
+            seen.append({"installer": "quit", "path": "foreground-cmd-q",
                          "elapsed": round(time.monotonic() - quit_started, 3)})
             continue
         # An answer may name a second button that must be on the same dialog,
