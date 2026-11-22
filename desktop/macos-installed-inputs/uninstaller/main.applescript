@@ -38,8 +38,20 @@ on run
 	end try
 
 	set script_ to (POSIX path of (path to resource "delete-data.sh"))
-	set completion to removalStatus(script_)
-	if completion is 65 then
+	set checkOnly to " --check-removal"
+	if deleteData then set checkOnly to ""
+	-- The cleanup command checks the completion report itself. Run it once
+	-- and carry its real status into the result dialog after Installer exits.
+	try
+		set report to do shell script "/bin/sh " & quoted form of script_ & checkOnly & " 2>&1; echo \"status=$?\""
+		set lines_ to paragraphs of report
+		set completion to last item of lines_
+	on error
+		set completion to "status=unknown"
+		set lines_ to {}
+	end try
+	activate
+	if completion is "status=65" then
 		if deleteData then
 			display dialog "Mobile Release Kit is still installed, so none of your data was deleted." & return & return & ¬
 				"If Installer was cancelled or reported a problem, you can run this uninstaller again." buttons {"OK"} default button "OK" with title appTitle with icon caution
@@ -48,9 +60,14 @@ on run
 		end if
 		return
 	end if
-	if completion is not 0 then
+	if completion is "status=66" or completion is "status=64" then
 		display dialog "Mobile Release Kit removal could not be confirmed. Your data was kept." & return & return & ¬
 			"Check macOS Installer for the result before trying another operation." buttons {"OK"} default button "OK" with title appTitle with icon caution
+		return
+	end if
+	if completion is not "status=0" and completion is not "status=1" then
+		display dialog "Mobile Release Kit could not confirm the uninstaller result." & return & return & ¬
+			"Check the result in macOS Installer before trying again." buttons {"OK"} default button "OK" with title appTitle with icon caution
 		return
 	end if
 
@@ -59,35 +76,24 @@ on run
 		return
 	end if
 
-	-- The script's own report goes to stdout; its exit status is appended as
-	-- the last line so the report is shown whatever the outcome.
-	try
-		set report to do shell script "/bin/sh " & quoted form of script_ & " 2>&1; echo \"status=$?\""
-	on error message
-		set report to message & return & "status=error"
-	end try
-	set lines_ to paragraphs of report
-	set outcome to "partial"
-	if (last item of lines_) is "status=0" then set outcome to "complete"
-	set report to ""
-	if (count of lines_) > 1 then
-		set AppleScript's text item delimiters to return
-		set report to (items 1 thru -2 of lines_) as text
-		set AppleScript's text item delimiters to ""
-	end if
-	if outcome is "complete" then
+	if completion is "status=0" then
 		display dialog "Mobile Release Kit was removed and its data was deleted." buttons {"OK"} default button "OK" with title appTitle with icon note
 	else
-		display dialog "Mobile Release Kit was removed, but some data was kept:" & return & return & report & return & return & ¬
-			"Nothing else was deleted. You can run this uninstaller again, or delete the listed items yourself (Keychain items with Keychain Access)." buttons {"OK"} default button "OK" with title appTitle with icon caution
+		display dialog "Mobile Release Kit was removed, but some data was kept." & return & return & retainedDetails(lines_) ¬
+			buttons {"OK"} default button "OK" with title appTitle with icon caution
 	end if
 end run
 
-on removalStatus(script_)
-	try
-		do shell script "/bin/sh " & quoted form of script_ & " --check-removal"
-		return 0
-	on error number statusCode
-		return statusCode
-	end try
-end removalStatus
+on retainedDetails(lines_)
+	set summary to ""
+	set total to 0
+	repeat with entry in lines_
+		set detail to contents of entry
+		if detail starts with "kept " or detail starts with "could not delete:" then
+			set total to total + 1
+			if total is less than or equal to 4 then set summary to summary & detail & return
+		end if
+	end repeat
+	if total is greater than 4 then set summary to summary & "Additional items kept: " & (total - 4) & return
+	return summary & "You can run the uninstaller again."
+end retainedDetails
