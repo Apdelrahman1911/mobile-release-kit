@@ -17,6 +17,7 @@ on:
     paths:
       - .github/workflows/desktop-macos-removal-lab.yml
       - desktop/native/macos-installed-native/**
+      - desktop/src-tauri/src/bin/macos_install.rs
   workflow_dispatch:
 
 permissions:
