@@ -14045,6 +14045,7 @@ mod installer {
                 // The legacy-only Instant field is an inert marker here and
                 // cannot select a worker clock or its private result transport.
                 Self { originals: Vec::new(), creations: Vec::new(), end: Instant::now(), unknown:false, close_refusal:None,
+                    removal_live_originals:None,
                     legacy_volumes:[None;mobile_release_desktop::macos_install_maintenance::PREDECESSOR_LIMIT+1],
                     worker_deadline:Some(deadline),worker_stderr_is_gate:stderr_is_gate,worker_go_eof:false,
                     fresh_birth_control_reserved:false,fresh_outputs:None,fresh_preparation_phase:FreshPreparationPhase::None,
