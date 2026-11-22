@@ -227,12 +227,14 @@ jobs:
           archive=installer::maintenance::removal_archive_preserves_hidden_distribution_sidecars
           live=installer::tests::removal_live_index_keeps_original_open_and_close_finality
           repair=installer::worker::tests::macl_repair_requires_the_frozen_epoch_and_post_mismatch_failure
-          "$MRK_PAYLOAD_UNLINK_TEST" "$locks" "$archive" "$live" "$repair" --exact --test-threads=1 |
+          packagekit=installer::worker::tests::packagekit_resume_accepts_only_the_fixed_sticky_ancestor_shape
+          "$MRK_PAYLOAD_UNLINK_TEST" "$locks" "$archive" "$live" "$repair" "$packagekit" --exact --test-threads=1 |
             tee "$RUNNER_TEMP/removal-preflight-test.log"
           grep -F "test $locks ... ok" "$RUNNER_TEMP/removal-preflight-test.log"
           grep -F "test $archive ... ok" "$RUNNER_TEMP/removal-preflight-test.log"
           grep -F "test $live ... ok" "$RUNNER_TEMP/removal-preflight-test.log"
           grep -F "test $repair ... ok" "$RUNNER_TEMP/removal-preflight-test.log"
+          grep -F "test $packagekit ... ok" "$RUNNER_TEMP/removal-preflight-test.log"
 
       - name: Verify bundle metadata conservation and original unlink inside Installer
         shell: bash
@@ -244,10 +246,14 @@ jobs:
           chmod 0755 "$work"
           test_case=installer::worker::tests::payload_removal_settles_the_same_original_after_unlink
           metadata_case=installer::worker::tests::payload_removal_conserves_the_enrolled_app_tag
-          printf '#!/bin/sh\nset -eu\numask 022\nexport TMPDIR="%s"\nexec "%s" "%s" "%s" --ignored --exact --nocapture --test-threads=1 >"%s" 2>&1\n' \
-            "$work/fixtures" "$MRK_PAYLOAD_UNLINK_TEST" "$test_case" "$metadata_case" "$RUNNER_TEMP/payload-unlink-test.log" \
+          packagekit_case=installer::worker::tests::packagekit_resume_holds_the_actual_installer_ancestors
+          /bin/cp -X "$MRK_PAYLOAD_UNLINK_TEST" "$work/scripts/mrk-macos-remove"
+          # The installed script resolves its own directory inside PackageKit.
+          # shellcheck disable=SC2016
+          printf '#!/bin/sh\nset -eu\numask 022\nexport TMPDIR="%s"\ncd -P "$(/usr/bin/dirname "$0")"\nexec ./mrk-macos-remove "%s" "%s" "%s" --ignored --exact --nocapture --test-threads=1 >"%s" 2>&1\n' \
+            "$work/fixtures" "$test_case" "$metadata_case" "$packagekit_case" "$RUNNER_TEMP/payload-unlink-test.log" \
             >"$work/scripts/postinstall"
-          chmod 0755 "$work/scripts/postinstall"
+          chmod 0555 "$work/scripts/postinstall" "$work/scripts/mrk-macos-remove"
           /usr/bin/pkgbuild --nopayload --scripts "$work/scripts" --identifier dev.mobile-release-kit.fixture.payload-unlink \
             --version 1 "$work/proof.pkg" >/dev/null
           status=0
@@ -259,6 +265,7 @@ jobs:
           [[ $status == 0 ]]
           grep -F "test $test_case ... ok" "$RUNNER_TEMP/payload-unlink-test.log"
           grep -F "test $metadata_case ... ok" "$RUNNER_TEMP/payload-unlink-test.log"
+          grep -F "test $packagekit_case ... ok" "$RUNNER_TEMP/payload-unlink-test.log"
 
       - name: Retain bounded test evidence
         if: ${{ !cancelled() }}

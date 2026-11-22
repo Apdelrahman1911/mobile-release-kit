@@ -904,6 +904,10 @@ mod installer {
             if let Some(reason) = protection_data::refusal(protection_role, ProtectionObservation {
                 mode: u32::from(s.st_mode), uid: s.st_uid, gid: s.st_gid, links: u64::from(s.st_nlink),
             }, directory, mode, u32::from(SFlag::S_IFMT.bits()), u32::from(kind.bits())) { return Err(reason); }
+            self.protected_mount_and_acl(n,role)
+        }
+        fn protected_mount_and_acl(&self,n:usize,role:AclRole)->Result<()> {
+            let fd=self.fd(n)?;
             let fs = statfs::fstatfs(fd).map_err(|_| "mount-refused")?;
             check(fs.filesystem_type_name() == "apfs" && fs.flags().contains(MntFlags::MNT_LOCAL)
                 && !fs.flags().intersects(MntFlags::MNT_UNION | MntFlags::MNT_AUTOMOUNTED | MntFlags::MNT_IGNORE_OWNERSHIP), "mount-refused")?;
@@ -16656,7 +16660,7 @@ mod installer {
                         check(source.first.is_none() && source.verified && !source.pending_native_data(),"removal-payload-source-phase")?;
                         source.originals.input.post(book)?;
                         check(std::env::current_exe().ok().as_deref()==Some(Path::new(&source.originals.executed)),"removal-resume-executed-image")?;
-                        for n in &source.originals.bootstrap {book.check_name(*n,true)?;}
+                        source.originals.bootstrap_post(book)?;
                         removal_resume_stat(book,source.originals.program,false,Some(0o555))?;
                         maintenance::held_bytes(book,source.originals.script,removal_packaged_callback_bytes())?;
                         for (n,raw) in source.originals.installed_pair.iter().zip(&source.originals.installed_raw) {maintenance::held_bytes(book,*n,raw)?;}
@@ -17518,6 +17522,48 @@ mod installer {
                 && path[1..].split('/').all(|p|!p.is_empty() && p.len()<=255 && p!="." && p!="..")
                 && path.rsplit('/').next()==Some("mrk-macos-remove")
         }
+        fn removal_resume_packagekit_parent_data(path:&str,package:&str)->bool {
+            fn suffix(value:&str,prefix:&str)->bool {
+                value.strip_prefix(prefix).and_then(|rest|rest.strip_prefix('.'))
+                    .is_some_and(|rest|rest.len()==6 && rest.bytes().all(|byte|byte.is_ascii_alphanumeric()))
+            }
+            let mut parts=path.split('/');
+            matches!((parts.next(),parts.next(),parts.next(),parts.next(),parts.next(),parts.next(),parts.next()),
+                (Some(""),Some("private"),Some("tmp"),Some(sandbox),Some("Scripts"),Some(script),None)
+                    if suffix(sandbox,"PKInstallSandbox") && suffix(script,package))
+        }
+        fn removal_resume_tmp_post(book:&Install,n:usize)->Result<()> {
+            const REASON:&str="removal-resume-packagekit-tmp";
+            let original=&book.originals[n];
+            let private=original.parent.and_then(|parent|book.originals.get(parent)).ok_or(REASON)?;
+            let root=private.parent.and_then(|parent|book.originals.get(parent)).ok_or(REASON)?;
+            check(original.name=="tmp" && private.name=="private" && root.name=="/" && root.parent.is_none(),REASON)?;
+            let expected=book.identity(n)?;
+            book.clock()?;
+            let held=Identity::of(&stat::fstat(book.fd(n)?).map_err(|_|REASON)?);
+            let named=Identity::of(&book.named(original.parent,&original.name).map_err(|_|REASON)?);
+            // Other processes can change the shared directory's contents.
+            // Bind the same root-owned sticky inode, with no other writable
+            // ancestor or user-owned child admitted by this exception.
+            check([expected,held,named].iter().all(|actual|actual.same_object(expected)
+                && actual.uid==0 && actual.gid==0 && actual.mode==0o041777),REASON)?;
+            book.clock()
+        }
+        fn removal_resume_bootstrap(book:&mut Install,parent_path:&str,packagekit:bool)->Result<(Vec<usize>,Option<usize>)> {
+            let mut bootstrap=Vec::new();bootstrap.try_reserve_exact(32).map_err(|_|"removal-resume-allocation")?;
+            let mut parent=book.open(None,"/",true)?;book.protected_as(parent,true,None,AclRole::SystemRoot)?;bootstrap.push(parent);
+            let mut tmp=None;
+            for (depth,part) in parent_path[1..].split('/').enumerate() {
+                parent=book.open(Some(parent),part,true)?;
+                if packagekit && depth==1 {
+                    removal_resume_tmp_post(book,parent)?;
+                    book.protected_mount_and_acl(parent,AclRole::Other)?;
+                    removal_resume_tmp_post(book,parent)?;tmp=Some(parent);
+                }else{book.protected(parent,true,None)?;book.check_name(parent,true)?;}
+                check(bootstrap.len()<32,"removal-resume-path-bound")?;bootstrap.push(parent);
+            }
+            Ok((bootstrap,tmp))
+        }
         fn removal_resume_stat(book:&Install,n:usize,directory:bool,mode:Option<u32>)->Result<()> {
             book.clock()?;book.check_name(n,true)?;book.protected(n,directory,mode)?;book.clock()?;
             native::no_xattrs(book.fd(n)?.as_fd()).map_err(|_|"removal-resume-attributes")?;book.clock()?;
@@ -17955,11 +18001,18 @@ mod installer {
             genesis.post(book,census)?;read.post(book)?;Ok(genesis)
         }
         struct RemovalResumeOriginals {
-            input:completed_package::Input,bootstrap:Vec<usize>,executed:String,parent_path:String,
+            input:completed_package::Input,bootstrap:Vec<usize>,packagekit_tmp:Option<usize>,executed:String,parent_path:String,
             program:usize,script:usize,program_sha:[u8;32],root:usize,root_chain:Vec<usize>,
             installed_pair:[usize;2],installed_raw:[Vec<u8>;2],genesis:Option<RemovalResumeGenesis>,pending_genesis:Option<RemovalPendingGenesis>,
         }
         impl RemovalResumeOriginals {
+            fn bootstrap_post(&self,book:&Install)->Result<()> {
+                for &n in &self.bootstrap {
+                    if self.packagekit_tmp==Some(n){removal_resume_tmp_post(book,n)?;}
+                    else{book.check_name(n,true)?;}
+                }
+                Ok(())
+            }
             fn memory(&self)->Result<()> {
                 let mut raw=self.input.retained_bytes_data()?.checked_add(self.bootstrap.capacity()*std::mem::size_of::<usize>())
                     .and_then(|n|n.checked_add(self.root_chain.capacity()*std::mem::size_of::<usize>()))
@@ -17988,7 +18041,8 @@ mod installer {
                 self.memory()?;
                 self.input.post(book)?;
                 check(std::env::current_exe().ok().as_deref()==Some(Path::new(&self.executed)),"removal-resume-executed-image")?;
-                for n in self.bootstrap.iter().chain(&self.root_chain) {book.check_name(*n,true)?;}
+                self.bootstrap_post(book)?;
+                for &n in &self.root_chain {book.check_name(n,true)?;}
                 removal_resume_stat(book,self.program,false,Some(0o555))?;
                 maintenance::held_bytes(book,self.script,removal_packaged_callback_bytes())?;
                 for (n,raw) in self.installed_pair.iter().zip(&self.installed_raw){maintenance::held_bytes(book,*n,raw)?;}
@@ -18497,12 +18551,10 @@ exec ./mrk-macos-remove --fixture-supervise "$1"
                 let executed=path.to_str().filter(|s|removal_resume_path_data(s)).ok_or("removal-resume-executed-image")?.to_owned();
                 let parent_path=executed.rsplit_once('/').ok_or("removal-resume-executed-image")?.0.to_owned();
                 check(!parent_path.is_empty(),"removal-resume-executed-image")?;
-                let mut bootstrap=Vec::new();bootstrap.try_reserve_exact(32).map_err(|_|"removal-resume-allocation")?;
-                let mut parent=book.open(None,"/",true)?;book.protected_as(parent,true,None,AclRole::SystemRoot)?;bootstrap.push(parent);
-                for part in parent_path[1..].split('/') {
-                    parent=book.open(Some(parent),part,true)?;book.protected(parent,true,None)?;book.check_name(parent,true)?;
-                    check(bootstrap.len()<32,"removal-resume-path-bound")?;bootstrap.push(parent);
-                }
+                let packagekit=removal_resume_packagekit_parent_data(&parent_path,
+                    mobile_release_desktop::macos_remove_producer::REMOVER_IDENTIFIER);
+                let (bootstrap,packagekit_tmp)=removal_resume_bootstrap(book,&parent_path,packagekit)?;
+                let parent=*bootstrap.last().ok_or("removal-resume-parent")?;
                 removal_resume_stat(book,parent,true,None)?;
                 check(book.identity(parent)?.gid==0,"removal-resume-parent-group")?;
                 let roster=maintenance::roster_now(book,parent)?;
@@ -18554,7 +18606,7 @@ exec ./mrk-macos-remove --fixture-supervise "$1"
                         "removal-resume-source-data")?;
                 }
                 check(removal_hex_data::<32>(removal.binding_data().remover_executable_sha256)?==program_sha,"removal-resume-program-hash")?;
-                let originals=RemovalResumeOriginals{input,bootstrap,executed,parent_path,program,script,program_sha,root,root_chain,
+                let originals=RemovalResumeOriginals{input,bootstrap,packagekit_tmp,executed,parent_path,program,script,program_sha,root,root_chain,
                     installed_pair:[descriptor_original,signature_original],installed_raw:[raw,sig],genesis:None,pending_genesis:None};
                 originals.fixed_absence(book)?;
                 check(book.originals.iter().filter(|n|n.fd.is_some()).count().checked_add(32+EXTRA_LIVE)
@@ -22942,6 +22994,49 @@ exec ./mrk-macos-remove --fixture-supervise "$1"
         #[cfg(test)]
         mod tests {
             use super::*;
+            #[test]
+            fn packagekit_resume_accepts_only_the_fixed_sticky_ancestor_shape() {
+                const ID:&str="dev.mobile-release-kit.desktop.remove";
+                assert!(removal_resume_packagekit_parent_data(
+                    "/private/tmp/PKInstallSandbox.94svu5/Scripts/dev.mobile-release-kit.desktop.remove.HbVeQV",ID));
+                for path in [
+                    "/tmp/PKInstallSandbox.94svu5/Scripts/dev.mobile-release-kit.desktop.remove.HbVeQV",
+                    "/private/tmp/PKInstallSandbox.94svu5/Scripts/dev.mobile-release-kit.desktop.install.HbVeQV",
+                    "/private/tmp/PKInstallSandbox.94svu5/Scripts/dev.mobile-release-kit.desktop.remove.HbVeQV/x",
+                    "/private/tmp/PKInstallSandbox.94svu5/Scripts/../dev.mobile-release-kit.desktop.remove.HbVeQV",
+                    "/private/tmp/PKInstallSandbox.94svu5/Scripts/dev.mobile-release-kit.desktop.remove.HbVe!V",
+                ] { assert!(!removal_resume_packagekit_parent_data(path,ID)); }
+            }
+
+            #[test]
+            #[ignore = "requires a disposable macOS runner executing the real Installer postinstall fixture"]
+            fn packagekit_resume_holds_the_actual_installer_ancestors() {
+                assert!(unistd::geteuid().is_root());
+                let cwd=std::env::current_dir().unwrap();
+                let actual=cwd.to_str().unwrap();
+                let fixture="dev.mobile-release-kit.fixture.payload-unlink";
+                assert!(removal_resume_packagekit_parent_data(actual,fixture));
+                assert_eq!(std::env::current_exe().unwrap(),cwd.join("mrk-macos-remove"));
+                let mut book=Install::new();
+                let (ancestors,tmp)=removal_resume_bootstrap(&mut book,actual,true).unwrap();
+                assert_eq!(tmp,ancestors.get(2).copied());
+                removal_resume_tmp_post(&book,tmp.unwrap()).unwrap();
+                let scripts=*ancestors.last().unwrap();
+                removal_resume_stat(&book,scripts,true,None).unwrap();
+                assert_eq!(book.identity(scripts).unwrap().gid,0);
+                assert!(maintenance::roster_now(&mut book,scripts).unwrap().keys().map(String::as_str)
+                    .eq(["mrk-macos-remove","postinstall"]));
+                for name in ["mrk-macos-remove","postinstall"] {
+                    let original=book.open(Some(scripts),name,false).unwrap();
+                    removal_resume_stat(&book,original,false,Some(0o555)).unwrap();
+                    book.forward_close(original,"test-packagekit-close").unwrap();
+                }
+                for original in ancestors.into_iter().rev() {
+                    book.forward_close(original,"test-packagekit-close").unwrap();
+                }
+                assert!(!book.unknown);
+            }
+
             #[test]
             fn macl_repair_requires_the_frozen_epoch_and_post_mismatch_failure() {
                 use mobile_release_desktop::macos_remove_record::{FailureKindData,FirstFailureData,PrefixData};
