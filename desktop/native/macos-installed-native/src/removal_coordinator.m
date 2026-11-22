@@ -84,14 +84,18 @@ void *mrk_removal_confirmation_reserve(uint64_t start,uint64_t work,uint64_t har
     if(!combined || !confirmation_cut(b,0)){free(b);return NULL;}
     return b;
 }
-int mrk_removal_confirmation_start(void *original) {
+int mrk_removal_confirmation_start(void *original, void *parent) {
     MRKRemovalConfirmation *b=original;
     if(!confirmation_original(b) || b->attempted || b->close_attempted || b->unknown)return 0;
     b->attempted=1;
     @try {
         if(!confirmation_cut(b,0))return 0;
-        NSWindow *main=[NSApp mainWindow];
-        if(!main || [main isKindOfClass:[NSPanel class]] || [main attachedSheet]){b->failed=1;return 0;}
+        // Installer is normally frontmost. AppKit's mainWindow can be nil
+        // then, even though the original application window is still open.
+        NSWindow *main=parent;
+        if(!main || [[NSApp windows] indexOfObjectIdenticalTo:main]==NSNotFound
+            || ![main isVisible] || ![main canBecomeMainWindow]
+            || [main isKindOfClass:[NSPanel class]] || [main attachedSheet]){b->failed=1;return 0;}
         if(!confirmation_before(b,R_PARENT))return 0;
         b->parent=[main retain];
         if(!confirmation_got(b,R_PARENT,b->parent!=nil) || !confirmation_before(b,R_ALERT))return 0;
@@ -125,6 +129,7 @@ int mrk_removal_confirmation_start(void *original) {
         // claim that an AppKit callback cannot still run.
         b->started=1;
         [b->alert beginSheetModalForWindow:b->parent completionHandler:b->completion];
+        if(confirmation_cut(b,0) && ![NSApp isActive])[NSApp activate];
         return confirmation_cut(b,0);
     } @catch (...) {
         for(unsigned i=0;i<R_REFERENCES;i++)if(b->refs[i]==R_ENTERED)b->refs[i]=R_UNKNOWN;

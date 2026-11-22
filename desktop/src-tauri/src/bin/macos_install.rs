@@ -859,6 +859,10 @@ mod installer {
             }
             Ok(())
         }
+        fn has_existing_app_metadata(&self,identity:Identity)->bool {
+            self.originals.iter().any(|prior|prior.existing_app_metadata.is_some()
+                && prior.identity.is_some_and(|original|original.same_object(identity)))
+        }
         // Call only after authenticating the recorded app/launcher original.
         // The same snapshot follows its held FD through rename, POST and close.
         fn capture_existing_app_metadata(&mut self,n:usize,allow_existing_macl:bool,reason:&'static str)->Result<()> {
@@ -16904,6 +16908,17 @@ mod installer {
                 3=>Ok("payload-roster-removal.json"),4=>Ok("payload-absent-observed.json"),5=>Ok("first-failure.json"),
                 _=>Err("removal-payload-record-slot")}
         }
+        fn removal_payload_node_attributes(book:&mut Install,n:usize,directory:bool,app_directory:bool)->Result<()> {
+            const REASON:&str="removal-payload-node-attributes";
+            // Only an authenticated original can carry its snapshot into the
+            // final unlink. A similar path or a previously absent tag cannot
+            // authorize a new snapshot.
+            if directory && app_directory && book.has_existing_app_metadata(book.identity(n)?) {
+                book.capture_existing_app_metadata(n,true,REASON)
+            } else {
+                maintenance::existing_leaf_attributes(book,n,!directory,REASON)
+            }
+        }
         impl RemovalPayloadExecution {
             fn new(source:RemovalAdmission,observed:maintenance::RemovalObserved,snapshot:RemovalSnapshot,
                 admission:RemovalSnapshotAdmission,exclusion:RemovalExclusion,plan:maintenance::RemovalPayloadPlan)->Result<Self> {
@@ -17268,9 +17283,10 @@ mod installer {
                 check(book.originals[n].parent==Some(parent) && book.originals[n].name==node.name
                     && Identity::of(&actual)==node.present_data()?.0 && actual.st_flags==node.present_data()?.1 && node.present_data()?.1==0,"removal-payload-node-original")?;
                 book.protected(n,node.directory,Some(if node.directory||node.executable{0o555}else{0o444}))?;
-                // Removal only deletes recorded installed objects: a regular
-                // file may keep the OS provenance tag, never other metadata.
-                maintenance::existing_leaf_attributes(book,n,!node.directory,"removal-payload-node-attributes")?;book.check_name(n,true)?;Ok(n)
+                let app_directory=self.plan.generations[node.generation].roots[0]==Some(index)
+                    || node.name=="MobileReleaseKitPayload.app";
+                removal_payload_node_attributes(book,n,node.directory,app_directory)?;
+                book.check_name(n,true)?;Ok(n)
             }
             fn remove_node(&mut self,book:&mut Install,index:usize,parent:usize,keep_root:bool,depth:usize)->Result<()> {
                 check(depth<=17 && (!self.plan.nodes[index].directory || depth<17)
@@ -22825,6 +22841,54 @@ exec ./mrk-macos-remove --fixture-supervise "$1"
         #[cfg(test)]
         mod tests {
             use super::*;
+            #[test]
+            #[ignore = "requires a disposable macOS runner without automatic provenance on directories"]
+            fn payload_removal_conserves_the_enrolled_app_tag() {
+                use super::super::tests::unlinked_snapshot_book;
+                const TAG:&str="com.apple.macl";
+                const REFUSAL:&str="removal-payload-node-attributes";
+                let fixture=unistd::mkdtemp(std::env::temp_dir().join("mrk-removal-app-tag.XXXXXXXX").as_path()).unwrap();
+                let tested=std::panic::catch_unwind(|| {
+                    let (mut book,enrolled)=unlinked_snapshot_book(&fixture);
+                    let path=fixture.join("Old.app");
+                    let set=|tag:&str,hex:&str| {
+                        assert!(std::process::Command::new("/usr/bin/xattr")
+                            .args(["-wx",tag,hex]).arg(&path).status().unwrap().success());
+                    };
+                    set(TAG,&"07".repeat(72));
+                    let original=book.open(Some(0),"Old.app",true).unwrap();
+                    book.originals[enrolled].existing_app_metadata=None;
+                    assert_eq!(removal_payload_node_attributes(&mut book,original,true,true),Err(REFUSAL));
+
+                    book.capture_existing_app_metadata(original,true,REFUSAL).unwrap();
+                    let reopened=book.open(Some(0),"Old.app",true).unwrap();
+                    assert_eq!(removal_payload_node_attributes(&mut book,reopened,true,false),Err(REFUSAL));
+                    assert_eq!(removal_payload_node_attributes(&mut book,reopened,true,true),Ok(()));
+                    assert_eq!(book.originals[reopened].existing_app_metadata,book.originals[original].existing_app_metadata);
+                    // The real inventory walk retains its snapshot after
+                    // closing the audited directory.
+                    book.forward_close(reopened,REFUSAL).unwrap();
+                    book.forward_close(original,REFUSAL).unwrap();
+
+                    let replacement=fixture.join("Replacement.app");
+                    std::fs::create_dir(&replacement).unwrap();
+                    assert!(std::process::Command::new("/usr/bin/xattr")
+                        .args(["-wx",TAG,&"07".repeat(72)]).arg(&replacement).status().unwrap().success());
+                    let substitute=book.open(Some(0),"Replacement.app",true).unwrap();
+                    assert_eq!(removal_payload_node_attributes(&mut book,substitute,true,true),Err(REFUSAL));
+
+                    set(TAG,&"08".repeat(72));
+                    let changed=book.open(Some(0),"Old.app",true).unwrap();
+                    assert_eq!(removal_payload_node_attributes(&mut book,changed,true,true),Err(REFUSAL));
+                    set(TAG,&"07".repeat(72));
+                    set("user.mrk-test","01");
+                    let foreign=book.open(Some(0),"Old.app",true).unwrap();
+                    assert_eq!(removal_payload_node_attributes(&mut book,foreign,true,true),Err(REFUSAL));
+                });
+                std::fs::remove_dir_all(fixture).unwrap();
+                tested.unwrap();
+            }
+
             #[test]
             #[ignore = "requires a disposable macOS runner with untagged fixture directories"]
             fn payload_removal_settles_the_same_original_after_unlink() {
