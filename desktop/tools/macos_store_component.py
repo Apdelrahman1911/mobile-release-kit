@@ -25,7 +25,7 @@ REPOSITORY = 'Apdelrahman1911/mobile-release-kit'
 WORKFLOW = '.github/workflows/desktop-macos-store-runtime.yml'
 BRANCH = 'verify/desktop-macos-store-runtime'
 ASSEMBLY_BRANCH = 'task/ci-simplification-20261015'
-VERSIONS = {'ruby': '3.3.12', 'openssl': '3.5.8', 'libyaml': '0.2.5', 'deploymentTarget': '26.0'}
+VERSIONS = {'ruby': '3.3.14', 'openssl': '3.5.9', 'libyaml': '0.2.5', 'deploymentTarget': '26.0'}
 LIMIT = 512 * 1024 * 1024
 ROOT = Path(__file__).resolve().parents[2]
 RETAINED_SELECTION = 'macos-installed-inputs/store-signed-retained-transport.json'
@@ -58,7 +58,7 @@ def native_inputs():
     archives = {row['directory']: {'bytes': row['bytes'], 'sha256': row['sha256']}
                 for row in source.SOURCES}
     archives['openssl-' + openssl['version']] = {'bytes': openssl['bytes'], 'sha256': openssl['sha256']}
-    ca = (ROOT / 'desktop/cpython-source-inputs/github-ca.pem').read_bytes()
+    ca = source.macos_store_ca()
     return {'recipe': NATIVE_RECIPE, 'archives': archives, 'caSha256': hashlib.sha256(ca).hexdigest()}
 
 

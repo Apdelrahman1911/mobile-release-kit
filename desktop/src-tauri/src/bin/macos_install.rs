@@ -179,8 +179,35 @@ mod installer {
     }
     #[derive(Clone, Copy, PartialEq, Eq)]
     enum FreshPreparationPhase { None, HandlesRetired, StorageRebased }
+    const LIVE_ORIGINAL_LIMIT: usize = 96;
+    #[derive(Clone, Copy)]
+    struct RemovalLiveOriginals {
+        indexes: [usize; LIVE_ORIGINAL_LIMIT],
+        len: usize,
+    }
+    impl RemovalLiveOriginals {
+        fn new() -> Self { Self { indexes: [0; LIVE_ORIGINAL_LIMIT], len: 0 } }
+        fn indexes(&self) -> &[usize] { &self.indexes[..self.len] }
+        fn opened(&mut self, index: usize) -> bool {
+            if self.len == self.indexes.len() || self.indexes().last().is_some_and(|last| *last >= index) {
+                return false;
+            }
+            self.indexes[self.len] = index;
+            self.len += 1;
+            true
+        }
+        fn consumed(&mut self, index: usize) -> bool {
+            let Ok(position) = self.indexes().binary_search(&index) else { return false; };
+            self.indexes.copy_within(position + 1..self.len, position);
+            self.len -= 1;
+            true
+        }
+    }
     struct Install {
         originals: Vec<Original>, creations: Vec<Creation>, end: Instant, unknown: bool,
+        // Used only by payload removal. The append-only ledger retains every
+        // effect and remains the authority for identity and finality.
+        removal_live_originals: Option<RemovalLiveOriginals>,
         // First closed reason a close() turned unknown without returning an
         // error of its own. Diagnostic DATA only; never a finality input.
         close_refusal: Option<&'static str>,
@@ -626,6 +653,7 @@ mod installer {
     impl Install {
         fn new() -> Self {
             Self { originals: Vec::new(), creations: Vec::new(), end: Instant::now()+Duration::from_secs(120), unknown:false,
+                removal_live_originals:None,
                 close_refusal:None,
                 legacy_volumes:[None;mobile_release_desktop::macos_install_maintenance::PREDECESSOR_LIMIT+1],
                 worker_deadline:None,worker_stderr_is_gate:false,worker_go_eof:false,payload_written:0,payload_write_calls:0,launcher_writes:applications::WriteCounts::default(),launcher_effects:None,
@@ -650,6 +678,28 @@ mod installer {
         }
         fn fd(&self, n: usize) -> Result<&OwnedFd> { self.originals.get(n).and_then(|r| r.fd.as_ref()).ok_or("original-missing") }
         fn identity(&self, n: usize) -> Result<Identity> { self.originals.get(n).and_then(|r| r.identity).ok_or("identity-missing") }
+        fn live_original_indexes(&self) -> impl Iterator<Item = usize> + '_ {
+            let (indexed, scan) = match &self.removal_live_originals {
+                Some(live) => (live.indexes(), 0..0),
+                None => (&[][..], 0..self.originals.len()),
+            };
+            indexed.iter().copied().chain(scan.filter(|&n| self.originals[n].fd.is_some()))
+        }
+        fn start_removal_live_index(&mut self) -> Result<()> {
+            check(self.removal_live_originals.is_none(), "removal-live-index-once")?;
+            let mut live = RemovalLiveOriginals::new();
+            for n in self.live_original_indexes() {
+                check(live.opened(n), "removal-live-index-bound")?;
+            }
+            self.removal_live_originals = Some(live);
+            Ok(())
+        }
+        fn finish_removal_live_index(&mut self) -> Result<()> {
+            let live = self.removal_live_originals.take().ok_or("removal-live-index-missing")?;
+            if live.indexes().iter().copied().eq(self.live_original_indexes()) { return Ok(()); }
+            self.unknown = true;
+            Err("removal-live-index-mismatch")
+        }
         fn enroll_legacy_volume(&mut self, binding: Option<mobile_release_desktop::macos_persistent_identity::LegacyVolumeBindingData>) -> Result<()> {
             if let Some(binding)=binding {
                 if !self.legacy_volumes.contains(&Some(binding)) {
@@ -668,7 +718,8 @@ mod installer {
             self.clock()?;
             let extra = (if self.worker_deadline.is_some() { worker::EXTRA_LIVE } else { 0 })
                 + self.removal_live_reserved;
-            check(self.originals.len() < installation_record::ORIGINAL_LIMIT && self.originals.iter().filter(|r| r.fd.is_some()).count() + extra < 96, "original-bound")?;
+            let live = self.removal_live_originals.as_ref().map_or_else(|| self.live_original_indexes().count(), |live| live.len);
+            check(self.originals.len() < installation_record::ORIGINAL_LIMIT && live + extra < LIVE_ORIGINAL_LIMIT, "original-bound")?;
             let n = self.originals.len(); self.originals.push(Original { fd: None, state: State::Reserved, role, parent, name: name.into(), identity: None, existing_app_metadata:None }); Ok(n)
         }
         fn named(&self, parent: Option<usize>, name: &str) -> nix::Result<FileStat> {
@@ -681,6 +732,10 @@ mod installer {
             match result {
                 Ok(fd) => {
                     self.originals[n].fd = Some(fd); self.originals[n].state = State::Owned;
+                    if self.removal_live_originals.as_mut().is_some_and(|live| !live.opened(n)) {
+                        self.unknown = true;
+                        return Err("removal-live-index-open");
+                    }
                     if self.originals[n].role == Role::MetadataWriter { self.metadata.opened()?; }
                     if self.originals[n].role == Role::GateWriter { self.gate.creation = "created"; }
                     if self.originals[n].role == Role::ReservationWriter { self.registration.creation = "created"; }
@@ -713,7 +768,7 @@ mod installer {
             // live original is matched by actual birth as well as device/inode;
             // closed Fresh aliases additionally require the private census witness.
             let mut snapshot=None;
-            for prior in 0..n {
+            for prior in self.live_original_indexes().take_while(|prior| *prior < n) {
                 if self.originals[prior].fd.is_some() && self.originals[prior].existing_app_metadata.is_some()
                     && self.originals[prior].identity.is_some_and(|value|value.same_object(id)) {
                     let held=stat::fstat(self.fd(prior)?).map_err(|_|"app-alias-original-stat")?;
@@ -914,6 +969,8 @@ mod installer {
             // It vetoes success without leaving the live descriptor behind.
             let metadata_ok=self.originals[n].fd.is_none() || self.originals[n].existing_app_metadata.is_none()
                 || self.check_name(n,true).is_ok();
+            let index_ok = self.originals[n].fd.is_none()
+                || self.removal_live_originals.as_mut().is_none_or(|live| live.consumed(n));
             let r = &mut self.originals[n];
             match r.state {
                 State::Reserved => r.state = State::NoHandle,
@@ -926,6 +983,7 @@ mod installer {
                 State::Closed | State::NoHandle => {},
                 _ => { self.unknown = true; self.close_refusal.get_or_insert("original-close-state-unknown"); }
             }
+            if !index_ok { self.unknown=true; self.close_refusal.get_or_insert("removal-live-index-close"); }
             if !metadata_ok { self.unknown=true; self.close_refusal.get_or_insert("original-close-snapshot-name"); }
             !self.unknown
         }
@@ -16740,6 +16798,7 @@ mod installer {
             nodes.checked_mul(std::mem::size_of::<RemovalNodeState>())?
                 .checked_add(9*std::mem::size_of::<usize>())?
                 .checked_add(4*std::mem::size_of::<u32>())?
+                .checked_add(2*std::mem::size_of::<RemovalLiveOriginals>())?
                 .checked_add(std::mem::size_of::<RemovalPayloadExecution>())?.checked_add(2*1024*1024)
         }
         fn removal_lifecycle_reserve(book:&mut Install,end:usize,nodes:usize,storage:u64,snapshot:u64,restore:bool)->Result<()> {
@@ -17015,8 +17074,9 @@ mod installer {
                 let roster=self.roster(book,parent)?;check(self.namespace_matches(parent,book,&roster)?,"removal-payload-parent-roster")?;
                 // Only independently verified aliases of THIS actual parent
                 // share this returned effect. Everything else stays exact.
-                for n in 0..book.originals.len() {
-                    if book.originals[n].fd.is_none(){continue;}
+                let live=book.removal_live_originals.ok_or("removal-live-index-missing")?;
+                for &n in live.indexes() {
+                    book.fd(n)?;
                     let old=book.identity(n)?;
                     if old.dev==before.0.dev && old.ino==before.0.ino {
                         let held=stat::fstat(book.fd(n)?).map_err(|_|"removal-payload-alias-stat")?;
@@ -17403,6 +17463,7 @@ mod installer {
                     record_sha256:self.record.as_ref().ok_or("removal-payload-record")?.digest_data().to_owned()})
             }
             fn run(&mut self,book:&mut Install)->Result<RemovalPayloadAbsence> {
+                book.start_removal_live_index()?;
                 let result=self.run_inner(book);
                 if let Err(error)=result {
                     use mobile_release_desktop::macos_remove_record::FailureKindData;
@@ -17418,7 +17479,9 @@ mod installer {
                         && self.record.is_some() && self.failure_record.is_none() && self.journal.files()[5].writer.is_none() {
                         let _=self.progress(book,5);
                     }
-                }result
+                }
+                let indexed=book.finish_removal_live_index();
+                result.and_then(|absence| indexed.map(|()| absence))
             }
         }
 
@@ -24311,6 +24374,33 @@ exec ./mrk-macos-remove --fixture-supervise "$1"
     }
     #[cfg(test)]
     mod tests {
+        #[test]
+        fn removal_live_index_keeps_original_open_and_close_finality() {
+            use super::*;
+            let mut book = Install::new();
+            for _ in 0..4096 {
+                book.originals.push(Original { fd: None, state: State::Closed, role: Role::Reader,
+                    parent: None, name: String::new(), identity: None, existing_app_metadata: None });
+            }
+            let open = |book: &mut Install| {
+                let n = book.reserve(None, "fixture", Role::Reader).unwrap();
+                book.adopt(n, fcntl::open("/dev/null", OFlag::O_RDONLY | OFlag::O_CLOEXEC, Mode::empty())).unwrap()
+            };
+            let first = open(&mut book);
+            book.start_removal_live_index().unwrap();
+            let second = open(&mut book);
+            let failed = book.reserve(None, "fixture-refusal", Role::Reader).unwrap();
+            assert_eq!(book.adopt(failed, Err(Errno::ENOENT)), Err("open-refused"));
+            assert_eq!(book.live_original_indexes().collect::<Vec<_>>(), [first, second]);
+            assert!(book.close(first));
+            assert_eq!(book.live_original_indexes().collect::<Vec<_>>(), [second]);
+            assert!(matches!(book.originals[first].state, State::Closed));
+            assert!(matches!(book.originals[failed].state, State::NoHandle));
+            book.finish_removal_live_index().unwrap();
+            assert!(book.close(second) && book.originals_settled());
+            assert_eq!(book.originals.len(), 4099);
+        }
+
         fn fresh_memory_test_book(other: u64) -> super::Install {
             use super::*;
             let mut book=Install::new();

@@ -298,11 +298,14 @@ def prepare(op):
     origin_body = op.read(origin)
     state['inputs'].append((origin, origin_body))
     upstream = api.tool_json(origin_body)
+    source, run, artifact = {
+        'arm64': ('af4952883f038313ddeab8879052e12bd7379ba6', 44871835695, 14693449606),
+        'x86_64': ('0039f79baa54318d58d87606335492f7ef2a90dd', 38844616192, 12022823630),
+    }[op.arch]
     need(type(upstream) is dict and upstream.get('signed') is False and upstream.get('arch') == op.arch
          and upstream.get('archiveSha256') == sha(original)
-         and upstream.get('source') == '0039f79baa54318d58d87606335492f7ef2a90dd'
-         and upstream.get('runId') == 38844616192 and upstream.get('runAttempt') == 1
-         and upstream.get('artifactId') == (12022417782 if op.arch == 'arm64' else 12022823630), 'service-origin')
+         and upstream.get('source') == source and upstream.get('runId') == run
+         and upstream.get('runAttempt') == 1 and upstream.get('artifactId') == artifact, 'service-origin')
     matcher = op.signing_matcher()
     input_rows, before, omitted = io_call(op, 'store-preflight', lambda: project_runtime_inventory(original, op, matcher))
     state['rows'] = before

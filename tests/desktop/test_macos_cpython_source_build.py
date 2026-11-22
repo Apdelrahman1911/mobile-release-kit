@@ -7396,7 +7396,8 @@ def archive_fixture(component="zlib", *, trailer=b"", compression_trailer=b"", b
         archive.addfile(item, io.BytesIO(body))
     raw = buffer.getvalue() + trailer
     compressed = (lzma.compress(raw) if component == "cpython" else gzip.compress(raw, mtime=0)) + compression_trailer
-    source = SimpleNamespace(component=component, size=len(compressed), sha256=BUILD.digest(compressed), original_prefix=logical)
+    source = SimpleNamespace(component=component, size=len(compressed), sha256=BUILD.digest(compressed),
+                             original_prefix=logical, archive_inventory=None)
     rows = {"Lib/source with spaces.py": {"path": logical + "Lib/source with spaces.py", "size": len(body),
                                             "sha256": BUILD.digest(body), "mode": 0o644}}
     provenance = {"archiveRoot": prefix, "archive": {"size": len(compressed), "sha256": source.sha256},
@@ -8254,6 +8255,26 @@ class MacPythonSourceBuildTests(unittest.TestCase):
                 BUILD.read(selected, 3, expected_links=3, expected=(3, BUILD.digest(b"xyz")))
             closed.assert_called_once_with(714)
         self.assertTrue(BUILD.DATA.known)
+
+    def test_derived_source_inventory_requires_exact_file_and_directory_digests(self):
+        source, compressed, rows, provenance = archive_fixture()
+        tar_body = gzip.decompress(compressed)
+        expected = BUILD.canonical({"files": list(rows.values())}) + b"\n"
+        source.inventory_size, source.inventory_sha256 = len(expected), BUILD.digest(expected)
+        directories = {"", "Lib"}
+        source.archive_inventory = {
+            "archiveRoot": provenance["archiveRoot"],
+            "directoryRosterSha256": BUILD.digest(BUILD.canonical(sorted(directories)) + b"\n"),
+        }
+        modes = provenance["modeProjection"]
+        self.assertEqual(BUILD.derive_source_inventory(tar_body, source, modes, lambda: None),
+                         (expected, directories))
+        with patch.object(source, "inventory_sha256", "0" * 64):
+            with self.assertRaisesRegex(BUILD.BuildRefused, "^derived-source-inventory-digest$"):
+                BUILD.derive_source_inventory(tar_body, source, modes, lambda: None)
+        with patch.dict(source.archive_inventory, directoryRosterSha256="0" * 64):
+            with self.assertRaisesRegex(BUILD.BuildRefused, "^derived-source-directory-digest$"):
+                BUILD.derive_source_inventory(tar_body, source, modes, lambda: None)
 
     def test_real_small_source_projection_preserves_bytes_modes_and_inventory(self):
         for component in ("cpython", "zlib"):

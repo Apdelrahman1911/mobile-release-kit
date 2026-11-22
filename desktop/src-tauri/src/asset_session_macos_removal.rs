@@ -143,7 +143,7 @@ impl Original{
     fn poison(&self){self.unknown.store(true,Ordering::SeqCst);self.stop.send_replace(true);if let Some(prompt)=self.prompt.get(){prompt.stop();}self.signal();}
     fn note(&self,why:AdmissionFailure,at:Instant){
         if at>Instant::now(){self.poison();return;}
-        match self.first.try_write(){Ok(mut value)=>*value=first(*value,Some((why,at))),Err(_)=>{self.poison();return;}}
+        match self.first.write(){Ok(mut value)=>*value=first(*value,Some((why,at))),Err(_)=>{self.poison();return;}}
         if let Some(source)=self.source.get(){source.source_note(why,at);}
         if matches!(why,AdmissionFailure::Unknown|AdmissionFailure::AlreadyUsed){self.unknown.store(true,Ordering::SeqCst);}
         self.stop.send_replace(true);if let Some(prompt)=self.prompt.get(){prompt.stop();}self.signal();
@@ -157,10 +157,9 @@ impl Original{
         }
     }
     fn local_first(&self)->Option<(AdmissionFailure,Instant)>{
-        // The worker's preflight and the coordinator's cleanup cut can
-        // observe the same first failure concurrently. Only a conflicting
-        // publication or a poisoned lock makes this observation unknown.
-        let local=match self.first.try_read(){Ok(value)=>*value,Err(_)=>{self.poison();None}};
+        // Both callers share a short DATA-only cell. Neither guard crosses
+        // a clock callback, a native operation, or a second lock.
+        let local=match self.first.read(){Ok(value)=>*value,Err(_)=>{self.poison();None}};
         first(local,self.source.get().and_then(AppRemovalWorkGate::source_first))
     }
     fn local_end(&self,external:Option<(AdmissionFailure,Instant)>)->Option<Instant>{
@@ -168,7 +167,7 @@ impl Original{
         let mut end=match first{Some((_,at))=>at.checked_add(TAIL)?.min(self.hard),None=>self.hard};
         // A returned native/wrapper observation only narrows this original
         // local tail. It is NOT a conversion of native_first_failure.
-        if let Ok(value)=self.peer_observation.try_read(){if let Some(at)=value.as_ref().and_then(|v|v.first_failure){end=end.min(at.checked_add(TAIL)?);}}
+        if let Ok(value)=self.peer_observation.read(){if let Some(at)=value.as_ref().and_then(|v|v.first_failure){end=end.min(at.checked_add(TAIL)?);}}
         else{self.poison();return None;}
         Some(end)
     }
@@ -184,6 +183,7 @@ impl Original{
         if now<self.admitted{self.poison();return false;}
         if now>=self.work{self.note(AdmissionFailure::Deadline,self.work);return false;}
         if self.local_first().is_some()||self.unknown.load(Ordering::SeqCst)||*self.stop.borrow(){return false;}
+        if Instant::now()>=self.work{self.note(AdmissionFailure::Deadline,self.work);return false;}
         if self.document.upgrade().is_none()||self.identity.upgrade().is_none(){self.note(AdmissionFailure::Stopped,now);return false;}
         if let Some(source)=self.source.get(){
             if source.source_work().is_err(){self.stop.send_replace(true);if let Some(prompt)=self.prompt.get(){prompt.stop();}return false;}
@@ -197,7 +197,7 @@ impl Original{
     fn pause(&self){std::thread::park_timeout(HEARTBEAT.min(self.local_end(None).unwrap_or(self.hard).saturating_duration_since(Instant::now())));}
     fn main_retired(&self)->bool{self.prompt.get().is_none_or(|prompt|prompt.never_requested()||prompt.known_main_retired())}
     fn observe_peer(&self,custody:peer_native::RemovalPeerCustody){
-        match self.peer_observation.try_write(){Ok(mut slot)=>{
+        match self.peer_observation.write(){Ok(mut slot)=>{
             if slot.as_ref().is_some_and(|old|old.native_calls>custody.native_calls||old.native_returns>custody.native_returns
                 ||old.native_first_failure!=0&&(old.native_first_failure!=custody.native_first_failure||old.native_first_code!=custody.native_first_code)){
                 drop(slot);self.poison();return;
@@ -443,10 +443,24 @@ fn joined_data(request:&wire::RequestData,current:&RemovalCurrent<'_>)->Flow<[[u
     if result[2]!=hex(actual.remover_executable_sha256).ok_or(())?{return Err(());}Ok(result)
 }
 fn source_post(original:&Original,request:&RemovalRequestOriginal,current:&RemovalCurrent<'_>)->Flow<()>{
-    if !original.work_ok(){return Err(());}let stop=original.stop.subscribe();
-    request.recheck(original.work,&stop).map_err(|_|())?;
-    current.recheck(original.work,&stop,&mut|_,at|original.note_source(at)).map_err(|_|())?;
-    if !original.work_ok(){return Err(());}Ok(())
+    if !original.work_ok(){
+        removal_trace(format_args!("app source-recheck=work-before first={:?} stopped={} unknown={} clock_invalid={} clock_stopped={}",
+            original.local_first().map(|(why,_)|why),*original.stop.borrow(),original.unknown.load(Ordering::SeqCst),
+            original.clock.get().is_some_and(|clock|clock.invalid()),original.clock.get().is_some_and(|clock|clock.work_stopped())));
+        return Err(());
+    }
+    let stop=original.stop.subscribe();
+    request.recheck(original.work,&stop).map_err(|why|{
+        removal_trace(format_args!("app source-recheck=request reason={why:?}"));
+    })?;
+    current.recheck(original.work,&stop,&mut|_,at|original.note_source(at)).map_err(|why|{
+        removal_trace(format_args!("app source-recheck=installed reason={why:?}"));
+    })?;
+    if !original.work_ok(){
+        removal_trace(format_args!("app source-recheck=work-after"));
+        return Err(());
+    }
+    Ok(())
 }
 fn signature_gate(original:&Original,parent_veto:&Cell<bool>,point:ProducerCheckpoint)->Decision{
     let(phase,custody)=match point{ProducerCheckpoint::Before{phase,custody}|ProducerCheckpoint::Returned{phase,custody,..}=>(phase,custody)};
@@ -549,10 +563,11 @@ fn exchange(original:&Original,request:&RemovalRequestOriginal,current:&RemovalC
         if offers.state.completion{return Err(());}drop(offers);original.pause();
     }
     let result=completion.as_ref().ok_or(())?;
-    removal_trace(format_args!("app maintenance=returned phase={:?}",result.status().phase));
+    let status=result.status();
+    removal_trace(format_args!("app maintenance=returned phase={:?} reason={:?} started={} unregister={} absent={}",
+        status.phase,status.reason,status.started_or_uncertain,status.unregister_accepted,status.not_registered));
     {let offers=original.offers.try_lock().map_err(|_|())?;
         if !result.matches_removal(offers.saved.as_ref().ok_or(())?,&cutoff)||!result.request_quit(){return Err(());}}
-    let status=result.status();
     let branch=match(status.phase,status.unregister_accepted,status.not_registered){
         (MacosMaintenancePhase::Prepared,true,true)=>wire::PreparationData::UnregisteredNow,
         (MacosMaintenancePhase::Prepared,false,true)=>wire::PreparationData::NeverRegistered,_=>return Err(()),};

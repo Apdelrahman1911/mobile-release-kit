@@ -56,6 +56,7 @@ fn git_local_busy_handoff_retains_exact_ticket_for_its_only_stop() {
     {
         let locked=host.control.lock().unwrap();
         assert_eq!(host.finish_native_state_retained(&ticket,&project).err(),Some(Error::Busy));
+        assert!(host.try_finish_native_state_retained(&ticket,&project).is_ok_and(|value|value.is_none()));
         assert_eq!(locked.pending,Some(ticket.0.epoch));
     }
     assert_eq!(Arc::as_ptr(&ticket),pointer);
@@ -69,7 +70,7 @@ fn git_local_consumed_error_is_not_handoff_cleanup_or_another_admission() {
     let (host,ticket,project)=unopened_ticket();let epoch=ticket.0.epoch;
     // The unchanged Host body consumes pending before detecting no prepared
     // binding. The still-held ticket cannot make this a successful handoff.
-    assert_eq!(host.finish_native_state_retained(&ticket,&project).err(),Some(Error::Conflict));
+    assert_eq!(host.try_finish_native_state_retained(&ticket,&project).err(),Some(Error::Conflict));
     assert_eq!(host.cancel_native_state_ticket(&ticket),Err(Error::Conflict));
     assert_eq!(host.finish_native_state_retained(&ticket,&project).err(),Some(Error::AccessDenied));
     let state=host.control.lock().unwrap();

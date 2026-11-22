@@ -475,7 +475,15 @@ impl InstallationSlots {
     }
     fn removal_archive_source_scope(&self)->bool {
         #[cfg(not(feature = "macos-android-registration-helper"))]
-        { self.removal.is_some() && self.book.as_ref().is_some_and(|book|book.removal_gate.is_some()) }
+        {
+            self.book.as_ref().is_some_and(|book| {
+                // The confirmed removal's maintenance worker repeats this
+                // inspection. Reinstall preserves the earlier root-only
+                // archives for both reads of the same installed root.
+                (self.removal.is_some() && book.removal_gate.is_some())
+                    || book.registration_gate.as_ref().is_some_and(|gate|gate.source_has_removal_cutoff())
+            })
+        }
         #[cfg(feature = "macos-android-registration-helper")]
         { false }
     }
@@ -894,7 +902,6 @@ impl InstallationSlots {
                 return self.reject(Problem::RecordMismatch,Instant::now(),publish);
             }
             let old_app = self.open(Some(install),&name,true,end,stop,publish)?;
-            self.protected(old_app,0o555,end,stop,publish)?;
             let old_release = self.open(Some(versions),binding.release,true,end,stop,publish)?;
             self.protected(old_release,0o755,end,stop,publish)?;
             self.match_fixed_roster(old_release,&["runtime",data::INVENTORY_NAME,data::RECORD_NAME],None,end,stop,publish)?;
@@ -932,6 +939,8 @@ impl InstallationSlots {
                     recorded_app.matches_legacy_binding_data(&observed_app,legacy))) {
                 return self.reject(Problem::RecordMismatch,Instant::now(),publish);
             }
+            self.attempt(Problem::PayloadMismatch,end,stop,publish,
+                |book| book.capture_validated_retained_bundle(old_app,end,stop))?;
             let old_runtime = self.open(Some(old_release),"runtime",true,end,stop,publish)?;
             self.protected(old_runtime,0o555,end,stop,publish)?;
             self.close(old_runtime,end,stop,publish)?; self.close(old_release,end,stop,publish)?; self.close(old_app,end,stop,publish)?;

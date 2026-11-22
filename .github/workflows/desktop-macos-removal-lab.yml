@@ -203,16 +203,18 @@ jobs:
           )"
           printf 'MRK_PAYLOAD_UNLINK_TEST=%s\n' "$binary" >> "$GITHUB_ENV"
 
-      - name: Check the original locks and the signed sidecar archive format
+      - name: Check the original locks, recorded sidecars and live original index
         shell: bash
         run: |
           set -euo pipefail
           locks=installer::worker::tests::launcher_removal_requires_both_original_locks
           archive=installer::maintenance::removal_archive_preserves_hidden_distribution_sidecars
-          "$MRK_PAYLOAD_UNLINK_TEST" "$locks" "$archive" --exact --test-threads=1 |
+          live=installer::tests::removal_live_index_keeps_original_open_and_close_finality
+          "$MRK_PAYLOAD_UNLINK_TEST" "$locks" "$archive" "$live" --exact --test-threads=1 |
             tee "$RUNNER_TEMP/removal-preflight-test.log"
           grep -F "test $locks ... ok" "$RUNNER_TEMP/removal-preflight-test.log"
           grep -F "test $archive ... ok" "$RUNNER_TEMP/removal-preflight-test.log"
+          grep -F "test $live ... ok" "$RUNNER_TEMP/removal-preflight-test.log"
 
       - name: Exercise the original unlink and close inside Installer
         shell: bash

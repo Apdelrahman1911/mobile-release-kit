@@ -18,7 +18,7 @@ pub struct BridgeError {
     installed_git_epoch_rejection: Option<InstalledGitEpochRejection>,
 }
 
-// Exact first rejected predicate from one original TRY-only epoch read.
+// Exact first rejected predicate from one original epoch read.
 // Nonshipping closed DATA; never a public error, epoch or admission grant.
 #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation",
     not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"),

@@ -36,7 +36,7 @@ class SourcePackagingInputData(unittest.TestCase):
                 self.assertEqual(S.signature(path.stat()), S.signature(before[role][1]))
             for target in S.MAC_TARGETS:
                 result = S.packaging_selection_command(SimpleNamespace(target=target))
-                self.assertEqual((result['target'], result['packageVersion']), (target, '0.2.0'))
+                self.assertEqual((result['target'], result['packageVersion']), (target, '0.2.2'))
                 self.assertFalse(result['nativeAuthority'])
 
     def test_roles_select_only_fixed_paths_and_caps(self):

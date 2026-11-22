@@ -6938,11 +6938,11 @@ sys.exit(status)
         original = dict(sorted(original.items()))
         rows = {name: {"path": name, "size": len(body), "sha256": module.digest(body), "mode": mode}
                 for name, (body, mode) in original.items()}
-        lock = TOOL.canonical({"schemaVersion": 1, "target": {"triple": target, "minimumMacOS": "26.0", "pythonVersion": "3.14.7", "gil": True},
+        lock = TOOL.canonical({"schemaVersion": 1, "target": {"triple": target, "minimumMacOS": "26.0", "pythonVersion": TOOL.supplier_python_version(target), "gil": True},
                                "requiredPublicNoticeInputs": required})
         source(TOOL.source_lock_input(target), lock)
         receipt = TOOL.canonical({"schemaVersion": 1, "kind": TOOL.FRESH_SUPPLIER_KIND, "target": target,
-            "pythonVersion": "3.14.7", "gil": True, "sourceLockSha256": module.digest(lock),
+            "pythonVersion": TOOL.supplier_python_version(target), "gil": True, "sourceLockSha256": module.digest(lock),
             "producerSourceSha256": "1" * 64, "recipeSha256": "2" * 64, "toolchainSha256": "3" * 64,
             "inventorySha256": module.digest(TOOL.canonical(list(rows.values()))), "files": list(rows.values()),
             "notices": sorted(name for name in original if name.startswith("python/licenses/")),
@@ -7821,8 +7821,7 @@ sys.exit(status)
         with self.assertRaises(TOOL.Refused):
             TOOL.removal_package_receipt_data(TOOL.canonical(updated),
                 **dict(arguments, expected_workflow=TOOL._CANDIDATE_FINAL_IMAGE_WORKFLOW))
-        # The candidate carrier's own same-run Remove emission: accepted only for
-        # its exact workflow and binding, never with a product/harness split.
+        # Same-source carriers keep the original workflow and product binding.
         carrier = copy.deepcopy(successful)
         carrier["workflow"] = TOOL._CANDIDATE_FINAL_IMAGE_WORKFLOW
         carrier_args = dict(arguments, expected_workflow=TOOL._CANDIDATE_FINAL_IMAGE_WORKFLOW)
@@ -7832,6 +7831,24 @@ sys.exit(status)
                              dict(carrier_args, expected_workflow=TOOL._INSTALLED_FINAL_IMAGE_WORKFLOW)):
             with self.assertRaises(TOOL.Refused):
                 TOOL.removal_package_receipt_data(TOOL.canonical(carrier), **changed_args)
+        from desktop.tools import macos_prepared_package as prepared
+        prepared_consumer = dict(source="b"*40, tree="c"*40, target=prepared.TARGETS[0], runId="123", runAttempt="1")
+        product = dict(origin=dict(source="a"*40, target=target, runId="41", runAttempt="1"),
+                       packageRole="ordinary-image")
+        # This fixture exercises receipt correspondence after DATA admission.
+        admitted = prepared.PreparedBinding(prepared._SEAL, product, prepared_consumer, {}, removal_compatible=True)
+        context = dict(GITHUB_SHA="b"*40, GITHUB_WORKFLOW_SHA="b"*40, GITHUB_RUN_ID="123", GITHUB_RUN_ATTEMPT="1",
+                       GITHUB_REPOSITORY=prepared.REPOSITORY, GITHUB_REF=module.CANDIDATE_REF,
+                       GITHUB_WORKFLOW_REF=TOOL._CANDIDATE_FINAL_IMAGE_WORKFLOW, GITHUB_EVENT_NAME="workflow_dispatch",
+                       MRK_MACOS_NATIVE_SCOPE="disabled", MRK_MACOS_PACKAGE_ROLE="ordinary-image",
+                       MRK_MACOS_LOCAL_DESKTOP_CARRIER="true", MRK_MACOS_TARGET=target)
+        split = dict(carrier, source="b"*40, workflowSource="b"*40)
+        split_args = dict(carrier_args, binding=prepared_consumer, environment=context, prepared_removal=admitted)
+        self.assertEqual(TOOL.removal_package_receipt_data(TOOL.canonical(split), **split_args),
+                         split["removalDistribution"])
+        for change in (dict(source="a"*40), dict(imageSourceCommit="b"*40), dict(runId="124")):
+            with self.subTest(receiptChange=change), self.assertRaises(TOOL.Refused):
+                TOOL.removal_package_receipt_data(TOOL.canonical(dict(split, **change)), **split_args)
         for mutation in ("old-source", "other-run", "install-phase", "pending", "close", "role", "return-bool", "credential", "context", "false-completion", "image-name", "extra"):
             changed = copy.deepcopy(successful)
             if mutation == "old-source": changed["imageSourceCommit"] = "b" * 40
@@ -17077,7 +17094,7 @@ class MacInstallationMetadataData(unittest.TestCase):
         self.assertEqual(selected["packageVersion"], TOOL.PACKAGE_VERSION)
         self.assertEqual(selected["release"], TOOL.RELEASE)
         self.assertEqual(TOOL.HISTORICAL_SUPPLIER_RELEASE, "macos26-arm64-project-draft-01")
-        self.assertEqual(TOOL.RELEASE, "macos26-arm64-desktop-06")
+        self.assertEqual(TOOL.RELEASE, "macos26-arm64-desktop-08")
         # Current verification generation, not a predecessor or release approval.
         def source_data(relative, limit):
             path = source / relative
@@ -17090,17 +17107,17 @@ class MacInstallationMetadataData(unittest.TestCase):
         cargo = tomllib.loads(source_data("desktop/src-tauri/Cargo.toml", 16384).decode("utf-8"))
         tauri = json.loads(source_data("desktop/src-tauri/tauri.conf.json", 4096))
         self.assertEqual((cargo["package"]["name"], cargo["package"]["version"], tauri["version"]),
-                         ("mobile-release-kit-desktop", "0.2.0", "0.2.0"))
-        for target, name, release in ((TOOL.ARM_TARGET, "build-release.json", "macos26-arm64-desktop-06"),
-                                      (TOOL.INTEL_TARGET, "build-release-intel.json", "macos26-x86_64-desktop-06")):
+                         ("mobile-release-kit-desktop", "0.2.2", "0.2.2"))
+        for target, name, release in ((TOOL.ARM_TARGET, "build-release.json", "macos26-arm64-desktop-08"),
+                                      (TOOL.INTEL_TARGET, "build-release-intel.json", "macos26-x86_64-desktop-08")):
             row = TOOL.build_release_data(source_data("desktop/macos-installed-inputs/" + name, 4096), target=target)
-            self.assertEqual(row, {"schemaVersion": 1, "packageVersion": "0.2.0", "release": release})
+            self.assertEqual(row, {"schemaVersion": 1, "packageVersion": "0.2.2", "release": release})
         for relative in ("desktop/src-tauri/Cargo.lock", "desktop/helpers/macos-android-register/Cargo.lock",
                          "desktop/helpers/macos-desktop-image/Cargo.lock"):
             locked = tomllib.loads(source_data(relative, 256 * 1024).decode("utf-8"))
             roots = [row for row in locked["package"] if row["name"] == "mobile-release-kit-desktop"]
             self.assertEqual(len(roots), 1)
-            self.assertEqual(roots[0]["version"], "0.2.0")
+            self.assertEqual(roots[0]["version"], "0.2.2")
             self.assertNotIn("source", roots[0])
             self.assertNotIn("checksum", roots[0])
         # This is bounded SOURCE metadata comparison, not native xattr/input
@@ -17213,7 +17230,7 @@ def current_data_fixture():
         engine = b"# Inert protocol DATA, never imported.\n"
         inputs = {"src/mobile_release/__init__.py": b'__version__ = "0.1.0"\n',
                   "src/mobile_release/_desktop_engine.py": engine,
-                  TOOL.CURRENT_CA_SOURCE: b"SYNTHETIC CA DATA, not a trust store\n",
+                  TOOL.CURRENT_CA_SOURCE: (Path(__file__).resolve().parents[2] / TOOL.CURRENT_CA_SOURCE).read_bytes(),
                   TOOL.CURRENT_HELPER_SOURCE: helper}
         inputs.update({"desktop/" + name: ("# current inert " + name + "\n").encode() for name in TOOL.CURRENT_BOOTSTRAPS})
         for name, body in inputs.items():
@@ -17263,7 +17280,9 @@ class MacCurrentRuntimeData(unittest.TestCase):
             self.assertEqual(len(projection) + 1, len(captured))
             self.assertNotIn(TOOL.CURRENT_HELPER_SOURCE, projection)
             self.assertNotIn(TOOL.CURRENT_CA_SOURCE, projection)
-            self.assertEqual(projection["desktop/github-ca.pem"], (fixture.inputs[TOOL.CURRENT_CA_SOURCE], 0o444))
+            self.assertEqual(projection["desktop/github-ca.pem"][1], 0o444)
+            self.assertEqual(TOOL.digest(projection["desktop/github-ca.pem"][0]),
+                "8a2bfdbfac68ecdda694c8dd46f5d29d4386fa0402f844b59a17b7d073ebbd81")
             description = TOOL.current_runtime_command(self.args(fixture))
             args = self.args(fixture, "current-runtime", "final")
             args.expected_source = source_digest

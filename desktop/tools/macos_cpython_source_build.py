@@ -343,6 +343,44 @@ def inventory(body, source):
     return rows
 
 
+def derive_source_inventory(tar_body, source, modes, check):
+    """Reproduce the independently pinned inventory from one verified TAR."""
+    rows, directories, aliases = [], set(), set()
+    base = source.archive_inventory["archiveRoot"]
+    with DATA.closing(tarfile.open(fileobj=io.BytesIO(tar_body), mode="r:")) as archive:
+        for member in archive:
+            check()
+            full = member.name.rstrip("/")
+            need(full == base or full.startswith(base + "/"), "source-archive-root")
+            name = source_name(full[len(base) + 1:]) if full != base else ""
+            need(name.casefold() not in aliases and not member.sparse and not member.mode & 0o7000,
+                 "source-inventory-original")
+            aliases.add(name.casefold())
+            need(len(aliases) <= 20000, "source-inventory-roster-bound")
+            if member.isdir():
+                need(modes["directories"].get(str(member.mode)) == 0o755, "source-directory-roster")
+                directories.add(name)
+                continue
+            mode = modes["files"].get(str(member.mode))
+            need(name and member.isreg() and mode in {0o644, 0o755} and 0 <= member.size <= 64 * MIB,
+                 "source-inventory-file")
+            stream = archive.extractfile(member)
+            need(stream is not None, "source-body-missing")
+            with DATA.closing(stream):
+                body = stream.read(member.size + 1)
+                need(len(body) == member.size and not stream.read(1), "source-body-identity")
+            rows.append({"path": source.original_prefix + name, "size": len(body),
+                         "sha256": digest(body), "mode": mode})
+        tail = tar_body[archive.offset:]
+        need(len(tail) >= 1024 and len(tail) % 512 == 0 and not any(tail), "source-tar-zero-tail")
+    body = canonical({"files": sorted(rows, key=lambda row: row["path"])}) + b"\n"
+    need((len(body), digest(body)) == (source.inventory_size, source.inventory_sha256),
+         "derived-source-inventory-digest")
+    need(digest(canonical(sorted(directories)) + b"\n") == source.archive_inventory["directoryRosterSha256"],
+         "derived-source-directory-digest")
+    return body, directories
+
+
 def make_value(body, key):
     # This fixed upstream uses the ordinary TAB recipe prefix. Do not interpret
     # custom Make syntax or silently mistake a changed prefix for declarations.
@@ -782,11 +820,10 @@ class Build:
         self.provenance = {row["id"]: row for row in provenance["sources"]}
         for source in self.inputs:
             self.check()
-            body = read(self.root / source.inventory_path, source.inventory_size,
-                        expected=(source.inventory_size, source.inventory_sha256))
-            self.source_rows[source.component] = inventory(body, source)
-            if source.component == "cpython":
-                self.stdlib = self.recipe.stdlib_projection(self.lock_body, body, self.target)
+            if source.archive_inventory is None:
+                body = read(self.root / source.inventory_path, source.inventory_size,
+                            expected=(source.inventory_size, source.inventory_sha256))
+                self.admit_source_inventory(body, source)
             archive = self.private / "archives" / (source.component + ".archive")
             need(not archive.exists(), "source-acquisition-collision")
             self.run("download-" + source.component, [self.curl, "-q", "--fail", "--silent", "--show-error",
@@ -799,8 +836,16 @@ class Build:
             "inventorySha256": source.inventory_sha256, "files": len(self.source_rows[source.component]),
             "incorporated": source.component != "libffi"} for source in self.inputs})
 
+    def admit_source_inventory(self, body, source):
+        self.source_rows[source.component] = inventory(body, source)
+        if source.component == "cpython":
+            self.stdlib = self.recipe.stdlib_projection(self.lock_body, body, self.target)
+
     def extract(self, source, compressed):
         expected = self.provenance[source.component]
+        if source.archive_inventory is not None:
+            expected = {**expected, **source.archive_inventory,
+                        "archive": {"sha256": source.sha256, "size": source.size}}
         need(expected["archive"] == {"sha256": source.sha256, "size": source.size}, "source-provenance-archive")
         decoded = self.private / "archives" / (source.component + ".tar")
         decoder = lzma.LZMADecompressor(format=lzma.FORMAT_XZ, memlimit=256 * MIB) if source.component == "cpython" else zlib.decompressobj(31)
@@ -827,15 +872,18 @@ class Build:
                  "decoded-source-identity")
         root = self.private / "sources" / source.component
         root.mkdir(mode=0o700)
-        rows = self.source_rows[source.component]
-        directories = {row["path"][len(source.original_prefix):].rstrip("/") for row in expected["directories"]}
-        # The provenance root path lacks the trailing slash in originalPrefix.
-        directories.add("")
         seen, seen_directories, aliases = set(), set(), set()
         # The archive parser receives bounded bytes, not a second hidden file
         # descriptor whose constructor/close failure could lose custody.
         tar_body = read(decoded, expected["decodedTar"]["size"],
                         expected=(expected["decodedTar"]["size"], expected["decodedTar"]["sha256"]))
+        if source.archive_inventory is not None:
+            body, directories = derive_source_inventory(tar_body, source, expected["modeProjection"], self.check)
+            self.admit_source_inventory(body, source)
+        else:
+            directories = {row["path"][len(source.original_prefix):].rstrip("/") for row in expected["directories"]}
+            directories.add("")
+        rows = self.source_rows[source.component]
         with DATA.closing(tarfile.open(fileobj=io.BytesIO(tar_body), mode="r:")) as archive:
             for member in archive:
                 self.check()
@@ -963,8 +1011,9 @@ class Build:
         self.python_build = directory
         self.evidence_bytes("python-link.map", read(directory / "python-link.map", 8 * MIB))
         self.evidence_json("build.json", {"sourceCommit": self.source, "configuration": self.configuration,
-            "linkMapSha256": digest(self.evidence["python-link.map"]), "pythonVersion": "3.14.7", "gil": True,
-            "dependencies": {"openssl": "3.5.8 static", "zlib": "1.3.2 static", "libffi": "Apple system"}})
+            "linkMapSha256": digest(self.evidence["python-link.map"]), "pythonVersion": self.inputs[0].version, "gil": True,
+            "dependencies": {"openssl": next(source.version for source in self.inputs if source.component == "openssl") + " static",
+                             "zlib": "1.3.2 static", "libffi": "Apple system"}})
 
     def project(self):
         self.phase = "supplier-projection"
@@ -1381,7 +1430,7 @@ class Build:
         supplier = export / "supplier"
         self._move_payload("export", deadline=self.deadline + CLEANUP_SECONDS)
         receipt = {"schemaVersion": 1, "kind": "mrk-macos-cpython-source-supplier-v1",
-            "target": self.target, "pythonVersion": "3.14.7", "gil": True,
+            "target": self.target, "pythonVersion": self.inputs[0].version, "gil": True,
             "sourceLockSha256": self.source_lock["sha256"],
             "producerSourceSha256": self.source_binding["desktop/tools/macos_cpython_source_build.py"]["sha256"],
             "recipeSha256": digest(canonical({name: row["sha256"] for name, row in self.source_binding.items()})),

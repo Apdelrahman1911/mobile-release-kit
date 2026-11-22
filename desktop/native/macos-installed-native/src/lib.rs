@@ -207,6 +207,7 @@ unsafe extern "C" {
         free_result: *mut c_int, free_errno: *mut c_int) -> c_int;
     fn mrk_no_xattrs(fd: c_int) -> c_int;
     fn mrk_existing_app_macl(fd: c_int, bytes: *mut u8, capacity: usize, used: *mut usize) -> c_int;
+    fn mrk_initial_app_macl(fd: c_int, bytes: *mut u8, capacity: usize, used: *mut usize, opening_change: *mut c_int) -> c_int;
     fn mrk_existing_leaf_provenance(fd: c_int) -> c_int;
     fn mrk_entries(fd: c_int, bytes: *mut u8, capacity: usize, used: *mut usize) -> c_int;
     fn mrk_sync(fd: c_int, file: c_int) -> c_int;
@@ -297,6 +298,20 @@ pub fn existing_app_macl(fd: BorrowedFd<'_>, bytes: &mut [u8; 1024]) -> io::Resu
     result(unsafe { mrk_existing_app_macl(fd.as_raw_fd(), bytes.as_mut_ptr(), bytes.len(), &mut used) })?;
     if used > bytes.len() { return Err(io::ErrorKind::InvalidData.into()); }
     Ok(used)
+}
+/// A refused initial read can report a tag observed across a ctime change.
+/// A change hint requires another strict read, including comparison with any
+/// tag bytes from the first observation.
+pub fn initial_app_macl(fd: BorrowedFd<'_>, bytes: &mut [u8; 1024]) -> io::Result<(usize, bool)> {
+    let (mut used, mut changed) = (0, 0);
+    // SAFETY: live borrowed FD, fixed buffer, and two distinct output cells.
+    let code = unsafe { mrk_initial_app_macl(fd.as_raw_fd(), bytes.as_mut_ptr(), bytes.len(), &mut used, &mut changed) };
+    match (code, changed, used) {
+        (0, 0, used) if used <= bytes.len() => Ok((used, false)),
+        (nix::libc::EPERM, 1, used) if used <= bytes.len() => Ok((used, true)),
+        _ if code != 0 => Err(io::Error::from_raw_os_error(code)),
+        _ => Err(io::ErrorKind::InvalidData.into()),
+    }
 }
 /// Admit an EXISTING enrolled regular payload file with no attributes or with
 /// only macOS's own provenance tag (exact 11-byte version-1 shape). Read only:
@@ -2904,6 +2919,23 @@ fn evidence_folder_abi_data_check() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn existing_app_metadata_rejects_an_unrelated_attribute() {
+        use std::os::fd::AsFd;
+        let path = std::env::temp_dir().join(format!("mrk-bundle-metadata-{}", std::process::id()));
+        std::fs::create_dir(&path).unwrap();
+        let dir = std::fs::File::open(&path).unwrap();
+        let mut bytes = [0; 1024];
+        let set = std::process::Command::new("/usr/bin/xattr")
+            .args(["-w", "user.mrk-test", "foreign"]).arg(&path).status().unwrap();
+        let strict = existing_app_macl(dir.as_fd(), &mut bytes);
+        let opening = initial_app_macl(dir.as_fd(), &mut bytes);
+        drop(dir);
+        std::fs::remove_dir(&path).unwrap();
+        assert!(set.success());
+        assert_eq!(strict.unwrap_err().raw_os_error(), Some(nix::libc::EPERM));
+        assert_eq!(opening.unwrap_err().raw_os_error(), Some(nix::libc::EPERM));
+    }
     #[test]
     fn existing_leaf_provenance_admits_only_the_os_tag_on_regular_files() {
         use std::os::fd::AsFd;

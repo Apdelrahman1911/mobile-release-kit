@@ -253,18 +253,16 @@ impl Publisher {
     pub(crate) fn at(&self) -> Instant { self.at }
     pub(crate) fn accepted(&self) -> bool { self.accepted && !self.finished }
     pub(crate) fn same_slot(&self, slot: &Arc<ControlSlot>) -> bool { Arc::ptr_eq(&self.slot, slot) }
-    /// Read-only comparison for the exact ordinary source-picker publisher.
-    /// epoch() remains strict for every other caller. No acceptance or renewal.
+    /// Read the original Git publisher using the same serialized Book read as
+    /// ControlSlot::epoch(). A concurrent status poll can briefly hold the
+    /// Book without changing its epoch or reserving another publisher.
     pub(crate) fn git_local_epoch(&self) -> Result<u64, BridgeError> {
-        // Same exact sole-publisher proof, no widening of ordinary epoch().
-        #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation",
+        self.publisher_epoch_checked(self.slot.book.lock().map_err(TryLockError::from),
+            #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation",
     not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"),
     target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
-        { self.tool_source_epoch_checked(true) }
-        #[cfg(not(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation",
-    not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"),
-    target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64"))))]
-        { self.tool_source_epoch() }
+            true
+        )
     }
     // Closed reserved-version chain comparison, not a new publisher/acceptance.
     // Wait-only observation for the retained reserved-version native job.
@@ -282,20 +280,21 @@ impl Publisher {
         self.tool_source_epoch()?; Ok(self.serial)
     }
     pub(crate) fn tool_source_epoch(&self) -> Result<u64, BridgeError> {
-        self.tool_source_epoch_checked(
+        self.publisher_epoch_checked(self.slot.book.try_lock(),
             #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation",
     not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"),
     target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
             false
         )
     }
-    fn tool_source_epoch_checked(&self,
+    fn publisher_epoch_checked<'a>(&self,
+        book: Result<std::sync::MutexGuard<'a, ControlBook>, TryLockError<std::sync::MutexGuard<'a, ControlBook>>>,
         #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation",
     not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"),
     target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
         observe_git: bool,
     ) -> Result<u64, BridgeError> {
-        let book = self.slot.book.try_lock().map_err(|original| {
+        let book = book.map_err(|original| {
             let error = BridgeError::cleanup_unknown();
             #[cfg(all(test, debug_assertions, feature="desktop-shell", feature="custom-protocol", feature="macos-installed-observation",
     not(feature="development-runtime"), not(feature="ubuntu-runtime-publisher"), not(feature="macos-installed-installer"),
@@ -310,7 +309,7 @@ impl Publisher {
     target_os="macos", target_pointer_width="64", any(target_arch="aarch64", target_arch="x86_64")))]
         let mut rejected = None;
         // Each original short-circuit predicate is evaluated exactly once in
-        // its original order, under the SAME original ControlBook TRY lock.
+        // its original order under the same ControlBook lock.
         macro_rules! epoch_rejected {
             ($condition:expr, $kind:ident) => {{
                 let failed = $condition;
@@ -416,8 +415,6 @@ impl ControlSlot {
         let slot = Arc::new(ControlSlot::default());
         let mut p = slot.reserve(PublisherKind::General, false).unwrap();
         assert_eq!(p.git_local_epoch().unwrap(), 0);
-        let held = slot.book.lock().unwrap();
-        rejected(&p, R::BookWouldBlock); drop(held);
         p.finished = true; p.index = 10;
         rejected(&p, R::PublisherFinished);
         p.finished = false; rejected(&p, R::PublisherKind); p.index = 0;
@@ -2330,6 +2327,33 @@ mod lifecycle_book_tests {
         publisher.resolve(true);assert!(publisher.tool_source_epoch().is_err());
         assert_eq!(slot.epoch().unwrap(),1);
     }
+    #[test]
+    fn git_epoch_serializes_with_the_book_and_rechecks_the_original_publisher() {
+        let slot = Arc::new(ControlSlot::default());
+        let publisher = slot.reserve(PublisherKind::General, false).unwrap();
+        let book = slot.book.lock().unwrap();
+        assert!(publisher.tool_source_epoch().is_err());
+        std::thread::scope(|scope| {
+            let publisher = &publisher;
+            let (started, entered) = std::sync::mpsc::channel();
+            let (finish, completed) = std::sync::mpsc::channel();
+            scope.spawn(move || {
+                started.send(()).unwrap();
+                finish.send(publisher.git_local_epoch()).unwrap();
+            });
+            entered.recv().unwrap();
+            let pending = completed.recv_timeout(Duration::from_millis(100));
+            drop(book);
+            assert!(matches!(pending, Err(std::sync::mpsc::RecvTimeoutError::Timeout)));
+            assert_eq!(completed.recv().unwrap().unwrap(), 0);
+        });
+        let other = slot.reserve(PublisherKind::General, false).unwrap();
+        assert_eq!(publisher.git_local_epoch(), Err(BridgeError::cleanup_unknown()));
+        other.reject();
+        assert_eq!(publisher.git_local_epoch().unwrap(), 0);
+        publisher.reject();
+    }
+
     #[test]
     fn accepted_event_keeps_original_f_after_pending_projection_finishes() {
         let (slot,control,_cohort,gate)=control_at(Instant::now());

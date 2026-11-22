@@ -19,6 +19,47 @@ mod native {
     use zeroize::Zeroizing;
     use std::time::Instant;
 
+    const ROOT_BINDING_V1: &[u8] = b"MRK service root v1\n";
+    const ROOT_BINDING_BYTES: usize = ROOT_BINDING_V1.len() + 16;
+    #[cfg(all(target_os = "macos", not(feature = "macos-xcode-setup")))]
+    const ROOT_BINDING_V2: &[u8] = b"MRK service root v2\n";
+    #[cfg(all(target_os = "macos", not(feature = "macos-xcode-setup")))]
+    const ROOT_BINDING_NEXT: &str = ".service-v1.reservation.next";
+
+    fn legacy_root_binding(original: FileKey) -> Vec<u8> {
+        let mut bytes = ROOT_BINDING_V1.to_vec();
+        bytes.extend(original.device.to_be_bytes());
+        bytes.extend(original.inode.to_be_bytes());
+        bytes
+    }
+
+    #[cfg(all(target_os = "macos", not(feature = "macos-xcode-setup")))]
+    fn mac_volume_binding(volume: [u8; 16], inode: u64) -> Vec<u8> {
+        // Keep the fixed reservation width. This 128-bit identity digest is
+        // scoped to the volume UUID and the original directory's file number.
+        // The separately held native name, owner, permissions and lock remain
+        // mandatory. A device number identifies only the current mount.
+        let mut hash = Sha256::new();
+        hash.update(b"MobileReleaseKit-cli-state-root-v2\0");
+        hash.update(volume);
+        hash.update(inode.to_be_bytes());
+        let mut bytes = ROOT_BINDING_V2.to_vec();
+        bytes.extend(&hash.finalize()[..16]);
+        bytes
+    }
+
+    fn root_binding(file: &File, original: FileKey) -> Result<Vec<u8>> {
+        #[cfg(all(target_os = "macos", not(feature = "macos-xcode-setup")))]
+        {
+            use std::os::fd::AsFd;
+            let volume = mrk_macos_installed_native::filesystem_identity::volume_uuid(file.as_fd())
+                .map_err(io_error)?;
+            Ok(mac_volume_binding(volume, original.inode))
+        }
+        #[cfg(not(all(target_os = "macos", not(feature = "macos-xcode-setup"))))]
+        { let _ = file; Ok(legacy_root_binding(original)) }
+    }
+
     fn checkpoint(deadline: Option<Instant>) -> Result<()> {
         if deadline.is_some_and(|cutoff| Instant::now() >= cutoff) { Err(Error::Expired.into()) } else { Ok(()) }
     }
@@ -237,14 +278,16 @@ mod native {
                 // sync can fail. The outer close then attempts EVERY original.
                 this.edges.push(Edge { file, name: OsString::from(DIRECTORY), original });
                 let parent = &this.edges[parent_index].file;
-                let mut binding = b"MRK service root v1\n".to_vec();
-                binding.extend(original.device.to_be_bytes()); binding.extend(original.inode.to_be_bytes());
                 let (reservation_key, reservation_bytes) = if created {
                     checkpoint(deadline)?;
+                    let binding = root_binding(this.file()?, original)?;
                     let created_key = create_private(parent, PARENT_RESERVATION, &binding)?;
-                    sync(parent)?; (created_key, binding.clone())
-                } else { read_private(parent, PARENT_RESERVATION, binding.len(), marker)? };
-                if reservation_bytes != binding { return Err(Error::Conflict.into()); }
+                    sync(parent)?; (created_key, binding)
+                } else { read_private(parent, PARENT_RESERVATION, ROOT_BINDING_BYTES, marker)? };
+                if reservation_bytes != legacy_root_binding(original)
+                    && reservation_bytes != root_binding(this.file()?, original)? {
+                    return Err(Error::Conflict.into());
+                }
                 this.parent_reservation = Some(reservation_key);
                 this.check()?;
                 Ok(created)
@@ -268,6 +311,47 @@ mod native {
         pub(crate) fn for_client(app_data: &Path) -> Result<Self> { Self::acquire(app_data, false, &[], None, None).map(|v| v.0) }
         pub(crate) fn file(&self) -> Result<&File> { self.edges.last().map(|e| &e.file).ok_or_else(|| Error::Unavailable.into()) }
         pub(crate) fn path(&self) -> &Path { &self.path }
+        #[cfg(all(target_os = "macos", not(feature = "macos-xcode-setup")))]
+        fn seal_legacy_root(&mut self, deadline: Option<Instant>) -> Result<()> {
+            checkpoint(deadline)?;
+            self.check()?;
+            let child = self.edges.last().ok_or_else(|| StateError::from(Error::StateUnknown))?;
+            let parent = self.edges.get(self.edges.len().checked_sub(2).ok_or_else(|| StateError::from(Error::StateUnknown))?)
+                .ok_or_else(|| StateError::from(Error::StateUnknown))?;
+            let dir = &parent.file;
+            let (original, old) = read_private(dir, PARENT_RESERVATION, ROOT_BINDING_BYTES, self.parent_reservation)?;
+            let binding = root_binding(&child.file, child.original)?;
+            if old == binding {
+                return if named(dir, ROOT_BINDING_NEXT)?.is_none() { Ok(()) } else { Err(Error::RecoveryRequired.into()) };
+            }
+            // Only this running host under the original exclusive owner.lock
+            // may migrate a fully matched legacy reservation. A device/volume
+            // mismatch in an unsealed legacy entry still needs recovery.
+            if old != legacy_root_binding(child.original) { return Err(Error::Conflict.into()); }
+            let candidate = if let Some(key) = named(dir, ROOT_BINDING_NEXT)? {
+                let (_, staged) = read_private(dir, ROOT_BINDING_NEXT, ROOT_BINDING_BYTES, Some(key))?;
+                if staged != binding { return Err(Error::RecoveryRequired.into()); }
+                key
+            } else {
+                create_private(dir, ROOT_BINDING_NEXT, &binding)?
+            };
+            checkpoint(deadline)?;
+            self.check()?;
+            if named(dir, ROOT_BINDING_NEXT)? != Some(candidate) || Some(original) != self.parent_reservation {
+                return Err(Error::Conflict.into());
+            }
+            fcntl::renameat(dir, ROOT_BINDING_NEXT, dir, PARENT_RESERVATION)
+                .map_err(|_| StateError::unknown(Effect::Unknown))?;
+            sync(dir).map_err(|_| StateError::unknown(Effect::Applied))?;
+            let (written, bytes) = read_private(dir, PARENT_RESERVATION, ROOT_BINDING_BYTES, None)
+                .map_err(|_| StateError::unknown(Effect::Applied))?;
+            let pending = named(dir, ROOT_BINDING_NEXT).map_err(|_| StateError::unknown(Effect::Applied))?;
+            if !candidate.same_object(written) || bytes != binding || pending.is_some() {
+                return Err(StateError::unknown(Effect::Applied));
+            }
+            self.parent_reservation = Some(written);
+            self.check().map_err(|_| StateError::unknown(Effect::Applied))
+        }
         pub(crate) fn check(&self) -> Result<()> {
             for (i, edge) in self.edges.iter().enumerate() {
                 if !edge.original.same_directory(key(&edge.file)?) { return Err(Error::Conflict.into()); }
@@ -349,6 +433,8 @@ mod native {
         fn open_checked(app_data: &Path, excluded_projects: &[(u64, u64)],
             expected: Option<ApplicationDirectoryExpectation>, deadline: Option<Instant>) -> Result<Self> {
             let (directory, created) = Directory::acquire(app_data, true, excluded_projects, expected, deadline)?;
+            #[cfg(all(target_os = "macos", not(feature = "macos-xcode-setup")))]
+            let mut directory = directory;
             let result = (|| {
                 checkpoint(deadline)?;
                 let flags = OFlag::O_RDWR | OFlag::O_CLOEXEC | OFlag::O_NOFOLLOW | OFlag::O_NONBLOCK
@@ -400,6 +486,8 @@ mod native {
                         decode(namespace, &raw)?;
                         originals.insert(namespace, key);
                     }
+                    #[cfg(all(target_os = "macos", not(feature = "macos-xcode-setup")))]
+                    directory.seal_legacy_root(deadline)?;
                     Ok((reservation, version, originals))
                 })();
                 match load { Ok((reservation, version, originals)) => Ok((file, lock_key, reservation, version, originals)), Err(error) => { close(file)?; Err(error) } }
@@ -572,6 +660,38 @@ mod native {
         fn held_directory_identity(path: &Path) -> ApplicationDirectoryIdentity {
             let file = File::open(path).unwrap(); let id = application_identity(key(&file).unwrap());
             close(file).unwrap(); id
+        }
+        #[cfg(all(target_os = "macos", not(feature = "macos-xcode-setup")))]
+        #[test]
+        fn legacy_root_migrates_only_while_the_original_mount_still_matches() {
+            let fixture = Fixture::new();
+            let store = PrivateStateDirectory::open(&fixture.app).unwrap();
+            let snapshot = store.replace(Namespace::Projects, Revision(0), b"fixture references").unwrap();
+            store.close().unwrap();
+
+            let marker = fixture.app.join(PARENT_RESERVATION);
+            let child = File::open(fixture.app.join(DIRECTORY)).unwrap();
+            let original = key(&child).unwrap();
+            let durable = root_binding(&child, original).unwrap();
+            assert_eq!(std::fs::read(&marker).unwrap(), durable);
+            assert_eq!(durable.len(), ROOT_BINDING_BYTES);
+            assert_eq!(root_binding(&child, FileKey { device: original.device ^ 1, ..original }).unwrap(), durable);
+            assert_ne!(root_binding(&child, FileKey { inode: original.inode ^ 1, ..original }).unwrap(), durable);
+            assert_ne!(mac_volume_binding([1; 16], original.inode), mac_volume_binding([2; 16], original.inode));
+
+            let stale = legacy_root_binding(FileKey { device: original.device ^ 1, ..original });
+            std::fs::write(&marker, &stale).unwrap();
+            assert_eq!(Directory::for_client(&fixture.app).err().unwrap().code, Error::Conflict);
+            assert_eq!(PrivateStateDirectory::open(&fixture.app).err().unwrap().code, Error::Conflict);
+            assert_eq!(std::fs::read(&marker).unwrap(), stale);
+
+            std::fs::write(&marker, legacy_root_binding(original)).unwrap();
+            Directory::for_client(&fixture.app).unwrap().close().unwrap();
+            let reopened = PrivateStateDirectory::open(&fixture.app).unwrap();
+            assert_eq!(std::fs::read(&marker).unwrap(), durable);
+            assert_eq!(reopened.read(Namespace::Projects).unwrap().bytes, snapshot.bytes);
+            reopened.close().unwrap();
+            close(child).unwrap();
         }
         #[test]
         fn native_store_expected_presence_and_identity_refuse_before_service_writes() {

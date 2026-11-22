@@ -104,6 +104,12 @@ its checkpoint also still needs a build retry. This split removes the repeated
 long build from later installation and test failures; it does not claim that an
 unfinished build or an older binary can verify changed source.
 
+The ordinary ARM64 package uses `[macos-desktop-update] [macos-builds-only]`.
+When changed Git behaviour needs the installed observer, `[macos-git-only]`
+selects the Git27 graph and its acceptance case. Use the ordinary package's own
+build ID and source for the matching Installer and removal checks. Record the
+Git27 observer's source separately, even when the code inputs agree.
+
 For a test/packaging script correction, select **Run workflow**, operation
 **candidate-tests**, the saved package's full `prepared_source` and `prepared_run`,
 and one `test_group`. This dispatch does not run either build. GitHub's complete

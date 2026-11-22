@@ -269,6 +269,10 @@ class CandidatePartsWorkflowTests(unittest.TestCase):
                 self.assertIn('matrix.native_scope',job['name'])
                 self.assertEqual(job['strategy']['matrix']['include'][0]['native_scope'],scope)
                 self.assertEqual(job['strategy']['matrix']['include'][0]['runner'],runner)
+                if profile == 'Tool26':
+                    self.assertIn("!contains(github.event.head_commit.message, '[macos-git-only]')", job['if'])
+                else:
+                    self.assertNotIn('[macos-git-only]', job['if'])
                 self.assertFalse(job['strategy']['fail-fast'])
                 expected = [prefix + '-' + name for name in P.ancestors(part)] if part != 'prepare' else ['candidate-parts-data']
                 self.assertEqual(job['needs'],expected)
@@ -292,6 +296,9 @@ class CandidatePartsWorkflowTests(unittest.TestCase):
         self.assertEqual(auto['needs'],['engineering-install','candidate-tool26-final-package','candidate-git27-final-package'])
         self.assertIn("needs.candidate-tool26-final-package.result == 'success'",auto['if'])
         self.assertIn("needs.candidate-git27-final-package.result == 'success'",auto['if'])
+        self.assertIn("needs.candidate-git27-final-package.result == 'success' && "
+                      "(needs.candidate-tool26-final-package.result == 'success' || "
+                      "contains(github.event.head_commit.message, '[macos-git-only]'))", auto['if'])
         self.assertNotIn("github.ref == 'refs/heads/verify/desktop-macos-candidate'",jobs['engineering-install']['if'])
 
     def test_actual_source_actions_use_fresh_admission_without_reusing_old_work_identity(self):

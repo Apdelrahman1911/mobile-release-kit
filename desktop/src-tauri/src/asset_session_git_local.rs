@@ -275,19 +275,21 @@ impl GitLocalGate {
         if self.0.post.set(PostPublisher {project,stamp}).is_err() {return Err(BridgeError::cleanup_unknown())}
         slot.joined=true;Ok(ticket)
     }
-    pub(crate) fn host_joined(&self,id:&str,ticket:&NativeStateTicket)->Result<Arc<NativeStateReady>,BridgeError> {
+    pub(crate) fn host_joined(&self,id:&str,ticket:&NativeStateTicket)->Result<Option<Arc<NativeStateReady>>,BridgeError> {
         let document=self.0.document.upgrade().ok_or_else(BridgeError::cleanup_unknown)?;
         let state=document.state.lock().map_err(|_|BridgeError::cleanup_unknown())?;
         let edit=document.bridge.edits.saved_registration_guard(&document.session_identity)?;
         self.current_with_edit_locked(&document,&state,id,&edit)?;
         if self.0.ready.get().is_some() {return Err(BridgeError::cleanup_unknown())}
         let post=self.0.post.get().ok_or_else(BridgeError::cleanup_unknown)?;
-        let ready=Arc::new(document.bridge.application_service.finish_native_state_retained(ticket,&post.project).map_err(state_error)?);
+        let Some(ready)=document.bridge.application_service.try_finish_native_state_retained(ticket,&post.project)
+            .map_err(state_error)? else {return Ok(None)};
+        let ready=Arc::new(ready);
         let binding=ready.project_binding();
         if binding.canonical_root!=self.0.root.path.to_str().ok_or_else(changed)?
             ||(binding.device,binding.inode)!=(post.project.device,post.project.inode)
             ||ready.retained_bytes().is_none_or(|v|v>32*1024) {return Err(BridgeError::cleanup_unknown())}
-        self.0.ready.set(ready.clone()).map_err(|_|BridgeError::cleanup_unknown())?;drop(edit);Ok(ready)
+        self.0.ready.set(ready.clone()).map_err(|_|BridgeError::cleanup_unknown())?;drop(edit);Ok(Some(ready))
     }
     /// Last original finite job, after final Store write/use retirement joins.
     /// No Doc guard is held if an original publisher resolves or poisons.

@@ -5,6 +5,8 @@ import os
 import plistlib
 import re
 from pathlib import Path
+import subprocess
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -44,6 +46,83 @@ def inventory_fixture():
 
 
 class OrdinaryDesktopUpdateTests(unittest.TestCase):
+    @unittest.skipUnless(sys.platform == 'darwin', 'uses Darwin stat and xattr declarations')
+    def test_startup_tag_timing_in_native_reader(self):
+        root = Path(__file__).resolve().parents[2]
+        source = (root / 'desktop/native/macos-installed-native/src/native.m').read_text()
+        _, native = source.split('int mrk_no_xattrs(int fd)', 1)
+        native, _ = native.split('// Bounded read only. macOS may attach', 1)
+        harness = r"""
+#include <assert.h>
+#include <errno.h>
+#include <stdint.h>
+#include <string.h>
+#include <sys/stat.h>
+#include <sys/xattr.h>
+enum Fixture { EMPTY, STABLE, ATTACH, BEFORE_LIST, FOREIGN, REPLACED };
+static enum Fixture fixture;
+static int stats, lists;
+static int sample(int fd, struct stat *s) {
+    (void)fd;
+    memset(s,0,sizeof(*s));
+    s->st_mode=S_IFDIR | 0555;
+    s->st_ino=1;
+    ++stats;
+    if (stats==2 && (fixture==ATTACH || fixture==BEFORE_LIST || fixture==REPLACED))
+        s->st_ctimespec.tv_nsec=1;
+    if (stats==2 && fixture==REPLACED) s->st_ino=2;
+    return 0;
+}
+static ssize_t list(int fd, char *value, size_t cap, int flags) {
+    (void)fd; (void)flags;
+    ++lists;
+    if (fixture==EMPTY || ((fixture==ATTACH || fixture==REPLACED) && lists==1)) return 0;
+    const char *tag=fixture==FOREIGN ? "user.foreign" : "com.apple.macl";
+    size_t count=strlen(tag)+1;
+    if (value) { assert(cap>=count); memcpy(value,tag,count); }
+    return (ssize_t)count;
+}
+static ssize_t get(int fd, const char *tag, void *value, size_t cap, uint32_t pos, int flags) {
+    (void)fd; (void)pos; (void)flags;
+    assert(strcmp(tag,"com.apple.macl")==0);
+    if (value) { assert(cap==72); memset(value,7,cap); }
+    return 72;
+}
+#define fstat sample
+#define flistxattr list
+#define fgetxattr get
+""" + 'int mrk_no_xattrs(int fd)' + native + r"""
+static void check(enum Fixture selected, int code, int hint, size_t count) {
+    fixture=selected; stats=lists=0;
+    uint8_t bytes[1024]={0};
+    size_t used=0; int changed=0;
+    assert(mrk_initial_app_macl(4,bytes,sizeof(bytes),&used,&changed)==code);
+    assert(changed==hint && used==count);
+}
+int main(void) {
+    check(EMPTY,0,0,0);
+    check(STABLE,0,0,72);
+    check(ATTACH,EPERM,1,0);
+    check(BEFORE_LIST,EPERM,1,72);
+    check(FOREIGN,EPERM,0,0);
+    check(REPLACED,EPERM,0,0);
+    uint8_t bytes[1024]={0}; size_t used=0;
+    fixture=ATTACH; stats=lists=0;
+    assert(mrk_existing_app_macl(4,bytes,sizeof(bytes),&used)==EPERM);
+    fixture=STABLE; stats=lists=0;
+    assert(mrk_existing_app_macl(4,bytes,sizeof(bytes),&used)==0 && used==72);
+    assert(mrk_no_xattrs(4)==EPERM);
+    return 0;
+}
+"""
+        with tempfile.TemporaryDirectory(prefix='mrk-startup-attributes-') as work:
+            probe = Path(work) / 'probe.c'
+            binary = Path(work) / 'probe'
+            probe.write_text(harness)
+            subprocess.run(['/usr/bin/clang', '-std=gnu17', '-Wall', '-Wextra', '-Werror',
+                            str(probe), '-o', str(binary)], check=True, timeout=30)
+            subprocess.run([str(binary)], check=True, timeout=5)
+
     def test_maintenance_payload_floor_keeps_each_generation_bounded(self):
         inventories = [dict(files=[dict(size=n)]) for n in (283_826_469,331_920_402)]
         proof = U.maintenance_payload_floor_data(inventories)

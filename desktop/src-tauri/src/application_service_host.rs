@@ -562,7 +562,16 @@ impl ApplicationHost {
     /// uncertain handoff. Same pending/epoch/current checks, no cloned ticket
     /// or new authority; an error is not proof that pending remained intact.
     pub(crate) fn finish_native_state_retained(&self, ticket: &NativeStateTicket, current: &NativeProject) -> Result<NativeStateReady, Error> {
-        let mut state = self.try_native_lock()?;
+        self.try_finish_native_state_retained(ticket, current)?.ok_or(Error::Busy)
+    }
+    /// Under pure Host contention the exact joined ticket is still pending.
+    /// A failed check after acquiring Control retains its original error.
+    pub(crate) fn try_finish_native_state_retained(&self, ticket: &NativeStateTicket, current: &NativeProject) -> Result<Option<NativeStateReady>, Error> {
+        let mut state = match self.try_native_lock() {
+            Ok(state) => state,
+            Err(Error::Busy) => return Ok(None),
+            Err(error) => return Err(error),
+        };
         self.check_startup(&state, &ticket.0)?;
         state.pending = None;
         if state.prepared.take() != Some(ticket.0.epoch)
@@ -571,8 +580,8 @@ impl ApplicationHost {
         let project = state.prepared_binding.take().ok_or(Error::StateUnknown)?;
         if project.canonical_root != current.canonical_root.to_str().ok_or(Error::Conflict)?
             || (project.device, project.inode) != (current.device, current.inode) { return Err(Error::Conflict); }
-        Ok(NativeStateReady { owner: self.identity.clone(), source_epoch: state.source_epoch,
-            original: current.clone(), project, store: state.store.clone().ok_or(Error::Unavailable)? })
+        Ok(Some(NativeStateReady { owner: self.identity.clone(), source_epoch: state.source_epoch,
+            original: current.clone(), project, store: state.store.clone().ok_or(Error::Unavailable)? }))
     }
     /// A TRY-only memory context recheck, not a Store read or operation grant.
     pub(crate) fn native_state_current(&self, lease: &NativeStateReady, current: &NativeProject) -> Result<(), Error> {

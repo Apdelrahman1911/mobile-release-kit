@@ -39,7 +39,7 @@ on:
         required: false
         type: choice
         default: git-local
-        options: [git-local, git-fetch, git-push, git-create, git-upstream, service-cli, public-acquisition, sdk-registration, upload-keys, cold-restart, backup]
+        options: [git-local, git-branch, git-fetch, git-push, git-create, git-upstream, service-cli, public-acquisition, sdk-registration, upload-keys, cold-restart, backup]
       target:
         description: Single selected target; no architecture fallback
         required: true
@@ -67,8 +67,9 @@ permissions:
   contents: read
   actions: read
 
+# A saved ordinary package can be carried while the current Git observer builds.
 concurrency:
-  group: desktop-macos-installed-${{ github.ref }}${{ github.ref == 'refs/heads/verify/desktop-macos-candidate' && format('-{0}', github.sha) || '' }}${{ github.event_name == 'workflow_dispatch' && inputs.operation == 'candidate-tests' && format('-{0}', inputs.test_group) || github.event_name == 'workflow_dispatch' && inputs.operation == 'local-carrier' && '-local-carrier' || '' }}
+  group: desktop-macos-installed-${{ github.ref }}${{ github.ref == 'refs/heads/verify/desktop-macos-candidate' && format('-{0}', github.sha) || '' }}${{ github.event_name == 'workflow_dispatch' && inputs.operation == 'candidate-tests' && format('-{0}', inputs.test_group) || github.event_name == 'workflow_dispatch' && (inputs.operation == 'local-carrier' || inputs.operation == 'local-desktop-carrier') && format('-{0}', inputs.operation) || '' }}
   cancel-in-progress: false
 
 jobs:
@@ -257,7 +258,7 @@ jobs:
       fail-fast: false
       max-parallel: 2
       matrix:
-        include: ${{ fromJSON(github.ref == 'refs/heads/verify/desktop-macos-candidate' && '[{"native_scope":"tool-setup","target":"aarch64-apple-darwin","runner":"macos-26","machine":"arm64","hosted_job":"github-hosted-macos26-arm64","supplier_receipt":"e6b23316078020c513ab1b05b3b55e4f87b8d15908a8dee022ad5ee03b8f763e","supplier_tar":"ead75b364118139561a34da6aa48e3c54791e152154ab32c46196b0223962359","supplier_source":"c6551aa07d0673436aa9587b3a039889d22449c3","supplier_run":"40473858216","supplier_attempt":"1","supplier_artifact":"12719943283"},{"native_scope":"git-native","target":"aarch64-apple-darwin","runner":"xcode-27","machine":"arm64","hosted_job":"github-hosted-xcode27-arm64","supplier_receipt":"e6b23316078020c513ab1b05b3b55e4f87b8d15908a8dee022ad5ee03b8f763e","supplier_tar":"ead75b364118139561a34da6aa48e3c54791e152154ab32c46196b0223962359","supplier_source":"c6551aa07d0673436aa9587b3a039889d22449c3","supplier_run":"40473858216","supplier_attempt":"1","supplier_artifact":"12719943283"}]' || github.ref == 'refs/heads/verify/desktop-macos-positive-update' && '[{"target":"aarch64-apple-darwin","runner":"macos-26","machine":"arm64","hosted_job":"github-hosted-macos26-arm64","supplier_receipt":"e6b23316078020c513ab1b05b3b55e4f87b8d15908a8dee022ad5ee03b8f763e","supplier_tar":"ead75b364118139561a34da6aa48e3c54791e152154ab32c46196b0223962359","supplier_source":"c6551aa07d0673436aa9587b3a039889d22449c3","supplier_run":"40473858216","supplier_attempt":"1","supplier_artifact":"12719943283"}]' || github.ref == 'refs/heads/verify/desktop-macos-removal-lifecycle' && '[{"target":"aarch64-apple-darwin","runner":"macos-26","machine":"arm64","hosted_job":"github-hosted-macos26-arm64","supplier_receipt":"e6b23316078020c513ab1b05b3b55e4f87b8d15908a8dee022ad5ee03b8f763e","supplier_tar":"ead75b364118139561a34da6aa48e3c54791e152154ab32c46196b0223962359","supplier_source":"c6551aa07d0673436aa9587b3a039889d22449c3","supplier_run":"40473858216","supplier_attempt":"1","supplier_artifact":"12719943283","removal_case":"ordinary"},{"target":"x86_64-apple-darwin","runner":"macos-26-intel","machine":"x86_64","hosted_job":"github-hosted-macos26-x86_64","supplier_receipt":"afba303207b19692b73fb1288b56afcd73378fc29b0b0ede4ff10eb2e0f949b8","supplier_tar":"ff976626b48e95abc414d46ff91f1ebb183416356bb4706b8e673b7c9018ca9c","supplier_source":"a2f7a10b4c86305f5ee65c6779ceaf6b128cd8fa","supplier_run":"38343340695","supplier_attempt":"1","supplier_artifact":"11787588635","removal_case":"ordinary"},{"target":"aarch64-apple-darwin","runner":"macos-26","machine":"arm64","hosted_job":"github-hosted-macos26-arm64","supplier_receipt":"e6b23316078020c513ab1b05b3b55e4f87b8d15908a8dee022ad5ee03b8f763e","supplier_tar":"ead75b364118139561a34da6aa48e3c54791e152154ab32c46196b0223962359","supplier_source":"c6551aa07d0673436aa9587b3a039889d22449c3","supplier_run":"40473858216","supplier_attempt":"1","supplier_artifact":"12719943283","removal_case":"abrupt"},{"target":"x86_64-apple-darwin","runner":"macos-26-intel","machine":"x86_64","hosted_job":"github-hosted-macos26-x86_64","supplier_receipt":"afba303207b19692b73fb1288b56afcd73378fc29b0b0ede4ff10eb2e0f949b8","supplier_tar":"ff976626b48e95abc414d46ff91f1ebb183416356bb4706b8e673b7c9018ca9c","supplier_source":"a2f7a10b4c86305f5ee65c6779ceaf6b128cd8fa","supplier_run":"38343340695","supplier_attempt":"1","supplier_artifact":"11787588635","removal_case":"abrupt"}]' || '[{"target":"aarch64-apple-darwin","runner":"macos-26","machine":"arm64","hosted_job":"github-hosted-macos26-arm64","supplier_receipt":"e6b23316078020c513ab1b05b3b55e4f87b8d15908a8dee022ad5ee03b8f763e","supplier_tar":"ead75b364118139561a34da6aa48e3c54791e152154ab32c46196b0223962359","supplier_source":"c6551aa07d0673436aa9587b3a039889d22449c3","supplier_run":"40473858216","supplier_attempt":"1","supplier_artifact":"12719943283"},{"target":"x86_64-apple-darwin","runner":"macos-26-intel","machine":"x86_64","hosted_job":"github-hosted-macos26-x86_64","supplier_receipt":"afba303207b19692b73fb1288b56afcd73378fc29b0b0ede4ff10eb2e0f949b8","supplier_tar":"ff976626b48e95abc414d46ff91f1ebb183416356bb4706b8e673b7c9018ca9c","supplier_source":"a2f7a10b4c86305f5ee65c6779ceaf6b128cd8fa","supplier_run":"38343340695","supplier_attempt":"1","supplier_artifact":"11787588635"}]') }}
+        include: ${{ fromJSON(github.ref == 'refs/heads/verify/desktop-macos-candidate' && '[{"native_scope":"tool-setup","target":"aarch64-apple-darwin","runner":"macos-26","machine":"arm64","hosted_job":"github-hosted-macos26-arm64","supplier_receipt":"8472de6eaf5c12b9f46d96ff97830c9cf4f02c98943c0c9134eddd48519d589c","supplier_tar":"2e6efe239af9e7bc6f3688997d41a9607aa2980528d68fcaa8c97e40d611f438","supplier_source":"9a64371c72dc56de3de3bcc63e7a368a91b7437d","supplier_run":"44870109681","supplier_attempt":"1","supplier_artifact":"14693417053"},{"native_scope":"git-native","target":"aarch64-apple-darwin","runner":"xcode-27","machine":"arm64","hosted_job":"github-hosted-xcode27-arm64","supplier_receipt":"8472de6eaf5c12b9f46d96ff97830c9cf4f02c98943c0c9134eddd48519d589c","supplier_tar":"2e6efe239af9e7bc6f3688997d41a9607aa2980528d68fcaa8c97e40d611f438","supplier_source":"9a64371c72dc56de3de3bcc63e7a368a91b7437d","supplier_run":"44870109681","supplier_attempt":"1","supplier_artifact":"14693417053"}]' || github.ref == 'refs/heads/verify/desktop-macos-positive-update' && '[{"target":"aarch64-apple-darwin","runner":"macos-26","machine":"arm64","hosted_job":"github-hosted-macos26-arm64","supplier_receipt":"8472de6eaf5c12b9f46d96ff97830c9cf4f02c98943c0c9134eddd48519d589c","supplier_tar":"2e6efe239af9e7bc6f3688997d41a9607aa2980528d68fcaa8c97e40d611f438","supplier_source":"9a64371c72dc56de3de3bcc63e7a368a91b7437d","supplier_run":"44870109681","supplier_attempt":"1","supplier_artifact":"14693417053"}]' || github.ref == 'refs/heads/verify/desktop-macos-removal-lifecycle' && '[{"target":"aarch64-apple-darwin","runner":"macos-26","machine":"arm64","hosted_job":"github-hosted-macos26-arm64","supplier_receipt":"8472de6eaf5c12b9f46d96ff97830c9cf4f02c98943c0c9134eddd48519d589c","supplier_tar":"2e6efe239af9e7bc6f3688997d41a9607aa2980528d68fcaa8c97e40d611f438","supplier_source":"9a64371c72dc56de3de3bcc63e7a368a91b7437d","supplier_run":"44870109681","supplier_attempt":"1","supplier_artifact":"14693417053","removal_case":"ordinary"},{"target":"x86_64-apple-darwin","runner":"macos-26-intel","machine":"x86_64","hosted_job":"github-hosted-macos26-x86_64","supplier_receipt":"afba303207b19692b73fb1288b56afcd73378fc29b0b0ede4ff10eb2e0f949b8","supplier_tar":"ff976626b48e95abc414d46ff91f1ebb183416356bb4706b8e673b7c9018ca9c","supplier_source":"a2f7a10b4c86305f5ee65c6779ceaf6b128cd8fa","supplier_run":"38343340695","supplier_attempt":"1","supplier_artifact":"11787588635","removal_case":"ordinary"},{"target":"aarch64-apple-darwin","runner":"macos-26","machine":"arm64","hosted_job":"github-hosted-macos26-arm64","supplier_receipt":"8472de6eaf5c12b9f46d96ff97830c9cf4f02c98943c0c9134eddd48519d589c","supplier_tar":"2e6efe239af9e7bc6f3688997d41a9607aa2980528d68fcaa8c97e40d611f438","supplier_source":"9a64371c72dc56de3de3bcc63e7a368a91b7437d","supplier_run":"44870109681","supplier_attempt":"1","supplier_artifact":"14693417053","removal_case":"abrupt"},{"target":"x86_64-apple-darwin","runner":"macos-26-intel","machine":"x86_64","hosted_job":"github-hosted-macos26-x86_64","supplier_receipt":"afba303207b19692b73fb1288b56afcd73378fc29b0b0ede4ff10eb2e0f949b8","supplier_tar":"ff976626b48e95abc414d46ff91f1ebb183416356bb4706b8e673b7c9018ca9c","supplier_source":"a2f7a10b4c86305f5ee65c6779ceaf6b128cd8fa","supplier_run":"38343340695","supplier_attempt":"1","supplier_artifact":"11787588635","removal_case":"abrupt"}]' || '[{"target":"aarch64-apple-darwin","runner":"macos-26","machine":"arm64","hosted_job":"github-hosted-macos26-arm64","supplier_receipt":"8472de6eaf5c12b9f46d96ff97830c9cf4f02c98943c0c9134eddd48519d589c","supplier_tar":"2e6efe239af9e7bc6f3688997d41a9607aa2980528d68fcaa8c97e40d611f438","supplier_source":"9a64371c72dc56de3de3bcc63e7a368a91b7437d","supplier_run":"44870109681","supplier_attempt":"1","supplier_artifact":"14693417053"},{"target":"x86_64-apple-darwin","runner":"macos-26-intel","machine":"x86_64","hosted_job":"github-hosted-macos26-x86_64","supplier_receipt":"afba303207b19692b73fb1288b56afcd73378fc29b0b0ede4ff10eb2e0f949b8","supplier_tar":"ff976626b48e95abc414d46ff91f1ebb183416356bb4706b8e673b7c9018ca9c","supplier_source":"a2f7a10b4c86305f5ee65c6779ceaf6b128cd8fa","supplier_run":"38343340695","supplier_attempt":"1","supplier_artifact":"11787588635"}]') }}
     env:
       RUSTUP_TOOLCHAIN: ${{ fromJSON('{"aarch64-apple-darwin":"1.98.1","x86_64-apple-darwin":"1.98.0"}')[matrix.target] }}
       MRK_MACOS_TARGET: ${{ matrix.target }}
@@ -334,12 +335,12 @@ jobs:
                   ;;
                 *) exit 1 ;;
               esac
-              expected_supplier_receipt=e6b23316078020c513ab1b05b3b55e4f87b8d15908a8dee022ad5ee03b8f763e
-              expected_supplier_tar=ead75b364118139561a34da6aa48e3c54791e152154ab32c46196b0223962359
-              expected_supplier_source=c6551aa07d0673436aa9587b3a039889d22449c3
-              expected_supplier_run=40473858216
+              expected_supplier_receipt=8472de6eaf5c12b9f46d96ff97830c9cf4f02c98943c0c9134eddd48519d589c
+              expected_supplier_tar=2e6efe239af9e7bc6f3688997d41a9607aa2980528d68fcaa8c97e40d611f438
+              expected_supplier_source=9a64371c72dc56de3de3bcc63e7a368a91b7437d
+              expected_supplier_run=44870109681
               expected_supplier_attempt=1
-              expected_supplier_artifact=12719943283
+              expected_supplier_artifact=14693417053
               ;;
             x86_64-apple-darwin)
               [[ "$MRK_MACOS_RUNNER" == macos-26-intel && "$RUNNER_ARCH" == X64 && "$MRK_MACOS_MACHINE" == x86_64 && "$MRK_MACOS_HOSTED_JOB" == github-hosted-macos26-x86_64 && "$(/usr/bin/uname -m)" == x86_64 ]] || exit 1
@@ -3011,7 +3012,7 @@ jobs:
   # without starting functional checks. Saved-package dispatches stay explicit.
   candidate-tests:
     needs: [engineering-install, candidate-tool26-final-package, candidate-git27-final-package]
-    if: ${{ !cancelled() && github.ref == 'refs/heads/verify/desktop-macos-candidate' && ((github.event_name == 'push' && !contains(github.event.head_commit.message, '[macos-builds-only]') && needs.candidate-tool26-final-package.result == 'success' && needs.candidate-git27-final-package.result == 'success') || (github.event_name == 'workflow_dispatch' && (inputs.operation == 'candidate-tests' || inputs.operation == 'local-carrier' || inputs.operation == 'git-cli-timing' || inputs.operation == 'git-cli-process-data'))) }}
+    if: ${{ !cancelled() && github.ref == 'refs/heads/verify/desktop-macos-candidate' && ((github.event_name == 'push' && !contains(github.event.head_commit.message, '[macos-builds-only]') && needs.candidate-git27-final-package.result == 'success' && (needs.candidate-tool26-final-package.result == 'success' || contains(github.event.head_commit.message, '[macos-git-only]'))) || (github.event_name == 'workflow_dispatch' && (inputs.operation == 'candidate-tests' || inputs.operation == 'local-carrier' || inputs.operation == 'git-cli-timing' || inputs.operation == 'git-cli-process-data'))) }}
     uses: ./.github/workflows/desktop-macos-candidate-tests.yml
     secrets: inherit
 
@@ -3673,7 +3674,7 @@ jobs:
 
   candidate-tool26-prepare:
     name: "${{ matrix.native_scope == 'tool-setup' && 'macOS part (Tool26 / prepare)' || 'macOS part (Git27 / prepare)' }}"
-    if: "github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-macos-candidate' && !contains(github.event.head_commit.message, '[macos-desktop-update]')"
+    if: "github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-macos-candidate' && !contains(github.event.head_commit.message, '[macos-desktop-update]') && !contains(github.event.head_commit.message, '[macos-git-only]')"
     runs-on: "${{ matrix.runner }}"
     timeout-minutes: 90
     strategy:
@@ -3685,12 +3686,12 @@ jobs:
             runner: macos-26
             machine: arm64
             hosted_job: github-hosted-macos26-arm64
-            supplier_receipt: e6b23316078020c513ab1b05b3b55e4f87b8d15908a8dee022ad5ee03b8f763e
-            supplier_tar: ead75b364118139561a34da6aa48e3c54791e152154ab32c46196b0223962359
-            supplier_source: c6551aa07d0673436aa9587b3a039889d22449c3
-            supplier_run: "40473858216"
+            supplier_receipt: 8472de6eaf5c12b9f46d96ff97830c9cf4f02c98943c0c9134eddd48519d589c
+            supplier_tar: 2e6efe239af9e7bc6f3688997d41a9607aa2980528d68fcaa8c97e40d611f438
+            supplier_source: 9a64371c72dc56de3de3bcc63e7a368a91b7437d
+            supplier_run: "44870109681"
             supplier_attempt: "1"
-            supplier_artifact: "12719943283"
+            supplier_artifact: "14693417053"
             removal_case: disabled
     env:
       RUSTUP_TOOLCHAIN: "${{ fromJSON('{\"aarch64-apple-darwin\":\"1.98.1\",\"x86_64-apple-darwin\":\"1.98.0\"}')[matrix.target] }}"
@@ -3772,12 +3773,12 @@ jobs:
                   ;;
                 *) exit 1 ;;
               esac
-              expected_supplier_receipt=e6b23316078020c513ab1b05b3b55e4f87b8d15908a8dee022ad5ee03b8f763e
-              expected_supplier_tar=ead75b364118139561a34da6aa48e3c54791e152154ab32c46196b0223962359
-              expected_supplier_source=c6551aa07d0673436aa9587b3a039889d22449c3
-              expected_supplier_run=40473858216
+              expected_supplier_receipt=8472de6eaf5c12b9f46d96ff97830c9cf4f02c98943c0c9134eddd48519d589c
+              expected_supplier_tar=2e6efe239af9e7bc6f3688997d41a9607aa2980528d68fcaa8c97e40d611f438
+              expected_supplier_source=9a64371c72dc56de3de3bcc63e7a368a91b7437d
+              expected_supplier_run=44870109681
               expected_supplier_attempt=1
-              expected_supplier_artifact=12719943283
+              expected_supplier_artifact=14693417053
               ;;
             x86_64-apple-darwin)
               [[ "$MRK_MACOS_RUNNER" == macos-26-intel && "$RUNNER_ARCH" == X64 && "$MRK_MACOS_MACHINE" == x86_64 && "$MRK_MACOS_HOSTED_JOB" == github-hosted-macos26-x86_64 && "$(/usr/bin/uname -m)" == x86_64 ]] || exit 1
@@ -4069,7 +4070,7 @@ jobs:
           overwrite: false
   candidate-tool26-resident:
     name: "${{ matrix.native_scope == 'tool-setup' && 'macOS part (Tool26 / resident)' || 'macOS part (Git27 / resident)' }}"
-    if: "github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-macos-candidate' && !contains(github.event.head_commit.message, '[macos-desktop-update]')"
+    if: "github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-macos-candidate' && !contains(github.event.head_commit.message, '[macos-desktop-update]') && !contains(github.event.head_commit.message, '[macos-git-only]')"
     runs-on: "${{ matrix.runner }}"
     timeout-minutes: 90
     strategy:
@@ -4081,12 +4082,12 @@ jobs:
             runner: macos-26
             machine: arm64
             hosted_job: github-hosted-macos26-arm64
-            supplier_receipt: e6b23316078020c513ab1b05b3b55e4f87b8d15908a8dee022ad5ee03b8f763e
-            supplier_tar: ead75b364118139561a34da6aa48e3c54791e152154ab32c46196b0223962359
-            supplier_source: c6551aa07d0673436aa9587b3a039889d22449c3
-            supplier_run: "40473858216"
+            supplier_receipt: 8472de6eaf5c12b9f46d96ff97830c9cf4f02c98943c0c9134eddd48519d589c
+            supplier_tar: 2e6efe239af9e7bc6f3688997d41a9607aa2980528d68fcaa8c97e40d611f438
+            supplier_source: 9a64371c72dc56de3de3bcc63e7a368a91b7437d
+            supplier_run: "44870109681"
             supplier_attempt: "1"
-            supplier_artifact: "12719943283"
+            supplier_artifact: "14693417053"
             removal_case: disabled
     env:
       RUSTUP_TOOLCHAIN: "${{ fromJSON('{\"aarch64-apple-darwin\":\"1.98.1\",\"x86_64-apple-darwin\":\"1.98.0\"}')[matrix.target] }}"
@@ -4187,7 +4188,7 @@ jobs:
           overwrite: false
   candidate-tool26-vault:
     name: "${{ matrix.native_scope == 'tool-setup' && 'macOS part (Tool26 / vault)' || 'macOS part (Git27 / vault)' }}"
-    if: "github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-macos-candidate' && !contains(github.event.head_commit.message, '[macos-desktop-update]')"
+    if: "github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-macos-candidate' && !contains(github.event.head_commit.message, '[macos-desktop-update]') && !contains(github.event.head_commit.message, '[macos-git-only]')"
     runs-on: "${{ matrix.runner }}"
     timeout-minutes: 90
     strategy:
@@ -4199,12 +4200,12 @@ jobs:
             runner: macos-26
             machine: arm64
             hosted_job: github-hosted-macos26-arm64
-            supplier_receipt: e6b23316078020c513ab1b05b3b55e4f87b8d15908a8dee022ad5ee03b8f763e
-            supplier_tar: ead75b364118139561a34da6aa48e3c54791e152154ab32c46196b0223962359
-            supplier_source: c6551aa07d0673436aa9587b3a039889d22449c3
-            supplier_run: "40473858216"
+            supplier_receipt: 8472de6eaf5c12b9f46d96ff97830c9cf4f02c98943c0c9134eddd48519d589c
+            supplier_tar: 2e6efe239af9e7bc6f3688997d41a9607aa2980528d68fcaa8c97e40d611f438
+            supplier_source: 9a64371c72dc56de3de3bcc63e7a368a91b7437d
+            supplier_run: "44870109681"
             supplier_attempt: "1"
-            supplier_artifact: "12719943283"
+            supplier_artifact: "14693417053"
             removal_case: disabled
     env:
       RUSTUP_TOOLCHAIN: "${{ fromJSON('{\"aarch64-apple-darwin\":\"1.98.1\",\"x86_64-apple-darwin\":\"1.98.0\"}')[matrix.target] }}"
@@ -4305,7 +4306,7 @@ jobs:
           overwrite: false
   candidate-tool26-frontend:
     name: "${{ matrix.native_scope == 'tool-setup' && 'macOS part (Tool26 / frontend)' || 'macOS part (Git27 / frontend)' }}"
-    if: "github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-macos-candidate' && !contains(github.event.head_commit.message, '[macos-desktop-update]')"
+    if: "github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-macos-candidate' && !contains(github.event.head_commit.message, '[macos-desktop-update]') && !contains(github.event.head_commit.message, '[macos-git-only]')"
     runs-on: "${{ matrix.runner }}"
     timeout-minutes: 90
     strategy:
@@ -4317,12 +4318,12 @@ jobs:
             runner: macos-26
             machine: arm64
             hosted_job: github-hosted-macos26-arm64
-            supplier_receipt: e6b23316078020c513ab1b05b3b55e4f87b8d15908a8dee022ad5ee03b8f763e
-            supplier_tar: ead75b364118139561a34da6aa48e3c54791e152154ab32c46196b0223962359
-            supplier_source: c6551aa07d0673436aa9587b3a039889d22449c3
-            supplier_run: "40473858216"
+            supplier_receipt: 8472de6eaf5c12b9f46d96ff97830c9cf4f02c98943c0c9134eddd48519d589c
+            supplier_tar: 2e6efe239af9e7bc6f3688997d41a9607aa2980528d68fcaa8c97e40d611f438
+            supplier_source: 9a64371c72dc56de3de3bcc63e7a368a91b7437d
+            supplier_run: "44870109681"
             supplier_attempt: "1"
-            supplier_artifact: "12719943283"
+            supplier_artifact: "14693417053"
             removal_case: disabled
     env:
       RUSTUP_TOOLCHAIN: "${{ fromJSON('{\"aarch64-apple-darwin\":\"1.98.1\",\"x86_64-apple-darwin\":\"1.98.0\"}')[matrix.target] }}"
@@ -4419,7 +4420,7 @@ jobs:
           overwrite: false
   candidate-tool26-observer:
     name: "${{ matrix.native_scope == 'tool-setup' && 'macOS part (Tool26 / observer)' || 'macOS part (Git27 / observer)' }}"
-    if: "github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-macos-candidate' && !contains(github.event.head_commit.message, '[macos-desktop-update]')"
+    if: "github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-macos-candidate' && !contains(github.event.head_commit.message, '[macos-desktop-update]') && !contains(github.event.head_commit.message, '[macos-git-only]')"
     runs-on: "${{ matrix.runner }}"
     timeout-minutes: 120
     strategy:
@@ -4431,12 +4432,12 @@ jobs:
             runner: macos-26
             machine: arm64
             hosted_job: github-hosted-macos26-arm64
-            supplier_receipt: e6b23316078020c513ab1b05b3b55e4f87b8d15908a8dee022ad5ee03b8f763e
-            supplier_tar: ead75b364118139561a34da6aa48e3c54791e152154ab32c46196b0223962359
-            supplier_source: c6551aa07d0673436aa9587b3a039889d22449c3
-            supplier_run: "40473858216"
+            supplier_receipt: 8472de6eaf5c12b9f46d96ff97830c9cf4f02c98943c0c9134eddd48519d589c
+            supplier_tar: 2e6efe239af9e7bc6f3688997d41a9607aa2980528d68fcaa8c97e40d611f438
+            supplier_source: 9a64371c72dc56de3de3bcc63e7a368a91b7437d
+            supplier_run: "44870109681"
             supplier_attempt: "1"
-            supplier_artifact: "12719943283"
+            supplier_artifact: "14693417053"
             removal_case: disabled
     env:
       RUSTUP_TOOLCHAIN: "${{ fromJSON('{\"aarch64-apple-darwin\":\"1.98.1\",\"x86_64-apple-darwin\":\"1.98.0\"}')[matrix.target] }}"
@@ -4547,7 +4548,7 @@ jobs:
           overwrite: false
   candidate-tool26-remover:
     name: "${{ matrix.native_scope == 'tool-setup' && 'macOS part (Tool26 / remover)' || 'macOS part (Git27 / remover)' }}"
-    if: "github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-macos-candidate' && !contains(github.event.head_commit.message, '[macos-desktop-update]')"
+    if: "github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-macos-candidate' && !contains(github.event.head_commit.message, '[macos-desktop-update]') && !contains(github.event.head_commit.message, '[macos-git-only]')"
     runs-on: "${{ matrix.runner }}"
     timeout-minutes: 90
     strategy:
@@ -4559,12 +4560,12 @@ jobs:
             runner: macos-26
             machine: arm64
             hosted_job: github-hosted-macos26-arm64
-            supplier_receipt: e6b23316078020c513ab1b05b3b55e4f87b8d15908a8dee022ad5ee03b8f763e
-            supplier_tar: ead75b364118139561a34da6aa48e3c54791e152154ab32c46196b0223962359
-            supplier_source: c6551aa07d0673436aa9587b3a039889d22449c3
-            supplier_run: "40473858216"
+            supplier_receipt: 8472de6eaf5c12b9f46d96ff97830c9cf4f02c98943c0c9134eddd48519d589c
+            supplier_tar: 2e6efe239af9e7bc6f3688997d41a9607aa2980528d68fcaa8c97e40d611f438
+            supplier_source: 9a64371c72dc56de3de3bcc63e7a368a91b7437d
+            supplier_run: "44870109681"
             supplier_attempt: "1"
-            supplier_artifact: "12719943283"
+            supplier_artifact: "14693417053"
             removal_case: disabled
     env:
       RUSTUP_TOOLCHAIN: "${{ fromJSON('{\"aarch64-apple-darwin\":\"1.98.1\",\"x86_64-apple-darwin\":\"1.98.0\"}')[matrix.target] }}"
@@ -4673,7 +4674,7 @@ jobs:
           overwrite: false
   candidate-tool26-cli:
     name: "${{ matrix.native_scope == 'tool-setup' && 'macOS part (Tool26 / cli)' || 'macOS part (Git27 / cli)' }}"
-    if: "github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-macos-candidate' && !contains(github.event.head_commit.message, '[macos-desktop-update]')"
+    if: "github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-macos-candidate' && !contains(github.event.head_commit.message, '[macos-desktop-update]') && !contains(github.event.head_commit.message, '[macos-git-only]')"
     runs-on: "${{ matrix.runner }}"
     timeout-minutes: 90
     strategy:
@@ -4685,12 +4686,12 @@ jobs:
             runner: macos-26
             machine: arm64
             hosted_job: github-hosted-macos26-arm64
-            supplier_receipt: e6b23316078020c513ab1b05b3b55e4f87b8d15908a8dee022ad5ee03b8f763e
-            supplier_tar: ead75b364118139561a34da6aa48e3c54791e152154ab32c46196b0223962359
-            supplier_source: c6551aa07d0673436aa9587b3a039889d22449c3
-            supplier_run: "40473858216"
+            supplier_receipt: 8472de6eaf5c12b9f46d96ff97830c9cf4f02c98943c0c9134eddd48519d589c
+            supplier_tar: 2e6efe239af9e7bc6f3688997d41a9607aa2980528d68fcaa8c97e40d611f438
+            supplier_source: 9a64371c72dc56de3de3bcc63e7a368a91b7437d
+            supplier_run: "44870109681"
             supplier_attempt: "1"
-            supplier_artifact: "12719943283"
+            supplier_artifact: "14693417053"
             removal_case: disabled
     env:
       RUSTUP_TOOLCHAIN: "${{ fromJSON('{\"aarch64-apple-darwin\":\"1.98.1\",\"x86_64-apple-darwin\":\"1.98.0\"}')[matrix.target] }}"
@@ -4799,7 +4800,7 @@ jobs:
           overwrite: false
   candidate-tool26-sign-remover:
     name: "${{ matrix.native_scope == 'tool-setup' && 'macOS part (Tool26 / sign-remover)' || 'macOS part (Git27 / sign-remover)' }}"
-    if: "github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-macos-candidate' && !contains(github.event.head_commit.message, '[macos-desktop-update]')"
+    if: "github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-macos-candidate' && !contains(github.event.head_commit.message, '[macos-desktop-update]') && !contains(github.event.head_commit.message, '[macos-git-only]')"
     runs-on: "${{ matrix.runner }}"
     timeout-minutes: 90
     strategy:
@@ -4811,12 +4812,12 @@ jobs:
             runner: macos-26
             machine: arm64
             hosted_job: github-hosted-macos26-arm64
-            supplier_receipt: e6b23316078020c513ab1b05b3b55e4f87b8d15908a8dee022ad5ee03b8f763e
-            supplier_tar: ead75b364118139561a34da6aa48e3c54791e152154ab32c46196b0223962359
-            supplier_source: c6551aa07d0673436aa9587b3a039889d22449c3
-            supplier_run: "40473858216"
+            supplier_receipt: 8472de6eaf5c12b9f46d96ff97830c9cf4f02c98943c0c9134eddd48519d589c
+            supplier_tar: 2e6efe239af9e7bc6f3688997d41a9607aa2980528d68fcaa8c97e40d611f438
+            supplier_source: 9a64371c72dc56de3de3bcc63e7a368a91b7437d
+            supplier_run: "44870109681"
             supplier_attempt: "1"
-            supplier_artifact: "12719943283"
+            supplier_artifact: "14693417053"
             removal_case: disabled
     env:
       RUSTUP_TOOLCHAIN: "${{ fromJSON('{\"aarch64-apple-darwin\":\"1.98.1\",\"x86_64-apple-darwin\":\"1.98.0\"}')[matrix.target] }}"
@@ -4914,7 +4915,7 @@ jobs:
           overwrite: false
   candidate-tool26-sign-cli:
     name: "${{ matrix.native_scope == 'tool-setup' && 'macOS part (Tool26 / sign-cli)' || 'macOS part (Git27 / sign-cli)' }}"
-    if: "github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-macos-candidate' && !contains(github.event.head_commit.message, '[macos-desktop-update]')"
+    if: "github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-macos-candidate' && !contains(github.event.head_commit.message, '[macos-desktop-update]') && !contains(github.event.head_commit.message, '[macos-git-only]')"
     runs-on: "${{ matrix.runner }}"
     timeout-minutes: 90
     strategy:
@@ -4926,12 +4927,12 @@ jobs:
             runner: macos-26
             machine: arm64
             hosted_job: github-hosted-macos26-arm64
-            supplier_receipt: e6b23316078020c513ab1b05b3b55e4f87b8d15908a8dee022ad5ee03b8f763e
-            supplier_tar: ead75b364118139561a34da6aa48e3c54791e152154ab32c46196b0223962359
-            supplier_source: c6551aa07d0673436aa9587b3a039889d22449c3
-            supplier_run: "40473858216"
+            supplier_receipt: 8472de6eaf5c12b9f46d96ff97830c9cf4f02c98943c0c9134eddd48519d589c
+            supplier_tar: 2e6efe239af9e7bc6f3688997d41a9607aa2980528d68fcaa8c97e40d611f438
+            supplier_source: 9a64371c72dc56de3de3bcc63e7a368a91b7437d
+            supplier_run: "44870109681"
             supplier_attempt: "1"
-            supplier_artifact: "12719943283"
+            supplier_artifact: "14693417053"
             removal_case: disabled
     env:
       RUSTUP_TOOLCHAIN: "${{ fromJSON('{\"aarch64-apple-darwin\":\"1.98.1\",\"x86_64-apple-darwin\":\"1.98.0\"}')[matrix.target] }}"
@@ -5029,7 +5030,7 @@ jobs:
           overwrite: false
   candidate-tool26-assemble:
     name: "${{ matrix.native_scope == 'tool-setup' && 'macOS part (Tool26 / assemble)' || 'macOS part (Git27 / assemble)' }}"
-    if: "github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-macos-candidate' && !contains(github.event.head_commit.message, '[macos-desktop-update]')"
+    if: "github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-macos-candidate' && !contains(github.event.head_commit.message, '[macos-desktop-update]') && !contains(github.event.head_commit.message, '[macos-git-only]')"
     runs-on: "${{ matrix.runner }}"
     timeout-minutes: 90
     strategy:
@@ -5041,12 +5042,12 @@ jobs:
             runner: macos-26
             machine: arm64
             hosted_job: github-hosted-macos26-arm64
-            supplier_receipt: e6b23316078020c513ab1b05b3b55e4f87b8d15908a8dee022ad5ee03b8f763e
-            supplier_tar: ead75b364118139561a34da6aa48e3c54791e152154ab32c46196b0223962359
-            supplier_source: c6551aa07d0673436aa9587b3a039889d22449c3
-            supplier_run: "40473858216"
+            supplier_receipt: 8472de6eaf5c12b9f46d96ff97830c9cf4f02c98943c0c9134eddd48519d589c
+            supplier_tar: 2e6efe239af9e7bc6f3688997d41a9607aa2980528d68fcaa8c97e40d611f438
+            supplier_source: 9a64371c72dc56de3de3bcc63e7a368a91b7437d
+            supplier_run: "44870109681"
             supplier_attempt: "1"
-            supplier_artifact: "12719943283"
+            supplier_artifact: "14693417053"
             removal_case: disabled
     env:
       RUSTUP_TOOLCHAIN: "${{ fromJSON('{\"aarch64-apple-darwin\":\"1.98.1\",\"x86_64-apple-darwin\":\"1.98.0\"}')[matrix.target] }}"
@@ -5158,7 +5159,7 @@ jobs:
           overwrite: false
   candidate-tool26-notarize-payload:
     name: "${{ matrix.native_scope == 'tool-setup' && 'macOS part (Tool26 / notarize-payload)' || 'macOS part (Git27 / notarize-payload)' }}"
-    if: "github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-macos-candidate' && !contains(github.event.head_commit.message, '[macos-desktop-update]')"
+    if: "github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-macos-candidate' && !contains(github.event.head_commit.message, '[macos-desktop-update]') && !contains(github.event.head_commit.message, '[macos-git-only]')"
     runs-on: "${{ matrix.runner }}"
     timeout-minutes: 90
     strategy:
@@ -5170,12 +5171,12 @@ jobs:
             runner: macos-26
             machine: arm64
             hosted_job: github-hosted-macos26-arm64
-            supplier_receipt: e6b23316078020c513ab1b05b3b55e4f87b8d15908a8dee022ad5ee03b8f763e
-            supplier_tar: ead75b364118139561a34da6aa48e3c54791e152154ab32c46196b0223962359
-            supplier_source: c6551aa07d0673436aa9587b3a039889d22449c3
-            supplier_run: "40473858216"
+            supplier_receipt: 8472de6eaf5c12b9f46d96ff97830c9cf4f02c98943c0c9134eddd48519d589c
+            supplier_tar: 2e6efe239af9e7bc6f3688997d41a9607aa2980528d68fcaa8c97e40d611f438
+            supplier_source: 9a64371c72dc56de3de3bcc63e7a368a91b7437d
+            supplier_run: "44870109681"
             supplier_attempt: "1"
-            supplier_artifact: "12719943283"
+            supplier_artifact: "14693417053"
             removal_case: disabled
     env:
       RUSTUP_TOOLCHAIN: "${{ fromJSON('{\"aarch64-apple-darwin\":\"1.98.1\",\"x86_64-apple-darwin\":\"1.98.0\"}')[matrix.target] }}"
@@ -5283,7 +5284,7 @@ jobs:
           overwrite: false
   candidate-tool26-installer:
     name: "${{ matrix.native_scope == 'tool-setup' && 'macOS part (Tool26 / installer)' || 'macOS part (Git27 / installer)' }}"
-    if: "github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-macos-candidate' && !contains(github.event.head_commit.message, '[macos-desktop-update]')"
+    if: "github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-macos-candidate' && !contains(github.event.head_commit.message, '[macos-desktop-update]') && !contains(github.event.head_commit.message, '[macos-git-only]')"
     runs-on: "${{ matrix.runner }}"
     timeout-minutes: 90
     strategy:
@@ -5295,12 +5296,12 @@ jobs:
             runner: macos-26
             machine: arm64
             hosted_job: github-hosted-macos26-arm64
-            supplier_receipt: e6b23316078020c513ab1b05b3b55e4f87b8d15908a8dee022ad5ee03b8f763e
-            supplier_tar: ead75b364118139561a34da6aa48e3c54791e152154ab32c46196b0223962359
-            supplier_source: c6551aa07d0673436aa9587b3a039889d22449c3
-            supplier_run: "40473858216"
+            supplier_receipt: 8472de6eaf5c12b9f46d96ff97830c9cf4f02c98943c0c9134eddd48519d589c
+            supplier_tar: 2e6efe239af9e7bc6f3688997d41a9607aa2980528d68fcaa8c97e40d611f438
+            supplier_source: 9a64371c72dc56de3de3bcc63e7a368a91b7437d
+            supplier_run: "44870109681"
             supplier_attempt: "1"
-            supplier_artifact: "12719943283"
+            supplier_artifact: "14693417053"
             removal_case: disabled
     env:
       RUSTUP_TOOLCHAIN: "${{ fromJSON('{\"aarch64-apple-darwin\":\"1.98.1\",\"x86_64-apple-darwin\":\"1.98.0\"}')[matrix.target] }}"
@@ -5406,7 +5407,7 @@ jobs:
           overwrite: false
   candidate-tool26-scripts-package:
     name: "${{ matrix.native_scope == 'tool-setup' && 'macOS part (Tool26 / scripts-package)' || 'macOS part (Git27 / scripts-package)' }}"
-    if: "github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-macos-candidate' && !contains(github.event.head_commit.message, '[macos-desktop-update]')"
+    if: "github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-macos-candidate' && !contains(github.event.head_commit.message, '[macos-desktop-update]') && !contains(github.event.head_commit.message, '[macos-git-only]')"
     runs-on: "${{ matrix.runner }}"
     timeout-minutes: 90
     strategy:
@@ -5418,12 +5419,12 @@ jobs:
             runner: macos-26
             machine: arm64
             hosted_job: github-hosted-macos26-arm64
-            supplier_receipt: e6b23316078020c513ab1b05b3b55e4f87b8d15908a8dee022ad5ee03b8f763e
-            supplier_tar: ead75b364118139561a34da6aa48e3c54791e152154ab32c46196b0223962359
-            supplier_source: c6551aa07d0673436aa9587b3a039889d22449c3
-            supplier_run: "40473858216"
+            supplier_receipt: 8472de6eaf5c12b9f46d96ff97830c9cf4f02c98943c0c9134eddd48519d589c
+            supplier_tar: 2e6efe239af9e7bc6f3688997d41a9607aa2980528d68fcaa8c97e40d611f438
+            supplier_source: 9a64371c72dc56de3de3bcc63e7a368a91b7437d
+            supplier_run: "44870109681"
             supplier_attempt: "1"
-            supplier_artifact: "12719943283"
+            supplier_artifact: "14693417053"
             removal_case: disabled
     env:
       RUSTUP_TOOLCHAIN: "${{ fromJSON('{\"aarch64-apple-darwin\":\"1.98.1\",\"x86_64-apple-darwin\":\"1.98.0\"}')[matrix.target] }}"
@@ -5531,7 +5532,7 @@ jobs:
           overwrite: false
   candidate-tool26-final-package:
     name: "${{ matrix.native_scope == 'tool-setup' && 'Build signed candidate (Tool26)' || 'Build signed candidate (Git27)' }}"
-    if: "github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-macos-candidate' && !contains(github.event.head_commit.message, '[macos-desktop-update]')"
+    if: "github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-macos-candidate' && !contains(github.event.head_commit.message, '[macos-desktop-update]') && !contains(github.event.head_commit.message, '[macos-git-only]')"
     runs-on: "${{ matrix.runner }}"
     timeout-minutes: 90
     strategy:
@@ -5543,12 +5544,12 @@ jobs:
             runner: macos-26
             machine: arm64
             hosted_job: github-hosted-macos26-arm64
-            supplier_receipt: e6b23316078020c513ab1b05b3b55e4f87b8d15908a8dee022ad5ee03b8f763e
-            supplier_tar: ead75b364118139561a34da6aa48e3c54791e152154ab32c46196b0223962359
-            supplier_source: c6551aa07d0673436aa9587b3a039889d22449c3
-            supplier_run: "40473858216"
+            supplier_receipt: 8472de6eaf5c12b9f46d96ff97830c9cf4f02c98943c0c9134eddd48519d589c
+            supplier_tar: 2e6efe239af9e7bc6f3688997d41a9607aa2980528d68fcaa8c97e40d611f438
+            supplier_source: 9a64371c72dc56de3de3bcc63e7a368a91b7437d
+            supplier_run: "44870109681"
             supplier_attempt: "1"
-            supplier_artifact: "12719943283"
+            supplier_artifact: "14693417053"
             removal_case: disabled
     env:
       RUSTUP_TOOLCHAIN: "${{ fromJSON('{\"aarch64-apple-darwin\":\"1.98.1\",\"x86_64-apple-darwin\":\"1.98.0\"}')[matrix.target] }}"
@@ -5723,12 +5724,12 @@ jobs:
             runner: xcode-27
             machine: arm64
             hosted_job: github-hosted-xcode27-arm64
-            supplier_receipt: e6b23316078020c513ab1b05b3b55e4f87b8d15908a8dee022ad5ee03b8f763e
-            supplier_tar: ead75b364118139561a34da6aa48e3c54791e152154ab32c46196b0223962359
-            supplier_source: c6551aa07d0673436aa9587b3a039889d22449c3
-            supplier_run: "40473858216"
+            supplier_receipt: 8472de6eaf5c12b9f46d96ff97830c9cf4f02c98943c0c9134eddd48519d589c
+            supplier_tar: 2e6efe239af9e7bc6f3688997d41a9607aa2980528d68fcaa8c97e40d611f438
+            supplier_source: 9a64371c72dc56de3de3bcc63e7a368a91b7437d
+            supplier_run: "44870109681"
             supplier_attempt: "1"
-            supplier_artifact: "12719943283"
+            supplier_artifact: "14693417053"
             removal_case: disabled
     env:
       RUSTUP_TOOLCHAIN: "${{ fromJSON('{\"aarch64-apple-darwin\":\"1.98.1\",\"x86_64-apple-darwin\":\"1.98.0\"}')[matrix.target] }}"
@@ -5810,12 +5811,12 @@ jobs:
                   ;;
                 *) exit 1 ;;
               esac
-              expected_supplier_receipt=e6b23316078020c513ab1b05b3b55e4f87b8d15908a8dee022ad5ee03b8f763e
-              expected_supplier_tar=ead75b364118139561a34da6aa48e3c54791e152154ab32c46196b0223962359
-              expected_supplier_source=c6551aa07d0673436aa9587b3a039889d22449c3
-              expected_supplier_run=40473858216
+              expected_supplier_receipt=8472de6eaf5c12b9f46d96ff97830c9cf4f02c98943c0c9134eddd48519d589c
+              expected_supplier_tar=2e6efe239af9e7bc6f3688997d41a9607aa2980528d68fcaa8c97e40d611f438
+              expected_supplier_source=9a64371c72dc56de3de3bcc63e7a368a91b7437d
+              expected_supplier_run=44870109681
               expected_supplier_attempt=1
-              expected_supplier_artifact=12719943283
+              expected_supplier_artifact=14693417053
               ;;
             x86_64-apple-darwin)
               [[ "$MRK_MACOS_RUNNER" == macos-26-intel && "$RUNNER_ARCH" == X64 && "$MRK_MACOS_MACHINE" == x86_64 && "$MRK_MACOS_HOSTED_JOB" == github-hosted-macos26-x86_64 && "$(/usr/bin/uname -m)" == x86_64 ]] || exit 1
@@ -6119,12 +6120,12 @@ jobs:
             runner: xcode-27
             machine: arm64
             hosted_job: github-hosted-xcode27-arm64
-            supplier_receipt: e6b23316078020c513ab1b05b3b55e4f87b8d15908a8dee022ad5ee03b8f763e
-            supplier_tar: ead75b364118139561a34da6aa48e3c54791e152154ab32c46196b0223962359
-            supplier_source: c6551aa07d0673436aa9587b3a039889d22449c3
-            supplier_run: "40473858216"
+            supplier_receipt: 8472de6eaf5c12b9f46d96ff97830c9cf4f02c98943c0c9134eddd48519d589c
+            supplier_tar: 2e6efe239af9e7bc6f3688997d41a9607aa2980528d68fcaa8c97e40d611f438
+            supplier_source: 9a64371c72dc56de3de3bcc63e7a368a91b7437d
+            supplier_run: "44870109681"
             supplier_attempt: "1"
-            supplier_artifact: "12719943283"
+            supplier_artifact: "14693417053"
             removal_case: disabled
     env:
       RUSTUP_TOOLCHAIN: "${{ fromJSON('{\"aarch64-apple-darwin\":\"1.98.1\",\"x86_64-apple-darwin\":\"1.98.0\"}')[matrix.target] }}"
@@ -6237,12 +6238,12 @@ jobs:
             runner: xcode-27
             machine: arm64
             hosted_job: github-hosted-xcode27-arm64
-            supplier_receipt: e6b23316078020c513ab1b05b3b55e4f87b8d15908a8dee022ad5ee03b8f763e
-            supplier_tar: ead75b364118139561a34da6aa48e3c54791e152154ab32c46196b0223962359
-            supplier_source: c6551aa07d0673436aa9587b3a039889d22449c3
-            supplier_run: "40473858216"
+            supplier_receipt: 8472de6eaf5c12b9f46d96ff97830c9cf4f02c98943c0c9134eddd48519d589c
+            supplier_tar: 2e6efe239af9e7bc6f3688997d41a9607aa2980528d68fcaa8c97e40d611f438
+            supplier_source: 9a64371c72dc56de3de3bcc63e7a368a91b7437d
+            supplier_run: "44870109681"
             supplier_attempt: "1"
-            supplier_artifact: "12719943283"
+            supplier_artifact: "14693417053"
             removal_case: disabled
     env:
       RUSTUP_TOOLCHAIN: "${{ fromJSON('{\"aarch64-apple-darwin\":\"1.98.1\",\"x86_64-apple-darwin\":\"1.98.0\"}')[matrix.target] }}"
@@ -6355,12 +6356,12 @@ jobs:
             runner: xcode-27
             machine: arm64
             hosted_job: github-hosted-xcode27-arm64
-            supplier_receipt: e6b23316078020c513ab1b05b3b55e4f87b8d15908a8dee022ad5ee03b8f763e
-            supplier_tar: ead75b364118139561a34da6aa48e3c54791e152154ab32c46196b0223962359
-            supplier_source: c6551aa07d0673436aa9587b3a039889d22449c3
-            supplier_run: "40473858216"
+            supplier_receipt: 8472de6eaf5c12b9f46d96ff97830c9cf4f02c98943c0c9134eddd48519d589c
+            supplier_tar: 2e6efe239af9e7bc6f3688997d41a9607aa2980528d68fcaa8c97e40d611f438
+            supplier_source: 9a64371c72dc56de3de3bcc63e7a368a91b7437d
+            supplier_run: "44870109681"
             supplier_attempt: "1"
-            supplier_artifact: "12719943283"
+            supplier_artifact: "14693417053"
             removal_case: disabled
     env:
       RUSTUP_TOOLCHAIN: "${{ fromJSON('{\"aarch64-apple-darwin\":\"1.98.1\",\"x86_64-apple-darwin\":\"1.98.0\"}')[matrix.target] }}"
@@ -6469,12 +6470,12 @@ jobs:
             runner: xcode-27
             machine: arm64
             hosted_job: github-hosted-xcode27-arm64
-            supplier_receipt: e6b23316078020c513ab1b05b3b55e4f87b8d15908a8dee022ad5ee03b8f763e
-            supplier_tar: ead75b364118139561a34da6aa48e3c54791e152154ab32c46196b0223962359
-            supplier_source: c6551aa07d0673436aa9587b3a039889d22449c3
-            supplier_run: "40473858216"
+            supplier_receipt: 8472de6eaf5c12b9f46d96ff97830c9cf4f02c98943c0c9134eddd48519d589c
+            supplier_tar: 2e6efe239af9e7bc6f3688997d41a9607aa2980528d68fcaa8c97e40d611f438
+            supplier_source: 9a64371c72dc56de3de3bcc63e7a368a91b7437d
+            supplier_run: "44870109681"
             supplier_attempt: "1"
-            supplier_artifact: "12719943283"
+            supplier_artifact: "14693417053"
             removal_case: disabled
     env:
       RUSTUP_TOOLCHAIN: "${{ fromJSON('{\"aarch64-apple-darwin\":\"1.98.1\",\"x86_64-apple-darwin\":\"1.98.0\"}')[matrix.target] }}"
@@ -6597,12 +6598,12 @@ jobs:
             runner: xcode-27
             machine: arm64
             hosted_job: github-hosted-xcode27-arm64
-            supplier_receipt: e6b23316078020c513ab1b05b3b55e4f87b8d15908a8dee022ad5ee03b8f763e
-            supplier_tar: ead75b364118139561a34da6aa48e3c54791e152154ab32c46196b0223962359
-            supplier_source: c6551aa07d0673436aa9587b3a039889d22449c3
-            supplier_run: "40473858216"
+            supplier_receipt: 8472de6eaf5c12b9f46d96ff97830c9cf4f02c98943c0c9134eddd48519d589c
+            supplier_tar: 2e6efe239af9e7bc6f3688997d41a9607aa2980528d68fcaa8c97e40d611f438
+            supplier_source: 9a64371c72dc56de3de3bcc63e7a368a91b7437d
+            supplier_run: "44870109681"
             supplier_attempt: "1"
-            supplier_artifact: "12719943283"
+            supplier_artifact: "14693417053"
             removal_case: disabled
     env:
       RUSTUP_TOOLCHAIN: "${{ fromJSON('{\"aarch64-apple-darwin\":\"1.98.1\",\"x86_64-apple-darwin\":\"1.98.0\"}')[matrix.target] }}"
@@ -6723,12 +6724,12 @@ jobs:
             runner: xcode-27
             machine: arm64
             hosted_job: github-hosted-xcode27-arm64
-            supplier_receipt: e6b23316078020c513ab1b05b3b55e4f87b8d15908a8dee022ad5ee03b8f763e
-            supplier_tar: ead75b364118139561a34da6aa48e3c54791e152154ab32c46196b0223962359
-            supplier_source: c6551aa07d0673436aa9587b3a039889d22449c3
-            supplier_run: "40473858216"
+            supplier_receipt: 8472de6eaf5c12b9f46d96ff97830c9cf4f02c98943c0c9134eddd48519d589c
+            supplier_tar: 2e6efe239af9e7bc6f3688997d41a9607aa2980528d68fcaa8c97e40d611f438
+            supplier_source: 9a64371c72dc56de3de3bcc63e7a368a91b7437d
+            supplier_run: "44870109681"
             supplier_attempt: "1"
-            supplier_artifact: "12719943283"
+            supplier_artifact: "14693417053"
             removal_case: disabled
     env:
       RUSTUP_TOOLCHAIN: "${{ fromJSON('{\"aarch64-apple-darwin\":\"1.98.1\",\"x86_64-apple-darwin\":\"1.98.0\"}')[matrix.target] }}"
@@ -6849,12 +6850,12 @@ jobs:
             runner: xcode-27
             machine: arm64
             hosted_job: github-hosted-xcode27-arm64
-            supplier_receipt: e6b23316078020c513ab1b05b3b55e4f87b8d15908a8dee022ad5ee03b8f763e
-            supplier_tar: ead75b364118139561a34da6aa48e3c54791e152154ab32c46196b0223962359
-            supplier_source: c6551aa07d0673436aa9587b3a039889d22449c3
-            supplier_run: "40473858216"
+            supplier_receipt: 8472de6eaf5c12b9f46d96ff97830c9cf4f02c98943c0c9134eddd48519d589c
+            supplier_tar: 2e6efe239af9e7bc6f3688997d41a9607aa2980528d68fcaa8c97e40d611f438
+            supplier_source: 9a64371c72dc56de3de3bcc63e7a368a91b7437d
+            supplier_run: "44870109681"
             supplier_attempt: "1"
-            supplier_artifact: "12719943283"
+            supplier_artifact: "14693417053"
             removal_case: disabled
     env:
       RUSTUP_TOOLCHAIN: "${{ fromJSON('{\"aarch64-apple-darwin\":\"1.98.1\",\"x86_64-apple-darwin\":\"1.98.0\"}')[matrix.target] }}"
@@ -6964,12 +6965,12 @@ jobs:
             runner: xcode-27
             machine: arm64
             hosted_job: github-hosted-xcode27-arm64
-            supplier_receipt: e6b23316078020c513ab1b05b3b55e4f87b8d15908a8dee022ad5ee03b8f763e
-            supplier_tar: ead75b364118139561a34da6aa48e3c54791e152154ab32c46196b0223962359
-            supplier_source: c6551aa07d0673436aa9587b3a039889d22449c3
-            supplier_run: "40473858216"
+            supplier_receipt: 8472de6eaf5c12b9f46d96ff97830c9cf4f02c98943c0c9134eddd48519d589c
+            supplier_tar: 2e6efe239af9e7bc6f3688997d41a9607aa2980528d68fcaa8c97e40d611f438
+            supplier_source: 9a64371c72dc56de3de3bcc63e7a368a91b7437d
+            supplier_run: "44870109681"
             supplier_attempt: "1"
-            supplier_artifact: "12719943283"
+            supplier_artifact: "14693417053"
             removal_case: disabled
     env:
       RUSTUP_TOOLCHAIN: "${{ fromJSON('{\"aarch64-apple-darwin\":\"1.98.1\",\"x86_64-apple-darwin\":\"1.98.0\"}')[matrix.target] }}"
@@ -7079,12 +7080,12 @@ jobs:
             runner: xcode-27
             machine: arm64
             hosted_job: github-hosted-xcode27-arm64
-            supplier_receipt: e6b23316078020c513ab1b05b3b55e4f87b8d15908a8dee022ad5ee03b8f763e
-            supplier_tar: ead75b364118139561a34da6aa48e3c54791e152154ab32c46196b0223962359
-            supplier_source: c6551aa07d0673436aa9587b3a039889d22449c3
-            supplier_run: "40473858216"
+            supplier_receipt: 8472de6eaf5c12b9f46d96ff97830c9cf4f02c98943c0c9134eddd48519d589c
+            supplier_tar: 2e6efe239af9e7bc6f3688997d41a9607aa2980528d68fcaa8c97e40d611f438
+            supplier_source: 9a64371c72dc56de3de3bcc63e7a368a91b7437d
+            supplier_run: "44870109681"
             supplier_attempt: "1"
-            supplier_artifact: "12719943283"
+            supplier_artifact: "14693417053"
             removal_case: disabled
     env:
       RUSTUP_TOOLCHAIN: "${{ fromJSON('{\"aarch64-apple-darwin\":\"1.98.1\",\"x86_64-apple-darwin\":\"1.98.0\"}')[matrix.target] }}"
@@ -7208,12 +7209,12 @@ jobs:
             runner: xcode-27
             machine: arm64
             hosted_job: github-hosted-xcode27-arm64
-            supplier_receipt: e6b23316078020c513ab1b05b3b55e4f87b8d15908a8dee022ad5ee03b8f763e
-            supplier_tar: ead75b364118139561a34da6aa48e3c54791e152154ab32c46196b0223962359
-            supplier_source: c6551aa07d0673436aa9587b3a039889d22449c3
-            supplier_run: "40473858216"
+            supplier_receipt: 8472de6eaf5c12b9f46d96ff97830c9cf4f02c98943c0c9134eddd48519d589c
+            supplier_tar: 2e6efe239af9e7bc6f3688997d41a9607aa2980528d68fcaa8c97e40d611f438
+            supplier_source: 9a64371c72dc56de3de3bcc63e7a368a91b7437d
+            supplier_run: "44870109681"
             supplier_attempt: "1"
-            supplier_artifact: "12719943283"
+            supplier_artifact: "14693417053"
             removal_case: disabled
     env:
       RUSTUP_TOOLCHAIN: "${{ fromJSON('{\"aarch64-apple-darwin\":\"1.98.1\",\"x86_64-apple-darwin\":\"1.98.0\"}')[matrix.target] }}"
@@ -7333,12 +7334,12 @@ jobs:
             runner: xcode-27
             machine: arm64
             hosted_job: github-hosted-xcode27-arm64
-            supplier_receipt: e6b23316078020c513ab1b05b3b55e4f87b8d15908a8dee022ad5ee03b8f763e
-            supplier_tar: ead75b364118139561a34da6aa48e3c54791e152154ab32c46196b0223962359
-            supplier_source: c6551aa07d0673436aa9587b3a039889d22449c3
-            supplier_run: "40473858216"
+            supplier_receipt: 8472de6eaf5c12b9f46d96ff97830c9cf4f02c98943c0c9134eddd48519d589c
+            supplier_tar: 2e6efe239af9e7bc6f3688997d41a9607aa2980528d68fcaa8c97e40d611f438
+            supplier_source: 9a64371c72dc56de3de3bcc63e7a368a91b7437d
+            supplier_run: "44870109681"
             supplier_attempt: "1"
-            supplier_artifact: "12719943283"
+            supplier_artifact: "14693417053"
             removal_case: disabled
     env:
       RUSTUP_TOOLCHAIN: "${{ fromJSON('{\"aarch64-apple-darwin\":\"1.98.1\",\"x86_64-apple-darwin\":\"1.98.0\"}')[matrix.target] }}"
@@ -7456,12 +7457,12 @@ jobs:
             runner: xcode-27
             machine: arm64
             hosted_job: github-hosted-xcode27-arm64
-            supplier_receipt: e6b23316078020c513ab1b05b3b55e4f87b8d15908a8dee022ad5ee03b8f763e
-            supplier_tar: ead75b364118139561a34da6aa48e3c54791e152154ab32c46196b0223962359
-            supplier_source: c6551aa07d0673436aa9587b3a039889d22449c3
-            supplier_run: "40473858216"
+            supplier_receipt: 8472de6eaf5c12b9f46d96ff97830c9cf4f02c98943c0c9134eddd48519d589c
+            supplier_tar: 2e6efe239af9e7bc6f3688997d41a9607aa2980528d68fcaa8c97e40d611f438
+            supplier_source: 9a64371c72dc56de3de3bcc63e7a368a91b7437d
+            supplier_run: "44870109681"
             supplier_attempt: "1"
-            supplier_artifact: "12719943283"
+            supplier_artifact: "14693417053"
             removal_case: disabled
     env:
       RUSTUP_TOOLCHAIN: "${{ fromJSON('{\"aarch64-apple-darwin\":\"1.98.1\",\"x86_64-apple-darwin\":\"1.98.0\"}')[matrix.target] }}"
@@ -7581,12 +7582,12 @@ jobs:
             runner: xcode-27
             machine: arm64
             hosted_job: github-hosted-xcode27-arm64
-            supplier_receipt: e6b23316078020c513ab1b05b3b55e4f87b8d15908a8dee022ad5ee03b8f763e
-            supplier_tar: ead75b364118139561a34da6aa48e3c54791e152154ab32c46196b0223962359
-            supplier_source: c6551aa07d0673436aa9587b3a039889d22449c3
-            supplier_run: "40473858216"
+            supplier_receipt: 8472de6eaf5c12b9f46d96ff97830c9cf4f02c98943c0c9134eddd48519d589c
+            supplier_tar: 2e6efe239af9e7bc6f3688997d41a9607aa2980528d68fcaa8c97e40d611f438
+            supplier_source: 9a64371c72dc56de3de3bcc63e7a368a91b7437d
+            supplier_run: "44870109681"
             supplier_attempt: "1"
-            supplier_artifact: "12719943283"
+            supplier_artifact: "14693417053"
             removal_case: disabled
     env:
       RUSTUP_TOOLCHAIN: "${{ fromJSON('{\"aarch64-apple-darwin\":\"1.98.1\",\"x86_64-apple-darwin\":\"1.98.0\"}')[matrix.target] }}"

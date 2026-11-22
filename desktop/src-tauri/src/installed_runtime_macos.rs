@@ -76,6 +76,11 @@ pub(crate) struct AndroidServiceIdentitySlots {
 }
 #[cfg(not(feature = "macos-android-registration-helper"))]
 impl AndroidServiceIdentitySlots {
+    // Protected app ancestry, the fixed code group, two install records and
+    // six fixed signature paths fit in this book. The full inventory uses the
+    // separate InstallationSlots book, which is consumed before this one.
+    const FIXED_RECORDS: usize = 64;
+
     pub(crate) fn new(gate: crate::saved_command_owner::AndroidRegistrationWorkGate) -> Self {
         let mut original=Book::new();original.registration_gate=Some(gate.clone());
         Self { installation:InstallationSlots::new_registered(gate.clone()),original,
@@ -164,7 +169,7 @@ impl AndroidServiceIdentitySlots {
     fn fixed_payload(&mut self,end:Instant,stop:&watch::Receiver<bool>)->Result<()> {
         use crate::macos_install_record as data;
         self.attempt(|book|book.arm_acl_once(end,stop))?;
-        let roles=self.attempt(|book|book.protected_app_once(end,stop))?;
+        let roles=self.attempt(|book|book.protected_app_with_records(Self::FIXED_RECORDS,end,stop))?;
         let (contents,app,install)=(roles.contents,roles.payload,roles.install);
         self.attempt(|book|Self::mode(book,roles.entry,0o555,end,stop))?;
         self.attempt(|book|Self::mode(book,app,0o555,end,stop))?;
@@ -228,6 +233,7 @@ impl AndroidServiceIdentitySlots {
                 return Err(AdmissionFailure::Inventory);
             }
         }
+        if self.original.records.capacity()>Self::FIXED_RECORDS{return Err(AdmissionFailure::Bounds);}
         self.recheck_admission(false,end,stop)
     }
     pub(crate) fn check_once(&mut self,end:Instant,stop:&watch::Receiver<bool>)->Result<()> {
@@ -329,7 +335,14 @@ impl AndroidServiceIdentitySlots {
     fn recheck_admission(&mut self,recheck:bool,end:Instant,stop:&watch::Receiver<bool>)->Result<()> {
         for index in 0..self.original.records.len() {
             if self.original.records[index].state==State::Owned {
-                self.attempt_admission(recheck,|book|book.check_name(index,end,stop))?;
+                self.attempt_admission(recheck,|book|book.check_name(index,end,stop)).map_err(|failure|{
+                    if recheck&&self.gate.source_has_removal_cutoff(){
+                        mrk_macos_installed_native::removal_coordinator::removal_trace(&format!(
+                            "app maintenance-identity-recheck=refused slot={index} reason={failure:?} parent_veto={}",
+                            self.original.removal_clock_vetoed()));
+                    }
+                    failure
+                })?;
             }
         }
         if self.gate.source_has_removal_cutoff(){self.original.point(end,stop)}else{self.gate.source_work()}
@@ -352,6 +365,21 @@ impl AndroidServiceIdentitySlots {
         std::mem::size_of::<Self>().checked_add(self.original.retained_heap_bytes()?)?
             .checked_add(self.installation.control_bytes()?)
     }
+}
+
+#[cfg(all(test,not(feature = "macos-android-registration-helper")))]
+#[test]
+fn fixed_android_identity_record_capacity_fits_both_settled_maintenance_checks() {
+    let record_bytes = std::mem::size_of::<Record>();
+    let mut probe = Vec::<Record>::new();
+    let mut enabled = Vec::<Record>::new();
+    for records in [&mut probe, &mut enabled] {
+        records.try_reserve_exact(AndroidServiceIdentitySlots::FIXED_RECORDS).unwrap();
+    }
+    // The service-enabled path retains both ledgers until the owner's final
+    // cut. The old shared reservation exceeded the 2 MiB cap on its own.
+    assert!(2 * 8256 * record_bytes > 2 * 1024 * 1024);
+    assert!((probe.capacity() + enabled.capacity()) * record_bytes < 32 * 1024);
 }
 
 pub(crate) use crate::macos_install_paths::{APP, PROTOCOL_SHA, runtime_root};
@@ -422,6 +450,30 @@ impl Identity {
         Ok(Expected { device: u64::try_from(self.dev).map_err(|_| AdmissionFailure::Identity)?, inode: self.ino,
             mode: u32::from(self.mode), owner: self.uid, group: self.gid, flags: self.flags })
     }
+    fn opening_ctime_advance(self, observed: Self) -> bool {
+        (observed.ctime, observed.ctime_ns) > (self.ctime, self.ctime_ns)
+            && Self { ctime: observed.ctime, ctime_ns: observed.ctime_ns, ..self } == observed
+    }
+}
+#[cfg(test)]
+#[test]
+fn opening_entry_observation_only_allows_forward_ctime() {
+    let before = Identity { dev: 7, ino: 8, mode: 0o040555, uid: 0, gid: 0, links: 2,
+        size: 96, mtime: 80, mtime_ns: 100, ctime: 80, ctime_ns: 100, flags: 0 };
+    let after = Identity { ctime_ns: 101, ..before };
+    assert!(before.opening_ctime_advance(after));
+    assert!(before.opening_ctime_advance(Identity { ctime: 81, ctime_ns: 0, ..before }));
+    assert!(!before.opening_ctime_advance(before));
+    assert!(!after.opening_ctime_advance(before));
+    for changed in [
+        Identity { dev: 9, ..after }, Identity { ino: 9, ..after },
+        Identity { mode: 0o040755, ..after }, Identity { uid: 1, ..after },
+        Identity { gid: 1, ..after }, Identity { links: 3, ..after },
+        Identity { size: 128, ..after }, Identity { mtime_ns: 101, ..after },
+        Identity { flags: 1, ..after },
+    ] {
+        assert!(!before.opening_ctime_advance(changed));
+    }
 }
 /// Shared removal-only source gate. Its preauth clock DATA can only shorten
 /// finite admission, never issue a peer, source or confirmation capability.
@@ -463,11 +515,11 @@ impl AppRemovalWorkGate {
         use std::sync::atomic::Ordering;
         if at>Instant::now(){self.original.unknown.store(true,Ordering::SeqCst);return;}
         if matches!(failure,AdmissionFailure::Unknown|AdmissionFailure::AlreadyUsed){self.original.unknown.store(true,Ordering::SeqCst);}
-        match self.original.first.try_write(){Ok(mut first)=>*first=earliest_failure(*first,Some((failure,at))),
+        match self.original.first.write(){Ok(mut first)=>*first=earliest_failure(*first,Some((failure,at))),
             Err(_)=>{self.original.unknown.store(true,Ordering::SeqCst);}}
     }
     pub(crate) fn source_first(&self)->Option<(AdmissionFailure,Instant)>{
-        match self.original.first.try_read(){Ok(first)=>*first,Err(_)=>{
+        match self.original.first.read(){Ok(first)=>*first,Err(_)=>{
             self.original.unknown.store(true,std::sync::atomic::Ordering::SeqCst);None}}
     }
     pub(crate) fn source_parent_vetoed(&self)->bool{self.original.clock.unknown()}
@@ -709,9 +761,10 @@ fn push_worker_name(selection:&VerifiedRuntime)->&'static str {
 }
 struct Record { state: State, fd: Option<OwnedFd>, parent: Option<usize>, name: String, identity: Option<Identity>, android_flags: Option<u32> }
 struct Book { inspection_phase: inspection_phase::Phase, upload_key_inspection:bool, initialization_agent_inspection:bool,workflow_edit_agent_inspection:bool, records: Vec<Record>, started: bool, inspected: bool, prepared: bool, unknown: bool, closed: bool,
-    // Three fixed installed bundle roots only; no per-payload allocation.
+    // Three fixed current roots and one authenticated retained root at a time.
     // Capturing opaque metadata never substitutes for record/signature admission.
     bundle_metadata: [Option<(Identity,crate::macos_existing_app_metadata::SnapshotData)>;3],
+    retained_bundle_metadata: Option<(usize, Identity, crate::macos_existing_app_metadata::SnapshotData)>,
     tool_ca_required: bool, tool_ca: Option<(usize,u64,String)>,
     fetch_helper_required:bool,fetch_helper:Option<usize>,
     push_helper_required:bool,push_helper:Option<usize>,
@@ -758,7 +811,7 @@ fn metadata(s: &FileStat, directory: bool) -> Result<Identity> {
 impl Book {
     fn new() -> Self { Self { inspection_phase: inspection_phase::Phase::default(), upload_key_inspection:false, initialization_agent_inspection:false,workflow_edit_agent_inspection:false, records: Vec::new(), started: false, inspected: false, prepared: false, unknown: false, closed: false,
         history_nomination: None, history_provider: None, tool_ca_required:false, tool_ca:None,fetch_helper_required:false,fetch_helper:None,push_helper_required:false,push_helper:None,
-        store: None, bundle_metadata: [None;3],
+        store: None, bundle_metadata: [None;3], retained_bundle_metadata: None,
         #[cfg(not(feature = "macos-android-registration-helper"))]
         registration_gate: None,
         #[cfg(not(feature = "macos-android-registration-helper"))]
@@ -1071,30 +1124,81 @@ impl Book {
         SnapshotData::from_observed_bytes_data(&bytes[..used]).ok_or(AdmissionFailure::Bounds)
     }
     fn bundle_metadata_post_with(&self,index:usize,point:&mut dyn FnMut()->Result<()>)->Result<()> {
-        if let Some(slot)=self.installed_bundle_slot(index) {
-            if let Some((identity,first))=self.bundle_metadata[slot] {
-                if self.records[index].identity!=Some(identity){return Err(AdmissionFailure::Identity);}
-                if self.read_bundle_metadata_with(index,point)?!=first{return Err(AdmissionFailure::Identity);}
-                // Recheck the SAME held FD and no-follow name after the added read.
-                self.check_identity_with(index,point)?;
+        let snapshot = self.installed_bundle_slot(index).and_then(|slot| self.bundle_metadata[slot])
+            .or_else(|| self.retained_bundle_metadata.filter(|(original, _, _)| *original == index)
+                .map(|(_, identity, first)| (identity, first)));
+        if let Some((identity, first)) = snapshot {
+            if self.records[index].identity != Some(identity)
+                || self.read_bundle_metadata_with(index,point)? != first {
+                return Err(AdmissionFailure::Identity);
             }
+            self.check_identity_with(index,point)?;
         }
         Ok(())
+    }
+    fn capture_bundle_metadata(&self, index: usize, end: Instant, stop: &watch::Receiver<bool>)
+        -> Result<(Identity, crate::macos_existing_app_metadata::SnapshotData)> {
+        self.check_name(index,end,stop)?;
+        let identity = self.records[index].identity.ok_or(AdmissionFailure::Identity)?;
+        if identity.mode != 0o040555 || identity.uid != 0 || identity.gid != 0 || identity.flags != 0 {
+            return Err(AdmissionFailure::Ownership);
+        }
+        Ok((identity, self.read_bundle_metadata_with(index,&mut || self.point(end,stop))?))
+    }
+    // Installation history calls this after matching the recorded generation
+    // to this held original. A retained-looking path alone grants no exception.
+    fn capture_validated_retained_bundle(&mut self, index: usize, end: Instant, stop: &watch::Receiver<bool>) -> Result<()> {
+        if self.retained_bundle_metadata.is_some() || self.installed_bundle_slot(index).is_some() {
+            return Err(AdmissionFailure::AlreadyUsed);
+        }
+        let (identity, captured) = self.capture_bundle_metadata(index,end,stop)?;
+        self.retained_bundle_metadata = Some((index, identity, captured));
+        self.check_name(index,end,stop)
     }
     fn installed_attributes(&mut self,index:usize,end:Instant,stop:&watch::Receiver<bool>)->Result<()> {
         let Some(slot)=self.installed_bundle_slot(index) else {
             return native::no_xattrs(self.fd(index)?.as_fd()).map_err(native_error);
         };
-        self.check_name(index,end,stop)?;
-        let identity=self.records[index].identity.ok_or(AdmissionFailure::Identity)?;
-        if identity.mode!=0o040555 || identity.uid!=0 || identity.gid!=0 || identity.flags!=0 {
-            return Err(AdmissionFailure::Ownership);
-        }
-        let captured=self.read_bundle_metadata_with(index,&mut ||self.point(end,stop))?;
+        let (identity, captured) = self.capture_bundle_metadata(index,end,stop)?;
         if let Some((original,first))=self.bundle_metadata[slot] {
             if original!=identity || first!=captured{return Err(AdmissionFailure::Identity);}
         }
         self.bundle_metadata[slot]=Some((identity,captured));
+        self.check_name(index,end,stop)
+    }
+    fn initial_entry_attributes(&mut self, index: usize, end: Instant, stop: &watch::Receiver<bool>) -> Result<()> {
+        use crate::macos_existing_app_metadata::{MACL_BYTES_LIMIT, SnapshotData};
+        if self.installed_bundle_slot(index) != Some(0) || self.bundle_metadata[0].is_some() {
+            return Err(AdmissionFailure::AlreadyUsed);
+        }
+        self.check_name(index,end,stop)?;
+        let initial = self.records[index].identity.ok_or(AdmissionFailure::Identity)?;
+        if initial.mode != 0o040555 || initial.uid != 0 || initial.gid != 0 || initial.flags != 0 {
+            return Err(AdmissionFailure::Ownership);
+        }
+        let mut bytes = zeroize::Zeroizing::new([0u8; MACL_BYTES_LIMIT]);
+        self.point(end,stop)?;
+        let (initial_size, changed) = native::initial_app_macl(self.fd(index)?.as_fd(), &mut bytes).map_err(native_error)?;
+        self.point(end,stop)?;
+        let first = SnapshotData::from_observed_bytes_data(&bytes[..initial_size]).ok_or(AdmissionFailure::Bounds)?;
+        let (identity, captured) = if changed {
+            // One stable reread on the same FD, inside the original deadline.
+            // Only the ctime of this still-unpublished root may advance.
+            let fd = self.fd(index)?;
+            let after = Identity::of(&stat::fstat(fd).map_err(native_error)?);
+            if !initial.opening_ctime_advance(after) { return Err(AdmissionFailure::Identity); }
+            bytes.fill(0);
+            self.point(end,stop)?;
+            let size = native::existing_app_macl(fd.as_fd(), &mut bytes).map_err(native_error)?;
+            if size == 0 { return Err(AdmissionFailure::Identity); }
+            let stable = SnapshotData::from_observed_bytes_data(&bytes[..size]).ok_or(AdmissionFailure::Bounds)?;
+            if initial_size != 0 && first != stable { return Err(AdmissionFailure::Identity); }
+            (after, stable)
+        } else {
+            (initial, first)
+        };
+        self.records[index].identity = Some(identity);
+        self.bundle_metadata[0] = Some((identity, captured));
         self.check_name(index,end,stop)
     }
     fn chain(&mut self, path: &Path, end: Instant, stop: &watch::Receiver<bool>) -> Result<usize> {
@@ -1147,6 +1251,9 @@ impl Book {
             _ => self.unknown = true,
         }
         if !metadata_ok {self.unknown=true;}
+        if !self.unknown && self.retained_bundle_metadata.is_some_and(|(original, _, _)| original == index) {
+            self.retained_bundle_metadata = None;
+        }
         !self.unknown
     }
     fn walk(&mut self, parent: usize, relative: &str, files: &BTreeMap<String, PayloadFile>, directories: &BTreeSet<String>,
@@ -1287,13 +1394,16 @@ impl Book {
     // Private factoring of the existing installed-app proof, not a Resources
     // capability. FixedSupport uses the SAME retained Contents ancestor.
     fn protected_app_once(&mut self, end: Instant, stop: &watch::Receiver<bool>) -> Result<ProtectedApp> {
+        self.protected_app_with_records(8256,end,stop)
+    }
+    fn protected_app_with_records(&mut self, records: usize, end: Instant, stop: &watch::Receiver<bool>) -> Result<ProtectedApp> {
         if !self.inspection_ready() { return Err(AdmissionFailure::AlreadyUsed); }
         // Diagnostic DATA only: callers outside inspect() never report it.
         self.inspection_phase = inspection_phase::Phase::ProtectedProfile;
         let layout=installed_code_layout()?;
-        // Fixed support/seal callers retain their existing small quote. Full
-        // runtime inspection reserves its larger ledger before entering here.
-        self.records.try_reserve_exact(8256).map_err(native_error)?; self.started = true;
+        // A full runtime walk reserves its larger ledger before entering here.
+        // A fixed identity check retains only the capacity its own proof needs.
+        self.records.try_reserve_exact(records).map_err(native_error)?; self.started = true;
         self.point(end, stop)?; native::real_user().map_err(native_error)?; self.point(end, stop)?;
         // A user-writable drag-copy or checkout app cannot select this runtime.
         let executable = Path::new(crate::macos_install_paths::PAYLOAD_EXECUTABLE);
@@ -1307,7 +1417,7 @@ impl Book {
         let helpers = self.open(Some(outer_contents), "Helpers", true, end, stop)?;
         let payload = self.open(Some(helpers), crate::macos_install_paths::PAYLOAD_NAME, true, end, stop)?;
         self.inspection_phase = inspection_phase::Phase::ProtectedEntryAttributes;
-        self.installed_attributes(entry,end,stop)?;
+        self.initial_entry_attributes(entry,end,stop)?;
         self.inspection_phase = inspection_phase::Phase::ProtectedPayloadAttributes;
         self.installed_attributes(payload,end,stop)?;
         self.inspection_phase = inspection_phase::Phase::ProtectedBinary;

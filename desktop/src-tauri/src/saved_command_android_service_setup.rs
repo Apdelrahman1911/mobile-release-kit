@@ -577,6 +577,9 @@ impl CallbackOriginal {
                     failure.note(if observation.status==management::Status::RequiresApproval{
                         wire::Reason::ApprovalRequired
                     }else{wire::Reason::ServiceUnavailable},at);
+                    let route=if self.retirement.removal.is_some(){"remove"}else{"prepare"};
+                    mrk_macos_installed_native::removal_coordinator::removal_trace(&format!(
+                        "app maintenance-status=refused route={route} state={:?} outcome={:?}",observation.status,observation.outcome));
                 }
             }
         }
@@ -898,7 +901,17 @@ impl Preparation {
             self.gate.control.poisoned();return false;
         }
         let stop=self.gate.control.stop.subscribe();
-        let checked=self.gate.source_work().is_ok() && identity.check_once(self.gate.control.work,&stop).is_ok();
+        let check=self.gate.source_work().and_then(|()|identity.check_once(self.gate.control.work,&stop));
+        if let Err(failure)=check{
+            if self.retirement.removal.is_some(){
+                let original=self.gate.control.failure();
+                let detail=identity.diagnostic().for_first(original);
+                mrk_macos_installed_native::removal_coordinator::removal_trace(&format!(
+                    "app maintenance-identity-check=refused reason={failure:?} original={:?} detail={detail:?}",
+                    original.map(|(reason,_)|reason)));
+            }
+        }
+        let checked=check.is_ok();
         if checked{self.requested.store(true,Ordering::SeqCst);self.gate.control.changed();}
         let mut files_known=None;
         let main=loop{
@@ -913,6 +926,10 @@ impl Preparation {
         if checked && self.gate.control.failure().is_none() && main.0
             && (self.retirement.removal.is_none() || self.gate.publishable()){
             if let Err(failure)=identity.recheck(self.gate.control.work,&stop){
+                if self.retirement.removal.is_some(){
+                    mrk_macos_installed_native::removal_coordinator::removal_trace(&format!(
+                        "app maintenance-identity-recheck=returned reason={failure:?}"));
+                }
                 let at=Instant::now();self.gate.control.propagated_refusal(wire::Reason::SigningUnavailable,at);
                 identity.capture_recheck_refusal(failure,at);
             }
@@ -1250,6 +1267,12 @@ impl MaintenancePreparation {
             && self.probe.gate.source_work().is_ok() && signal.admitted(false)
             && Instant::now()<control.work;
         let branch=Self::observed_branch(observed,checked);
+        if branch==MaintenanceBranch::Unselected{
+            let route=if self.probe.retirement.removal.is_some(){"remove"}else{"prepare"};
+            mrk_macos_installed_native::removal_coordinator::removal_trace(&format!(
+                "app maintenance-probe=refused route={route} probe-ok={probe_ok} checked={checked} observed-state={:?}",
+                observed.map(|value|value.state)));
+        }
         let enabled=branch==MaintenanceBranch::Unregistered;
         let absent=branch==MaintenanceBranch::ObservedAbsent;
         let mut result;
