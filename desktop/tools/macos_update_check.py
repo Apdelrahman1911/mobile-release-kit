@@ -2292,6 +2292,34 @@ def open_quarantined_uninstaller(mount, work, evidence, label):
     need(returncode == 0, f"{label}-quarantined-open-{returncode}")
 
 
+def uninstaller_diagnostic_run(mount, work, evidence, label, answers, timeout=240):
+    # Observe actual process lifetimes without collecting command arguments,
+    # which could include credentials from independent hosted fixtures.
+    done = threading.Event()
+    records = []
+    started = time.monotonic()
+    def sample():
+        previous = None
+        while not done.is_set():
+            p = subprocess.run(["/bin/ps", "-A", "-o", "pid=,ppid=,stat=,comm="],
+                               capture_output=True, text=True, timeout=5)
+            rows = [line.strip() for line in p.stdout.splitlines()
+                    if re.search(r"(?:/MacOS/(?:Installer|applet)|/usr/bin/(?:open|security)|/bin/sh)$", line)]
+            if rows != previous:
+                records.append({"elapsed": round(time.monotonic() - started, 3), "processes": rows})
+                previous = rows
+            done.wait(.5)
+
+    sampler = threading.Thread(target=sample, daemon=True)
+    sampler.start()
+    try:
+        return uninstaller_run(mount, work, evidence, label, answers, timeout=timeout)
+    finally:
+        done.set()
+        sampler.join(timeout=7)
+        (evidence / f"{label}-process-timeline.json").write_text(json.dumps(records, indent=2) + "\n")
+
+
 def uninstaller_run(mount, work, evidence, label, answers, timeout=240):
     """Open the mounted uninstaller as the owner would and answer its dialogs
     in order. An answer is a button name, or None to quit Installer once the
@@ -2320,17 +2348,30 @@ def uninstaller_run(mount, work, evidence, label, answers, timeout=240):
             while time.monotonic() < deadline and not installer_running():
                 time.sleep(1)
             need(installer_running(), f"{label}-installer-not-opened")
-            time.sleep(5)
+            window_deadline = min(time.monotonic() + 25, deadline)
+            while time.monotonic() < window_deadline:
+                p, _ = run(["/usr/bin/osascript", "-e",
+                            'tell application "System Events" to count windows of first application process whose bundle identifier is "com.apple.installer"'],
+                           8)
+                if p.returncode == 0 and p.stdout.strip().isdigit() and int(p.stdout.strip()) > 0:
+                    break
+                time.sleep(.5)
+            else:
+                raise Failed(label + "-installer-welcome-window-missing")
             subprocess.run(["/usr/sbin/screencapture", "-x", str(evidence / f"screen-{label}-installer.png")],
                            capture_output=True, timeout=60)
-            subprocess.run(["/usr/bin/osascript", "-e", 'tell application id "com.apple.installer" to quit'],
-                           capture_output=True, timeout=30)
+            quit_started = time.monotonic()
+            closed = subprocess.run(["/usr/bin/osascript", "-e", 'tell application id "com.apple.installer" to quit'],
+                                    capture_output=True, text=True, timeout=30)
             quit_by = time.monotonic() + 15
             while installer_running() and time.monotonic() < quit_by:
                 time.sleep(1)
-            if installer_running():
+            needed_fallback = installer_running()
+            if needed_fallback:
                 subprocess.run(["/usr/bin/pkill", "-x", "Installer"], capture_output=True, timeout=30)
-            seen.append({"installer": "quit"})
+            seen.append({"installer": "quit", "returncode": closed.returncode,
+                         "stderr": closed.stderr[-300:], "fallback": needed_fallback,
+                         "elapsed": round(time.monotonic() - quit_started, 3)})
             continue
         # An answer may name a second button that must be on the same dialog,
         # so a shared "Cancel" is never clicked on the wrong one.
@@ -2462,7 +2503,7 @@ def confirmed_data_deletion(mount, work, evidence, result, decoys):
                         "-w", os.urandom(16).hex()], check=True, capture_output=True, timeout=30)
     out["appKeychainItemsSeeded"] = {svc: keychain_has(svc) for svc in (*KEYCHAIN_SERVICES, DECOY_SERVICE)}
     need(all(out["appKeychainItemsSeeded"].values()), "delete-all-data-keychain-fixture")
-    seen = uninstaller_run(mount, work, evidence, "uninstall-delete",
+    seen = uninstaller_diagnostic_run(mount, work, evidence, "uninstall-delete",
                            [DELETE_LABEL, "Delete All Data", "Continue", None, "OK"])
     out["deleteAllData"] = seen
     gone = {relative: not home_path(relative).exists() for relative in DELETE_TARGETS}
