@@ -1019,17 +1019,7 @@ SHEET_JXA = """function run(argv) {
     const texts = sheet.staticTexts().map(t => t.value());
     if (names.length !== 2 || names.indexOf('Cancel') < 0 || names.indexOf(confirm) < 0) return 'unexpected:' + names.join('|');
     if (!texts.some(t => t === title)) return 'unexpected-text';
-    if (argv[1] === 'click') {
-      if (!quit && argv[3] === 'activate-on-consent') {
-        // Accessibility press does not focus a background window like a
-        // physical click. The exact background sheet was already observed.
-        proc.frontmost = true;
-        delay(0.3);
-        if (!proc.frontmost()) return 'consent-focus-unconfirmed';
-      }
-      sheet.buttons.byName(confirm).click();
-      return 'clicked';
-    }
+    if (argv[1] === 'click') { sheet.buttons.byName(confirm).click(); return 'clicked'; }
     return 'present';
   }
   return 'absent';
@@ -1428,7 +1418,7 @@ def live_remove(mount, work, evidence, steps, label, observe_release=None, *, re
                     suffix = "quit-sheet" if clicked else "sheet"
                     subprocess.run(["/usr/sbin/screencapture", "-x", str(evidence / f"screen-{label}-{suffix}.png")],
                                    capture_output=True, timeout=60)
-                    q = subprocess.run([*cmd, "click", phase, "activate-on-consent" if background else ""],
+                    q = subprocess.run([*cmd, "click", phase],
                                        capture_output=True, text=True, timeout=30)
                     history.append(q.stdout.strip() or ("error:" + q.stderr.strip()[-160:]))
                     if q.stdout.strip() == "clicked":
@@ -1551,6 +1541,7 @@ def remove_check(selection, work, evidence, steps, result, *, folder=None, seede
     background = os.environ.get("MRK_CHECK_REMOVE_INACTIVE") == "true"
     if background:
         install_macl_fixture((APP,))
+        credential = seed_update_credential()
     out = live_remove(mount, work, evidence, steps, "remove", observe_release=row["release"] if repeat else None,
                       background=background)
     result.update(removalSheet=out["sheet"], removalQuitSheet=out["quitSheet"],
@@ -1561,7 +1552,7 @@ def remove_check(selection, work, evidence, steps, result, *, folder=None, seede
     result["userDataPreservedByRemoval"] = all(kept.get(k) == v for k, v in seeded.items())
     need(result["userDataPreservedByRemoval"], "user-data-changed-by-removal")
     try:
-        if mode == "retained-transition":
+        if mode == "retained-transition" or background:
             kept_credential = credential is not None and update_credential_matches(credential)
             result["credentialPreservedAfterRemoval"] = kept_credential
             need(kept_credential, "retained-credential-changed-by-removal")
@@ -1587,10 +1578,12 @@ def remove_check(selection, work, evidence, steps, result, *, folder=None, seede
             need(after == archives, "reinstall-removal-archive-changed")
         if mode == "removal-archive":
             return
-        observer = first_launch_observe if mode == "retained-transition" else None
+        observer = first_launch_observe if mode == "retained-transition" or background else None
         result["launchAfterReinstall"] = launch_smoke("after-reinstall", work, evidence, steps, observe=observer)
         if observer is not None:
-            require_runtime(result["launchAfterReinstall"], "retained-reinstall-runtime")
+            require_runtime(result["launchAfterReinstall"], "reinstall-bundled-runtime")
+            if background:
+                need(update_credential_matches(credential), "background-removal-reinstalled-credential")
             return
         if repeat:
             if mode == "repeat-after-dialogs":
@@ -1723,10 +1716,10 @@ def install_macl_fixture(paths):
 
 
 def macl_journal_recovery_check(selection, work, evidence, steps, result):
-    """Exercise the exact signed 0.2.3-to-0.2.4 interrupted removal transition."""
+    """Exercise the exact signed 0.2.3-to-0.2.5 interrupted removal transition."""
     need("previousRemoval" in selection and "removal" in selection
          and selection["previous"]["release"] == "macos26-arm64-desktop-09"
-         and selection["next"]["release"] == "macos26-arm64-desktop-10", "macl-recovery-selection")
+         and selection["next"]["release"] == "macos26-arm64-desktop-11", "macl-recovery-selection")
     need(not STATE.exists(), "macl-recovery-existing-installation")
     next_folder = fetch("next", selection["next"], work, steps)
     for role in selected_release_roles(selection)[:-1]:
