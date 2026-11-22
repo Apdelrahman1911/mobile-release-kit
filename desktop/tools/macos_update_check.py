@@ -546,6 +546,9 @@ def steady_resource_summary(samples, seconds, interval):
         size = max(1, len(samples) // 12)
         summary["firstWindowMeanRssKiB"] = round(sum(s["rssKiB"] for s in samples[:size]) / size)
         summary["lastWindowMeanRssKiB"] = round(sum(s["rssKiB"] for s in samples[-size:]) / size)
+        summary["firstWindowMeanCpuPercent"] = round(sum(s["cpuPercent"] for s in samples[:size]) / size, 1)
+        summary["lastWindowMeanCpuPercent"] = round(sum(s["cpuPercent"] for s in samples[-size:]) / size, 1)
+        summary["actualSampleSpanSeconds"] = round(samples[-1]["t"] - samples[0]["t"], 1)
         summary["rssWindowSamples"] = size
     return summary
 
