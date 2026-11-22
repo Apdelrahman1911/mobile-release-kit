@@ -21,9 +21,9 @@ mod native {
 
     const ROOT_BINDING_V1: &[u8] = b"MRK service root v1\n";
     const ROOT_BINDING_BYTES: usize = ROOT_BINDING_V1.len() + 16;
-    #[cfg(target_os = "macos")]
+    #[cfg(all(target_os = "macos", not(feature = "macos-xcode-setup")))]
     const ROOT_BINDING_V2: &[u8] = b"MRK service root v2\n";
-    #[cfg(target_os = "macos")]
+    #[cfg(all(target_os = "macos", not(feature = "macos-xcode-setup")))]
     const ROOT_BINDING_NEXT: &str = ".service-v1.reservation.next";
 
     fn legacy_root_binding(original: FileKey) -> Vec<u8> {
@@ -33,7 +33,7 @@ mod native {
         bytes
     }
 
-    #[cfg(target_os = "macos")]
+    #[cfg(all(target_os = "macos", not(feature = "macos-xcode-setup")))]
     fn mac_volume_binding(volume: [u8; 16], inode: u64) -> Vec<u8> {
         // Keep the fixed reservation width. This 128-bit identity digest is
         // scoped to the volume UUID and the original directory's file number.
@@ -49,14 +49,14 @@ mod native {
     }
 
     fn root_binding(file: &File, original: FileKey) -> Result<Vec<u8>> {
-        #[cfg(target_os = "macos")]
+        #[cfg(all(target_os = "macos", not(feature = "macos-xcode-setup")))]
         {
             use std::os::fd::AsFd;
             let volume = mrk_macos_installed_native::filesystem_identity::volume_uuid(file.as_fd())
                 .map_err(io_error)?;
             Ok(mac_volume_binding(volume, original.inode))
         }
-        #[cfg(not(target_os = "macos"))]
+        #[cfg(not(all(target_os = "macos", not(feature = "macos-xcode-setup"))))]
         { let _ = file; Ok(legacy_root_binding(original)) }
     }
 
@@ -311,7 +311,7 @@ mod native {
         pub(crate) fn for_client(app_data: &Path) -> Result<Self> { Self::acquire(app_data, false, &[], None, None).map(|v| v.0) }
         pub(crate) fn file(&self) -> Result<&File> { self.edges.last().map(|e| &e.file).ok_or_else(|| Error::Unavailable.into()) }
         pub(crate) fn path(&self) -> &Path { &self.path }
-        #[cfg(target_os = "macos")]
+        #[cfg(all(target_os = "macos", not(feature = "macos-xcode-setup")))]
         fn seal_legacy_root(&mut self, deadline: Option<Instant>) -> Result<()> {
             checkpoint(deadline)?;
             self.check()?;
@@ -433,7 +433,7 @@ mod native {
         fn open_checked(app_data: &Path, excluded_projects: &[(u64, u64)],
             expected: Option<ApplicationDirectoryExpectation>, deadline: Option<Instant>) -> Result<Self> {
             let (directory, created) = Directory::acquire(app_data, true, excluded_projects, expected, deadline)?;
-            #[cfg(target_os = "macos")]
+            #[cfg(all(target_os = "macos", not(feature = "macos-xcode-setup")))]
             let mut directory = directory;
             let result = (|| {
                 checkpoint(deadline)?;
@@ -486,7 +486,7 @@ mod native {
                         decode(namespace, &raw)?;
                         originals.insert(namespace, key);
                     }
-                    #[cfg(target_os = "macos")]
+                    #[cfg(all(target_os = "macos", not(feature = "macos-xcode-setup")))]
                     directory.seal_legacy_root(deadline)?;
                     Ok((reservation, version, originals))
                 })();
@@ -661,7 +661,7 @@ mod native {
             let file = File::open(path).unwrap(); let id = application_identity(key(&file).unwrap());
             close(file).unwrap(); id
         }
-        #[cfg(target_os = "macos")]
+        #[cfg(all(target_os = "macos", not(feature = "macos-xcode-setup")))]
         #[test]
         fn legacy_root_migrates_only_while_the_original_mount_still_matches() {
             let fixture = Fixture::new();
