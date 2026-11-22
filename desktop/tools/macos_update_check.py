@@ -1051,9 +1051,32 @@ DIALOG_JXA = """function run(argv) {
 """
 
 
+def open_quarantined_removal_image(image, steps):
+    """Use the same Launch Services handoff as a Finder double-click."""
+    deadline = time.monotonic() + 300
+    opened, step = run(["/usr/bin/open", str(image)], 60)
+    steps.append(dict(step, role="removal-image-launch-services"))
+    need(opened.returncode == 0, "removal-image-open")
+    original = image.resolve()
+    while time.monotonic() < deadline:
+        info = subprocess.run(["/usr/bin/hdiutil", "info", "-plist"], capture_output=True, timeout=20)
+        need(info.returncode == 0, "removal-image-info")
+        entries = plistlib.loads(info.stdout)["images"]
+        matched = [entry for entry in entries if entry.get("image-path")
+                   and Path(entry["image-path"]).resolve() == original]
+        need(len(matched) <= 1, "removal-image-multiple-attachments")
+        if matched:
+            need(matched[0].get("writeable") is False, "removal-image-writable")
+            mounts = [e["mount-point"] for e in matched[0]["system-entities"] if e.get("mount-point")]
+            if mounts:
+                need(len(mounts) == 1, "removal-image-mount")
+                return Path(mounts[0])
+        time.sleep(1)
+    raise Failed("removal-image-open-no-mount")
+
+
 def removal_image(row, work, steps):
-    """Download the notarized Remove carrier and mount it read-only, as the
-    owner would open it; the package runs only from the mounted image."""
+    """Mount the authenticated carrier read-only and verify its exact roster."""
     target = work / "removal"
     target.mkdir(mode=0o700)
     archive = target / "remove.zip"
@@ -1067,14 +1090,20 @@ def removal_image(row, work, steps):
     archive.unlink()
     image = target / "MobileReleaseKit-Remove.dmg"
     need(digest(image) == row["imageSha256"], "removal-image-digest")
+    quarantined = os.environ.get("MRK_CHECK_QUARANTINED_REMOVE_MEDIA") == "true"
+    if quarantined:
+        require_quarantine(image)
     p, r1 = run(["/usr/sbin/spctl", "-a", "-vv", "-t", "open", "--context", "context:primary-signature", str(image)], 120)
     steps.append(dict(r1, role="removal-image-gatekeeper"))
     need(p.returncode == 0 and "Notarized Developer ID" in (p.stdout + p.stderr), "removal-image-gatekeeper")
-    p, r2 = run(["/usr/bin/hdiutil", "attach", "-readonly", "-nobrowse", "-noautoopen", "-plist", str(image)], 300, check=True)
-    steps.append(dict(r2, role="removal-image-attach"))
-    mounts = [e["mount-point"] for e in plistlib.loads(p.stdout.encode())["system-entities"] if e.get("mount-point")]
-    need(len(mounts) == 1, "removal-image-mount")
-    mount = Path(mounts[0])
+    if quarantined:
+        mount = open_quarantined_removal_image(image, steps)
+    else:
+        p, r2 = run(["/usr/bin/hdiutil", "attach", "-readonly", "-nobrowse", "-noautoopen", "-plist", str(image)], 300, check=True)
+        steps.append(dict(r2, role="removal-image-attach"))
+        mounts = [e["mount-point"] for e in plistlib.loads(p.stdout.encode())["system-entities"] if e.get("mount-point")]
+        need(len(mounts) == 1, "removal-image-mount")
+        mount = Path(mounts[0])
     package = mount / "Remove.pkg"
     need(package.is_file(), "removal-image-roster")
     # #83/#51: the image shows only the uninstaller; the package and its two
@@ -1922,11 +1951,15 @@ def run_workspace_xctest(mode, row, folder, installed, work, evidence, steps, re
         result["reopen"] = launch_smoke("prepare-quit-reopen", work, evidence, steps)
 
 
-def package_acceptance(package):
+def require_quarantine(path):
     quarantine = f"0081;{int(time.time()):x};GitHubActions;"
-    written, _ = run(["/usr/bin/xattr", "-w", "com.apple.quarantine", quarantine, str(package)], 30)
-    read, _ = run(["/usr/bin/xattr", "-p", "com.apple.quarantine", str(package)], 30)
+    written, _ = run(["/usr/bin/xattr", "-w", "com.apple.quarantine", quarantine, str(path)], 30)
+    read, _ = run(["/usr/bin/xattr", "-p", "com.apple.quarantine", str(path)], 30)
     need(written.returncode == read.returncode == 0 and read.stdout.strip() == quarantine, "asset-quarantine")
+
+
+def package_acceptance(package):
+    require_quarantine(package)
     signature, _ = run(["/usr/sbin/pkgutil", "--check-signature", str(package)], 120)
     need(signature.returncode == 0 and "Developer ID Installer" in signature.stdout
          and "trusted by the Apple notary service" in signature.stdout, "asset-signature")

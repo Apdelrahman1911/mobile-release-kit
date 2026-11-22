@@ -59,6 +59,7 @@ jobs:
           || contains(github.event.head_commit.message, '[macos-workspace-xctest]') && fromJSON('["workspace-xctest","prepare-xctest"]')
           || contains(github.event.head_commit.message, '[macos-prepare-state-check]') && fromJSON('["prepare-xctest"]')
           || contains(github.event.head_commit.message, '[macos-refreshed-acceptance]') && fromJSON('["fresh","update-credentials","performance-long","release-asset","prepare-xctest","workspace-xctest","recovery-xctest","core-recovery","delete-data"]')
+          || contains(github.event.head_commit.message, '[macos-quarantined-remove-media]') && fromJSON('["uninstaller"]')
           || contains(github.event.head_commit.message, '[macos-hourly-performance]') && fromJSON('["performance-long"]')
           || contains(github.event.head_commit.message, '[macos-signed-core-recovery]') && fromJSON('["core-recovery"]')
           || contains(github.event.head_commit.message, '[macos-signed-gui-recovery]') && fromJSON('["recovery-xctest"]')
@@ -92,6 +93,7 @@ jobs:
           GH_TOKEN: ${{ github.token }}
           MRK_CHECK_REFRESHED_RUNTIME: ${{ (contains(github.event.head_commit.message, '[macos-refreshed-acceptance]') || contains(github.event.head_commit.message, '[macos-retained-transition]') || contains(github.event.head_commit.message, '[macos-retained-maintenance]') || contains(github.event.head_commit.message, '[macos-retained-removal-scale]')) && matrix.mode == 'fresh' }}
           MRK_CHECK_DURABLE_CLI_STATE: ${{ (contains(github.event.head_commit.message, '[macos-retained-maintenance]') || contains(github.event.head_commit.message, '[macos-retained-removal-scale]') || contains(github.event.head_commit.message, '[macos-physical-cli-only]')) && matrix.mode == 'workspace-xctest' }}
+          MRK_CHECK_QUARANTINED_REMOVE_MEDIA: ${{ contains(github.event.head_commit.message, '[macos-quarantined-remove-media]') && matrix.mode == 'uninstaller' }}
         run: |
           set -euo pipefail
           umask 077

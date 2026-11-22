@@ -2,6 +2,7 @@
 import copy
 import importlib.util
 import json
+import plistlib
 import subprocess
 import sys
 import tempfile
@@ -227,6 +228,30 @@ class LaunchSmokeSourceTests(unittest.TestCase):
         self.assertTrue(any(d.startswith("Projects/") for d in M.DECOY_FILES))
         self.assertTrue(any(d.startswith(".config/gh/") for d in M.DECOY_FILES))
         self.assertNotIn(M.DECOY_SERVICE, M.KEYCHAIN_SERVICES)
+
+    def test_quarantined_remove_media_binds_read_only_mount_to_the_opened_image(self):
+        from unittest import mock
+
+        image = Path("/private/tmp/staged/MobileReleaseKit-Remove.dmg")
+        mount = "/Volumes/MobileReleaseKit"
+        original = {"image-path": str(image), "writeable": False, "system-entities": [{"mount-point": mount}]}
+        other = {**original, "image-path": "/private/tmp/foreign.dmg", "system-entities": [{"mount-point": "/Volumes/Foreign"}]}
+        opened = subprocess.CompletedProcess([], 0)
+
+        for writable in (False, True):
+            with self.subTest(writable=writable):
+                info = plistlib.dumps({"images": [other, {**original, "writeable": writable}]})
+                with mock.patch.object(M, "run", return_value=(opened, {})) as launch, \
+                     mock.patch.object(M.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, info)) as inspect:
+                    steps = []
+                    if writable:
+                        with self.assertRaisesRegex(M.Failed, "removal-image-writable"):
+                            M.open_quarantined_removal_image(image, steps)
+                    else:
+                        self.assertEqual(M.open_quarantined_removal_image(image, steps), Path(mount))
+                    launch.assert_called_once_with(["/usr/bin/open", str(image)], 60)
+                    inspect.assert_called_once_with(["/usr/bin/hdiutil", "info", "-plist"], capture_output=True, timeout=20)
+                    self.assertEqual(steps, [{"role": "removal-image-launch-services"}])
 
     def test_delete_data_can_run_after_the_first_confirmed_removal(self):
         from unittest import mock
