@@ -84,7 +84,7 @@ void *mrk_removal_confirmation_reserve(uint64_t start,uint64_t work,uint64_t har
     if(!combined || !confirmation_cut(b,0)){free(b);return NULL;}
     return b;
 }
-int mrk_removal_confirmation_start(void *original, void *parent) {
+int mrk_removal_confirmation_start(void *original, uintptr_t parent) {
     MRKRemovalConfirmation *b=original;
     if(!confirmation_original(b) || b->attempted || b->close_attempted || b->unknown)return 0;
     b->attempted=1;
@@ -92,9 +92,11 @@ int mrk_removal_confirmation_start(void *original, void *parent) {
         if(!confirmation_cut(b,0))return 0;
         // Installer is normally frontmost. AppKit's mainWindow can be nil
         // then, even though the original application window is still open.
-        NSWindow *main=parent;
-        if(!main || [[NSApp windows] indexOfObjectIdenticalTo:main]==NSNotFound
-            || ![main isVisible] || ![main canBecomeMainWindow]
+        NSWindow *main=nil;
+        for (NSWindow *window in [NSApp windows]) {
+            if ((uintptr_t)window==parent) { main=window; break; }
+        }
+        if(!main || ![main isVisible] || ![main canBecomeMainWindow]
             || [main isKindOfClass:[NSPanel class]] || [main attachedSheet]){b->failed=1;return 0;}
         if(!confirmation_before(b,R_PARENT))return 0;
         b->parent=[main retain];
