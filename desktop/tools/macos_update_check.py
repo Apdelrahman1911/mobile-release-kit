@@ -1019,7 +1019,17 @@ SHEET_JXA = """function run(argv) {
     const texts = sheet.staticTexts().map(t => t.value());
     if (names.length !== 2 || names.indexOf('Cancel') < 0 || names.indexOf(confirm) < 0) return 'unexpected:' + names.join('|');
     if (!texts.some(t => t === title)) return 'unexpected-text';
-    if (argv[1] === 'click') { sheet.buttons.byName(confirm).click(); return 'clicked'; }
+    if (argv[1] === 'click') {
+      if (!quit && argv[3] === 'activate-on-consent') {
+        // Accessibility press does not focus a background window like a
+        // physical click. The exact background sheet was already observed.
+        proc.frontmost = true;
+        delay(0.3);
+        if (!proc.frontmost()) return 'consent-focus-unconfirmed';
+      }
+      sheet.buttons.byName(confirm).click();
+      return 'clicked';
+    }
     return 'present';
   }
   return 'absent';
@@ -1341,6 +1351,17 @@ def fixed_app_trace(evidence, label):
     (evidence / f"{label}-app-trace.txt").write_text("\n".join(trace) + "\n")
     return trace
 
+def removal_script_diagnostics(evidence, label):
+    installer_log, _ = run(["/usr/bin/sudo", "-n", "/usr/bin/tail", "-n", "3000", "/var/log/install.log"], 30)
+    unified, _ = run(["/usr/bin/log", "show", "--last", "5m", "--style", "compact",
+                      "--predicate", 'eventMessage CONTAINS "MRK_MACOS_REMOVAL_"'], 40)
+    lines = [line for line in (installer_log.stdout + "\n" + unified.stdout).splitlines()
+             if "MRK_MACOS_REMOVAL_" in line]
+    captured = "\n".join(tail_text("\n".join(lines), 24)) + "\n"
+    (evidence / f"{label}-script-diagnostics.txt").write_text(captured)
+    return captured
+
+
 def live_remove(mount, work, evidence, steps, label, observe_release=None, *, refuse_at=None, background=False):
     """Open the installed app, run the mounted Remove.pkg with the standard
     Installer and confirm its exact removal sheet and ensuing ordinary Quit
@@ -1407,7 +1428,8 @@ def live_remove(mount, work, evidence, steps, label, observe_release=None, *, re
                     suffix = "quit-sheet" if clicked else "sheet"
                     subprocess.run(["/usr/sbin/screencapture", "-x", str(evidence / f"screen-{label}-{suffix}.png")],
                                    capture_output=True, timeout=60)
-                    q = subprocess.run([*cmd, "click", phase], capture_output=True, text=True, timeout=30)
+                    q = subprocess.run([*cmd, "click", phase, "activate-on-consent" if background else ""],
+                                       capture_output=True, text=True, timeout=30)
                     history.append(q.stdout.strip() or ("error:" + q.stderr.strip()[-160:]))
                     if q.stdout.strip() == "clicked":
                         if clicked:
@@ -1441,7 +1463,7 @@ def live_remove(mount, work, evidence, steps, label, observe_release=None, *, re
     need(clicked, "removal-sheet-not-confirmed")
     need(not out.get("timedOut"), "removal-watchdog-timed-out")
     if refuse_at is not None:
-        logged = (evidence / f"{label}-installer.log").read_text(errors="replace")
+        logged = removal_script_diagnostics(evidence, label)
         need(installer.returncode != 0 and refuse_at in logged, "expected-removal-refusal-not-observed")
     else:
         need(installer.returncode == 0, "remove-returned-nonzero")
@@ -1754,6 +1776,8 @@ def macl_journal_recovery_check(selection, work, evidence, steps, result):
         steps.append(dict(step, role="macl-signed-resume"))
         result["resumeReturn"] = p.returncode
         (evidence / "macl-recovery-installer.log").write_text("\n".join(tail_text(p.stdout + p.stderr, 80)) + "\n")
+        if p.returncode != 0:
+            removal_script_diagnostics(evidence, "macl-recovery")
         need(p.returncode == 0, "macl-signed-recovery-returned-nonzero")
     finally:
         run(["/usr/bin/hdiutil", "detach", str(repair_mount)], 45, check=True)
