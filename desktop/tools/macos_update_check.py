@@ -449,6 +449,20 @@ def first_launch_observe(pid, work, evidence, label):
             "cliStatus": status, "screenshot": shot.name if shot.exists() else None}
 
 
+COLD_MARKER = re.compile(rb"^MRK(?:DBG_DESKTOP_BOOTSTRAP|_DESKTOP_CAPABILITIES|_RUNTIME_INSPECTION_FAILED)=[a-zA-Z0-9_-]{1,140}$")
+
+
+def time_bootstrap(trace, started, stop, observations):
+    with trace.open("rb") as stream:
+        for _ in range(1200):
+            for raw in stream.readlines(64 * 1024):
+                if COLD_MARKER.fullmatch(raw.rstrip(b"\n")) and len(observations) < 128:
+                    observations.append({"second": round(time.monotonic() - started, 3),
+                                         "event": raw.decode("ascii").strip()})
+            if stop.wait(0.05):
+                break
+
+
 def capture_cold_runtime(evidence, label, started):
     end = time.monotonic() + 20
     while time.monotonic() < end:
@@ -458,21 +472,27 @@ def capture_cold_runtime(evidence, label, started):
         time.sleep(0.1)
     else:
         return
+    sampled_at = time.monotonic() - started
     with tempfile.TemporaryFile(mode="w+t", dir=evidence.parent, errors="replace") as trace:
-        p = subprocess.run(["/usr/bin/sudo", "-n", "/usr/bin/sample", str(pids[0]), "14", "5"],
+        p = subprocess.run(["/usr/bin/sudo", "-n", "/usr/bin/sample", str(pids[0]), "18", "5"],
                            stdout=trace, stderr=subprocess.DEVNULL, timeout=30)
         trace.seek(0)
-        kept = [f"sample started within {time.monotonic() - started - 14:.1f}s; return={p.returncode}"]
+        kept = [f"sample began {sampled_at:.3f}s after open; return={p.returncode}"]
+        markers = ("installed_runtime_macos", "::supervisor", "vault_acl", "directory_block", "fstat",
+                   "sha256", "posix_spawn", "bootstrap", "wait_for_response", "capabilities", "SecStaticCode")
         in_graph = False
+        per_marker = dict.fromkeys(markers, 0)
         for row in trace:
             if row.startswith("Call graph:"):
                 in_graph = True
             if row.startswith("Total number in stack"):
                 break
-            if in_graph and len(row) <= 800 and any(text in row for text in
-                    ("libmrk_desktop_image", "posix_spawn", "semaphore_wait", "SecStaticCode", "python")):
-                kept.append(row.strip())
-                if len(kept) == 200:
+            if not in_graph or len(row) > 1400:
+                continue
+            for marker in markers:
+                if marker in row and per_marker[marker] < 40:
+                    kept.append(row.strip())
+                    per_marker[marker] += 1
                     break
         (evidence / f"{label}-bootstrap-sample.txt").write_text("\n".join(kept) + "\n")
 
@@ -487,11 +507,16 @@ def launch_smoke(label, work, evidence, steps, observe=None, steady_idle_seconds
     cold = os.environ.get("MRK_COLD_RUNTIME_DIAGNOSTIC") == "true" and label in ("first-launch", "warm-after-timeout")
     trace = work / f"{label}-bootstrap-stderr.txt"
     sample = None
+    timing_stop = threading.Event()
+    observations = []
     if cold:
         trace.touch(mode=0o600, exist_ok=False)
         argv += ["--stderr", str(trace)]
-        sample = threading.Thread(target=capture_cold_runtime, args=(evidence, label, started), daemon=True)
-        sample.start()
+        timing = threading.Thread(target=time_bootstrap, args=(trace, started, timing_stop, observations), daemon=True)
+        timing.start()
+        if os.environ.get("MRK_COLD_RUNTIME_SAMPLE") == "profile":
+            sample = threading.Thread(target=capture_cold_runtime, args=(evidence, label, started), daemon=True)
+            sample.start()
     p, row = run([*argv, str(APP)], 60)
     steps.append(dict(row, role=label))
     need(p.returncode == 0, f"{label}-open-returned-{p.returncode}")
@@ -555,10 +580,10 @@ def launch_smoke(label, work, evidence, steps, observe=None, steady_idle_seconds
         stop_app(alive)
     if sample is not None:
         sample.join(timeout=16)
-        with trace.open("rb") as stream:
-            raw = stream.read(1024 * 1024)
-        known = re.findall(rb"(?m)^MRK(?:DBG_DESKTOP_BOOTSTRAP|_DESKTOP_CAPABILITIES)=[a-zA-Z0-9_-]{1,140}$", raw)
-        (evidence / f"{label}-bootstrap-status.txt").write_bytes(b"\n".join(known[:128]) + b"\n")
+    if cold:
+        timing_stop.set()
+        timing.join(timeout=2)
+        (evidence / f"{label}-bootstrap-status.json").write_text(json.dumps(observations, indent=2) + "\n")
     need(pids, f"{label}-app-process-not-started")
     need(not crashes, f"{label}-app-crashed")
     need(alive and settled, f"{label}-app-window-missing")
@@ -856,6 +881,10 @@ def fresh_check(selection, work, evidence, steps, result):
     if performance:
         need(ui.get("runtimeCard") == "bundled", "resource-first-launch-runtime-unproven")
         need(result["firstLaunch"]["steadyIdleResources"]["samples"] == 300, "resource-sample-incomplete")
+        return
+    if os.environ.get("MRK_COLD_RUNTIME_DIAGNOSTIC") == "true":
+        need(ui.get("runtimeCard") == "bundled", "cold-first-launch-runtime-unobserved")
+        result["diagnosticOnly"] = True
         return
     data = manifest() if USER_DATA.exists() else {}
     result["appDataFilesAfterFirstLaunch"] = len(data)
