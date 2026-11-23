@@ -416,7 +416,7 @@ jobs:
           /usr/bin/plutil -replace CFBundleIdentifier -string dev.mobile-release-kit.desktop.uninstaller "$old/Contents/Info.plist"
           printf '#!/bin/sh\nexit 65\n' > "$old/Contents/Resources/delete-data.sh"
           /usr/bin/codesign --force --sign - --identifier dev.mobile-release-kit.desktop.uninstaller "$old"
-          /usr/bin/cp "$fixture/image/Remove.pkg" "$fixture/older/Remove.pkg"
+          /bin/cp "$fixture/image/Remove.pkg" "$fixture/older/Remove.pkg"
           /usr/bin/hdiutil create -srcfolder "$fixture/older" -volname MRK-Uninstaller-Lab -format UDZO -fs APFS "$fixture/older.dmg"
           /usr/bin/hdiutil attach -readonly -nobrowse -noautoopen -plist "$fixture/older.dmg" > "$fixture/older-mount.plist"
           /usr/bin/hdiutil attach -readonly -nobrowse -noautoopen -plist "$fixture/app.dmg" > "$fixture/mount.plist"
