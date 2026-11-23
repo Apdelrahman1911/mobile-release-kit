@@ -17834,7 +17834,7 @@ mod installer {
             const INVENTORY:&str="f4ec6419c8816eaf75111154e12b0766a52e6e44819ac91f118564b393443fa9";
             fn enabled()->bool {
                 cfg!(all(target_arch="aarch64",not(feature="macos-installed-removal-abrupt-fixture")))
-                    && paths::RELEASE=="macos26-arm64-desktop-13" && paths::PACKAGE_VERSION=="0.2.7"
+                    && paths::RELEASE=="macos26-arm64-desktop-14" && paths::PACKAGE_VERSION=="0.2.8"
             }
             fn epoch(state_sha:[u8;32])->Result<([u8;20],[[u8;32];4])> {
                 Ok((removal_hex_data(Self::SOURCE)?,[
@@ -23138,6 +23138,11 @@ exec ./mrk-macos-remove --fixture-supervise "$1"
                     book.forward_close(original,"test-packagekit-close").unwrap();
                 }
                 assert!(!book.unknown);
+                let archive=cwd.join("mrk-journal-test");
+                std::fs::remove_dir(archive.join("changed")).unwrap();
+                std::fs::remove_file(archive.join("admission.json")).unwrap();
+                std::fs::remove_dir(archive).unwrap();
+                std::fs::remove_dir(cwd.join("mrk-unrelated-journal-test")).unwrap();
             }
 
             #[test]
@@ -23184,6 +23189,9 @@ exec ./mrk-macos-remove --fixture-supervise "$1"
                     }
                 }
                 assert!(!book.unknown);
+                let archive=cwd.join("mrk-live-journal-test");
+                std::fs::remove_file(archive.join("admission.json")).unwrap();
+                std::fs::remove_dir(archive).unwrap();
             }
 
             #[test]
