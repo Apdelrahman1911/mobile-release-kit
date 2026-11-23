@@ -23138,6 +23138,11 @@ exec ./mrk-macos-remove --fixture-supervise "$1"
                     book.forward_close(original,"test-packagekit-close").unwrap();
                 }
                 assert!(!book.unknown);
+                let archive=cwd.join("mrk-journal-test");
+                std::fs::remove_dir(archive.join("changed")).unwrap();
+                std::fs::remove_file(archive.join("admission.json")).unwrap();
+                std::fs::remove_dir(archive).unwrap();
+                std::fs::remove_dir(cwd.join("mrk-unrelated-journal-test")).unwrap();
             }
 
             #[test]
@@ -23184,6 +23189,9 @@ exec ./mrk-macos-remove --fixture-supervise "$1"
                     }
                 }
                 assert!(!book.unknown);
+                let archive=cwd.join("mrk-live-journal-test");
+                std::fs::remove_file(archive.join("admission.json")).unwrap();
+                std::fs::remove_dir(archive).unwrap();
             }
 
             #[test]
