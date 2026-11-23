@@ -174,10 +174,26 @@ def fetch(role, row, work, steps):
     target.mkdir(mode=0o700)
     def download(artifact, members, label):
         archive = target / f"{label}.zip"
-        with open(archive, "wb") as out:
-            p = subprocess.run(["gh", "api", f"repos/{REPOSITORY}/actions/artifacts/{artifact}/zip"],
-                               stdout=out, stderr=subprocess.PIPE, timeout=900)
-        need(p.returncode == 0, f"{role}-{label}-download")
+        deadline = time.monotonic() + 900
+        downloaded = False
+        for attempt in range(1, 4):
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                break
+            try:
+                with archive.open("wb") as out:
+                    p = subprocess.run(["gh", "api", f"repos/{REPOSITORY}/actions/artifacts/{artifact}/zip"],
+                                       stdout=out, stderr=subprocess.PIPE, timeout=remaining)
+            except subprocess.TimeoutExpired:
+                break
+            steps.append({"role": f"{role}-{label}-download", "attempt": attempt,
+                          "returncode": p.returncode, "artifactId": str(artifact)})
+            if p.returncode == 0:
+                downloaded = True
+                break
+            if attempt < 3:
+                time.sleep(min(2 ** attempt, max(0, deadline - time.monotonic())))
+        need(downloaded, f"{role}-{label}-download")
         with zipfile.ZipFile(archive) as z:
             need(set(members) <= set(z.namelist()), f"{role}-{label}-members")
             for name in members:
