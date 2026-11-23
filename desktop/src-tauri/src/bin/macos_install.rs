@@ -15356,29 +15356,46 @@ mod installer {
         }
         // The live source owns this system ancestor. Other products can
         // change its direct entries without changing this original directory.
-        pub(super) struct RemovalLiveSupport { original: usize, flags: u32 }
+        pub(super) struct RemovalLiveSupport {
+            original: usize,
+            flags: u32,
+            checked: std::cell::Cell<Option<Identity>>,
+        }
         impl RemovalLiveSupport {
             fn capture(book:&Install,original:usize)->Result<Self> {
                 let flags=stat::fstat(book.fd(original)?).map_err(|_|"removal-live-support-original")?.st_flags;
-                let value=Self{original,flags};
+                let value=Self{original,flags,checked:std::cell::Cell::new(None)};
                 value.post(book)?;Ok(value)
             }
-            fn post(&self,book:&Install)->Result<()> {
+            fn for_original(book:&Install,n:usize)->Option<&Self> {
+                book.removal_live_support.as_ref().filter(|support|support.original==n)
+            }
+            fn checked_pair(&self,book:&Install)->Result<(Identity,Identity)> {
                 const REASON:&str="removal-live-support-original";
+                book.clock()?;
                 let original=&book.originals[self.original];
                 let library=original.parent.and_then(|n|book.originals.get(n)).ok_or(REASON)?;
                 let root=library.parent.and_then(|n|book.originals.get(n)).ok_or(REASON)?;
                 check(original.name=="Application Support" && library.name=="Library"
                     && root.name=="/" && root.parent.is_none(),REASON)?;
-                book.clock()?;book.protected_as(self.original,true,None,AclRole::SystemSupport)?;
-                native::no_xattrs(book.fd(self.original)?.as_fd()).map_err(|_|REASON)?;
                 let expected=book.identity(self.original)?;
                 let held=stat::fstat(book.fd(self.original)?).map_err(|_|REASON)?;
                 let named=book.named(original.parent,&original.name).map_err(|_|REASON)?;
-                check(removal_current_flags_data(2,self.flags) && [held,named].iter().all(|stat| {
-                    let actual=Identity::of(stat);
-                    expected.same_object(actual) && expected.mode==actual.mode && stat.st_flags==self.flags
-                }),REASON)?;
+                let pair=(Identity::of(&held),Identity::of(&named));
+                check(removal_current_flags_data(2,self.flags) && held.st_flags==self.flags && named.st_flags==self.flags
+                    && [pair.0,pair.1].iter().all(|id|expected.same_object(*id) && expected.mode==id.mode),REASON)?;
+                Ok(pair)
+            }
+            fn post(&self,book:&Install)->Result<()> {
+                let before=self.checked_pair(book)?;
+                if before.0!=before.1 || self.checked.get()!=Some(before.0) {
+                    // The exact observation is reusable through the per-node
+                    // checks. A change requires a fresh ACL and xattr read.
+                    book.protected_as(self.original,true,None,AclRole::SystemSupport)?;
+                    native::no_xattrs(book.fd(self.original)?.as_fd()).map_err(|_|"removal-live-support-original")?;
+                    let after=self.checked_pair(book)?;
+                    self.checked.set((before==after && after.0==after.1).then_some(after.0));
+                }
                 book.clock()
             }
         }
@@ -15414,7 +15431,7 @@ mod installer {
                     if book.removal_resume_packagekit_tmp==Some(other) {
                         book.protected_mount_and_acl(other,AclRole::Other)?;
                         removal_resume_tmp_post(book,other)?;
-                    } else if let Some(support)=book.removal_live_support.as_ref().filter(|s|s.original==other) {
+                    } else if let Some(support)=RemovalLiveSupport::for_original(book,other) {
                         support.post(book)?;
                     } else {
                         book.check_name(other,true)?;
@@ -15973,11 +15990,13 @@ mod installer {
             }
             fn post(&self,effects:&RemovalPeerOwnEffects)->Result<()> {
                 self.request.post(self.book,self.source,self.observed)?;
-                // No global relaxed-name policy. Exactly the requestdir's
-                // original own-effect baseline is local while native borrows
-                // Book; every other still-owned original stays full-exact.
+                // The request directory's own effect and the authenticated
+                // shared system directory each retain their original checks.
+                // All other still-owned originals stay full-exact.
                 for (n,original) in self.book.originals.iter().enumerate() {
-                    if original.fd.is_some() && n!=self.directory { self.book.check_name(n,true)?; }
+                    if original.fd.is_none() || n==self.directory { continue; }
+                    if let Some(support)=RemovalLiveSupport::for_original(self.book,n) { support.post(self.book)?; }
+                    else { self.book.check_name(n,true)?; }
                 }
                 self.directory_post(effects)?;
                 let named=stat::fstatat(self.book.fd(self.directory)?,"s",AtFlags::AT_SYMLINK_NOFOLLOW);
@@ -16664,6 +16683,14 @@ mod installer {
                 exclusion:RemovalResumeExclusion },
         }
         impl RemovalPayloadOrigin {
+            fn ancestor_post(book:&Install,n:usize,flags:u32)->Result<()> {
+                if let Some(support)=RemovalLiveSupport::for_original(book,n) {
+                    check(support.flags==flags,"removal-payload-source-flags")?;
+                    return support.post(book);
+                }
+                book.check_name(n,true)?;
+                check(stat::fstat(book.fd(n)?).map_err(|_|"removal-payload-source-stat")?.st_flags==flags,"removal-payload-source-flags")
+            }
             fn root(&self)->usize {match self {Self::Live{source,..}=>source.root_original(),Self::Resume{source,..}=>source.root_original()}}
             fn settled(&self)->bool {match self {Self::Live{source,..}=>source.settled(),Self::Resume{source,..}=>source.native_settled()}}
             fn genesis(&self)->Option<&RemovalResumeGenesis> {match self {
@@ -16685,8 +16712,7 @@ mod installer {
             fn transferred_post(&self,book:&Install,flags:&[u32])->Result<()> {
                 check(self.settled() && flags.len()==self.ancestor_originals().len(),"removal-payload-source-phase")?;
                 for (n,flags) in self.ancestor_originals().iter().zip(flags) {
-                    book.check_name(*n,true)?;
-                    check(stat::fstat(book.fd(*n)?).map_err(|_|"removal-payload-source-stat")?.st_flags==*flags,"removal-payload-source-flags")?;
+                    Self::ancestor_post(book,*n,*flags)?;
                 }
                 let (root,r,m)=match self {
                     Self::Live{source,observed,exclusion,..}=>{
@@ -23174,7 +23200,8 @@ exec ./mrk-macos-remove --fixture-supervise "$1"
                     assert_eq!(observation.post(&book),Err("removal-live-support-original"));
                 }
                 book.originals[support].identity=Some(identity);
-                assert_eq!(RemovalLiveSupport{flags:observation.flags^1,..observation}.post(&book),
+                let flags=observation.flags;
+                assert_eq!(RemovalLiveSupport{original:support,flags:flags^1,checked:std::cell::Cell::new(None)}.post(&book),
                     Err("removal-live-support-original"));
                 book.removal_live_support=Some(observation);
                 RemovalPublication::returned_parent_change(&mut book,journal_parent,before,true).unwrap();
@@ -23183,15 +23210,22 @@ exec ./mrk-macos-remove --fixture-supervise "$1"
                 admission.write(&mut book,1,b"disposable live admission").unwrap();
                 admission.close_file(&mut book,archive,1).unwrap();
                 admission.file_post(&book).unwrap();
+                assert_eq!(book.check_name(support,true),Err("original-correspondence"));
+                RemovalPayloadOrigin::ancestor_post(&book,support,flags).unwrap();
+                assert_eq!(RemovalPayloadOrigin::ancestor_post(&book,support,flags^1),
+                    Err("removal-payload-source-flags"));
+                let archive_path=cwd.join("mrk-live-journal-test");
+                std::fs::create_dir(archive_path.join("unexpected")).unwrap();
+                assert_eq!(RemovalPayloadOrigin::ancestor_post(&book,archive,0),Err("original-correspondence"));
+                std::fs::remove_dir(archive_path.join("unexpected")).unwrap();
                 for original in (0..book.originals.len()).rev() {
                     if book.originals[original].fd.is_some() {
                         book.forward_close(original,"test-live-support-close").unwrap();
                     }
                 }
                 assert!(!book.unknown);
-                let archive=cwd.join("mrk-live-journal-test");
-                std::fs::remove_file(archive.join("admission.json")).unwrap();
-                std::fs::remove_dir(archive).unwrap();
+                std::fs::remove_file(archive_path.join("admission.json")).unwrap();
+                std::fs::remove_dir(archive_path).unwrap();
             }
 
             #[test]
