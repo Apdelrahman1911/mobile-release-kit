@@ -449,13 +449,50 @@ def first_launch_observe(pid, work, evidence, label):
             "cliStatus": status, "screenshot": shot.name if shot.exists() else None}
 
 
+def capture_cold_runtime(evidence, label, started):
+    end = time.monotonic() + 20
+    while time.monotonic() < end:
+        pids = payload_pids()
+        if len(pids) == 1:
+            break
+        time.sleep(0.1)
+    else:
+        return
+    with tempfile.TemporaryFile(mode="w+t", dir=evidence.parent, errors="replace") as trace:
+        p = subprocess.run(["/usr/bin/sudo", "-n", "/usr/bin/sample", str(pids[0]), "14", "5"],
+                           stdout=trace, stderr=subprocess.DEVNULL, timeout=30)
+        trace.seek(0)
+        kept = [f"sample started within {time.monotonic() - started - 14:.1f}s; return={p.returncode}"]
+        in_graph = False
+        for row in trace:
+            if row.startswith("Call graph:"):
+                in_graph = True
+            if row.startswith("Total number in stack"):
+                break
+            if in_graph and len(row) <= 800 and any(text in row for text in
+                    ("libmrk_desktop_image", "posix_spawn", "semaphore_wait", "SecStaticCode", "python")):
+                kept.append(row.strip())
+                if len(kept) == 200:
+                    break
+        (evidence / f"{label}-bootstrap-sample.txt").write_text("\n".join(kept) + "\n")
+
+
 def launch_smoke(label, work, evidence, steps, observe=None, steady_idle_seconds=0, steady_interval=1):
     """Open the installed app as the logged-in runner user and require a live
     payload process with an on-screen window and no crash report."""
     need(not payload_pids(), f"{label}-app-already-running")
     before = set(recent_crashes())
     started = time.monotonic()
-    p, row = run(["/usr/bin/open", str(APP)], 60)
+    argv = ["/usr/bin/open"]
+    cold = os.environ.get("MRK_COLD_RUNTIME_DIAGNOSTIC") == "true" and label in ("first-launch", "warm-after-timeout")
+    trace = work / f"{label}-bootstrap-stderr.txt"
+    sample = None
+    if cold:
+        trace.touch(mode=0o600, exist_ok=False)
+        argv += ["--stderr", str(trace)]
+        sample = threading.Thread(target=capture_cold_runtime, args=(evidence, label, started), daemon=True)
+        sample.start()
+    p, row = run([*argv, str(APP)], 60)
     steps.append(dict(row, role=label))
     need(p.returncode == 0, f"{label}-open-returned-{p.returncode}")
     pids, windows, samples = [], None, []
@@ -516,6 +553,12 @@ def launch_smoke(label, work, evidence, steps, observe=None, steady_idle_seconds
     (evidence / f"{label}-launch.json").write_text(json.dumps(observed, indent=2) + "\n")
     if alive:
         stop_app(alive)
+    if sample is not None:
+        sample.join(timeout=16)
+        with trace.open("rb") as stream:
+            raw = stream.read(1024 * 1024)
+        known = re.findall(rb"(?m)^MRK(?:DBG_DESKTOP_BOOTSTRAP|_DESKTOP_CAPABILITIES)=[a-zA-Z0-9_-]{1,140}$", raw)
+        (evidence / f"{label}-bootstrap-status.txt").write_bytes(b"\n".join(known[:128]) + b"\n")
     need(pids, f"{label}-app-process-not-started")
     need(not crashes, f"{label}-app-crashed")
     need(alive and settled, f"{label}-app-window-missing")
@@ -803,6 +846,9 @@ def fresh_check(selection, work, evidence, steps, result):
     ui = result["firstLaunch"].get("ui") or {}
     # A missing accessibility read is recorded as not-observed, never a pass;
     # only a definite unavailable card, error marker or wrong CLI refusal fails.
+    if ui.get("runtimeCard") == "unavailable" and os.environ.get("MRK_COLD_RUNTIME_DIAGNOSTIC") == "true":
+        result["warmAfterFirstLaunchRefusal"] = launch_smoke(
+            "warm-after-timeout", work, evidence, steps, observe=first_launch_observe)
     need(ui.get("runtimeCard") != "unavailable", "fresh-first-launch-runtime-unavailable")
     need(not ui.get("workspaceErrorMarkers"), "fresh-first-launch-workspace-error")
     need(ui.get("cliStatus", {}).get("returncode") == 3 and ui.get("cliStatus", {}).get("guidance"),
