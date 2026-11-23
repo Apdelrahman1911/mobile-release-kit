@@ -208,6 +208,8 @@ mod installer {
         // Used only by payload removal. The append-only ledger retains every
         // effect and remains the authority for identity and finality.
         removal_live_originals: Option<RemovalLiveOriginals>,
+        // The one shared sticky ancestor admitted by the PackageKit resume path.
+        removal_resume_packagekit_tmp: Option<usize>,
         // First closed reason a close() turned unknown without returning an
         // error of its own. Diagnostic DATA only; never a finality input.
         close_refusal: Option<&'static str>,
@@ -654,6 +656,7 @@ mod installer {
         fn new() -> Self {
             Self { originals: Vec::new(), creations: Vec::new(), end: Instant::now()+Duration::from_secs(120), unknown:false,
                 removal_live_originals:None,
+                removal_resume_packagekit_tmp:None,
                 close_refusal:None,
                 legacy_volumes:[None;mobile_release_desktop::macos_install_maintenance::PREDECESSOR_LIMIT+1],
                 worker_deadline:None,worker_stderr_is_gate:false,worker_go_eof:false,payload_written:0,payload_write_calls:0,launcher_writes:applications::WriteCounts::default(),launcher_effects:None,
@@ -14054,6 +14057,7 @@ mod installer {
                 // cannot select a worker clock or its private result transport.
                 Self { originals: Vec::new(), creations: Vec::new(), end: Instant::now(), unknown:false, close_refusal:None,
                     removal_live_originals:None,
+                    removal_resume_packagekit_tmp:None,
                     legacy_volumes:[None;mobile_release_desktop::macos_install_maintenance::PREDECESSOR_LIMIT+1],
                     worker_deadline:Some(deadline),worker_stderr_is_gate:stderr_is_gate,worker_go_eof:false,
                     fresh_birth_control_reserved:false,fresh_outputs:None,fresh_preparation_phase:FreshPreparationPhase::None,
@@ -15372,9 +15376,16 @@ mod installer {
                 book.protected_as(n,true,None,if book.originals[n].name=="Application Support" {
                     AclRole::SystemSupport } else { AclRole::Other })?;
                 // Only this parent's returned own directory-entry effect can
-                // advance its baseline. All other held originals stay exact.
+                // advance its baseline. PackageKit's enrolled shared tmp has
+                // its own check for unrelated directory-entry changes.
                 for (other,original) in book.originals.iter().enumerate() {
-                    if other!=n && original.fd.is_some() { book.check_name(other,true)?; }
+                    if other==n || original.fd.is_none() { continue; }
+                    if book.removal_resume_packagekit_tmp==Some(other) {
+                        book.protected_mount_and_acl(other,AclRole::Other)?;
+                        removal_resume_tmp_post(book,other)?;
+                    } else {
+                        book.check_name(other,true)?;
+                    }
                 }
                 book.clock()?;
                 book.originals[n].identity=Some(Identity::of(&actual));
@@ -17549,7 +17560,9 @@ mod installer {
                 && actual.uid==0 && actual.gid==0 && actual.mode==0o041777),REASON)?;
             book.clock()
         }
-        fn removal_resume_bootstrap(book:&mut Install,parent_path:&str,packagekit:bool)->Result<(Vec<usize>,Option<usize>)> {
+        fn removal_resume_bootstrap(book:&mut Install,parent_path:&str,package:&str)->Result<Vec<usize>> {
+            let packagekit=removal_resume_packagekit_parent_data(parent_path,package);
+            check(book.removal_resume_packagekit_tmp.is_none(),"removal-resume-packagekit-tmp-once")?;
             let mut bootstrap=Vec::new();bootstrap.try_reserve_exact(32).map_err(|_|"removal-resume-allocation")?;
             let mut parent=book.open(None,"/",true)?;book.protected_as(parent,true,None,AclRole::SystemRoot)?;bootstrap.push(parent);
             let mut tmp=None;
@@ -17562,7 +17575,8 @@ mod installer {
                 }else{book.protected(parent,true,None)?;book.check_name(parent,true)?;}
                 check(bootstrap.len()<32,"removal-resume-path-bound")?;bootstrap.push(parent);
             }
-            Ok((bootstrap,tmp))
+            book.removal_resume_packagekit_tmp=tmp;
+            Ok(bootstrap)
         }
         fn removal_resume_stat(book:&Install,n:usize,directory:bool,mode:Option<u32>)->Result<()> {
             book.clock()?;book.check_name(n,true)?;book.protected(n,directory,mode)?;book.clock()?;
@@ -18001,14 +18015,14 @@ mod installer {
             genesis.post(book,census)?;read.post(book)?;Ok(genesis)
         }
         struct RemovalResumeOriginals {
-            input:completed_package::Input,bootstrap:Vec<usize>,packagekit_tmp:Option<usize>,executed:String,parent_path:String,
+            input:completed_package::Input,bootstrap:Vec<usize>,executed:String,parent_path:String,
             program:usize,script:usize,program_sha:[u8;32],root:usize,root_chain:Vec<usize>,
             installed_pair:[usize;2],installed_raw:[Vec<u8>;2],genesis:Option<RemovalResumeGenesis>,pending_genesis:Option<RemovalPendingGenesis>,
         }
         impl RemovalResumeOriginals {
             fn bootstrap_post(&self,book:&Install)->Result<()> {
                 for &n in &self.bootstrap {
-                    if self.packagekit_tmp==Some(n){removal_resume_tmp_post(book,n)?;}
+                    if book.removal_resume_packagekit_tmp==Some(n){removal_resume_tmp_post(book,n)?;}
                     else{book.check_name(n,true)?;}
                 }
                 Ok(())
@@ -18551,9 +18565,8 @@ exec ./mrk-macos-remove --fixture-supervise "$1"
                 let executed=path.to_str().filter(|s|removal_resume_path_data(s)).ok_or("removal-resume-executed-image")?.to_owned();
                 let parent_path=executed.rsplit_once('/').ok_or("removal-resume-executed-image")?.0.to_owned();
                 check(!parent_path.is_empty(),"removal-resume-executed-image")?;
-                let packagekit=removal_resume_packagekit_parent_data(&parent_path,
-                    mobile_release_desktop::macos_remove_producer::REMOVER_IDENTIFIER);
-                let (bootstrap,packagekit_tmp)=removal_resume_bootstrap(book,&parent_path,packagekit)?;
+                let bootstrap=removal_resume_bootstrap(book,&parent_path,
+                    mobile_release_desktop::macos_remove_producer::REMOVER_IDENTIFIER)?;
                 let parent=*bootstrap.last().ok_or("removal-resume-parent")?;
                 removal_resume_stat(book,parent,true,None)?;
                 check(book.identity(parent)?.gid==0,"removal-resume-parent-group")?;
@@ -18606,7 +18619,7 @@ exec ./mrk-macos-remove --fixture-supervise "$1"
                         "removal-resume-source-data")?;
                 }
                 check(removal_hex_data::<32>(removal.binding_data().remover_executable_sha256)?==program_sha,"removal-resume-program-hash")?;
-                let originals=RemovalResumeOriginals{input,bootstrap,packagekit_tmp,executed,parent_path,program,script,program_sha,root,root_chain,
+                let originals=RemovalResumeOriginals{input,bootstrap,executed,parent_path,program,script,program_sha,root,root_chain,
                     installed_pair:[descriptor_original,signature_original],installed_raw:[raw,sig],genesis:None,pending_genesis:None};
                 originals.fixed_absence(book)?;
                 check(book.originals.iter().filter(|n|n.fd.is_some()).count().checked_add(32+EXTRA_LIVE)
@@ -23038,9 +23051,10 @@ exec ./mrk-macos-remove --fixture-supervise "$1"
                 assert!(removal_resume_packagekit_parent_data(actual,fixture));
                 assert_eq!(std::env::current_exe().unwrap(),cwd.join("mrk-macos-remove"));
                 let mut book=Install::new();
-                let (ancestors,tmp)=removal_resume_bootstrap(&mut book,actual,true).unwrap();
-                assert_eq!(tmp,ancestors.get(2).copied());
-                removal_resume_tmp_post(&book,tmp.unwrap()).unwrap();
+                let ancestors=removal_resume_bootstrap(&mut book,actual,fixture).unwrap();
+                let tmp=ancestors[2];
+                assert_eq!(book.removal_resume_packagekit_tmp,Some(tmp));
+                removal_resume_tmp_post(&book,tmp).unwrap();
                 let scripts=*ancestors.last().unwrap();
                 removal_resume_stat(&book,scripts,true,None).unwrap();
                 assert_eq!(book.identity(scripts).unwrap().gid,0);
@@ -23050,6 +23064,41 @@ exec ./mrk-macos-remove --fixture-supervise "$1"
                     let original=book.open(Some(scripts),name,false).unwrap();
                     removal_resume_stat(&book,original,false,Some(0o555)).unwrap();
                     book.forward_close(original,"test-packagekit-close").unwrap();
+                }
+
+                let before=RemovalPublication::parent_before(&book,scripts).unwrap();
+                let archive=book.directory(scripts,"mrk-journal-test",true,0o700).unwrap();
+                let marker=Path::new("/private/tmp").join(format!(".mrk-removal-lab-{}-{}",
+                    cwd.ancestors().nth(2).unwrap().file_name().unwrap().to_str().unwrap(),std::process::id()));
+                std::fs::OpenOptions::new().write(true).create_new(true).open(&marker).unwrap();
+                std::fs::remove_file(&marker).unwrap();
+                // Reproduce the old all-exact sweep against the actual sticky
+                // PackageKit ancestor at the same cut as linked journal birth.
+                book.removal_resume_packagekit_tmp=None;
+                assert_eq!(RemovalPublication::returned_parent_change(&mut book,scripts,before,true),
+                    Err("original-correspondence"));
+                assert!(book.identity(scripts).unwrap()==before.0);
+                eprintln!("PackageKit tmp churn reproduced original-correspondence at journal birth");
+                book.removal_resume_packagekit_tmp=Some(tmp);
+                RemovalPublication::returned_parent_change(&mut book,scripts,before,true).unwrap();
+                let mut admission=RemovalSnapshotFile::new();
+                admission.create(&mut book,archive,1).unwrap();
+                admission.write(&mut book,1,b"disposable record").unwrap();
+                admission.close_file(&mut book,archive,1).unwrap();
+                admission.file_post(&book).unwrap();
+
+                let before=RemovalPublication::parent_before(&book,scripts).unwrap();
+                book.directory(scripts,"mrk-unrelated-journal-test",true,0o700).unwrap();
+                std::fs::create_dir(cwd.join("mrk-journal-test").join("changed")).unwrap();
+                assert_eq!(RemovalPublication::returned_parent_change(&mut book,scripts,before,true),
+                    Err("original-correspondence"));
+                assert!(book.identity(scripts).unwrap()==before.0);
+                eprintln!("PackageKit journal admission accepted shared tmp churn and rejected protected directory churn");
+
+                for original in (ancestors.len()..book.originals.len()).rev() {
+                    if book.originals[original].fd.is_some() {
+                        book.forward_close(original,"test-packagekit-close").unwrap();
+                    }
                 }
                 for original in ancestors.into_iter().rev() {
                     book.forward_close(original,"test-packagekit-close").unwrap();
