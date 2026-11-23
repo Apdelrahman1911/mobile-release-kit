@@ -1318,7 +1318,8 @@ def sample_removal_metadata(release, requests, existing_requests, evidence, labe
         "request-root": requests,
     }
     snapshot, events = {}, deque(maxlen=160)
-    deadline = time.monotonic() + (150 if label == "macl-interrupted" else 30)
+    deadline = time.monotonic() + (150 if label == "macl-interrupted"
+        or os.environ.get("MRK_LIVE_REMOVAL_DIAGNOSTIC") == "true" else 30)
     try:
         while not stop.is_set() and time.monotonic() < deadline:
             if "request" not in paths:
@@ -1358,6 +1359,40 @@ def removal_script_diagnostics(evidence, label):
     (evidence / f"{label}-script-diagnostics.txt").write_text(captured)
     return captured
 
+
+def sample_native_removal(evidence, label, stop):
+    deadline = time.monotonic() + 150
+    while not stop.is_set() and time.monotonic() < deadline:
+        lookup = subprocess.run(["/usr/bin/pgrep", "-x", "mrk-macos-remove"], capture_output=True,
+                                text=True, timeout=10)
+        pids = lookup.stdout.split()
+        if len(pids) == 1 and pids[0].isdigit():
+            break
+        stop.wait(0.15)
+    else:
+        return
+    trace = evidence / f"{label}-native-filesys.txt"
+    with tempfile.TemporaryFile(mode="w+t", dir=evidence.parent, errors="replace") as all_events:
+        child = subprocess.Popen(["/usr/bin/sudo", "-n", "/usr/bin/fs_usage", "-w", "-f", "filesys",
+                                  "-t", "135", pids[0]], stdout=all_events, stderr=subprocess.DEVNULL)
+        try:
+            while child.poll() is None and not stop.wait(0.15):
+                if time.monotonic() >= deadline:
+                    break
+        finally:
+            if child.poll() is None:
+                child.terminate()
+                try:
+                    child.wait(timeout=5)
+                except subprocess.TimeoutExpired:
+                    child.kill()
+                    child.wait()
+        all_events.seek(0)
+        fields = deque(maxlen=700)
+        for row in all_events:
+            if len(row) <= 16384 and "mrk-macos-remove" in row:
+                fields.append(row)
+        trace.write_text("".join(fields))
 
 def live_remove(mount, work, evidence, steps, label, observe_release=None, *, refuse_at=None, background=False):
     """Open the installed app, run the mounted Remove.pkg with the standard
@@ -1401,6 +1436,11 @@ def live_remove(mount, work, evidence, steps, label, observe_release=None, *, re
     sample_thread = threading.Thread(target=sample_removal_start,
                                      args=(pids[0], evidence, label, sample_stop, existing_requests), daemon=True)
     sample_thread.start()
+    native_thread = None
+    if os.environ.get("MRK_LIVE_REMOVAL_DIAGNOSTIC") == "true":
+        native_thread = threading.Thread(target=sample_native_removal, daemon=True,
+                                         args=(evidence, label, sample_stop))
+        native_thread.start()
     metadata_thread = None
     if observe_release is not None:
         metadata_thread = threading.Thread(target=sample_removal_metadata, daemon=True,
@@ -1452,6 +1492,8 @@ def live_remove(mount, work, evidence, steps, label, observe_release=None, *, re
         (evidence / f"{label}-sheet-probes.json").write_text(json.dumps(sheet[-40:]) + "\n")
         (evidence / f"{label}-quit-sheet-probes.json").write_text(json.dumps(quit_sheet[-40:]) + "\n")
         out["appTrace"] = fixed_app_trace(evidence, label)
+    if native_thread is not None:
+        native_thread.join(timeout=9)
     out["returncode"] = installer.returncode
     steps.append({"argv": ["installer", "-pkg", "Remove.pkg"], "returncode": installer.returncode,
                   "role": label, "seconds": out["seconds"], "watchdogTimedOut": bool(out.get("timedOut"))})
@@ -1550,8 +1592,20 @@ def remove_check(selection, work, evidence, steps, result, *, folder=None, seede
     if background:
         install_macl_fixture((APP,))
         credential = seed_update_credential()
-    out = live_remove(mount, work, evidence, steps, "remove", observe_release=row["release"] if repeat else None,
-                      background=background)
+    diagnosing = os.environ.get("MRK_LIVE_REMOVAL_DIAGNOSTIC") == "true"
+    try:
+        out = live_remove(mount, work, evidence, steps, "remove",
+                          observe_release=row["release"] if repeat or diagnosing else None, background=background)
+    finally:
+        if diagnosing:
+            archive_shapes = {}
+            for name in removal_archive_identities():
+                p, _ = run(["/usr/bin/sudo", "-n", "/bin/ls", "-A", str(STATE / name)], 15)
+                archive_shapes[name] = p.stdout.splitlines() if p.returncode == 0 else None
+            (evidence / "remove-journal-cut.json").write_text(json.dumps({
+                "app": APP.exists(), "launcher": LAUNCHER.exists(), "process": bool(payload_pids()),
+                "archives": archive_shapes,
+            }, indent=2) + "\n")
     result.update(removalSheet=out["sheet"], removalQuitSheet=out["quitSheet"],
                   removeReturn=out["returncode"], afterRemoval=out["remaining"])
     if out.get("timedOut"):
