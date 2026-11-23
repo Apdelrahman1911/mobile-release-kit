@@ -1415,6 +1415,27 @@ def sample_native_removal(evidence, label, stop):
                 fields.append(row)
         trace.write_text("".join(fields) + "\nLast filesystem calls, including data I/O\n" + "".join(tail))
 
+def hosted_shared_parent_change(evidence, label, stop):
+    if os.environ.get("GITHUB_ACTIONS") != "true" or os.environ.get("GITHUB_REPOSITORY") != REPOSITORY:
+        return
+    deadline = time.monotonic() + 150
+    while not stop.is_set() and time.monotonic() < deadline:
+        if not LAUNCHER.exists() and APP.exists():
+            break
+        stop.wait(0.025)
+    else:
+        return
+    marker = STATE.parent / (".mrk-hosted-removal-proof-" + secrets.token_hex(16))
+    p, _ = run(["/usr/bin/sudo", "-n", "/bin/mkdir", "-m", "0700", str(marker)], 15, check=True)
+    try:
+        (evidence / f"{label}-shared-parent-fixture.json").write_text(json.dumps({
+            "createdAfterLauncherRetirement": True, "clockUtcMs": time.time_ns() // 1_000_000,
+            "returncode": p.returncode,
+        }) + "\n")
+        stop.wait(max(0, deadline - time.monotonic()))
+    finally:
+        run(["/usr/bin/sudo", "-n", "/bin/rmdir", str(marker)], 15, check=True)
+
 def live_remove(mount, work, evidence, steps, label, observe_release=None, *, refuse_at=None, background=False):
     """Open the installed app, run the mounted Remove.pkg with the standard
     Installer and confirm its exact removal sheet and ensuing ordinary Quit
@@ -1457,6 +1478,11 @@ def live_remove(mount, work, evidence, steps, label, observe_release=None, *, re
     sample_thread = threading.Thread(target=sample_removal_start,
                                      args=(pids[0], evidence, label, sample_stop, existing_requests), daemon=True)
     sample_thread.start()
+    change_thread = None
+    if os.environ.get("MRK_LIVE_SHARED_PARENT_FIXTURE") == "true" and label == "remove":
+        change_thread = threading.Thread(target=hosted_shared_parent_change, daemon=True,
+                                         args=(evidence, label, sample_stop))
+        change_thread.start()
     native_thread = None
     if os.environ.get("MRK_LIVE_REMOVAL_DIAGNOSTIC") == "true":
         native_thread = threading.Thread(target=sample_native_removal, daemon=True,
@@ -1513,6 +1539,9 @@ def live_remove(mount, work, evidence, steps, label, observe_release=None, *, re
         (evidence / f"{label}-sheet-probes.json").write_text(json.dumps(sheet[-40:]) + "\n")
         (evidence / f"{label}-quit-sheet-probes.json").write_text(json.dumps(quit_sheet[-40:]) + "\n")
         out["appTrace"] = fixed_app_trace(evidence, label)
+    if change_thread is not None:
+        change_thread.join(timeout=15)
+        need((evidence / f"{label}-shared-parent-fixture.json").is_file(), "shared-parent-change-not-observed")
     if native_thread is not None:
         native_thread.join(timeout=9)
     out["returncode"] = installer.returncode
