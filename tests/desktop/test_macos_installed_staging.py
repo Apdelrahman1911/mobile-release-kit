@@ -7540,7 +7540,7 @@ sys.exit(status)
                     "producer-root/producer.sig": b"INERT prior signature", "input/install-inventory.json": inventory,
                     "input/app/" + TOOL.REMOVER: program,
                     "source/desktop/macos-installed-inputs/uninstaller/main.applescript": b"INERT applet source",
-                    "source/desktop/macos-installed-inputs/uninstaller/delete-data.sh": b"INERT data script"}
+                    "source/desktop/macos-installed-inputs/uninstaller/removal-data-v1.sh": b"INERT data script"}
                 self.hidden = []
                 if candidate:
                     for old,new in (("producer-root/Install.pkg","Install.pkg"),("producer-root/producer.json","producer.json"),
@@ -7676,7 +7676,7 @@ sys.exit(status)
                     testcase.assertEqual((info["CFBundleIdentifier"], info["CFBundleShortVersionString"], info["LSMinimumSystemVersion"]),
                                          (module.UNINSTALLER_IDENTIFIER, selected.package_version, "26.0"))
                     testcase.assertFalse([key for key in info if key.endswith("UsageDescription") or key == "LSMinimumSystemVersionByArchitecture"])
-                    testcase.assertEqual(self.values["remove-producer-root/" + module.UNINSTALLER_NAME + "/Contents/Resources/delete-data.sh"],
+                    testcase.assertEqual(self.values["remove-producer-root/" + module.UNINSTALLER_NAME + "/Contents/Resources/removal-data-v1.sh"],
                                          b"INERT data script")
                     testcase.assertIn("--timestamp" if role == "uninstaller-sign" else "--strict", argv)
                 self.calls.append({"role": role, "entered": True, "returned": True, "capturesSettled": True,

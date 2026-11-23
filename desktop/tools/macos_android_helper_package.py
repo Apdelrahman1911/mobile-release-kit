@@ -8915,7 +8915,8 @@ class Operation:
         self.stage = "remove-uninstaller"
         bodies = {}
         carrier = self.cross_source_removal()
-        for name, limit in (("main.applescript", 32 * 1024), ("delete-data.sh", 16 * 1024)):
+        data_script = "removal-data-v1.sh"
+        for name, limit in (("main.applescript", 32 * 1024), (data_script, 16 * 1024)):
             role = "source-uninstaller-" + name
             if carrier is not None and name == "main.applescript":
                 carrier.removal_carrier_source(self.environment)
@@ -8935,8 +8936,8 @@ class Operation:
         contents = self.directory(bundle, "Contents", "uninstaller-contents")
         need({"Info.plist", "MacOS", "Resources"} <= set(os.listdir(contents["fd"])), "uninstaller-applet-roster")
         resources = self.directory(contents, "Resources", "uninstaller-resources")
-        need("delete-data.sh" not in os.listdir(resources["fd"]), "uninstaller-resource-collision")
-        self.package_file(resources, "delete-data.sh", bodies["delete-data.sh"])
+        need(not {data_script, "delete-data.sh"}.intersection(os.listdir(resources["fd"])), "uninstaller-resource-collision")
+        self.package_file(resources, data_script, bodies[data_script])
         info_entry = self.original(contents, "Info.plist", "uninstaller-applet-info", 64 * 1024, (0o644, 0o600, 0o444))
         info = plistlib.loads(self.read(info_entry))
         need(type(info) is dict and info.get("CFBundleExecutable") == "applet"

@@ -1,8 +1,9 @@
 #!/bin/sh
 # Mobile Release Kit: delete the app's OWN per-user data (#83, OD-05c).
 #
-# Runs as the signed-in user, never as root, and requires the native remover's
-# completion report for the current installation. It deletes nothing else:
+# Runs as the signed-in user and requires the native remover's completion
+# report for the current installation. Deletion requires an explicit command.
+# In that mode it deletes only:
 # only the exact, fixed locations below, each only if it is a real (non-link)
 # entry owned by this user. Projects, documents, ~/.config/gh and any other
 # file are never touched. Every outcome is printed; exit 0 means everything
@@ -12,6 +13,11 @@ set -u
 PATH=/usr/bin:/bin:/usr/sbin:/sbin
 export PATH
 umask 077
+
+case "$#:${1-}" in
+    1:--check-removal|1:--delete-data) ;;
+    *) exit 64 ;;
+esac
 
 support='/Library/Application Support'
 managed="$support/MobileReleaseKit"
@@ -62,7 +68,6 @@ removal_confirmed() {
         [ "$(protected_file_stamp "$state")" = "$state_stamp" ] && ! app_present
 }
 
-case "$#:${1-}" in 0:|1:--check-removal) ;; *) exit 64 ;; esac
 if app_present; then
     echo "refused: Mobile Release Kit is still installed; no data was deleted"
     exit 65
@@ -71,7 +76,7 @@ if ! removal_confirmed; then
     echo "refused: removal is unconfirmed; no data was deleted"
     exit 66
 fi
-[ "$#" -eq 0 ] || exit 0
+[ "$1" = --delete-data ] || exit 0
 
 home=${HOME:-}
 lib="$home/Library"

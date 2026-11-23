@@ -185,7 +185,9 @@ class PreparedPackageData(unittest.TestCase):
             with self.subTest(mutation=mutation), self.assertRaises(ValueError):
                 binding.removal_carrier_source(dict(env, **mutation))
         for bad in (dict(filename='desktop/src-tauri/src/bin/macos_install.rs', status='modified'),
-                    dict(filename='desktop/macos-installed-inputs/uninstaller/delete-data.sh', status='modified'),
+                    dict(filename='desktop/macos-installed-inputs/uninstaller/removal-data-v1.sh', status='modified'),
+                    dict(filename='desktop/macos-installed-inputs/uninstaller/removal-data-v1.sh', status='renamed',
+                         previous_filename='desktop/macos-installed-inputs/uninstaller/delete-data.sh'),
                     dict(filename='desktop/macos-installed-inputs/uninstaller/main.applescript', status='removed'),
                     dict(filename='desktop/packaging/macos-install-producer-signing.profile', status='modified'),
                     dict(filename='desktop/tools/stage_macos_installed.py', status='removed')):

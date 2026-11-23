@@ -916,7 +916,7 @@ def uninstaller_while_installed(mount, work, evidence, steps, result):
     Installer, removes and deletes nothing, and the data script refuses.
     Returns (decoys, before) for the confirmed path that follows."""
     out = result.setdefault("uninstaller", {})
-    script = mount / UNINSTALLER / "Contents/Resources/delete-data.sh"
+    script = mount / UNINSTALLER / "Contents/Resources/removal-data-v1.sh"
     need(script.is_file(), "uninstaller-data-script-missing")
     decoys = plant_decoys()
     before = manifest()
@@ -941,7 +941,7 @@ def uninstaller_while_installed(mount, work, evidence, steps, result):
     out["installerQuitWhileInstalled"] = seen
     need(dialog_says(seen, "still installed, so none of your data was deleted"), "uninstall-installer-quit-message")
     unchanged("uninstall-installer-quit")
-    p, r = run(["/bin/sh", str(script)], 60)
+    p, r = run(["/bin/sh", str(script), "--delete-data"], 60)
     steps.append(dict(r, role="delete-data-while-installed"))
     out["dataScriptWhileInstalled"] = p.returncode
     need(p.returncode == 65, "delete-data-not-refused-while-installed")

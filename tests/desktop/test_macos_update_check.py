@@ -2,6 +2,7 @@
 import copy
 import importlib.util
 import json
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
@@ -124,7 +125,7 @@ class LaunchSmokeSourceTests(unittest.TestCase):
 
     def test_uninstaller_sources_match_the_harness(self):
         folder = ROOT / "desktop/macos-installed-inputs/uninstaller"
-        script = (folder / "delete-data.sh").read_text()
+        script = (folder / "removal-data-v1.sh").read_text()
         applet = (folder / "main.applescript").read_text()
         for service in M.KEYCHAIN_SERVICES:
             self.assertIn(f"'{service}'", script)
@@ -134,6 +135,7 @@ class LaunchSmokeSourceTests(unittest.TestCase):
         self.assertIn("exit 66", script)
         self.assertIn("MobileReleaseKit-RemovalComplete-v1-$state_hash", script)
         self.assertLess(script.index("if ! removal_confirmed; then"), script.index('home=${HOME:-}'))
+        self.assertLess(script.index('[ "$1" = --delete-data ] || exit 0'), script.index('home=${HOME:-}'))
         self.assertIn("rm -r -f -x --", script)
         self.assertNotIn("sudo", script)
         for label in (M.KEEP_LABEL, M.DELETE_LABEL, "Delete All Data", "still installed, so none of your data was deleted",
@@ -142,16 +144,25 @@ class LaunchSmokeSourceTests(unittest.TestCase):
         self.assertIn("default button keepLabel", applet)
         self.assertIn('default button "Cancel" cancel button "Cancel"', applet)
         self.assertIn('" --check-removal"', applet)
+        self.assertIn('if deleteData then set dataOperation to " --delete-data"', applet)
         self.assertEqual(applet.count('set report to do shell script "/bin/sh '), 1)
         self.assertIn('if completion is "status=66" or completion is "status=64" then', applet)
         self.assertIn('if detail starts with "kept " or detail starts with "could not delete:" then', applet)
         self.assertIn("current application's NSBundle's mainBundle()", applet)
         self.assertIn('URLByAppendingPathComponent:"Remove.pkg"', applet)
-        self.assertIn('URLByAppendingPathComponent:"delete-data.sh"', applet)
+        self.assertIn('URLByAppendingPathComponent:"removal-data-v1.sh"', applet)
+        self.assertNotIn('"delete-data.sh"', applet)
         self.assertNotIn("path to me", applet)
         self.assertNotIn("path to resource", applet)
         # No top-level state an applet would save into its signed bundle.
         self.assertNotRegex(applet, r"(?m)^\s*(property|global)\s")
+
+    def test_removal_data_helper_requires_one_explicit_operation(self):
+        script = ROOT / "desktop/macos-installed-inputs/uninstaller/removal-data-v1.sh"
+        for arguments in ([], ["--unknown"], ["--check-removal", "--delete-data"]):
+            with self.subTest(arguments=arguments):
+                returned = subprocess.run(["/bin/sh", str(script), *arguments], capture_output=True, timeout=5)
+                self.assertEqual((returned.returncode, returned.stdout, returned.stderr), (64, b"", b""))
 
     def test_removal_selection_is_optional_and_strict(self):
         import tempfile
