@@ -2497,6 +2497,14 @@ def uninstaller_run(mount, work, evidence, label, answers, timeout=240):
             subprocess.run(["/usr/sbin/screencapture", "-x", str(evidence / f"screen-{label}-installer.png")],
                            capture_output=True, timeout=60)
             need(count, f"{label}-installer-visible-window-missing")
+            if label == "macl-duplicate-keep-incomplete":
+                listed = subprocess.check_output(["/bin/ps", "-axo", "command="], text=True, timeout=10)
+                opened = [line.strip() for line in listed.splitlines()
+                          if line.strip().startswith("/usr/bin/open -W -a Installer ")
+                          and line.strip().endswith("/Remove.pkg")]
+                (evidence / f"{label}-package-selection.json").write_text(json.dumps(opened, indent=2))
+                need(opened == ["/usr/bin/open -W -a Installer " + str(mount / "Remove.pkg")],
+                     f"{label}-installer-package-on-wrong-mount")
             quit_script = work / "installer-normal-quit.js"
             quit_script.write_text("""function run() {
   const se = Application('System Events');
