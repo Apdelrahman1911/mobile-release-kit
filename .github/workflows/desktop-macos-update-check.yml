@@ -10,6 +10,7 @@ name: Desktop macOS in-place update check
 # the standard Installer (confirming only the exact quit sheet), require the
 # app, launcher and process gone and the seeded data unchanged, then reinstall
 # and relaunch. Uses no signing credentials.
+# The remaining acceptance matrix reuses the exact pair from the signed removal qualification.
 # Path filters: push a follow-up commit after creating the branch (new-branch
 # diffs against main exceed the 300-file path-filter window).
 on:
