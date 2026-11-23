@@ -1388,11 +1388,16 @@ def sample_native_removal(evidence, label, stop):
                     child.kill()
                     child.wait()
         all_events.seek(0)
-        fields = deque(maxlen=700)
+        fields = deque(maxlen=3000)
+        tail = deque(maxlen=80)
         for row in all_events:
-            if len(row) <= 16384 and "mrk-macos-remove" in row:
+            if len(row) > 16384 or "mrk-macos-remove" not in row:
+                continue
+            tail.append(row)
+            tokens = row.split(maxsplit=3)
+            if len(tokens) >= 2 and tokens[1] not in ("pread", "pwrite", "read", "write", "PAGE_IN"):
                 fields.append(row)
-        trace.write_text("".join(fields))
+        trace.write_text("".join(fields) + "\nLast filesystem calls, including data I/O\n" + "".join(tail))
 
 def live_remove(mount, work, evidence, steps, label, observe_release=None, *, refuse_at=None, background=False):
     """Open the installed app, run the mounted Remove.pkg with the standard
