@@ -40,6 +40,7 @@ import threading
 import time
 import zipfile
 from collections import deque
+from contextlib import contextmanager
 from pathlib import Path
 
 REPOSITORY = "Apdelrahman1911/mobile-release-kit"
@@ -513,14 +514,90 @@ def capture_cold_runtime(evidence, label, started, observations, stop):
     (evidence / f"{label}-bootstrap-sample.txt").write_text("\n".join(kept) + "\n")
 
 
+class BootstrapJournal:
+    def __init__(self, sink, started):
+        self.sink = sink
+        self.started = started
+        self.lock = threading.Lock()
+
+    def record(self, event, origin="runner", **facts):
+        with self.lock:
+            record = {"elapsedSeconds": round(time.monotonic() - self.started, 3),
+                      "observedAtUnixNs": time.time_ns(), "origin": origin, "event": event, **facts}
+            self.sink.write(json.dumps(record, separators=(",", ":")) + "\n")
+            self.sink.flush()
+            os.fsync(self.sink.fileno())
+
+    def read_markers(self, trace, stop):
+        budget = 1024 * 1024
+        pending = b""
+        markers = 0
+        try:
+            with trace.open("rb", buffering=0) as raw:
+                while budget:
+                    data = raw.read(min(budget, 8192))
+                    if not data:
+                        if stop.wait(0.05) and not (data := raw.read(min(budget, 8192))):
+                            return
+                        if not data:
+                            continue
+                    budget -= len(data)
+                    lines = (pending + data).split(b"\n")
+                    pending = lines.pop()
+                    for line in lines:
+                        if COLD_MARKER.fullmatch(line):
+                            self.record(line.decode("ascii"), origin="app-stderr")
+                            markers += 1
+                            if markers == 128:
+                                self.record("marker-count-limit")
+                                return
+                self.record("stderr-byte-limit")
+        except OSError as error:
+            self.record("marker-reader-error", error=type(error).__name__)
+
+
+@contextmanager
+def durable_bootstrap(work, evidence, label):
+    trace = work / f"{label}-bootstrap-stderr.private"
+    trace.touch(mode=0o600, exist_ok=False)
+    stop = threading.Event()
+    with (evidence / f"{label}-bootstrap-journal.jsonl").open("x", encoding="utf-8") as sink:
+        journal = BootstrapJournal(sink, time.monotonic())
+        journal.record("capture-start")
+        reader = threading.Thread(target=journal.read_markers, args=(trace, stop), daemon=True)
+        reader.start()
+        try:
+            yield trace, journal
+        except subprocess.TimeoutExpired as error:
+            journal.record("launch-observation-timeout", limitSeconds=error.timeout)
+            raise
+        except Exception as error:
+            journal.record("launch-observation-error", error=type(error).__name__)
+            raise
+        finally:
+            stop.set()
+            reader.join(timeout=3)
+            journal.record("capture-finished", readerDrained=not reader.is_alive())
+
+
 def launch_smoke(label, work, evidence, steps, observe=None, steady_idle_seconds=0, steady_interval=1):
+    if os.environ.get("MRK_COLD_RUNTIME_DURABLE") == "true" and label == "first-launch":
+        with durable_bootstrap(work, evidence, label) as capture:
+            return observe_launch(label, work, evidence, steps, observe, steady_idle_seconds, steady_interval, capture)
+    return observe_launch(label, work, evidence, steps, observe, steady_idle_seconds, steady_interval)
+
+
+def observe_launch(label, work, evidence, steps, observe, steady_idle_seconds, steady_interval, durable=None):
     """Open the installed app as the logged-in runner user and require a live
     payload process with an on-screen window and no crash report."""
     need(not payload_pids(), f"{label}-app-already-running")
     before = set(recent_crashes())
     started = time.monotonic()
     argv = ["/usr/bin/open"]
-    cold = os.environ.get("MRK_COLD_RUNTIME_DIAGNOSTIC") == "true" and label in ("first-launch", "warm-after-timeout")
+    if durable:
+        capture_path, journal = durable
+        argv += ["--stderr", str(capture_path)]
+    cold = durable is None and os.environ.get("MRK_COLD_RUNTIME_DIAGNOSTIC") == "true" and label in ("first-launch", "warm-after-timeout")
     trace = work / f"{label}-bootstrap-stderr.txt"
     sample = None
     timing_stop = threading.Event()
@@ -534,7 +611,11 @@ def launch_smoke(label, work, evidence, steps, observe=None, steady_idle_seconds
             sample = threading.Thread(target=capture_cold_runtime,
                                       args=(evidence, label, started, observations, timing_stop), daemon=True)
             sample.start()
+    if durable:
+        journal.record("open-request")
     p, row = run([*argv, str(APP)], 60)
+    if durable:
+        journal.record("open-returned", returnCode=p.returncode)
     steps.append(dict(row, role=label))
     need(p.returncode == 0, f"{label}-open-returned-{p.returncode}")
     pids, windows, samples = [], None, []
@@ -549,6 +630,8 @@ def launch_smoke(label, work, evidence, steps, observe=None, steady_idle_seconds
                 break
         time.sleep(2)
     first_window = round(time.monotonic() - started, 1) if windows else None
+    if durable:
+        journal.record("first-window-observed" if windows else "first-window-unobserved")
     for _ in range(15):  # still alive and showing a window after the first paint
         time.sleep(1)
         live = payload_pids()
@@ -571,6 +654,8 @@ def launch_smoke(label, work, evidence, steps, observe=None, steady_idle_seconds
     shot = evidence / f"screen-{label}.png"
     subprocess.run(["/usr/sbin/screencapture", "-x", str(shot)], capture_output=True, timeout=60)
     ui = observe(alive[0], work, evidence, label) if observe and alive and settled else None
+    if durable:
+        journal.record("build-tools-observed", runtimeCard=(ui or {}).get("runtimeCard", "not-observed"))
     reports = recent_crash_paths()
     new_reports = sorted(set(reports) - before)
     # A resource diagnostic from the completed Installer is a separate
@@ -873,6 +958,11 @@ def main():
 def fresh_check(selection, work, evidence, steps, result):
     row = selection["next"]
     folder = fetch("next", row, work, steps)
+    durable = os.environ.get("MRK_COLD_RUNTIME_DURABLE") == "true"
+    if durable:
+        origin = json.loads((folder / "PREPARED.json").read_text())["origin"]
+        need(origin["source"] == "ce9380df50c0a6bc6a51f6e23eba1e0ac7ccf89a"
+             and origin["tree"] == "dcce7b95cf7465e51adc7df7fd141d0fe6d99b87", "cold-diagnostic-exact-source")
     need(install("next", folder, steps, evidence=evidence) == 0, "fresh-install-returned-nonzero")
     state = installed_state()
     result["afterFreshInstall"] = state
@@ -883,13 +973,16 @@ def fresh_check(selection, work, evidence, steps, result):
     need(state["bundleShortVersion"] == row["packageVersion"], "fresh-bundle-version")
     need(state["receiptVersion"] is None, "fresh-unexpected-package-receipt")
     need(state["cliReturn"] == 0 and state["cliVersionLine"].startswith("mrk "), "fresh-cli-runs")
+    if durable:
+        need(state["sourceCommit"] == origin["source"], "cold-diagnostic-installed-source")
+        result["durableBootstrap"] = True
     performance = result["mode"] == "performance"
     result["firstLaunch"] = launch_smoke("first-launch", work, evidence, steps, observe=first_launch_observe,
                                          steady_idle_seconds=300 if performance else 0)
     ui = result["firstLaunch"].get("ui") or {}
     # A missing accessibility read is recorded as not-observed, never a pass;
     # only a definite unavailable card, error marker or wrong CLI refusal fails.
-    if ui.get("runtimeCard") == "unavailable" and os.environ.get("MRK_COLD_RUNTIME_DIAGNOSTIC") == "true":
+    if not durable and ui.get("runtimeCard") == "unavailable" and os.environ.get("MRK_COLD_RUNTIME_DIAGNOSTIC") == "true":
         result["warmAfterFirstLaunchRefusal"] = launch_smoke(
             "warm-after-timeout", work, evidence, steps, observe=first_launch_observe)
     need(ui.get("runtimeCard") != "unavailable", "fresh-first-launch-runtime-unavailable")
@@ -900,8 +993,13 @@ def fresh_check(selection, work, evidence, steps, result):
         need(ui.get("runtimeCard") == "bundled", "resource-first-launch-runtime-unproven")
         need(result["firstLaunch"]["steadyIdleResources"]["samples"] == 300, "resource-sample-incomplete")
         return
-    if os.environ.get("MRK_COLD_RUNTIME_DIAGNOSTIC") == "true":
+    if durable or os.environ.get("MRK_COLD_RUNTIME_DIAGNOSTIC") == "true":
         need(ui.get("runtimeCard") == "bundled", "cold-first-launch-runtime-unobserved")
+        if durable:
+            journal = (evidence / "first-launch-bootstrap-journal.jsonl").read_text().splitlines()
+            records = [json.loads(line) for line in journal]
+            need(any(row["event"] == "MRK_DESKTOP_CAPABILITIES=available" for row in records)
+                 and records[-1].get("readerDrained") is True, "cold-bootstrap-evidence-incomplete")
         result["diagnosticOnly"] = True
         return
     data = manifest() if USER_DATA.exists() else {}

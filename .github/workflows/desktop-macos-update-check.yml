@@ -40,7 +40,8 @@ jobs:
         sample: ${{ contains(github.event.head_commit.message, '[macos-cold-runtime-contention]') && fromJSON('["contention"]') || contains(github.event.head_commit.message, '[macos-cold-runtime-diagnostic]') && fromJSON('["trace","profile"]') || fromJSON('["default"]') }}
         include: ${{ contains(github.event.head_commit.message, '[macos-cold-runtime-diagnostic]') && fromJSON('[{"mode":"workspace-xctest","sample":"default"}]') || fromJSON('[]') }}
         mode: >-
-          ${{ contains(github.event.head_commit.message, '[macos-retained-maintenance]') && fromJSON('["release-asset","retained-transition","retained-prepare","workspace-xctest","performance-long","fresh","update-credentials","delete-data","uninstaller","recovery-xctest","core-recovery"]')
+          ${{ contains(github.event.head_commit.message, '[macos-cold-runtime-durable]') && fromJSON('["fresh"]')
+          || contains(github.event.head_commit.message, '[macos-retained-maintenance]') && fromJSON('["release-asset","retained-transition","retained-prepare","workspace-xctest","performance-long","fresh","update-credentials","delete-data","uninstaller","recovery-xctest","core-recovery"]')
           || contains(github.event.head_commit.message, '[macos-retained-removal-scale]') && fromJSON('["retained-transition","release-asset","retained-prepare","fresh","workspace-xctest","update-credentials","delete-data","uninstaller","recovery-xctest"]')
           || contains(github.event.head_commit.message, '[macos-applet-carrier-revision]') && fromJSON('["delete-data","macl-journal-recovery","uninstaller","release-asset","remove"]')
           || (contains(github.event.head_commit.message, '[macos-live-removal-diag]') || contains(github.event.head_commit.message, '[macos-live-shared-parent]')) && fromJSON('["delete-data"]')
@@ -101,12 +102,14 @@ jobs:
           persist-credentials: false
 
       - name: Run the update check
+        timeout-minutes: ${{ contains(github.event.head_commit.message, '[macos-cold-runtime-durable]') && 38 || (matrix.mode == 'performance-long' && 85 || 45) }}
         shell: bash
         env:
           GH_TOKEN: ${{ github.token }}
           MRK_CHECK_REFRESHED_RUNTIME: ${{ (contains(github.event.head_commit.message, '[macos-refreshed-acceptance]') || contains(github.event.head_commit.message, '[macos-retained-transition]') || contains(github.event.head_commit.message, '[macos-retained-maintenance]') || contains(github.event.head_commit.message, '[macos-retained-removal-scale]') || (contains(github.event.head_commit.message, '[macos-completion-report]') || contains(github.event.head_commit.message, '[macos-post-recovery-acceptance]') || contains(github.event.head_commit.message, '[macos-cold-runtime-diagnostic]'))) && matrix.mode == 'fresh' }}
           MRK_COLD_RUNTIME_DIAGNOSTIC: ${{ (contains(github.event.head_commit.message, '[macos-cold-runtime-diagnostic]') || contains(github.event.head_commit.message, '[macos-cold-runtime-contention]')) && matrix.mode == 'fresh' }}
           MRK_COLD_RUNTIME_SAMPLE: ${{ matrix.sample }}
+          MRK_COLD_RUNTIME_DURABLE: ${{ contains(github.event.head_commit.message, '[macos-cold-runtime-durable]') && matrix.mode == 'fresh' }}
           MRK_LIVE_REMOVAL_DIAGNOSTIC: ${{ contains(github.event.head_commit.message, '[macos-live-removal-diag]') || contains(github.event.head_commit.message, '[macos-live-shared-parent]') || (contains(github.event.head_commit.message, '[macos-removal-qualification]') && matrix.mode == 'delete-data') }}
           MRK_LIVE_SHARED_PARENT_FIXTURE: ${{ (contains(github.event.head_commit.message, '[macos-live-shared-parent]') || contains(github.event.head_commit.message, '[macos-removal-qualification]')) && matrix.mode == 'delete-data' }}
           MRK_CHECK_DURABLE_CLI_STATE: ${{ (contains(github.event.head_commit.message, '[macos-retained-maintenance]') || contains(github.event.head_commit.message, '[macos-retained-removal-scale]') || contains(github.event.head_commit.message, '[macos-physical-cli-only]') || contains(github.event.head_commit.message, '[macos-cold-runtime-diagnostic]') || contains(github.event.head_commit.message, '[macos-cli-grant-diagnostic]')) && matrix.mode == 'workspace-xctest' }}
@@ -132,7 +135,7 @@ jobs:
           retention-days: 30
 
       - name: Retain bounded update evidence
-        if: ${{ !cancelled() && env.MRK_UPDATE_WORK != '' }}
+        if: ${{ always() && env.MRK_UPDATE_WORK != '' }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: macos-update-check-${{ matrix.mode }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}${{ matrix.sample != 'default' && format('-{0}', matrix.sample) || '' }}
