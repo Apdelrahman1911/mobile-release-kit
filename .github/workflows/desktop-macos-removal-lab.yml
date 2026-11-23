@@ -24,7 +24,7 @@ permissions:
   contents: read
 
 concurrency:
-  group: desktop-macos-removal-lab-${{ github.ref }}
+  group: desktop-macos-removal-lab-${{ github.ref }}${{ contains(github.event.head_commit.message, '[macos-uninstaller-result-lab]') && '-applet' || '' }}
   cancel-in-progress: true
 
 jobs:
@@ -316,7 +316,7 @@ jobs:
           mkdir -p "$profile" "$decoy"
           printf 'synthetic-app-profile\n' > "$profile/test-data"
           printf 'synthetic-unrelated-profile\n' > "$decoy/test-data"
-          script="$GITHUB_WORKSPACE/desktop/macos-installed-inputs/uninstaller/delete-data.sh"
+          script="$GITHUB_WORKSPACE/desktop/macos-installed-inputs/uninstaller/removal-data-v1.sh"
           /usr/bin/osacompile -o "$fixture/uninstaller.scpt" \
             "$GITHUB_WORKSPACE/desktop/macos-installed-inputs/uninstaller/main.applescript"
 
@@ -337,7 +337,7 @@ jobs:
           [[ ! -e "$receipt" && ! -L "$receipt" ]]
 
           need_status 66 absent-before-program-finished --check-removal
-          need_status 66 interrupted-purge-refused
+          need_status 66 interrupted-purge-refused --delete-data
           [[ "$(cat "$profile/test-data")" == synthetic-app-profile ]]
           printf 'Mobile Release Kit removal complete v1\n%s\n' "$digest" > "$fixture/receipt"
           /usr/bin/sudo -n /bin/ln -s "$fixture/receipt" "$receipt"
@@ -350,14 +350,14 @@ jobs:
           need_status 0 same-epoch-completion --check-removal
           [[ "$(cat "$profile/test-data")" == synthetic-app-profile ]]
           /usr/bin/sudo -n /usr/bin/install -d -m 0755 -o root -g wheel "$launcher"
-          need_status 65 launcher-still-present
+          need_status 65 launcher-still-present --delete-data
           /usr/bin/sudo -n /bin/rmdir "$launcher"
           printf 'next protected installation epoch\n' > "$fixture/new-state"
           /usr/bin/sudo -n /usr/bin/install -m 0444 -o root -g wheel "$fixture/new-state" "$state"
-          need_status 66 stale-epoch-report-refused
+          need_status 66 stale-epoch-report-refused --delete-data
           [[ "$(cat "$profile/test-data")" == synthetic-app-profile ]]
           /usr/bin/sudo -n /usr/bin/install -m 0444 -o root -g wheel "$fixture/state" "$state"
-          need_status 0 confirmed-purge
+          need_status 0 confirmed-purge --delete-data
           [[ ! -e "$profile" && "$(cat "$decoy/test-data")" == synthetic-unrelated-profile ]]
 
 
@@ -408,13 +408,15 @@ jobs:
           src="$GITHUB_WORKSPACE/desktop/macos-installed-inputs/uninstaller"
           /usr/bin/osacompile -o "$app" "$src/main.applescript"
           /usr/bin/plutil -replace CFBundleIdentifier -string dev.mobile-release-kit.desktop.uninstaller "$app/Contents/Info.plist"
-          /usr/bin/install -m 0444 "$src/delete-data.sh" "$app/Contents/Resources/delete-data.sh"
+          /usr/bin/install -m 0444 "$src/removal-data-v1.sh" "$app/Contents/Resources/removal-data-v1.sh"
           /usr/bin/codesign --force --sign - --identifier dev.mobile-release-kit.desktop.uninstaller "$app"
           /usr/bin/hdiutil create -srcfolder "$fixture/image" -volname MRK-Uninstaller-Lab -format UDZO -fs APFS "$fixture/app.dmg"
           old="$fixture/older/Uninstall Mobile Release Kit.app"
           /usr/bin/osacompile -o "$old" -e 'on run' -e 'return' -e 'end run'
           /usr/bin/plutil -replace CFBundleIdentifier -string dev.mobile-release-kit.desktop.uninstaller "$old/Contents/Info.plist"
-          printf '#!/bin/sh\nexit 65\n' > "$old/Contents/Resources/delete-data.sh"
+          # A legacy helper ignores every argument. Only a disposable canary
+          # is at risk here. The corrected applet must never execute it.
+          printf '#!/bin/sh\n/bin/rm -f -- "%s"\n' "$fixture/legacy-canary" > "$old/Contents/Resources/delete-data.sh"
           /usr/bin/codesign --force --sign - --identifier dev.mobile-release-kit.desktop.uninstaller "$old"
           /bin/cp "$fixture/image/Remove.pkg" "$fixture/older/Remove.pkg"
           /usr/bin/hdiutil create -srcfolder "$fixture/older" -volname MRK-Uninstaller-Lab -format UDZO -fs APFS "$fixture/older.dmg"
@@ -437,15 +439,34 @@ jobs:
           linked=Path.home()/"Library/Caches/dev.mobile-release-kit.desktop.launcher"
           assert not linked.exists() and not linked.is_symlink()
           linked.symlink_to(decoy)
+          canary=fixture/"legacy-canary"
+          canary.write_bytes(b"legacy cleanup was not run")
+          legacy=old_mount/check.UNINSTALLER/"Contents/Resources/delete-data.sh"
+          helper=mount/check.UNINSTALLER/"Contents/Resources/removal-data-v1.sh"
+          assert legacy.is_file() and not (legacy.parent/helper.name).exists()
+          assert not (helper.parent/legacy.name).exists()
           try:
-              for label in ("confirmed", "incomplete"):
-                  profile.mkdir(mode=0o700)
-                  (profile/"test-file").write_bytes(b"fixture data")
-                  seen=check.uninstaller_diagnostic_run(mount,fixture,evidence,label,
-                      [check.DELETE_LABEL,"Delete All Data","Continue",None,"OK"])
+              for label in ("keep", "confirmed", "incomplete"):
+                  if not profile.exists():
+                      profile.mkdir(mode=0o700)
+                      (profile/"test-file").write_bytes(b"fixture data")
+                  if label=="keep":
+                      for argv, expected in (([],64),(["--check-removal"],0),(["--unknown"],64)):
+                          completed=subprocess.run(["/bin/sh",str(helper),*argv],capture_output=True,timeout=15)
+                          assert completed.returncode==expected, (argv,completed.returncode)
+                          assert (profile/"test-file").read_bytes()==b"fixture data"
+                  answers=([check.KEEP_LABEL,"Continue",None,"OK"] if label=="keep"
+                           else [check.DELETE_LABEL,"Delete All Data","Continue",None,"OK"])
+                  seen=check.uninstaller_diagnostic_run(mount,fixture,evidence,label,answers)
                   (evidence/f"{label}-dialogs.json").write_text(json.dumps(seen,indent=2))
                   assert linked.is_symlink() and decoy.read_bytes()==b"test decoy"
-                  if label=="confirmed":
+                  assert canary.read_bytes()==b"legacy cleanup was not run"
+                  opened=json.loads((evidence/f"{label}-package-selection.json").read_bytes())
+                  assert len(opened)==1 and opened[0].endswith(str(mount/"Remove.pkg")), opened
+                  if label=="keep":
+                      assert (profile/"test-file").read_bytes()==b"fixture data"
+                      assert check.dialog_says(seen,"was removed. Your data was kept.")
+                  elif label=="confirmed":
                       assert not profile.exists()
                       assert check.dialog_says(seen,"was removed, but some data was kept.")
                       assert check.dialog_says(seen,"kept (link, not followed)")

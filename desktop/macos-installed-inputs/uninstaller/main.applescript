@@ -36,12 +36,12 @@ on run
 		do shell script "/usr/bin/open -W -a Installer " & quoted form of package
 	end try
 
-	set checkOnly to " --check-removal"
-	if deleteData then set checkOnly to ""
+	set dataOperation to " --check-removal"
+	if deleteData then set dataOperation to " --delete-data"
 	-- The cleanup command checks the completion report itself. Run it once
 	-- and carry its real status into the result dialog after Installer exits.
 	try
-		set report to do shell script "/bin/sh " & quoted form of script_ & checkOnly & " 2>&1; echo \"status=$?\""
+		set report to do shell script "/bin/sh " & quoted form of script_ & dataOperation & " 2>&1; echo \"status=$?\""
 		set lines_ to paragraphs of report
 		set completion to last item of lines_
 	on error
@@ -88,7 +88,8 @@ on removalPaths()
 	set runningBundle to current application's NSBundle's mainBundle()
 	set volumeURL to runningBundle's bundleURL()'s URLByDeletingLastPathComponent()
 	set package to (volumeURL's URLByAppendingPathComponent:"Remove.pkg" isDirectory:false)'s |path|() as text
-	set script_ to (runningBundle's resourceURL()'s URLByAppendingPathComponent:"delete-data.sh" isDirectory:false)'s |path|() as text
+	-- Legacy media used a script that did not understand check-only mode.
+	set script_ to (runningBundle's resourceURL()'s URLByAppendingPathComponent:"removal-data-v1.sh" isDirectory:false)'s |path|() as text
 	repeat with itemPath in {package, script_}
 		set originalPath to quoted form of (contents of itemPath)
 		do shell script "/bin/test -f " & originalPath & " && /bin/test ! -L " & originalPath
