@@ -1828,10 +1828,10 @@ def install_macl_fixture(paths):
 
 
 def macl_journal_recovery_check(selection, work, evidence, steps, result):
-    """Exercise the exact signed 0.2.3-to-0.2.7 interrupted removal transition."""
+    """Exercise the exact signed 0.2.3-to-0.2.8 interrupted removal transition."""
     need("previousRemoval" in selection and "removal" in selection
          and selection["previous"]["release"] == "macos26-arm64-desktop-09"
-         and selection["next"]["release"] == "macos26-arm64-desktop-13", "macl-recovery-selection")
+         and selection["next"]["release"] == "macos26-arm64-desktop-14", "macl-recovery-selection")
     need(not STATE.exists(), "macl-recovery-existing-installation")
     next_folder = fetch("next", selection["next"], work, steps)
     for role in selected_release_roles(selection)[:-1]:
@@ -1903,7 +1903,7 @@ def macl_journal_recovery_check(selection, work, evidence, steps, result):
     result["priorEmptyJournal"] = True
 
     # Mount the previously verified legacy image again to match the
-    # physical layout. Both images stay mounted for the 0.2.7 applet checks.
+    # physical layout. Both images stay mounted for the 0.2.8 applet checks.
     legacy_image = old_work / "removal/MobileReleaseKit-Remove.dmg"
     need(digest(legacy_image) == selection["previousRemoval"]["imageSha256"], "macl-legacy-image-changed")
     p, step = run(["/usr/bin/hdiutil", "attach", "-readonly", "-nobrowse", "-noautoopen",
