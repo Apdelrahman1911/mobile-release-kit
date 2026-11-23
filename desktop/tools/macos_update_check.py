@@ -463,38 +463,54 @@ def time_bootstrap(trace, started, stop, observations):
                 break
 
 
-def capture_cold_runtime(evidence, label, started):
-    end = time.monotonic() + 20
-    while time.monotonic() < end:
-        pids = payload_pids()
-        if len(pids) == 1:
-            break
-        time.sleep(0.1)
+def capture_cold_runtime(evidence, label, started, observations, stop):
+    end = time.monotonic() + 40
+    while time.monotonic() < end and not stop.wait(0.03):
+        if any(item["event"] == "MRKDBG_DESKTOP_BOOTSTRAP=app-info-enter" for item in observations):
+            pids = payload_pids()
+            if len(pids) == 1:
+                break
     else:
         return
     sampled_at = time.monotonic() - started
-    with tempfile.TemporaryFile(mode="w+t", dir=evidence.parent, errors="replace") as trace:
-        p = subprocess.run(["/usr/bin/sudo", "-n", "/usr/bin/sample", str(pids[0]), "18", "5"],
-                           stdout=trace, stderr=subprocess.DEVNULL, timeout=30)
-        trace.seek(0)
-        kept = [f"sample began {sampled_at:.3f}s after open; return={p.returncode}"]
-        markers = ("installed_runtime_macos", "::supervisor", "vault_acl", "directory_block", "fstat",
-                   "sha256", "posix_spawn", "bootstrap", "wait_for_response", "capabilities", "SecStaticCode")
-        in_graph = False
-        per_marker = dict.fromkeys(markers, 0)
-        for row in trace:
-            if row.startswith("Call graph:"):
-                in_graph = True
-            if row.startswith("Total number in stack"):
+    load = []
+    try:
+        if os.environ.get("MRK_COLD_RUNTIME_SAMPLE") == "contention" and label == "first-launch":
+            code = ("import hashlib,time\nend=time.monotonic()+13\n"
+                    "block=bytes(32*1024*1024)\n"
+                    "while time.monotonic()<end: hashlib.sha256(block).digest()\n")
+            for _ in range(max(1, min((os.cpu_count() or 2) - 1, 3))):
+                load.append(subprocess.Popen([sys.executable, "-I", "-S", "-B", "-c", code],
+                                             stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                             stderr=subprocess.DEVNULL))
+        with tempfile.TemporaryFile(mode="w+t", dir=evidence.parent, errors="replace") as trace:
+            p = subprocess.run(["/usr/bin/sudo", "-n", "/usr/bin/sample", str(pids[0]), "13", "5"],
+                               stdout=trace, stderr=subprocess.DEVNULL, timeout=24)
+            trace.seek(0)
+            sample = trace.read(8 * 1024 * 1024).splitlines()
+    finally:
+        for child in load:
+            if child.poll() is None:
+                child.terminate()
+            child.wait(timeout=5)
+    markers = ("installed_runtime", "supervisor", "vault_acl", "directory_block", "fstat",
+               "sha256", "posix_spawn", "bootstrap", "wait_for_response", "capabilities", "SecStaticCode")
+    kept = [f"sample began {sampled_at:.3f}s after open; return={p.returncode}; workload processes={len(load)}"]
+    in_graph = False
+    per_marker = dict.fromkeys(markers, 0)
+    for row in sample:
+        if row.startswith("Call graph:"):
+            in_graph = True
+        if row.startswith("Total number in stack"):
+            break
+        if not in_graph or len(row) > 1400:
+            continue
+        for marker in markers:
+            if marker in row and per_marker[marker] < 55:
+                kept.append(row.strip())
+                per_marker[marker] += 1
                 break
-            if not in_graph or len(row) > 1400:
-                continue
-            for marker in markers:
-                if marker in row and per_marker[marker] < 40:
-                    kept.append(row.strip())
-                    per_marker[marker] += 1
-                    break
-        (evidence / f"{label}-bootstrap-sample.txt").write_text("\n".join(kept) + "\n")
+    (evidence / f"{label}-bootstrap-sample.txt").write_text("\n".join(kept) + "\n")
 
 
 def launch_smoke(label, work, evidence, steps, observe=None, steady_idle_seconds=0, steady_interval=1):
@@ -514,8 +530,9 @@ def launch_smoke(label, work, evidence, steps, observe=None, steady_idle_seconds
         argv += ["--stderr", str(trace)]
         timing = threading.Thread(target=time_bootstrap, args=(trace, started, timing_stop, observations), daemon=True)
         timing.start()
-        if os.environ.get("MRK_COLD_RUNTIME_SAMPLE") == "profile":
-            sample = threading.Thread(target=capture_cold_runtime, args=(evidence, label, started), daemon=True)
+        if os.environ.get("MRK_COLD_RUNTIME_SAMPLE") in ("profile", "contention"):
+            sample = threading.Thread(target=capture_cold_runtime,
+                                      args=(evidence, label, started, observations, timing_stop), daemon=True)
             sample.start()
     p, row = run([*argv, str(APP)], 60)
     steps.append(dict(row, role=label))
@@ -578,10 +595,11 @@ def launch_smoke(label, work, evidence, steps, observe=None, steady_idle_seconds
     (evidence / f"{label}-launch.json").write_text(json.dumps(observed, indent=2) + "\n")
     if alive:
         stop_app(alive)
-    if sample is not None:
-        sample.join(timeout=16)
     if cold:
         timing_stop.set()
+    if sample is not None:
+        sample.join(timeout=25)
+    if cold:
         timing.join(timeout=2)
         (evidence / f"{label}-bootstrap-status.json").write_text(json.dumps(observations, indent=2) + "\n")
     need(pids, f"{label}-app-process-not-started")
