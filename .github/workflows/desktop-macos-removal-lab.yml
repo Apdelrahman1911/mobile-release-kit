@@ -362,7 +362,7 @@ jobs:
 
 
   uninstaller-result:
-    name: Verify the applet result on a read-only disk image
+    name: Verify the actual applet with two mounted removal images
     if: >-
       github.repository == 'Apdelrahman1911/mobile-release-kit'
       && github.event_name == 'push'
@@ -392,7 +392,7 @@ jobs:
           [[ ! -e "$managed" && ! -L "$managed" && ! -e "$realprofile" && ! -L "$realprofile" ]]
           fixture="$(mktemp -d "$RUNNER_TEMP/uninstaller-result.XXXXXXXX")"
           evidence="$RUNNER_TEMP/uninstaller-result-evidence"
-          mkdir -p "$fixture/image" "$fixture/scripts" "$evidence"
+          mkdir -p "$fixture/image" "$fixture/older" "$fixture/scripts" "$evidence"
           /usr/bin/sudo -n /usr/bin/install -d -m 0755 -o root -g wheel "$managed"
           printf 'synthetic protected installation state\n' > "$fixture/state"
           /usr/bin/sudo -n /usr/bin/install -m 0444 -o root -g wheel "$fixture/state" "$managed/installation-v2.json"
@@ -411,6 +411,14 @@ jobs:
           /usr/bin/install -m 0444 "$src/delete-data.sh" "$app/Contents/Resources/delete-data.sh"
           /usr/bin/codesign --force --sign - --identifier dev.mobile-release-kit.desktop.uninstaller "$app"
           /usr/bin/hdiutil create -srcfolder "$fixture/image" -volname MRK-Uninstaller-Lab -format UDZO -fs APFS "$fixture/app.dmg"
+          old="$fixture/older/Uninstall Mobile Release Kit.app"
+          /usr/bin/osacompile -o "$old" -e 'on run' -e 'return' -e 'end run'
+          /usr/bin/plutil -replace CFBundleIdentifier -string dev.mobile-release-kit.desktop.uninstaller "$old/Contents/Info.plist"
+          printf '#!/bin/sh\nexit 65\n' > "$old/Contents/Resources/delete-data.sh"
+          /usr/bin/codesign --force --sign - --identifier dev.mobile-release-kit.desktop.uninstaller "$old"
+          /usr/bin/cp "$fixture/image/Remove.pkg" "$fixture/older/Remove.pkg"
+          /usr/bin/hdiutil create -srcfolder "$fixture/older" -volname MRK-Uninstaller-Lab -format UDZO -fs APFS "$fixture/older.dmg"
+          /usr/bin/hdiutil attach -readonly -nobrowse -noautoopen -plist "$fixture/older.dmg" > "$fixture/older-mount.plist"
           /usr/bin/hdiutil attach -readonly -nobrowse -noautoopen -plist "$fixture/app.dmg" > "$fixture/mount.plist"
           /usr/bin/python3 -B - "$fixture" "$evidence" "$receipt" <<'PYTEST'
           import importlib.util, json, os, plistlib, subprocess, sys
@@ -420,6 +428,9 @@ jobs:
           check=importlib.util.module_from_spec(spec)
           spec.loader.exec_module(check)
           mount,=[Path(x["mount-point"]) for x in plistlib.loads((fixture/"mount.plist").read_bytes())["system-entities"] if "mount-point" in x]
+          old_mount,=[Path(x["mount-point"]) for x in plistlib.loads((fixture/"older-mount.plist").read_bytes())["system-entities"] if "mount-point" in x]
+          assert mount != old_mount and str(mount).startswith(str(old_mount) + " ")
+          subprocess.run(["/usr/bin/open","-W","-n",str(old_mount/check.UNINSTALLER)],check=True,timeout=20)
           profile=Path.home()/"Library/Application Support/dev.mobile-release-kit.desktop"
           decoy=fixture/"kept-target"
           decoy.write_bytes(b"test decoy")
@@ -444,6 +455,7 @@ jobs:
                       assert check.dialog_says(seen,"removal could not be confirmed. Your data was kept.")
           finally:
               subprocess.run(["/usr/bin/hdiutil","detach","-force",str(mount)],capture_output=True,timeout=30)
+              subprocess.run(["/usr/bin/hdiutil","detach","-force",str(old_mount)],capture_output=True,timeout=30)
           PYTEST
       - name: Retain applet result and timing evidence
         if: ${{ !cancelled() }}

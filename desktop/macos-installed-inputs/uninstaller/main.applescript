@@ -7,8 +7,17 @@
 -- No top-level properties or globals: an applet saves those back into its own
 -- bundle when it quits, and this signed app runs from a read-only image.
 
+use framework "Foundation"
+use scripting additions
+
 on run
 	set appTitle to "Uninstall Mobile Release Kit"
+	try
+		set {package, script_} to removalPaths()
+	on error
+		display dialog "The removal files for this app were not found. Open the complete Mobile Release Kit Remove disk image and run the uninstaller from there." buttons {"OK"} default button "OK" with title appTitle with icon stop
+		return
+	end try
 	set keepLabel to "Uninstall App (Keep My Data)"
 	set deleteLabel to "Uninstall App & Delete All Data"
 	set choice to button returned of (display dialog "How do you want to uninstall Mobile Release Kit?" & return & return & ¬
@@ -21,23 +30,12 @@ on run
 			"Your project folders, documents and other apps' files are not deleted." buttons {"Cancel", "Delete All Data"} default button "Cancel" cancel button "Cancel" with title appTitle with icon stop
 	end if
 
-	set here to POSIX path of (path to me)
-	set package to do shell script "/usr/bin/dirname " & quoted form of here
-	set package to package & "/Remove.pkg"
-	try
-		do shell script "/bin/test -f " & quoted form of package
-	on error
-		display dialog "Remove.pkg was not found next to this app. Open the complete Mobile Release Kit Remove disk image and run the uninstaller from there." buttons {"OK"} default button "OK" with title appTitle with icon stop
-		return
-	end try
-
 	display dialog "Installer will now open to remove Mobile Release Kit. Follow its steps and enter an administrator password when asked." & return & return & ¬
 		"When Installer finishes, quit Installer to return here." buttons {"Cancel", "Continue"} default button "Continue" cancel button "Cancel" with title appTitle with icon note
 	try
 		do shell script "/usr/bin/open -W -a Installer " & quoted form of package
 	end try
 
-	set script_ to (POSIX path of (path to resource "delete-data.sh"))
 	set checkOnly to " --check-removal"
 	if deleteData then set checkOnly to ""
 	-- The cleanup command checks the completion report itself. Run it once
@@ -65,7 +63,7 @@ on run
 			"Check macOS Installer for the result before trying another operation." buttons {"OK"} default button "OK" with title appTitle with icon caution
 		return
 	end if
-	if completion is not "status=0" and completion is not "status=1" then
+	if completion is not "status=0" and (not deleteData or completion is not "status=1") then
 		display dialog "Mobile Release Kit could not confirm the uninstaller result." & return & return & ¬
 			"Check the result in macOS Installer before trying again." buttons {"OK"} default button "OK" with title appTitle with icon caution
 		return
@@ -83,6 +81,20 @@ on run
 			buttons {"OK"} default button "OK" with title appTitle with icon caution
 	end if
 end run
+
+on removalPaths()
+	-- Resolve both paths from this executable's bundle. AppleScript aliases
+	-- can resolve to a different mounted copy with the same bundle ID.
+	set runningBundle to current application's NSBundle's mainBundle()
+	set volumeURL to runningBundle's bundleURL()'s URLByDeletingLastPathComponent()
+	set package to (volumeURL's URLByAppendingPathComponent:"Remove.pkg" isDirectory:false)'s |path|() as text
+	set script_ to (runningBundle's resourceURL()'s URLByAppendingPathComponent:"delete-data.sh" isDirectory:false)'s |path|() as text
+	repeat with itemPath in {package, script_}
+		set originalPath to quoted form of (contents of itemPath)
+		do shell script "/bin/test -f " & originalPath & " && /bin/test ! -L " & originalPath
+	end repeat
+	return {package, script_}
+end removalPaths
 
 on retainedDetails(lines_)
 	set summary to ""

@@ -288,9 +288,11 @@ REMOVAL_CARRIER_FILES = frozenset({
     'desktop/tools/macos_prepared_package.py',
     'desktop/tools/macos_android_helper_package.py',
     'desktop/tools/stage_macos_installed.py',
+    'desktop/macos-installed-inputs/uninstaller/main.applescript',
     'docs/macos-ci-retries.md',
     'tests/desktop/test_macos_installed_staging.py',
     'tests/desktop/test_macos_prepared_package.py',
+    'tests/desktop/test_macos_update_check.py',
 })
 
 

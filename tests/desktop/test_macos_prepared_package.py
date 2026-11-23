@@ -163,7 +163,8 @@ class PreparedPackageData(unittest.TestCase):
         current = {'sha': consumer['source'], 'commit': {'tree': {'sha': consumer['tree']}}}
         comparison = dict(status='ahead', behind_by=0, ahead_by=1, total_commits=1, base_commit=base,
                           merge_base_commit=base, commits=[current],
-                          files=[dict(filename='desktop/tools/stage_macos_installed.py', status='modified')])
+                          files=[dict(filename='desktop/tools/stage_macos_installed.py', status='modified'),
+                                 dict(filename='desktop/macos-installed-inputs/uninstaller/main.applescript', status='modified')])
         service['compatibility'] = comparison
         env = dict(GITHUB_SHA=consumer['source'], GITHUB_WORKFLOW_SHA=consumer['source'],
                    GITHUB_RUN_ID=consumer['runId'], GITHUB_RUN_ATTEMPT=consumer['runAttempt'],
@@ -184,6 +185,8 @@ class PreparedPackageData(unittest.TestCase):
             with self.subTest(mutation=mutation), self.assertRaises(ValueError):
                 binding.removal_carrier_source(dict(env, **mutation))
         for bad in (dict(filename='desktop/src-tauri/src/bin/macos_install.rs', status='modified'),
+                    dict(filename='desktop/macos-installed-inputs/uninstaller/delete-data.sh', status='modified'),
+                    dict(filename='desktop/macos-installed-inputs/uninstaller/main.applescript', status='removed'),
                     dict(filename='desktop/packaging/macos-install-producer-signing.profile', status='modified'),
                     dict(filename='desktop/tools/stage_macos_installed.py', status='removed')):
             with self.subTest(bad=bad), self.assertRaisesRegex(ValueError, 'prepared-harness-files'):

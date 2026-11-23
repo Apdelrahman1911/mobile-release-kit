@@ -145,6 +145,11 @@ class LaunchSmokeSourceTests(unittest.TestCase):
         self.assertEqual(applet.count('set report to do shell script "/bin/sh '), 1)
         self.assertIn('if completion is "status=66" or completion is "status=64" then', applet)
         self.assertIn('if detail starts with "kept " or detail starts with "could not delete:" then', applet)
+        self.assertIn("current application's NSBundle's mainBundle()", applet)
+        self.assertIn('URLByAppendingPathComponent:"Remove.pkg"', applet)
+        self.assertIn('URLByAppendingPathComponent:"delete-data.sh"', applet)
+        self.assertNotIn("path to me", applet)
+        self.assertNotIn("path to resource", applet)
         # No top-level state an applet would save into its signed bundle.
         self.assertNotRegex(applet, r"(?m)^\s*(property|global)\s")
 
