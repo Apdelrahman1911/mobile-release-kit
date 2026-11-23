@@ -6360,7 +6360,7 @@ final class NormalAppUITests: XCTestCase {
 
     private static let guidedWorkspaceFailures = ["Maximum update depth", "Minified React error", "Something went wrong"]
 
-    @MainActor private func checkInstalledCliStatus(_ expected: Int32) throws {
+    @MainActor private func checkInstalledCliStatus(_ expected: Int32?) throws {
         guard let clock = caseClock else { throw Refusal.condition("CLI observation requires the original case clock") }
         let outputURL = FileManager.default.temporaryDirectory.appendingPathComponent("mrk-status-" + UUID().uuidString)
         try require(FileManager.default.createFile(atPath: outputURL.path, contents: nil,
@@ -6373,16 +6373,27 @@ final class NormalAppUITests: XCTestCase {
         child.arguments = ["status", "--json"]
         child.standardOutput = output
         child.standardError = output
-        let end = try clock.end(within: 30)
+        let end: TimeInterval
+        if expected == nil {
+            let now = ProcessInfo.processInfo.systemUptime
+            guard let journeyDeadline, clock.observationAllowed(now, before: journeyDeadline) else { return }
+            end = min(journeyDeadline, now + 8)
+        } else {
+            end = try clock.end(within: 30)
+        }
         try child.run()
         defer { if child.isRunning { child.terminate() } }
-        while child.isRunning { try clock.progress(until: end) }
-        _ = try clock.remaining(1, before: end)
+        while child.isRunning { try clock.progress(until: end, cleanup: expected == nil) }
+        _ = try clock.remaining(1, before: end, cleanup: expected == nil)
         try output.seek(toOffset: 0)
         let body = try output.read(upToCount: 16385) ?? Data()
         try require(!body.isEmpty && body.count <= 16384, "original CLI status output bounds exceeded")
         let payload = (try? JSONSerialization.jsonObject(with: body)) as? [String: Any]
         let exit = child.terminationReason == .exit ? child.terminationStatus : -1
+        guard let expected else {
+            print("MRK_RELEASE_CLI_POST_REFUSAL_STATUS=exit=\(exit);json=\(payload != nil ? 1 : 0)")
+            return
+        }
         print("MRK_RELEASE_CLI_STATUS=expected=\(expected);exit=\(exit)")
         try require(exit == expected && payload != nil, "original installed CLI status differed")
         if expected == 0 {
@@ -6433,16 +6444,18 @@ final class NormalAppUITests: XCTestCase {
                 try checkInstalledCliStatus(0)
                 _ = try waitElement(granted, in: renderer, failures: ["Access is not confirmed"])
             } catch {
+                try? checkInstalledCliStatus(nil)
                 for (kind, label) in [
-                    ("off", "Off at last check"), ("checking", "Checking access…"),
+                    ("off", "Off at last check"), ("granted", "1 project was allowed at last check"), ("checking", "Checking access…"),
                     ("allowing", "Allowing the selected project…"), ("unknown", "Access is not confirmed"),
                     ("retired", "Finishing an earlier access request…"), ("unchecked", "Access not checked"),
                     ("needs-check", "Access needs another check"),
                 ] {
-                    guard (try? remaining(1)) != nil else { break }
-                    if renderer.staticTexts.matching(identifier: label).count != 0 {
-                        print("MRK_RELEASE_CLI_ACCESS_STATE=\(kind)")
-                    }
+                    guard let caseClock, let journeyDeadline,
+                          caseClock.observationAllowed(ProcessInfo.processInfo.systemUptime, before: journeyDeadline) else { break }
+                    let observation = renderer.staticTexts.matching(NSPredicate(format: "label == %@ OR title == %@ OR value == %@",
+                                                                                 label, label, label))
+                    if observation.count != 0 { print("MRK_RELEASE_CLI_ACCESS_STATE=\(kind)") }
                 }
                 throw error
             }
