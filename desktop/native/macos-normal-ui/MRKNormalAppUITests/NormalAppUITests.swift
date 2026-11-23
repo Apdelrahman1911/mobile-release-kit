@@ -5460,6 +5460,27 @@ final class NormalAppUITests: XCTestCase {
         try reveal(ready, in: renderer, line: line); ready.click() // Exactly one Apply.
         try waitGone(dialog)
     }
+    @MainActor private func waitForGuidedProjectPicker(_ window: XCUIElement) throws -> XCUIElement {
+        guard let clock = caseClock, let journeyDeadline else {
+            throw Refusal.condition("original project picker deadline missing")
+        }
+        let end = min(try clock.end(within: 5), journeyDeadline)
+        let title = "Choose a mobile project folder"
+        // XCTest's predicate waiter can report timeout even when the original
+        // window has one matching sheet. Observe that sheet directly and
+        // check the same deadline again after the original AX calls return.
+        while true {
+            try checkOriginalOwners()
+            _ = try clock.remaining(1, before: end)
+            if window.sheets.count == 1 {
+                let sheet = window.sheets.element(boundBy: 0)
+                let matches = sheet.exists && (sheet.label == title || sheet.staticTexts.matching(identifier: title).count == 1)
+                _ = try clock.remaining(1, before: end)
+                if matches { return sheet }
+            }
+            try clock.progress(until: end)
+        }
+    }
     @MainActor private func nativeSheet(_ window: XCUIElement, title: String, timeout: TimeInterval = 5,
                                         failures: [String] = [],
                                         line: UInt = #line) throws -> XCUIElement {
@@ -6420,7 +6441,7 @@ final class NormalAppUITests: XCTestCase {
         try stage("cli-denied") { try checkInstalledCliStatus(3) }
         try stage("project-open") {
             try press(renderer, "Choose project folder", renderer: renderer, failures: Self.guidedWorkspaceFailures, timeout: 24)
-            let picker = try nativeSheet(window, title: "Choose a mobile project folder")
+            let picker = try waitForGuidedProjectPicker(window)
             try goToFolder(picker, path: fixture.projectPath)
             try nativeOpen(picker)
             try expand(renderer, prefix: "Project details & saved observations", renderer: renderer)
