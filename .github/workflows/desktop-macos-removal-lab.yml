@@ -265,7 +265,10 @@ jobs:
           [[ $status == 0 ]]
           grep -F "test $test_case ... ok" "$RUNNER_TEMP/payload-unlink-test.log"
           grep -F "test $metadata_case ... ok" "$RUNNER_TEMP/payload-unlink-test.log"
-          grep -F "test $packagekit_case ... ok" "$RUNNER_TEMP/payload-unlink-test.log"
+          grep -F "test $packagekit_case ..." "$RUNNER_TEMP/payload-unlink-test.log"
+          grep -F "PackageKit tmp churn reproduced original-correspondence at journal birth" "$RUNNER_TEMP/payload-unlink-test.log"
+          grep -F "PackageKit journal admission accepted shared tmp churn and rejected protected directory churn" "$RUNNER_TEMP/payload-unlink-test.log"
+          grep -F "test result: ok. 3 passed; 0 failed" "$RUNNER_TEMP/payload-unlink-test.log"
 
       - name: Retain bounded test evidence
         if: ${{ !cancelled() }}
