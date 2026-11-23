@@ -247,11 +247,12 @@ jobs:
           test_case=installer::worker::tests::payload_removal_settles_the_same_original_after_unlink
           metadata_case=installer::worker::tests::payload_removal_conserves_the_enrolled_app_tag
           packagekit_case=installer::worker::tests::packagekit_resume_holds_the_actual_installer_ancestors
+          support_case=installer::worker::tests::live_journal_admission_conserves_the_shared_system_support_original
           /bin/cp -X "$MRK_PAYLOAD_UNLINK_TEST" "$work/scripts/mrk-macos-remove"
           # The installed script resolves its own directory inside PackageKit.
           # shellcheck disable=SC2016
-          printf '#!/bin/sh\nset -eu\numask 022\nexport TMPDIR="%s"\ncd -P "$(/usr/bin/dirname "$0")"\nexec ./mrk-macos-remove "%s" "%s" "%s" --ignored --exact --nocapture --test-threads=1 >"%s" 2>&1\n' \
-            "$work/fixtures" "$test_case" "$metadata_case" "$packagekit_case" "$RUNNER_TEMP/payload-unlink-test.log" \
+          printf '#!/bin/sh\nset -eu\numask 022\nexport TMPDIR="%s"\ncd -P "$(/usr/bin/dirname "$0")"\nexec ./mrk-macos-remove "%s" "%s" "%s" "%s" --ignored --exact --nocapture --test-threads=1 >"%s" 2>&1\n' \
+            "$work/fixtures" "$test_case" "$metadata_case" "$packagekit_case" "$support_case" "$RUNNER_TEMP/payload-unlink-test.log" \
             >"$work/scripts/postinstall"
           chmod 0555 "$work/scripts/postinstall" "$work/scripts/mrk-macos-remove"
           /usr/bin/pkgbuild --nopayload --scripts "$work/scripts" --identifier dev.mobile-release-kit.fixture.payload-unlink \
@@ -268,7 +269,8 @@ jobs:
           grep -F "test $packagekit_case ..." "$RUNNER_TEMP/payload-unlink-test.log"
           grep -F "PackageKit tmp churn reproduced original-correspondence at journal birth" "$RUNNER_TEMP/payload-unlink-test.log"
           grep -F "PackageKit journal admission accepted shared tmp churn and rejected protected directory churn" "$RUNNER_TEMP/payload-unlink-test.log"
-          grep -F "test result: ok. 3 passed; 0 failed" "$RUNNER_TEMP/payload-unlink-test.log"
+          grep -F "test $support_case ... ok" "$RUNNER_TEMP/payload-unlink-test.log"
+          grep -F "test result: ok. 4 passed; 0 failed" "$RUNNER_TEMP/payload-unlink-test.log"
 
       - name: Retain bounded test evidence
         if: ${{ !cancelled() }}

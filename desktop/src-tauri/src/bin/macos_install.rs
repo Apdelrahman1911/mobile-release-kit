@@ -210,6 +210,7 @@ mod installer {
         removal_live_originals: Option<RemovalLiveOriginals>,
         // The one shared sticky ancestor admitted by the PackageKit resume path.
         removal_resume_packagekit_tmp: Option<usize>,
+        removal_live_support: Option<worker::RemovalLiveSupport>,
         // First closed reason a close() turned unknown without returning an
         // error of its own. Diagnostic DATA only; never a finality input.
         close_refusal: Option<&'static str>,
@@ -657,6 +658,7 @@ mod installer {
             Self { originals: Vec::new(), creations: Vec::new(), end: Instant::now()+Duration::from_secs(120), unknown:false,
                 removal_live_originals:None,
                 removal_resume_packagekit_tmp:None,
+                removal_live_support:None,
                 close_refusal:None,
                 legacy_volumes:[None;mobile_release_desktop::macos_install_maintenance::PREDECESSOR_LIMIT+1],
                 worker_deadline:None,worker_stderr_is_gate:false,worker_go_eof:false,payload_written:0,payload_write_calls:0,launcher_writes:applications::WriteCounts::default(),launcher_effects:None,
@@ -14058,6 +14060,7 @@ mod installer {
                 Self { originals: Vec::new(), creations: Vec::new(), end: Instant::now(), unknown:false, close_refusal:None,
                     removal_live_originals:None,
                     removal_resume_packagekit_tmp:None,
+                    removal_live_support:None,
                     legacy_volumes:[None;mobile_release_desktop::macos_install_maintenance::PREDECESSOR_LIMIT+1],
                     worker_deadline:Some(deadline),worker_stderr_is_gate:stderr_is_gate,worker_go_eof:false,
                     fresh_birth_control_reserved:false,fresh_outputs:None,fresh_preparation_phase:FreshPreparationPhase::None,
@@ -15351,6 +15354,34 @@ mod installer {
         fn removal_request_name_data(name:&str)->bool {
             name.len()==34 && name.starts_with("r-") && removal_hex_data::<16>(&name[2..]).is_ok()
         }
+        // The live source owns this system ancestor. Other products can
+        // change its direct entries without changing this original directory.
+        pub(super) struct RemovalLiveSupport { original: usize, flags: u32 }
+        impl RemovalLiveSupport {
+            fn capture(book:&Install,original:usize)->Result<Self> {
+                let flags=stat::fstat(book.fd(original)?).map_err(|_|"removal-live-support-original")?.st_flags;
+                let value=Self{original,flags};
+                value.post(book)?;Ok(value)
+            }
+            fn post(&self,book:&Install)->Result<()> {
+                const REASON:&str="removal-live-support-original";
+                let original=&book.originals[self.original];
+                let library=original.parent.and_then(|n|book.originals.get(n)).ok_or(REASON)?;
+                let root=library.parent.and_then(|n|book.originals.get(n)).ok_or(REASON)?;
+                check(original.name=="Application Support" && library.name=="Library"
+                    && root.name=="/" && root.parent.is_none(),REASON)?;
+                book.clock()?;book.protected_as(self.original,true,None,AclRole::SystemSupport)?;
+                native::no_xattrs(book.fd(self.original)?.as_fd()).map_err(|_|REASON)?;
+                let expected=book.identity(self.original)?;
+                let held=stat::fstat(book.fd(self.original)?).map_err(|_|REASON)?;
+                let named=book.named(original.parent,&original.name).map_err(|_|REASON)?;
+                check(removal_current_flags_data(2,self.flags) && [held,named].iter().all(|stat| {
+                    let actual=Identity::of(stat);
+                    expected.same_object(actual) && expected.mode==actual.mode && stat.st_flags==self.flags
+                }),REASON)?;
+                book.clock()
+            }
+        }
         impl RemovalPublication {
             fn new()->Self { Self { infrastructure:None,directory:None,writer:None,reader:None,attempted:false,
                 written:0,sealed:false,file_persisted:false,directory_persisted:false,writer_closed:false,readback:false } }
@@ -15376,13 +15407,15 @@ mod installer {
                 book.protected_as(n,true,None,if book.originals[n].name=="Application Support" {
                     AclRole::SystemSupport } else { AclRole::Other })?;
                 // Only this parent's returned own directory-entry effect can
-                // advance its baseline. PackageKit's enrolled shared tmp has
-                // its own check for unrelated directory-entry changes.
+                // advance its baseline. The enrolled shared directories have
+                // their own checks for unrelated directory-entry changes.
                 for (other,original) in book.originals.iter().enumerate() {
                     if other==n || original.fd.is_none() { continue; }
                     if book.removal_resume_packagekit_tmp==Some(other) {
                         book.protected_mount_and_acl(other,AclRole::Other)?;
                         removal_resume_tmp_post(book,other)?;
+                    } else if let Some(support)=book.removal_live_support.as_ref().filter(|s|s.original==other) {
+                        support.post(book)?;
                     } else {
                         book.check_name(other,true)?;
                     }
@@ -17801,7 +17834,7 @@ mod installer {
             const INVENTORY:&str="f4ec6419c8816eaf75111154e12b0766a52e6e44819ac91f118564b393443fa9";
             fn enabled()->bool {
                 cfg!(all(target_arch="aarch64",not(feature="macos-installed-removal-abrupt-fixture")))
-                    && paths::RELEASE=="macos26-arm64-desktop-12" && paths::PACKAGE_VERSION=="0.2.6"
+                    && paths::RELEASE=="macos26-arm64-desktop-13" && paths::PACKAGE_VERSION=="0.2.7"
             }
             fn epoch(state_sha:[u8;32])->Result<([u8;20],[[u8;32];4])> {
                 Ok((removal_hex_data(Self::SOURCE)?,[
@@ -21642,6 +21675,7 @@ exec ./mrk-macos-remove --fixture-supervise "$1"
                 self.removal=Some(RemovalAdmission::new(&mut self.book,completed_path)?);
                 let source=self.removal.as_mut().ok_or("removal-original-missing")?;
                 source.inspect(&self.book)?;
+                self.book.removal_live_support=Some(RemovalLiveSupport::capture(&self.book,source.originals.code[2])?);
                 self.book.registration_before_maintenance(source.root_original())?;
                 // R acquisition does not promote a stale pre-R signature or
                 // code snapshot: actual originals are checked again now.
@@ -23102,6 +23136,52 @@ exec ./mrk-macos-remove --fixture-supervise "$1"
                 }
                 for original in ancestors.into_iter().rev() {
                     book.forward_close(original,"test-packagekit-close").unwrap();
+                }
+                assert!(!book.unknown);
+            }
+
+            #[test]
+            #[ignore = "requires a disposable macOS runner executing the real Installer postinstall fixture"]
+            fn live_journal_admission_conserves_the_shared_system_support_original() {
+                assert!(unistd::geteuid().is_root());
+                let cwd=std::env::current_dir().unwrap();
+                let package="dev.mobile-release-kit.fixture.payload-unlink";
+                assert!(removal_resume_packagekit_parent_data(cwd.to_str().unwrap(),package));
+                let mut book=Install::new();
+                let ancestors=removal_resume_bootstrap(&mut book,cwd.to_str().unwrap(),package).unwrap();
+                let support=book.support_root().unwrap();
+                let observation=RemovalLiveSupport::capture(&book,support).unwrap();
+                let journal_parent=*ancestors.last().unwrap();
+                let before=RemovalPublication::parent_before(&book,journal_parent).unwrap();
+                let archive=book.directory(journal_parent,"mrk-live-journal-test",true,0o700).unwrap();
+                let marker=Path::new("/Library/Application Support").join(format!(".mrk-removal-lab-{}-{}",
+                    cwd.ancestors().nth(2).unwrap().file_name().unwrap().to_str().unwrap(),std::process::id()));
+                std::fs::create_dir(&marker).unwrap();
+                std::fs::remove_dir(&marker).unwrap();
+                assert_eq!(RemovalPublication::returned_parent_change(&mut book,journal_parent,before,true),
+                    Err("original-correspondence"));
+                assert!(book.identity(journal_parent).unwrap()==before.0);
+
+                let identity=book.identity(support).unwrap();
+                for substituted in [Identity{ino:identity.ino^1,..identity},Identity{mode:identity.mode^0o020,..identity},
+                    Identity{gid:identity.gid^1,..identity}] {
+                    book.originals[support].identity=Some(substituted);
+                    assert_eq!(observation.post(&book),Err("removal-live-support-original"));
+                }
+                book.originals[support].identity=Some(identity);
+                assert_eq!(RemovalLiveSupport{flags:observation.flags^1,..observation}.post(&book),
+                    Err("removal-live-support-original"));
+                book.removal_live_support=Some(observation);
+                RemovalPublication::returned_parent_change(&mut book,journal_parent,before,true).unwrap();
+                let mut admission=RemovalSnapshotFile::new();
+                admission.create(&mut book,archive,1).unwrap();
+                admission.write(&mut book,1,b"disposable live admission").unwrap();
+                admission.close_file(&mut book,archive,1).unwrap();
+                admission.file_post(&book).unwrap();
+                for original in (0..book.originals.len()).rev() {
+                    if book.originals[original].fd.is_some() {
+                        book.forward_close(original,"test-live-support-close").unwrap();
+                    }
                 }
                 assert!(!book.unknown);
             }
