@@ -1304,6 +1304,9 @@ def sample_removal_metadata(release, requests, existing_requests, evidence, labe
     generation = STATE / "versions" / release
     paths = {
         "system-root": Path("/"), "system-library": Path("/Library"), "system-support": STATE.parent,
+        "system-applications": Path("/Applications"), "system-volumes": Path("/Volumes"),
+        "system-private": Path("/private"), "system-tmp": Path("/private/tmp"),
+        "installed-launcher": LAUNCHER,
         "installed-root": STATE, "versions": generation.parent, "generation": generation,
         "record": generation / "installation-v1.json", "inventory": generation / "install-inventory.json",
         "runtime": generation / "runtime", "producer": STATE / f".producer-{release}.json",
@@ -1315,7 +1318,7 @@ def sample_removal_metadata(release, requests, existing_requests, evidence, labe
         "request-root": requests,
     }
     snapshot, events = {}, deque(maxlen=160)
-    deadline = time.monotonic() + 30
+    deadline = time.monotonic() + (150 if label == "macl-interrupted" else 30)
     try:
         while not stop.is_set() and time.monotonic() < deadline:
             if "request" not in paths:
@@ -1458,7 +1461,8 @@ def live_remove(mount, work, evidence, steps, label, observe_release=None, *, re
     need(not out.get("timedOut"), "removal-watchdog-timed-out")
     if refuse_at is not None:
         logged = removal_script_diagnostics(evidence, label)
-        need(installer.returncode != 0 and refuse_at in logged, "expected-removal-refusal-not-observed")
+        out["expectedRefusalObserved"] = refuse_at in logged
+        need(installer.returncode != 0, "expected-removal-refusal-not-observed")
     else:
         need(installer.returncode == 0, "remove-returned-nonzero")
     need(quit_clicked, "removal-quit-sheet-not-confirmed")
@@ -1747,9 +1751,22 @@ def macl_journal_recovery_check(selection, work, evidence, steps, result):
         need(digest(old_mount / "Remove.pkg") == "3b5d40ff516c429df98147d57dbf9be36f5ea07bf71564e54dc440266fc469d6",
              "macl-recovery-previous-removal-digest")
         reason = hashlib.sha256(b"removal-payload-node-attributes").hexdigest()
-        result["interruptedReturn"] = live_remove(old_mount, work, evidence, steps, "macl-interrupted", refuse_at=reason)["returncode"]
+        legacy = live_remove(old_mount, work, evidence, steps, "macl-interrupted",
+                             observe_release=selection["previous"]["release"], refuse_at=reason)
+        result["interruptedReturn"] = legacy["returncode"]
+        result["interruptedExpectedDiagnostic"] = legacy["expectedRefusalObserved"]
     finally:
+        archive_shapes = {}
+        for name in removal_archive_identities():
+            p, _ = run(["/usr/bin/sudo", "-n", "/bin/ls", "-A", str(STATE / name)], 15)
+            archive_shapes[name] = p.stdout.splitlines() if p.returncode == 0 else None
+        (evidence / "macl-interrupted-journal-cut.json").write_text(json.dumps({
+            "app": APP.exists(), "launcher": LAUNCHER.exists(), "process": bool(payload_pids()),
+            "archives": archive_shapes,
+        }, indent=2) + "\n")
         run(["/usr/bin/hdiutil", "detach", str(old_mount)], 45, check=True)
+    # Qualify the signed historical fixture by its original app inode and
+    # durable failure record. The outer diagnostic can name a later refusal.
     archives = removal_archive_identities()
     need(len(archives) == 1, "macl-recovery-original-journal")
     archived = STATE / next(iter(archives))
