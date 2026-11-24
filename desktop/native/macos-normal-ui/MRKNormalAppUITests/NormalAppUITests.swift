@@ -6544,6 +6544,19 @@ final class NormalAppUITests: XCTestCase {
                     "identifier == %@ OR label == %@ OR title == %@ OR value == %@", title, title, title, title)).count == 1 {
                     print("MRK_RELEASE_PREPARE_STATUS=\(key)")
                 }
+                let admissions = [
+                    ("native-unavailable", "Preparation requires the normal installed app"),
+                    ("busy", "Finish or cancel the existing operation or quit question"),
+                    ("unknown-cleanup", "An original operation has unconfirmed cleanup"),
+                    ("closing", "The original app window is closing or unavailable"),
+                    ("confirmation-invalid", "Preparation needs the explicit confirmation shown here"),
+                    ("reply-unconfirmed", "The preparation reply could not be confirmed")
+                ]
+                for (reason, prefix) in admissions {
+                    let matches = renderer.staticTexts.matching(NSPredicate(format:
+                        "label BEGINSWITH %@ OR title BEGINSWITH %@ OR value BEGINSWITH %@", prefix, prefix, prefix))
+                    if matches.count == 1 { print("MRK_RELEASE_PREPARE_ADMISSION=\(reason)") }
+                }
                 throw error
             }
             try require(sheet.buttons.count == 2 && sheet.buttons.matching(identifier: "Cancel").count == 1,

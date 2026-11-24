@@ -2044,6 +2044,18 @@ def install_macl_fixture(paths):
         need(p.returncode == 0, "macl-fixture-signature")
 
 
+def detach_macl_fixture(volume, role, steps, result):
+    # On disposable hosted runners, the diagnostic must preserve any earlier
+    # Installer failure. An attached read-only fixture does not change the
+    # later upgrade or archive roster, which use independent paths.
+    try:
+        completed, step = run(["/usr/bin/hdiutil", "detach", str(volume)], 45)
+        steps.append(dict(step, role="macl-detach-" + role, stderr=tail_text(completed.stderr, 3)))
+        result[f"detach{role.title()}Return"] = completed.returncode
+    except (subprocess.TimeoutExpired, OSError) as error:
+        result[f"detach{role.title()}Error"] = type(error).__name__
+
+
 def macl_journal_recovery_check(selection, work, evidence, steps, result):
     """Exercise the exact signed 0.2.3-to-0.2.8 interrupted removal transition."""
     recovery = selection.get("recoveryInstall", selection["next"])
@@ -2051,6 +2063,8 @@ def macl_journal_recovery_check(selection, work, evidence, steps, result):
     need("previousRemoval" in selection and recovery_removal is not None
          and selection["previous"]["release"] == "macos26-arm64-desktop-09"
          and recovery["release"] == "macos26-arm64-desktop-14", "macl-recovery-selection")
+    replay_only = os.environ.get("MRK_RECOVERY_UPGRADE_DIAGNOSTIC") == "true"
+    result["oldAppletAssertionsReused"] = replay_only
     need(not STATE.exists(), "macl-recovery-existing-installation")
     next_folder = fetch("recovery", recovery, work, steps)
     for role in selected_release_roles(selection):
@@ -2139,41 +2153,50 @@ def macl_journal_recovery_check(selection, work, evidence, steps, result):
             need(repair_mount != legacy_mount and str(repair_mount).startswith(str(legacy_mount) + " "),
                  "macl-duplicate-volume-label")
             result["duplicateSignedRemovalImages"] = True
-            keep_incomplete = uninstaller_diagnostic_run(repair_mount, work, evidence, "macl-duplicate-keep-incomplete",
-                                                         [KEEP_LABEL, "Continue", None, "OK"])
-            selected = json.loads((evidence / "macl-duplicate-keep-incomplete-package-selection.json").read_bytes())
-            need(len(selected) == 1 and selected[0].endswith(str(repair_mount / "Remove.pkg")),
-                 "macl-duplicate-image-wrong-package")
-            need(dialog_says(keep_incomplete, "removal could not be confirmed. Your data was kept.")
-                 and all(manifest().get(key) == value for key, value in seeded.items())
-                 and update_credential_matches(credential), "macl-duplicate-incomplete-keep-data")
-            result["uninstallerDuplicateImageKeptOriginals"] = True
-            # The prior process withdrew the app and launcher, but its removal
-            # never finished. Signing and both data confirmations cannot turn that
-            # missing pathname into permission to clean up this hosted user's data.
-            refusal = uninstaller_run(repair_mount, work, evidence, "macl-incomplete-delete",
-                                      [DELETE_LABEL, "Delete All Data", "Continue", None, "OK"])
-            result["uninstallerIncompleteRemovalRefused"] = dialog_says(
-                refusal, "removal could not be confirmed. Your data was kept.")
-            need(result["uninstallerIncompleteRemovalRefused"], "macl-incomplete-deletion-reported-success")
-            need(all(manifest().get(key) == value for key, value in seeded.items())
-                 and update_credential_matches(credential), "macl-incomplete-deletion-touched-fake-data")
-            p, step = run(["/usr/bin/sudo", "-n", "/usr/sbin/installer", "-verbose", "-pkg",
-                           str(repair_mount / "Remove.pkg"), "-target", "/"], 240)
+            if not replay_only:
+                keep_incomplete = uninstaller_diagnostic_run(repair_mount, work, evidence, "macl-duplicate-keep-incomplete",
+                                                             [KEEP_LABEL, "Continue", None, "OK"])
+                selected = json.loads((evidence / "macl-duplicate-keep-incomplete-package-selection.json").read_bytes())
+                need(len(selected) == 1 and selected[0].endswith(str(repair_mount / "Remove.pkg")),
+                     "macl-duplicate-image-wrong-package")
+                need(dialog_says(keep_incomplete, "removal could not be confirmed. Your data was kept.")
+                     and all(manifest().get(key) == value for key, value in seeded.items())
+                     and update_credential_matches(credential), "macl-duplicate-incomplete-keep-data")
+                result["uninstallerDuplicateImageKeptOriginals"] = True
+                # The prior process withdrew the app and launcher, but its removal
+                # never finished. Signing and both data confirmations cannot turn that
+                # missing pathname into permission to clean up this hosted user's data.
+                refusal = uninstaller_run(repair_mount, work, evidence, "macl-incomplete-delete",
+                                          [DELETE_LABEL, "Delete All Data", "Continue", None, "OK"])
+                result["uninstallerIncompleteRemovalRefused"] = dialog_says(
+                    refusal, "removal could not be confirmed. Your data was kept.")
+                need(result["uninstallerIncompleteRemovalRefused"], "macl-incomplete-deletion-reported-success")
+                need(all(manifest().get(key) == value for key, value in seeded.items())
+                     and update_credential_matches(credential), "macl-incomplete-deletion-touched-fake-data")
+            try:
+                p, step = run(["/usr/bin/sudo", "-n", "/usr/sbin/installer", "-verbose", "-pkg",
+                               str(repair_mount / "Remove.pkg"), "-target", "/"], 240)
+            except subprocess.TimeoutExpired as error:
+                result["resumeTimedOut"] = True
+                (evidence / "macl-recovery-installer.log").write_text("\n".join(tail_text(
+                    (error.stdout or b"").decode(errors="replace") + (error.stderr or b"").decode(errors="replace"), 80)) + "\n")
+                removal_script_diagnostics(evidence, "macl-recovery-timeout")
+                raise Failed("macl-signed-recovery-timeout") from error
             steps.append(dict(step, role="macl-signed-resume"))
             result["resumeReturn"] = p.returncode
             (evidence / "macl-recovery-installer.log").write_text("\n".join(tail_text(p.stdout + p.stderr, 80)) + "\n")
             if p.returncode != 0:
                 removal_script_diagnostics(evidence, "macl-recovery")
             need(p.returncode == 0, "macl-signed-recovery-returned-nonzero")
-            keep = uninstaller_run(repair_mount, work, evidence, "macl-completed-keep",
-                                   [KEEP_LABEL, "Continue", None, "OK"])
-            result["uninstallerCompletedKeepConfirmed"] = dialog_says(keep, "was removed. Your data was kept.")
-            need(result["uninstallerCompletedKeepConfirmed"], "macl-complete-report-not-recognized")
+            if not replay_only:
+                keep = uninstaller_run(repair_mount, work, evidence, "macl-completed-keep",
+                                       [KEEP_LABEL, "Continue", None, "OK"])
+                result["uninstallerCompletedKeepConfirmed"] = dialog_says(keep, "was removed. Your data was kept.")
+                need(result["uninstallerCompletedKeepConfirmed"], "macl-complete-report-not-recognized")
         finally:
-            run(["/usr/bin/hdiutil", "detach", str(repair_mount)], 45, check=True)
+            detach_macl_fixture(repair_mount, "recovery", steps, result)
     finally:
-        run(["/usr/bin/hdiutil", "detach", str(legacy_mount)], 45, check=True)
+        detach_macl_fixture(legacy_mount, "legacy", steps, result)
 
     result["payloadAbsent"] = (not APP.exists() and not LAUNCHER.exists()
                                and not payload_pids() and not any(path.exists() for path in retained))
@@ -2509,6 +2532,7 @@ def run_workspace_xctest(mode, row, folder, installed, work, evidence, steps, re
         ("xctestWait", r"MRK_NORMAL_WAIT=v1;line=([0-9]{1,5});waiter=(completed|timed-out|other);matches=([0-5]);failures=([0-5])"),
         ("installedCLIStatuses", r"MRK_RELEASE_CLI_STATUS=expected=([034]);exit=(-?[0-9]{1,3})"),
         ("postRefusalCliStatus", r"MRK_RELEASE_CLI_POST_REFUSAL_STATUS=exit=(-?[0-9]{1,3});json=([01])"),
+        ("prepareAdmissionObservations", r"MRK_RELEASE_PREPARE_ADMISSION=(native-unavailable|busy|unknown-cleanup|closing|confirmation-invalid|reply-unconfirmed)\b"),
         ("prepareStatusObservations", r"MRK_RELEASE_PREPARE_STATUS=(rejected-request|refused|unknown|prepared|started|native-refused|cleanup-unknown|deadline)\b"),
     ):
         result[field] = re.findall(pattern, transcript)[-12:]
