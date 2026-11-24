@@ -792,15 +792,15 @@ pub(super) fn archive_phase_reference(capsule:&transaction::CapsuleData,intent:&
     Ok(reference.clone())
 }
 
-pub(super) fn recorded_phase_post(book:&mut Install,stage:usize,record:&maintenance::Recorded)->Result<u64> {
-    let observation=record.capsule.launcher_data().ok_or("launcher-phase-history-required")?;
+pub(super) fn recorded_phase_post(book:&mut Install,stage:usize,intent:&transaction::IntentData,
+    observation:&launcher::ObservationData)->Result<u64> {
     let reference=observation.publication_phase.as_ref().ok_or("launcher-phase-history-required")?;
     check(book.originals[stage].parent==book.gate.parent
         && book.originals[stage].name==format!(".install-{}",reference.stage_instance),"launcher-phase-history-stage")?;
     let (reader,raw)=maintenance::metadata_original(book,stage,
-        &PublicationPhaseData::name(record.intent.invocation_data())?,PHASE_LIMIT)?;
+        &PublicationPhaseData::name(intent.invocation_data())?,PHASE_LIMIT)?;
     check(format!("{:x}",Sha256::digest(&raw))==reference.sha256,"launcher-phase-history-hash")?;
-    let phase=PublicationPhaseData::parse_raw(&raw)?;phase.check(&record.intent,&reference.stage_instance)?;
+    let phase=PublicationPhaseData::parse_raw(&raw)?;phase.check(intent,&reference.stage_instance)?;
     let expected=if observation.outcome==launcher::OutcomeData::InverseRestored {phase.previous}else{Some(phase.staged)};
     // audit_selected_generation already authenticated the complete original
     // generation before enrolling its bounded legacy root-volume witness.

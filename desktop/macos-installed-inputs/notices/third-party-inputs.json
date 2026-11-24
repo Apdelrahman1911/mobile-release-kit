@@ -4842,13 +4842,13 @@
   }
  ],
  "lockfiles": {
-  "desktop/helpers/macos-android-register/Cargo.lock": "f21fa7d4c646e34bc5b96c3ea86501117faafe3747fefa233bc43cdf72a776d4",
-  "desktop/helpers/macos-desktop-image/Cargo.lock": "ed03649e76d01f3880b7a2ef1cc05b230fb200af4c433f10f2ca3f25983699ac",
+  "desktop/helpers/macos-android-register/Cargo.lock": "7e068b961a71641679f738c42848b4d9faf1ef38f790c4d91d527454d350f3cc",
+  "desktop/helpers/macos-desktop-image/Cargo.lock": "7bcc8ca7106e6923c3382367d0ddb69ebe78462194690a2ee3ad7463e0e77985",
   "desktop/helpers/macos-github-seal/Cargo.lock": "bed5621628fafce21707d508559b97d4563a3b464af0e1a8054877a0b75ff0a3",
   "desktop/helpers/macos-vault-helper/Cargo.lock": "9bcfd7b513f22676f813218b7b9f4b502fe2fbf0b89326fca0615325afe306f9",
   "desktop/native/macos-installed-native/Cargo.lock": "7af492c0d710ce3ccc1776369d9807bd82aade3d97c9e0bdafb01ec704343117",
-  "desktop/package-lock.json": "b9be8a680417eae04a479369abb2391041dc0b63b7ed4bddcf84794a9ae1c7a3",
-  "desktop/src-tauri/Cargo.lock": "dbc9b18b51ff0dc7e697c50ba3230d81caecbff0e6cb26e6d55618b016ded3fd"
+  "desktop/package-lock.json": "46c7938d9b521e522c637635c169716bca1d99532489987c42ef84917613a3eb",
+  "desktop/src-tauri/Cargo.lock": "72a1683d51ad7a94a75db5972d01c25c85b4218d5cbb380aab9fed5c313d01ab"
  },
  "noticeBytes": 715140,
  "noticeSha256": "4e79b32c850d62423af999a89c5c7a108dec637ff592ca04c4a895b3a10e1873",

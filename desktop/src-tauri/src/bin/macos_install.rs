@@ -2089,6 +2089,7 @@ mod installer {
     // entry caller must first admit its genuine completed-package expectation.
     mod maintenance {
         use super::*;
+        use mobile_release_desktop::macos_applications_launcher as launcher;
         use mobile_release_desktop::macos_install_maintenance::ReleaseData;
         use transaction::{AppIdentityData, CapsuleData, CorrespondenceData, GenerationCostData,
             GenerationData, IntentData, ProgressData, ProgressOutcomeData, ReturnedData, StateData, StepData};
@@ -11977,12 +11978,41 @@ mod installer {
             plan.nodes[0].presence=RemovalRemainingPresence::Present {identity:Identity{ino:3,..id},flags:0};
             assert_ne!(first,plan.fingerprint().unwrap());
         }
-        fn stage_roster_intent(book:&mut Install,root:usize,intent:&IntentData,selected:&ReleaseSetData,evidence_bytes:&mut u64)->Result<()> {
-            stage_roster_selected(book,root,intent,selected,evidence_bytes,None,None,None)
+        fn joined_update_phase<'a>(action:ActionData,invocation:&str,observation:Option<&'a launcher::ObservationData>)
+            ->Result<Option<(String,&'a launcher::ObservationData)>> {
+            if action!=ActionData::Update {return Ok(None);}
+            let Some(row)=observation else {return Ok(None);};
+            let Some(reference)=row.publication_phase.as_ref() else {return Ok(None);};
+            check(reference.valid_data() && reference.stage_instance==invocation,"archived-update-launcher-stage")?;
+            Ok(Some((applications::phase_name(invocation)?,row)))
+        }
+        #[cfg(test)]
+        #[test]
+        fn archived_update_stage_requires_the_joined_launcher_reference() {
+            let invocation="1".repeat(32);
+            let mut row=launcher::ObservationData {outcome:launcher::OutcomeData::Published,
+                published_identity:None,publication_phase:Some(launcher::PhaseReferenceData {
+                    stage_instance:invocation.clone(),sha256:"a".repeat(64)}),write_count:1,write_bytes:1,
+                originals_closed:true,within_original_deadline:true,readback_verified:true,workspace_cleared:true};
+            let phase=joined_update_phase(ActionData::Update,&invocation,Some(&row)).unwrap().unwrap();
+            assert_eq!(phase.0,format!("launcher-{invocation}.json"));
+            assert!(std::ptr::eq(phase.1,&row));
+            assert!(joined_update_phase(ActionData::Update,&invocation,None).unwrap().is_none());
+            assert!(joined_update_phase(ActionData::FreshInstall,&invocation,Some(&row)).unwrap().is_none());
+            row.publication_phase.as_mut().unwrap().stage_instance="2".repeat(32);
+            assert!(joined_update_phase(ActionData::Update,&invocation,Some(&row)).is_err());
+            let phase=row.publication_phase.as_mut().unwrap();
+            phase.stage_instance=invocation.clone();phase.sha256.truncate(63);
+            assert!(joined_update_phase(ActionData::Update,&invocation,Some(&row)).is_err());
         }
         fn stage_roster_selected(book:&mut Install,root:usize,intent:&IntentData,selected:&ReleaseSetData,evidence_bytes:&mut u64,
             launcher:Option<&applications::RemovalPreparation>,history:Option<&History>,
             recovery:Option<&noop_recovery::Namespace>)->Result<()> {
+            stage_roster(book,root,intent,selected,evidence_bytes,launcher,history,recovery,None)
+        }
+        fn stage_roster(book:&mut Install,root:usize,intent:&IntentData,selected:&ReleaseSetData,evidence_bytes:&mut u64,
+            launcher:Option<&applications::RemovalPreparation>,history:Option<&History>,
+            recovery:Option<&noop_recovery::Namespace>,joined:Option<&transaction::CapsuleData>)->Result<()> {
             if intent.action_data() == ActionData::SamePackageNoop { return Ok(()); }
             let name = format!(".install-{}", intent.invocation_data());
             let stage = book.open(Some(root), &name, true)?; book.protected(stage, true, Some(0o700))?;
@@ -12004,6 +12034,18 @@ mod installer {
             for record in &launcher_phases {
                 check(wanted.insert(applications::phase_name(record.intent.invocation_data())?),"launcher-phase-duplicate")?;
             }
+            if let Some(capsule)=joined {
+                check(capsule.invocation_data()==intent.invocation_data()
+                    && capsule.intent_digest_data()==intent.digest_data(),"archived-update-launcher-capsule")?;
+                let observation=capsule.launcher_data();
+                // On an archived update the new capsule has been persisted,
+                // but the old history cannot name this invocation's phase.
+                if let Some((name,observation))=joined_update_phase(intent.action_data(),intent.invocation_data(),observation)? {
+                    check(wanted.insert(name),"launcher-phase-duplicate")?;
+                    let size=applications::recorded_phase_post(book,stage,intent,observation)?;
+                    *evidence_bytes=evidence_bytes.checked_add(size).ok_or("maintenance-control-bound")?;
+                }
+            }
             // The current parent final census has no reloaded History yet.
             // Its own enrolled launcher phase was already read/hash/birth
             // checked above; later history retains its existing phase policy.
@@ -12023,7 +12065,8 @@ mod installer {
                 }
             }
             for record in launcher_phases {
-                let size=applications::recorded_phase_post(book,stage,record)?;
+                let observation=record.capsule.launcher_data().ok_or("launcher-phase-history-required")?;
+                let size=applications::recorded_phase_post(book,stage,&record.intent,observation)?;
                 *evidence_bytes=evidence_bytes.checked_add(size).ok_or("maintenance-control-bound")?;
             }
             for phase in phases {
@@ -12117,7 +12160,7 @@ mod installer {
             // original expected sets, never adopt observed foreign root names.
             pub(super) fn successful_names(&mut self,book:&mut Install,action:ActionData,intent:&IntentData,
                 previous:Option<&StateData>,selected:&ReleaseSetData,state:&StateData,input:&worker::ReinstallInputRead<'_>,holder:&mut CompleteGenerationPrefixSource,
-                restore:Option<&restore_recovery::JoinedNamespace>)->Result<()> {
+                restore:Option<&restore_recovery::JoinedNamespace>,capsule:&transaction::CapsuleData)->Result<()> {
                 check(!self.success_names && state.invocation_data()==intent.invocation_data()
                     && state.current_data().release_data()==selected.current_data(),"archived-success-names-once")?;
                 let root=self.root_names.as_mut().ok_or("archived-initial-names")?;
@@ -12143,7 +12186,8 @@ mod installer {
                 exact_roster(book,version_root,versions)?;
                 let _=audit_generation(book,self.root,version_root,&state.current_data(),false,false)?;
                 book.forward_close(version_root,"archived-final-versions-close")?;
-                let mut evidence=0;stage_roster_intent(book,self.root,intent,selected,&mut evidence)?;
+                let mut evidence=0;
+                stage_roster(book,self.root,intent,selected,&mut evidence,None,None,None,Some(capsule))?;
                 self.post(book,input,holder)?;self.state_sha=Some(worker::removal_hex_data(state.digest_data())?);
                 self.invocation=Some(worker::removal_hex_data(intent.invocation_data())?);self.success_names=true;book.clock()
             }
@@ -13437,14 +13481,15 @@ mod installer {
             held_bytes(book,reader,&bytes)?;
             book.forward_close(reader,"maintenance-parent-state-close")?; Ok(Some(state))
         }
-        pub(super) fn persist_capsule(book: &mut Install, observed: &Observed, invocation: &str, bytes: &[u8]) -> Result<()> {
+        pub(super) fn persist_capsule(book: &mut Install, observed: &Observed, invocation: &str, bytes: &[u8]) -> Result<CapsuleData> {
             observed.conservation_post(book)?;
             check(bytes.len() <= transaction::CAPSULE_LIMIT,"maintenance-capsule-bound")?;
             let parsed = data(CapsuleData::parse_data(bytes,&observed.selected))?;
             check(parsed.invocation_data() == invocation,"maintenance-capsule-invocation")?;
             let reader = book.record_file(observed.prepared.destination,&data(transaction::capsule_name_data(invocation))?,bytes,Role::ReceiptWriter)?;
             book.persist(observed.prepared.destination,false)?; held_bytes(book,reader,bytes)?;
-            book.forward_close(reader,"maintenance-capsule-close")
+            book.forward_close(reader,"maintenance-capsule-close")?;
+            Ok(parsed)
         }
         // Diagnostics only, AFTER the original complete/inverse/exit decisions.
         // A successful call is not sufficient when persisted progress or state
@@ -17860,7 +17905,7 @@ mod installer {
             const INVENTORY:&str="f4ec6419c8816eaf75111154e12b0766a52e6e44819ac91f118564b393443fa9";
             fn enabled()->bool {
                 cfg!(all(target_arch="aarch64",not(feature="macos-installed-removal-abrupt-fixture")))
-                    && paths::RELEASE=="macos26-arm64-desktop-15" && paths::PACKAGE_VERSION=="0.2.9"
+                    && paths::RELEASE=="macos26-arm64-desktop-16" && paths::PACKAGE_VERSION=="0.2.10"
             }
             fn epoch(state_sha:[u8;32])->Result<([u8;20],[[u8;32];4])> {
                 Ok((removal_hex_data(Self::SOURCE)?,[
@@ -22241,7 +22286,7 @@ exec ./mrk-macos-remove --fixture-supervise "$1"
                         original_joined:true,result_eof:self.output_eof,original_closes_known:joined.outcome.originals && self.output_close && self.command_close,
                         within_original_deadline:joined.outcome.timely,payload_write_count:joined.outcome.writes,payload_write_bytes:joined.outcome.bytes },
                     returned.launcher.clone(),&observed.selected).map_err(|_| "maintenance-capsule-binding")?;
-                maintenance::persist_capsule(&mut self.book,observed,&self.invocation,&capsule)?;
+                let joined_capsule=maintenance::persist_capsule(&mut self.book,observed,&self.invocation,&capsule)?;
                 if observed.action==ActionData::FreshInstall {self.book.fresh_output_parent_seal()?;}
                 if writer_known && joined.outcome.exit==0 {
                     if let Some(archives)=observed.archives.as_mut(){
@@ -22250,7 +22295,7 @@ exec ./mrk-macos-remove --fixture-supervise "$1"
                             &observed.prepared.inventory,&observed.prepared.inventory_bytes)?;
                         archives.successful_names(&mut self.book,observed.action,observed.intent.as_ref().ok_or("archived-intent")?,
                             observed.history.as_ref().map(|h|&h.current.state),&observed.selected,state.as_ref().ok_or("archived-state")?,&input,self.prefix_source.as_mut().ok_or("archived-prefix-original")?,
-                            observed.restore_joined.as_ref())?;
+                            observed.restore_joined.as_ref(),&joined_capsule)?;
                     }
                 }
                 self.book.source_post(self.source.as_ref().ok_or("worker-source-original")?)?;
