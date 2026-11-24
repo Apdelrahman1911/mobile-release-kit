@@ -964,8 +964,13 @@ def fresh_check(selection, work, evidence, steps, result):
     durable = os.environ.get("MRK_COLD_RUNTIME_DURABLE") == "true"
     if durable:
         origin = json.loads((folder / "PREPARED.json").read_text())["origin"]
-        need(origin["source"] == "ce9380df50c0a6bc6a51f6e23eba1e0ac7ccf89a"
-             and origin["tree"] == "dcce7b95cf7465e51adc7df7fd141d0fe6d99b87", "cold-diagnostic-exact-source")
+        expected = {
+            "macos26-arm64-desktop-14": ("ce9380df50c0a6bc6a51f6e23eba1e0ac7ccf89a",
+                                       "dcce7b95cf7465e51adc7df7fd141d0fe6d99b87"),
+            "macos26-arm64-desktop-15": ("e5f56c3d925c76df61bf43e24a0086815405ed25",
+                                       "e8db6d235daecfd3648852dfd143c4717e72dcae"),
+        }.get(row["release"])
+        need((origin["source"], origin["tree"]) == expected, "cold-diagnostic-exact-source")
     need(install("next", folder, steps, evidence=evidence) == 0, "fresh-install-returned-nonzero")
     state = installed_state()
     result["afterFreshInstall"] = state
