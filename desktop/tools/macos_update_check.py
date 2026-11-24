@@ -139,17 +139,18 @@ def hex_field(value, size):
 
 
 def selected_release_roles(data):
-    return [role for role in ("initial", "intermediate", "bridge", "previous", "next", "recoveryUpgrade") if role in data]
+    return [role for role in ("initial", "intermediate", "bridge", "previous", "next") if role in data]
 
 
 def load_selection(path):
     data = json.loads(Path(path).read_text())
     required = {"schemaVersion", "previous", "next"}
-    need(type(data) is dict and required <= set(data) <= required | {"initial", "intermediate", "bridge", "removal", "previousRemoval", "recoveryUpgrade"}
+    need(type(data) is dict and required <= set(data) <= required | {"initial", "intermediate", "bridge", "removal", "previousRemoval", "recoveryInstall", "recoveryRemoval"}
          and ("intermediate" not in data or "initial" in data)
          and ("bridge" not in data or {"intermediate", "previousRemoval"} <= set(data))
+         and (("recoveryInstall" in data) == ("recoveryRemoval" in data))
          and data["schemaVersion"] == 1, "selection-shape")
-    for key in ("removal", "previousRemoval"):
+    for key in ("removal", "previousRemoval", "recoveryRemoval"):
         if key not in data:
             continue
         row = data[key]
@@ -157,6 +158,8 @@ def load_selection(path):
              and re.fullmatch(r"[1-9][0-9]{0,19}", row["runId"]) and re.fullmatch(r"[1-9][0-9]{0,19}", row["artifactId"])
              and hex_field(row["imageSha256"], 64), "selection-removal-fields")
     roles = selected_release_roles(data)
+    if "recoveryInstall" in data:
+        roles.insert(roles.index("next"), "recoveryInstall")
     for role in roles:
         row = data[role]
         need(set(row) == {"runId", "artifactId", "carrierArtifactId", "packageSha256", "packageVersion", "release"}, f"selection-{role}")
@@ -2035,11 +2038,13 @@ def install_macl_fixture(paths):
 
 def macl_journal_recovery_check(selection, work, evidence, steps, result):
     """Exercise the exact signed 0.2.3-to-0.2.8 interrupted removal transition."""
-    need("previousRemoval" in selection and "removal" in selection
+    recovery = selection.get("recoveryInstall", selection["next"])
+    recovery_removal = selection.get("recoveryRemoval", selection.get("removal"))
+    need("previousRemoval" in selection and recovery_removal is not None
          and selection["previous"]["release"] == "macos26-arm64-desktop-09"
-         and selection["next"]["release"] == "macos26-arm64-desktop-14", "macl-recovery-selection")
+         and recovery["release"] == "macos26-arm64-desktop-14", "macl-recovery-selection")
     need(not STATE.exists(), "macl-recovery-existing-installation")
-    next_folder = fetch("next", selection["next"], work, steps)
+    next_folder = fetch("recovery", recovery, work, steps)
     for role in selected_release_roles(selection):
         if role == "next":
             break
@@ -2121,7 +2126,7 @@ def macl_journal_recovery_check(selection, work, evidence, steps, result):
     need(len(legacy_mounts) == 1, "macl-legacy-image-mount")
     legacy_mount = Path(legacy_mounts[0])
     try:
-        repair_mount, _ = removal_image(selection["removal"], work, steps)
+        repair_mount, _ = removal_image(recovery_removal, work, steps)
         try:
             need(repair_mount != legacy_mount and str(repair_mount).startswith(str(legacy_mount) + " "),
                  "macl-duplicate-volume-label")
@@ -2189,7 +2194,7 @@ def macl_journal_recovery_check(selection, work, evidence, steps, result):
     result["reinstallReturn"] = install("macl-reinstall", next_folder, steps, evidence=evidence)
     need(result["reinstallReturn"] == 0, "macl-recovery-reinstall-returned-nonzero")
     actual = installed_state()
-    need(all(actual[key] == selection["next"][key] for key in ("release", "packageVersion", "packageSha256")),
+    need(all(actual[key] == recovery[key] for key in ("release", "packageVersion", "packageSha256")),
          "macl-recovery-reinstalled-identity")
     result["launchAfterReinstall"] = launch_smoke("macl-reinstalled", work, evidence, steps, observe=first_launch_observe)
     require_runtime(result["launchAfterReinstall"], "macl-recovery-reinstalled-runtime")
@@ -2203,8 +2208,8 @@ def macl_journal_recovery_check(selection, work, evidence, steps, result):
         and empty_before.st_mtime_ns == empty_reinstalled.st_mtime_ns
         and empty_before.st_ctime_ns == empty_reinstalled.st_ctime_ns)
     need(result["priorEmptyJournalPreservedAfterReinstall"], "macl-reinstall-preadmission-changed")
-    if "recoveryUpgrade" in selection:
-        row = selection["recoveryUpgrade"]
+    if "recoveryInstall" in selection:
+        row = selection["next"]
         archives_before = removal_archive_identities()
         need(len(archives_before) == 3, "macl-recovery-upgrade-archive-baseline")
         folder = fetch("recoveryUpgrade", row, work, steps)

@@ -25,17 +25,17 @@
     "packageSha256": "ff0f6f899b7abb65774fcfc25aef072f0c6d6103298a4af0f1b7d69db77eee30"
   },
   "next": {
-    "runId": "45242336892",
-    "artifactId": "14859557552",
-    "carrierArtifactId": "14860596335",
-    "packageSha256": "984b5b6e907d8e752b3985b45f13da56f58662c9a2dd728815bdb84f6bc94c25",
-    "packageVersion": "0.2.8",
-    "release": "macos26-arm64-desktop-14"
+    "runId": "45328806744",
+    "artifactId": "14895681493",
+    "carrierArtifactId": "14894484973",
+    "packageSha256": "ed5ca5fff501ee736183a74a355e7b7c08b29b557b52621d82df6229fcda92a8",
+    "packageVersion": "0.2.9",
+    "release": "macos26-arm64-desktop-15"
   },
   "removal": {
-    "runId": "45259477138",
-    "artifactId": "14861522409",
-    "imageSha256": "b7f93d74efd8a8fd275f5410ba694de794bbd420faf942bbd427d8efab3643fd"
+    "runId": "45339333931",
+    "artifactId": "14895869050",
+    "imageSha256": "44c878f85792435dacdc78d61f06b89ae4ded91e0b3c066f0c0bad93a42b449e"
   },
   "bridge": {
     "runId": "44991962101",
@@ -49,5 +49,18 @@
     "runId": "45024441241",
     "artifactId": "14754614521",
     "imageSha256": "7396b4ef74ede07d7953aaed386d85dff00da8bac6a981352f8bb4f99ceb5e16"
+  },
+  "recoveryInstall": {
+    "runId": "45242336892",
+    "artifactId": "14859557552",
+    "carrierArtifactId": "14860596335",
+    "packageSha256": "984b5b6e907d8e752b3985b45f13da56f58662c9a2dd728815bdb84f6bc94c25",
+    "packageVersion": "0.2.8",
+    "release": "macos26-arm64-desktop-14"
+  },
+  "recoveryRemoval": {
+    "runId": "45259477138",
+    "artifactId": "14861522409",
+    "imageSha256": "b7f93d74efd8a8fd275f5410ba694de794bbd420faf942bbd427d8efab3643fd"
   }
 }
