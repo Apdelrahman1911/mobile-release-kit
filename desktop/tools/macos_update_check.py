@@ -139,13 +139,13 @@ def hex_field(value, size):
 
 
 def selected_release_roles(data):
-    return [role for role in ("initial", "intermediate", "bridge", "previous", "next") if role in data]
+    return [role for role in ("initial", "intermediate", "bridge", "previous", "next", "recoveryUpgrade") if role in data]
 
 
 def load_selection(path):
     data = json.loads(Path(path).read_text())
     required = {"schemaVersion", "previous", "next"}
-    need(type(data) is dict and required <= set(data) <= required | {"initial", "intermediate", "bridge", "removal", "previousRemoval"}
+    need(type(data) is dict and required <= set(data) <= required | {"initial", "intermediate", "bridge", "removal", "previousRemoval", "recoveryUpgrade"}
          and ("intermediate" not in data or "initial" in data)
          and ("bridge" not in data or {"intermediate", "previousRemoval"} <= set(data))
          and data["schemaVersion"] == 1, "selection-shape")
@@ -1893,7 +1893,7 @@ def remove_check(selection, work, evidence, steps, result, *, folder=None, seede
             if post_reinstall_prepare:
                 need(android_helper_status() == 113, "reinstall-prepare-helper-not-absent")
                 try:
-                    exercise_prepare_quit(work, evidence, steps, result)
+                    run_workspace_xctest("prepare-xctest", row, folder, again, work, evidence, steps, result)
                 finally:
                     result["prepareAppTrace"] = trace = fixed_app_trace(evidence, "post-reinstall-prepare")
                 need(any("app maintenance-worker=settled route=prepare branch=ObservedAbsent" in line
@@ -2040,7 +2040,9 @@ def macl_journal_recovery_check(selection, work, evidence, steps, result):
          and selection["next"]["release"] == "macos26-arm64-desktop-14", "macl-recovery-selection")
     need(not STATE.exists(), "macl-recovery-existing-installation")
     next_folder = fetch("next", selection["next"], work, steps)
-    for role in selected_release_roles(selection)[:-1]:
+    for role in selected_release_roles(selection):
+        if role == "next":
+            break
         expected = selection[role]
         folder = fetch(role, expected, work, steps)
         need(install(role, folder, steps, evidence=evidence) == 0, "macl-recovery-install-" + role)
@@ -2201,6 +2203,28 @@ def macl_journal_recovery_check(selection, work, evidence, steps, result):
         and empty_before.st_mtime_ns == empty_reinstalled.st_mtime_ns
         and empty_before.st_ctime_ns == empty_reinstalled.st_ctime_ns)
     need(result["priorEmptyJournalPreservedAfterReinstall"], "macl-reinstall-preadmission-changed")
+    if "recoveryUpgrade" in selection:
+        row = selection["recoveryUpgrade"]
+        archives_before = removal_archive_identities()
+        need(len(archives_before) == 3, "macl-recovery-upgrade-archive-baseline")
+        folder = fetch("recoveryUpgrade", row, work, steps)
+        result["recoveryUpgradeReturn"] = install("recoveryUpgrade", folder, steps, evidence=evidence)
+        need(result["recoveryUpgradeReturn"] == 0, "macl-recovery-upgrade-installer")
+        actual = result["afterRecoveryUpgrade"] = installed_state()
+        need(all(actual[key] == row[key] for key in ("release", "packageVersion", "packageSha256")),
+             "macl-recovery-upgrade-identity")
+        result["recoveryUpgradeRuntime"] = launch_smoke("macl-after-upgrade", work, evidence, steps, observe=first_launch_observe)
+        require_runtime(result["recoveryUpgradeRuntime"], "macl-recovery-upgrade-runtime")
+        need(android_helper_status() == 113, "macl-recovery-upgrade-helper-not-absent")
+        run_workspace_xctest("prepare-xctest", row, folder, actual, work, evidence, steps, result)
+        need(any("app maintenance-worker=settled route=prepare branch=ObservedAbsent" in line
+                 for line in result["prepareAppTrace"]), "macl-recovery-upgrade-native-settlement")
+        need(android_helper_status() == 113, "macl-recovery-upgrade-helper-changed")
+        result["recoveryUpgradeArchivesPreserved"] = removal_archive_identities() == archives_before
+        result["recoveryUpgradeDataPreserved"] = (all(manifest().get(k) == v for k, v in seeded.items())
+                                                  and update_credential_matches(credential))
+        need(result["recoveryUpgradeArchivesPreserved"], "macl-recovery-upgrade-archive-changed")
+        need(result["recoveryUpgradeDataPreserved"], "macl-recovery-upgrade-data-changed")
 
 
 def retained_transition_check(selection, work, evidence, steps, result):

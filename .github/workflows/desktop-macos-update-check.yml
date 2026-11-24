@@ -41,6 +41,7 @@ jobs:
         include: ${{ contains(github.event.head_commit.message, '[macos-cold-runtime-diagnostic]') && fromJSON('[{"mode":"workspace-xctest","sample":"default"}]') || fromJSON('[]') }}
         mode: >-
           ${{ contains(github.event.head_commit.message, '[macos-cold-runtime-durable]') && fromJSON('["fresh"]')
+          || contains(github.event.head_commit.message, '[macos-prepare-recovery-upgrade]') && fromJSON('["macl-journal-recovery"]')
           || contains(github.event.head_commit.message, '[macos-post-reinstall-prepare]') && fromJSON('["post-reinstall-prepare"]')
           || contains(github.event.head_commit.message, '[macos-retained-maintenance]') && fromJSON('["release-asset","retained-transition","retained-prepare","workspace-xctest","performance-long","fresh","update-credentials","delete-data","uninstaller","recovery-xctest","core-recovery"]')
           || contains(github.event.head_commit.message, '[macos-retained-removal-scale]') && fromJSON('["retained-transition","release-asset","retained-prepare","fresh","workspace-xctest","update-credentials","delete-data","uninstaller","recovery-xctest"]')
