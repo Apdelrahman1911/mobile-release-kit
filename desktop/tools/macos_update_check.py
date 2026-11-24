@@ -858,7 +858,7 @@ def main():
                                            "update-credentials", "release-asset", "workspace-cli",
                                            "workspace-xctest", "prepare-xctest", "performance-long", "core-recovery",
                                            "recovery-xctest", "retained-transition", "retained-prepare",
-                                           "macl-journal-recovery"), default="update")
+                                           "macl-journal-recovery", "post-reinstall-prepare"), default="update")
     args = parser.parse_args()
     work = Path(args.work)
     evidence = work / "evidence"
@@ -871,7 +871,7 @@ def main():
         if args.mode not in ("update", "update-credentials"):
             {"fresh": fresh_check, "remove": remove_check, "uninstaller": uninstaller_installed_check,
              "delete-data": remove_check, "repeat": remove_check, "repeat-after-dialogs": remove_check,
-             "removal-archive": remove_check,
+             "removal-archive": remove_check, "post-reinstall-prepare": remove_check,
              "retained-transition": retained_transition_check, "retained-prepare": retained_transition_check,
              "macl-journal-recovery": macl_journal_recovery_check,
              "prepare-quit": prepare_quit_check, "performance": fresh_check, "release-asset": release_asset_check,
@@ -1814,7 +1814,8 @@ def remove_check(selection, work, evidence, steps, result, *, folder=None, seede
     row = selection["next"]
     mode = result["mode"]
     repeat = mode in ("repeat", "repeat-after-dialogs")
-    check_archives = repeat or mode in ("removal-archive", "retained-transition")
+    post_reinstall_prepare = mode == "post-reinstall-prepare"
+    check_archives = repeat or post_reinstall_prepare or mode in ("removal-archive", "retained-transition")
     need((folder is None) == (seeded is None), "remove-baseline-selection")
     if folder is None:
         folder = fetch("next", row, work, steps)
@@ -1829,6 +1830,8 @@ def remove_check(selection, work, evidence, steps, result, *, folder=None, seede
     if seeded is None:
         seeded = seed_user_data()
     result["seededFiles"] = len(seeded)
+    if post_reinstall_prepare:
+        credential = seed_update_credential()
     background = os.environ.get("MRK_CHECK_REMOVE_INACTIVE") == "true"
     if background:
         install_macl_fixture((APP,))
@@ -1855,7 +1858,7 @@ def remove_check(selection, work, evidence, steps, result, *, folder=None, seede
     result["userDataPreservedByRemoval"] = all(kept.get(k) == v for k, v in seeded.items())
     need(result["userDataPreservedByRemoval"], "user-data-changed-by-removal")
     try:
-        if mode == "retained-transition" or background:
+        if mode == "retained-transition" or background or post_reinstall_prepare:
             kept_credential = credential is not None and update_credential_matches(credential)
             result["credentialPreservedAfterRemoval"] = kept_credential
             need(kept_credential, "retained-credential-changed-by-removal")
@@ -1881,12 +1884,24 @@ def remove_check(selection, work, evidence, steps, result, *, folder=None, seede
             need(after == archives, "reinstall-removal-archive-changed")
         if mode == "removal-archive":
             return
-        observer = first_launch_observe if mode == "retained-transition" or background else None
+        observer = first_launch_observe if mode == "retained-transition" or background or post_reinstall_prepare else None
         result["launchAfterReinstall"] = launch_smoke("after-reinstall", work, evidence, steps, observe=observer)
         if observer is not None:
             require_runtime(result["launchAfterReinstall"], "reinstall-bundled-runtime")
-            if background:
-                need(update_credential_matches(credential), "background-removal-reinstalled-credential")
+            if background or post_reinstall_prepare:
+                need(update_credential_matches(credential), "removal-reinstalled-credential")
+            if post_reinstall_prepare:
+                need(android_helper_status() == 113, "reinstall-prepare-helper-not-absent")
+                try:
+                    exercise_prepare_quit(work, evidence, steps, result)
+                finally:
+                    result["prepareAppTrace"] = trace = fixed_app_trace(evidence, "post-reinstall-prepare")
+                need(any("app maintenance-worker=settled route=prepare branch=ObservedAbsent" in line
+                         for line in trace), "reinstall-prepare-native-settlement")
+                need(android_helper_status() == 113, "reinstall-prepare-helper-changed")
+                need(removal_archive_identities() == archives, "reinstall-prepare-archive-changed")
+                need(all(manifest().get(k) == v for k, v in seeded.items())
+                     and update_credential_matches(credential), "reinstall-prepare-data-changed")
             return
         if repeat:
             if mode == "repeat-after-dialogs":
