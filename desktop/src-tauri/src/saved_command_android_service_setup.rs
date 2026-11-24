@@ -914,11 +914,12 @@ impl Preparation {
         let stop=self.gate.control.stop.subscribe();
         let check=self.gate.source_work().and_then(|()|identity.check_once(self.gate.control.work,&stop));
         if let Err(failure)=check{
-            if self.retirement.removal.is_some(){
+            if self.retirement.action==management::Action::ObserveForMaintenance{
+                let route=if self.retirement.removal.is_some(){"remove"}else{"prepare"};
                 let original=self.gate.control.failure();
                 let detail=identity.diagnostic().for_first(original);
                 mrk_macos_installed_native::removal_coordinator::removal_trace(&format!(
-                    "app maintenance-identity-check=refused reason={failure:?} original={:?} detail={detail:?}",
+                    "app maintenance-identity-check=refused route={route} reason={failure:?} original={:?} detail={detail:?}",
                     original.map(|(reason,_)|reason)));
             }
         }

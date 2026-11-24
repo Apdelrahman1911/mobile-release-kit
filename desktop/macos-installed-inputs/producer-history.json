@@ -106,6 +106,19 @@
           "runtimeManifestSha256": "c7cdb05ba77543841b0118e06aead5607e7bbd742f9df8997d27739b0333f386",
           "signingPolicySha256": "c33cb173b7cb29c3ee82d6265e2c2eb720e3b9e2de0e4da0c173150734fedacb",
           "sourceCommit": "f64d61400c085ffbb0921414f579440e257538f4"
+        },
+        {
+          "bundleIdentifier": "dev.mobile-release-kit.desktop",
+          "inventorySha256": "966338ff06361a1ff3f70d9535b44c8e264671f19e7e65c77ff38f2f5609f20f",
+          "packageIdentifier": "dev.mobile-release-kit.desktop.installed",
+          "packageSha256": "984b5b6e907d8e752b3985b45f13da56f58662c9a2dd728815bdb84f6bc94c25",
+          "packageVersion": "0.2.8",
+          "profile": "fixed-macos26-arm64-maintenance-v2",
+          "protocolSha256": "083e6afae3e329c4e0d81bad00dd0c9920f77491b38ce0d23aa602996f4c4bf5",
+          "release": "macos26-arm64-desktop-14",
+          "runtimeManifestSha256": "c7cdb05ba77543841b0118e06aead5607e7bbd742f9df8997d27739b0333f386",
+          "signingPolicySha256": "c33cb173b7cb29c3ee82d6265e2c2eb720e3b9e2de0e4da0c173150734fedacb",
+          "sourceCommit": "ce9380df50c0a6bc6a51f6e23eba1e0ac7ccf89a"
         }
       ],
       "signingPolicies": [

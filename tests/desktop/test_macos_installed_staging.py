@@ -13150,6 +13150,27 @@ class MacInstalledData(unittest.TestCase):
             with self.assertRaises(TOOL.Refused):
                 TOOL.original_package(Path("/scripts"), Path("/original.pkg"))
 
+    def test_producer_history_accepts_one_more_starting_release(self):
+        for target in TOOL.MAC_TARGETS:
+            profile, service, selection, history, expected = packaging_fixture(target)
+            source = TOOL.packaging_signing_data(profile, service)
+            rows = history["targets"][target]["acceptedPredecessors"]
+            current = expected["releaseSet"]["current"]
+            for number in range(1, TOOL.ACCEPTED_PREDECESSOR_LIMIT + 2):
+                rows.append(dict(current, packageVersion=f"0.1.{number}",
+                    release=f"{selection.release}-previous-{number}", packageSha256=f"{number:064x}"))
+            extra = rows.pop()
+
+            def assemble():
+                return TOOL.packaging_descriptor_data(TOOL.canonical(history), source, selection,
+                    source_commit="a" * 40, manifest="c" * 64, inventory="d" * 64, package=current["packageSha256"])
+
+            descriptor = assemble()
+            self.assertEqual(TOOL.maintenance_producer_data(descriptor, target=target)["releaseSet"]["acceptedPredecessors"], rows)
+            rows.append(extra)
+            with self.assertRaisesRegex(TOOL.Refused, "^producer-history-bound$"):
+                assemble()
+
     def test_package_commands_preserve_original_bytes_and_require_final_root_audit(self):
         files, original_members = package_data(uid=501, gid=20)
         final_members = package_data()[1]
@@ -13401,7 +13422,7 @@ class MacInstalledData(unittest.TestCase):
                 elif mutation == "policy-digest": row["signingPolicies"][0]["sha256"] = "f" * 64
                 elif mutation == "unused-policy": row["signingPolicies"].append({"sha256": "f" * 64, "policy": row["signingPolicies"][0]["policy"]})
                 elif mutation == "extra": row["unreviewed"] = []
-                else: row["acceptedPredecessors"] *= 9
+                else: row["acceptedPredecessors"] *= TOOL.ACCEPTED_PREDECESSOR_LIMIT + 1
                 with self.subTest(target=target, mutation=mutation), self.assertRaises(TOOL.Refused):
                     assemble(changed)
             summary = {"schemaVersion": 1, "kind": "mrk-package-producer-emitted", "packageSha256": TOOL.digest(package),
@@ -17094,7 +17115,7 @@ class MacInstallationMetadataData(unittest.TestCase):
         self.assertEqual(selected["packageVersion"], TOOL.PACKAGE_VERSION)
         self.assertEqual(selected["release"], TOOL.RELEASE)
         self.assertEqual(TOOL.HISTORICAL_SUPPLIER_RELEASE, "macos26-arm64-project-draft-01")
-        self.assertEqual(TOOL.RELEASE, "macos26-arm64-desktop-14")
+        self.assertEqual(TOOL.RELEASE, "macos26-arm64-desktop-15")
         # Current verification generation, not a predecessor or release approval.
         def source_data(relative, limit):
             path = source / relative
@@ -17107,17 +17128,17 @@ class MacInstallationMetadataData(unittest.TestCase):
         cargo = tomllib.loads(source_data("desktop/src-tauri/Cargo.toml", 16384).decode("utf-8"))
         tauri = json.loads(source_data("desktop/src-tauri/tauri.conf.json", 4096))
         self.assertEqual((cargo["package"]["name"], cargo["package"]["version"], tauri["version"]),
-                         ("mobile-release-kit-desktop", "0.2.8", "0.2.8"))
-        for target, name, release in ((TOOL.ARM_TARGET, "build-release.json", "macos26-arm64-desktop-14"),
-                                      (TOOL.INTEL_TARGET, "build-release-intel.json", "macos26-x86_64-desktop-14")):
+                         ("mobile-release-kit-desktop", "0.2.9", "0.2.9"))
+        for target, name, release in ((TOOL.ARM_TARGET, "build-release.json", "macos26-arm64-desktop-15"),
+                                      (TOOL.INTEL_TARGET, "build-release-intel.json", "macos26-x86_64-desktop-15")):
             row = TOOL.build_release_data(source_data("desktop/macos-installed-inputs/" + name, 4096), target=target)
-            self.assertEqual(row, {"schemaVersion": 1, "packageVersion": "0.2.8", "release": release})
+            self.assertEqual(row, {"schemaVersion": 1, "packageVersion": "0.2.9", "release": release})
         for relative in ("desktop/src-tauri/Cargo.lock", "desktop/helpers/macos-android-register/Cargo.lock",
                          "desktop/helpers/macos-desktop-image/Cargo.lock"):
             locked = tomllib.loads(source_data(relative, 256 * 1024).decode("utf-8"))
             roots = [row for row in locked["package"] if row["name"] == "mobile-release-kit-desktop"]
             self.assertEqual(len(roots), 1)
-            self.assertEqual(roots[0]["version"], "0.2.8")
+            self.assertEqual(roots[0]["version"], "0.2.9")
             self.assertNotIn("source", roots[0])
             self.assertNotIn("checksum", roots[0])
         # This is bounded SOURCE metadata comparison, not native xattr/input

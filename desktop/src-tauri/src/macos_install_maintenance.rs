@@ -14,6 +14,9 @@ use crate::{macos_install_paths as paths, protocol::strict_json};
 
 pub const INPUT_LIMIT: usize = 16 * 1024;
 pub const PREDECESSOR_LIMIT: usize = 8;
+// The signed list can name more starting releases than one installed history
+// can retain. Keep the existing limit on generations and their disk budget.
+const ACCEPTED_PREDECESSOR_LIMIT: usize = 9;
 const PROFILE: &str = "fixed-macos26-arm64-maintenance-v2";
 fn profile(target: MaintenanceTargetData) -> &'static str {
     match target { MaintenanceTargetData::Arm64 => PROFILE,
@@ -130,7 +133,7 @@ impl ReleaseSetData {
                 .is_some_and(|items| items.iter().all(serde_json::Value::is_object)), DataError::Shape)?;
         let value: ReleaseSetWireData = serde_json::from_value(raw).map_err(|_| DataError::Shape)?;
         require(value.schema_version == 2, DataError::Binding)?;
-        require(value.accepted_predecessors.len() <= PREDECESSOR_LIMIT, DataError::Limit)?;
+        require(value.accepted_predecessors.len() <= ACCEPTED_PREDECESSOR_LIMIT, DataError::Limit)?;
         value.current.validate(target)?;
         for (i, predecessor) in value.accepted_predecessors.iter().enumerate() {
             predecessor.validate(target)?;
@@ -339,8 +342,13 @@ mod tests {
         assert!(ReleaseSetData::parse_data(duplicate.as_bytes()).is_err());
         assert!(ReleaseSetData::parse_data(b"{\"schemaVersion\":NaN}").is_err());
         assert!(ReleaseSetData::parse_data(&vec![b' '; INPUT_LIMIT + 1]).is_err());
-        let mut many = plan(); many["acceptedPredecessors"] = json!(vec![release(2); PREDECESSOR_LIMIT + 1]);
-        assert!(ReleaseSetData::parse_data(&bytes(&many)).is_err());
+        let mut many = plan();
+        many["current"] = release(20);
+        let accepted: Vec<_> = (2..).take(ACCEPTED_PREDECESSOR_LIMIT).map(release).collect();
+        many["acceptedPredecessors"] = json!(accepted);
+        assert_eq!(ReleaseSetData::parse_data(&bytes(&many)).unwrap().predecessor_data().len(), ACCEPTED_PREDECESSOR_LIMIT);
+        many["acceptedPredecessors"].as_array_mut().unwrap().push(release(11));
+        assert_eq!(ReleaseSetData::parse_data(&bytes(&many)).unwrap_err(), DataError::Limit);
         // Actual expected target, not receipt-selected architecture. Existing
         // validation remains common to both selected SOURCE profiles.
         let mut intel = plan();

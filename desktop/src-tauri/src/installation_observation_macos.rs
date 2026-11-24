@@ -473,20 +473,6 @@ impl InstallationSlots {
         #[cfg(feature = "macos-android-registration-helper")]
         {self.removal.is_some()}
     }
-    fn removal_archive_source_scope(&self)->bool {
-        #[cfg(not(feature = "macos-android-registration-helper"))]
-        {
-            self.book.as_ref().is_some_and(|book| {
-                // The confirmed removal's maintenance worker repeats this
-                // inspection. Reinstall preserves the earlier root-only
-                // archives for both reads of the same installed root.
-                (self.removal.is_some() && book.removal_gate.is_some())
-                    || book.registration_gate.as_ref().is_some_and(|gate|gate.source_has_removal_cutoff())
-            })
-        }
-        #[cfg(feature = "macos-android-registration-helper")]
-        { false }
-    }
     fn parent_point_vetoed(&self)->bool {
         #[cfg(not(feature = "macos-android-registration-helper"))]
         {self.book.as_ref().is_some_and(Book::removal_clock_vetoed)}
@@ -947,20 +933,21 @@ impl InstallationSlots {
             drop(record); drop(inventory); drop(descriptor);
             drop(producer); drop(producer_bytes); drop(signature_bytes); retained = checkpoint_retained;
         }
-        let removal_archives=self.removal_archive_source_scope();
-        let limit=names.len().checked_add(if removal_archives { REMOVAL_VISIBLE_ARCHIVES } else { 0 })
-            .ok_or(Problem::Bounds)?;
-        if removal_archives && limit>350 { return self.reject(Problem::Bounds,Instant::now(),publish); }
+        // Signed reinstall deliberately preserves protected removal journals.
+        // They are visible metadata in every authenticated v2 inspection,
+        // including Prepare and Quit. The legacy roster remains exact.
+        let limit=names.len().checked_add(REMOVAL_VISIBLE_ARCHIVES).ok_or(Problem::Bounds)?;
+        if limit>350 { return self.reject(Problem::Bounds,Instant::now(),publish); }
         let actual = self.roster(install,limit,None,end,stop,publish)?;
         if !names.iter().all(|name|actual.contains_key(name)) { return self.reject(Problem::PayloadMismatch,Instant::now(),publish); }
         let mut extra=0usize;
         for (name,(inode,kind)) in &actual {
             if names.contains(name) { continue; }
-            if !removal_archives || !removal_archive_extra_data(name,*inode,*kind,extra) {
+            if !removal_archive_extra_data(name,*inode,*kind,extra) {
                 return self.reject(Problem::PayloadMismatch,Instant::now(),publish);
             }
-            // SAME existing no-follow visible PRE/POST. It never opens0700 or
-            // claims to inspect/authenticate its files; root Parent must do so.
+            // No-follow PRE/POST only. The reader never opens the directory
+            // or authenticates its contents. The privileged owner must do so.
             self.private_stage(install,name,*inode,end,stop,publish)?;
             extra+=1;
         }
@@ -1119,7 +1106,7 @@ impl InstallationSlots {
         // snapshot is quiescent here; every live/native frame must be accountable.
         let Some(native_bytes) = self.control_bytes() else { return self.reject(Problem::CleanupUnknown, Instant::now(), publish); };
         let planned = control_bound(&descriptor, &inventory_bytes, &inventory, &index, native_bytes)
-            .and_then(|bytes|bytes.checked_add(if self.removal_archive_source_scope() {
+            .and_then(|bytes|bytes.checked_add(if selected.is_some() {
                 REMOVAL_VISIBLE_ROSTER_BYTES //64 fixed40-byte names plus conservative actual BTree/node backing
             } else { 0 }));
         let Some(planned) = planned.filter(|bytes| *bytes <= CONTROL_RESERVE) else {
@@ -1349,8 +1336,7 @@ fn assert_installation_roster_path_contract() {
 #[test]
 fn installation_roster_uses_fixed_app_name_and_global_inventory_bound() {
     assert_installation_roster_path_contract();
-    // The extra names are admitted only in the private removal source branch,
-    // never an ordinary/legacy wildcard or an attempt to read root-only files.
+    // Only the authenticated v2 roster admits these protected directories.
     let archive=format!(".remove-{}","1".repeat(32));
     assert!(removal_archive_visible_name_data(&archive));
     for bad in [format!(".remove-{}","0".repeat(32)),format!(".remove-{}","A".repeat(32)),
@@ -1375,10 +1361,6 @@ fn installation_roster_uses_fixed_app_name_and_global_inventory_bound() {
         assert!(!private_stage_post_data(directory,other));
     }
     assert!(!private_stage_post_data(directory,Identity {ctime_ns:7,..directory}));
-    let ordinary=InstallationSlots::new();
-    assert!(!ordinary.removal_archive_source_scope());
-    let mut unbound=InstallationSlots::new();unbound.removal=Some(RemovalRetention::new());
-    assert!(!unbound.removal_archive_source_scope()); // retained DATA alone is not the owner gate
     assert_eq!(REMOVAL_VISIBLE_ROSTER_BYTES,32768);
     assert!(!runtime::safe_payload_path(paths::APP_NAME));
     assert_eq!(REMOVAL_WALK_PATHS.len(),10);

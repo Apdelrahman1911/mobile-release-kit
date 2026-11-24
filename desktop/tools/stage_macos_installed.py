@@ -197,6 +197,7 @@ MAINTENANCE_STATE_NAME = "installation-v2.json"
 MAINTENANCE_METADATA_BYTES = 128 * 1024 * 1024
 MAINTENANCE_ACTIONS = ("fresh-install", "same-package-noop", "restore-fixed-app", "update")
 PRODUCER_DESCRIPTOR_BYTES = 64 * 1024
+ACCEPTED_PREDECESSOR_LIMIT = 9
 PRODUCER_SIGNATURE_BYTES = 16 * 1024
 _DARWIN_XATTRS = None
 INSTALL_LOG = Path("/private/var/log/install.log")
@@ -6055,7 +6056,8 @@ def maintenance_producer_data(body, *, target):
      and document["target"] == target, "maintenance-producer-binding")
   releases = maintenance_map(document["releaseSet"], ("schemaVersion", "current", "acceptedPredecessors"), "maintenance-release-set-shape")
   need(type(releases["schemaVersion"]) is int and releases["schemaVersion"] == 2
-     and type(releases["acceptedPredecessors"]) is list and len(releases["acceptedPredecessors"]) <= 8,
+     and type(releases["acceptedPredecessors"]) is list
+     and len(releases["acceptedPredecessors"]) <= ACCEPTED_PREDECESSOR_LIMIT,
      "maintenance-release-set-bound")
   current = maintenance_release_data(releases["current"], target)
   seen = {key: {current[key]} for key in ("release", "packageVersion", "packageSha256")}
@@ -6156,7 +6158,8 @@ def packaging_descriptor_data(history_body, source, selection, *, source_commit,
   targets = maintenance_map(history["targets"], MAC_TARGETS, "producer-history-targets")
   for target, row in targets.items():
     maintenance_map(row, ("acceptedPredecessors", "signingPolicies"), "producer-history-row")
-    need(type(row["acceptedPredecessors"]) is list and len(row["acceptedPredecessors"]) <= 8
+    need(type(row["acceptedPredecessors"]) is list
+       and len(row["acceptedPredecessors"]) <= ACCEPTED_PREDECESSOR_LIMIT
        and type(row["signingPolicies"]) is list and len(row["signingPolicies"]) <= 8, "producer-history-bound")
     for old in row["acceptedPredecessors"]:
       maintenance_release_data(old, target)
