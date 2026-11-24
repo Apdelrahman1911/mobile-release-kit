@@ -1763,7 +1763,8 @@ def live_remove(mount, work, evidence, steps, label, observe_release=None, *, re
     time.sleep(5)
     remaining = {"app": APP.exists(), "launcher": LAUNCHER.exists(), "process": bool(payload_pids())}
     out["remaining"] = remaining
-    need(not any(remaining.values()), "removal-left-app-objects")
+    if refuse_at is None:
+        need(not any(remaining.values()), "removal-left-app-objects")
     return out
 
 
@@ -2066,6 +2067,28 @@ def macl_journal_recovery_check(selection, work, evidence, steps, result):
     replay_only = os.environ.get("MRK_RECOVERY_UPGRADE_DIAGNOSTIC") == "true"
     result["oldAppletAssertionsReused"] = replay_only
     need(not STATE.exists(), "macl-recovery-existing-installation")
+    if "recoveryInstall" in selection:
+        need("removal" in selection, "macl-recovery-candidate-removal-selection")
+        row = selection["next"]
+        upgrade_folder = fetch("recoveryUpgrade", row, work, steps)
+        producer = upgrade_folder / "producer-root/producer.json"
+        source = json.loads(producer.read_bytes())["releaseSet"]["current"]["sourceCommit"]
+        check_media = work / "upgrade-remove-proof"
+        check_media.mkdir(mode=0o700)
+        mount, _ = removal_image(selection["removal"], check_media, steps)
+        try:
+            removal = json.loads((mount / "remove-producer.json").read_bytes())
+            remove_sha = digest(mount / "Remove.pkg")
+            need(removal["installedProducerSha256"] == digest(producer)
+                 and removal["sourceCommit"] == source and removal["release"] == row["release"]
+                 and removal["packageVersion"] == row["packageVersion"]
+                 and removal["packageSha256"] == remove_sha, "macl-recovery-candidate-pair")
+            result["verifiedUpgradePair"] = {
+                "sourceCommit": source, "packageVersion": row["packageVersion"], "release": row["release"],
+                "installSha256": row["packageSha256"], "removeSha256": remove_sha,
+            }
+        finally:
+            detach_macl_fixture(mount, "upgrade-media", steps, result)
     next_folder = fetch("recovery", recovery, work, steps)
     for role in selected_release_roles(selection):
         if role == "next":
@@ -2081,6 +2104,7 @@ def macl_journal_recovery_check(selection, work, evidence, steps, result):
     state = json.loads((STATE / "installation-v2.json").read_bytes())
     retained = [STATE / (".retained-app-" + row["app"]["invocation"]) for row in state["retained"]]
     need(len(retained) >= 1 and all(path.is_dir() for path in retained), "macl-recovery-retained-originals")
+    retained_originals = {path: path.lstat() for path in retained}
     install_macl_fixture((APP, *retained))
 
     old_work = work / "previous-removal"
@@ -2103,14 +2127,22 @@ def macl_journal_recovery_check(selection, work, evidence, steps, result):
             "app": APP.exists(), "launcher": LAUNCHER.exists(), "process": bool(payload_pids()),
             "archives": archive_shapes,
         }, indent=2) + "\n")
-        run(["/usr/bin/hdiutil", "detach", str(old_mount)], 45, check=True)
+        detach_macl_fixture(old_mount, "interrupted", steps, result)
     # Qualify the signed historical fixture by its original app inode and
     # durable failure record. The outer diagnostic can name a later refusal.
+    result["interruptedDataPreserved"] = (
+        all(manifest().get(key) == value for key, value in seeded.items())
+        and update_credential_matches(credential)
+    )
+    need(result["interruptedDataPreserved"], "macl-recovery-interrupted-data")
+    need(not any(legacy["remaining"].values()), "macl-recovery-interruption-before-app-withdrawal")
     archives = removal_archive_identities()
     need(len(archives) == 1, "macl-recovery-original-journal")
     archived = STATE / next(iter(archives))
     p, _ = run(["/usr/bin/sudo", "-n", "/usr/bin/stat", "-f", "%i", str(archived / "app")], 15)
-    need(p.returncode == 0 and p.stdout.strip() == str(original.st_ino) and all(path.is_dir() for path in retained),
+    need(p.returncode == 0 and p.stdout.strip() == str(original.st_ino)
+         and all(path.is_dir() and os.path.samestat(before, path.lstat())
+                 for path, before in retained_originals.items()),
          "macl-recovery-withdrawn-originals")
     p, _ = run(["/usr/bin/sudo", "-n", "/bin/cat", str(archived / "first-failure.json")], 15)
     need(p.returncode == 0 and 0 < len(p.stdout) <= 4096, "macl-recovery-failure-record")
@@ -2119,8 +2151,8 @@ def macl_journal_recovery_check(selection, work, evidence, steps, result):
          "macl-recovery-failure-phase")
     result["interruptedFailure"] = first_failure["firstFailure"]
     first_digest = hashlib.sha256(p.stdout.encode()).hexdigest()
-    need(all(manifest().get(key) == value for key, value in seeded.items())
-         and update_credential_matches(credential), "macl-recovery-interrupted-data")
+    result["historicalFixtureQualified"] = True
+    result["seededFileCount"] = len(seeded)
 
     # A later attempt on the physical Mac reached linked journal creation
     # but stopped with a protected empty journal and the original intact.
@@ -2173,18 +2205,31 @@ def macl_journal_recovery_check(selection, work, evidence, steps, result):
                 need(result["uninstallerIncompleteRemovalRefused"], "macl-incomplete-deletion-reported-success")
                 need(all(manifest().get(key) == value for key, value in seeded.items())
                      and update_credential_matches(credential), "macl-incomplete-deletion-touched-fake-data")
+            output = work / "macl-recovery-installer.raw"
+            started = time.monotonic()
             try:
-                p, step = run(["/usr/bin/sudo", "-n", "/usr/sbin/installer", "-verbose", "-pkg",
-                               str(repair_mount / "Remove.pkg"), "-target", "/"], 240)
-            except subprocess.TimeoutExpired as error:
+                with output.open("w") as stream:
+                    p = subprocess.run(
+                        ["/usr/bin/sudo", "-n", "/usr/sbin/installer", "-verbose", "-pkg",
+                         str(repair_mount / "Remove.pkg"), "-target", "/"],
+                        stdout=stream, stderr=subprocess.STDOUT, timeout=240,
+                    )
+            except subprocess.TimeoutExpired:
+                p = None
+            finally:
+                result["resumeSeconds"] = round(time.monotonic() - started, 1)
+                with output.open("r", errors="replace") as stream:
+                    lines = deque(stream, maxlen=80)
+                (evidence / "macl-recovery-installer.log").write_text(
+                    "\n".join(tail_text("".join(lines), 80)) + "\n")
+            if p is None:
                 result["resumeTimedOut"] = True
-                (evidence / "macl-recovery-installer.log").write_text("\n".join(tail_text(
-                    (error.stdout or b"").decode(errors="replace") + (error.stderr or b"").decode(errors="replace"), 80)) + "\n")
                 removal_script_diagnostics(evidence, "macl-recovery-timeout")
-                raise Failed("macl-signed-recovery-timeout") from error
-            steps.append(dict(step, role="macl-signed-resume"))
+                raise Failed("macl-signed-recovery-timeout")
+            steps.append({"argv": ["installer", "-verbose", "-pkg", "Remove.pkg", "-target", ""],
+                          "role": "macl-signed-resume", "returncode": p.returncode,
+                          "seconds": result["resumeSeconds"]})
             result["resumeReturn"] = p.returncode
-            (evidence / "macl-recovery-installer.log").write_text("\n".join(tail_text(p.stdout + p.stderr, 80)) + "\n")
             if p.returncode != 0:
                 removal_script_diagnostics(evidence, "macl-recovery")
             need(p.returncode == 0, "macl-signed-recovery-returned-nonzero")
@@ -2243,16 +2288,26 @@ def macl_journal_recovery_check(selection, work, evidence, steps, result):
         row = selection["next"]
         archives_before = removal_archive_identities()
         need(len(archives_before) == 3, "macl-recovery-upgrade-archive-baseline")
-        folder = fetch("recoveryUpgrade", row, work, steps)
-        result["recoveryUpgradeReturn"] = install("recoveryUpgrade", folder, steps, evidence=evidence)
+        previous_app = APP.lstat()
+        result["recoveryUpgradeReturn"] = install("recoveryUpgrade", upgrade_folder, steps, evidence=evidence)
         need(result["recoveryUpgradeReturn"] == 0, "macl-recovery-upgrade-installer")
         actual = result["afterRecoveryUpgrade"] = installed_state()
         need(all(actual[key] == row[key] for key in ("release", "packageVersion", "packageSha256")),
              "macl-recovery-upgrade-identity")
+        need(actual["sourceCommit"] == result["verifiedUpgradePair"]["sourceCommit"],
+             "macl-recovery-upgrade-source")
+        installed = json.loads((STATE / "installation-v2.json").read_bytes())
+        previous_rows = [item for item in installed["retained"]
+                         if item["release"]["packageSha256"] == recovery["packageSha256"]]
+        need(len(previous_rows) == 1 and hex_field(previous_rows[0]["app"]["invocation"], 32),
+             "macl-recovery-upgrade-predecessor")
+        kept = STATE / (".retained-app-" + previous_rows[0]["app"]["invocation"])
+        result["recoveryUpgradePredecessorPreserved"] = os.path.samestat(previous_app, kept.lstat())
+        need(result["recoveryUpgradePredecessorPreserved"], "macl-recovery-upgrade-predecessor-original")
         result["recoveryUpgradeRuntime"] = launch_smoke("macl-after-upgrade", work, evidence, steps, observe=first_launch_observe)
         require_runtime(result["recoveryUpgradeRuntime"], "macl-recovery-upgrade-runtime")
         need(android_helper_status() == 113, "macl-recovery-upgrade-helper-not-absent")
-        run_workspace_xctest("prepare-xctest", row, folder, actual, work, evidence, steps, result)
+        run_workspace_xctest("prepare-xctest", row, upgrade_folder, actual, work, evidence, steps, result)
         need(any("app maintenance-worker=settled route=prepare branch=ObservedAbsent" in line
                  for line in result["prepareAppTrace"]), "macl-recovery-upgrade-native-settlement")
         need(android_helper_status() == 113, "macl-recovery-upgrade-helper-changed")
