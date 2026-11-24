@@ -15,13 +15,13 @@ T = importlib.util.module_from_spec(_spec)
 _spec.loader.exec_module(T)
 
 
-ARTIFACT = 13731635223
-ARTIFACT_BYTES = 215455359
-ARTIFACT_SHA = '0ab342b4ef0eac7b96ade39937801a6aed5c9d2950123f5ff3f6ec445cc43543'
-ORIGIN = dict(source='f778beb993691330c56b59059de5c8d970fbb27d',
-              tree='bdd9e77af2c626e435e02f9fbebfd229ef6a06a7',
-              target='aarch64-apple-darwin', runId='42745647519', runAttempt='1',
-              jobId='129597395171', nativeScope='disabled', hostProfile='macos-26')
+ARTIFACT = 14853360004
+ARTIFACT_BYTES = 217633313
+ARTIFACT_SHA = '25dd5a51139febf5568dc44da1c438ebedf60ead659ca0ebbdc5c7dfac63272b'
+ORIGIN = dict(source='ce9380df50c0a6bc6a51f6e23eba1e0ac7ccf89a',
+              tree='dcce7b95cf7465e51adc7df7fd141d0fe6d99b87',
+              target='aarch64-apple-darwin', runId='45242336892', runAttempt='1',
+              jobId='137930868944', nativeScope='disabled', hostProfile='macos-26')
 PREFIX = 'work/signed-android-transport/'
 
 

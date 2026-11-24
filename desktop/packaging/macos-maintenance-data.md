@@ -1,7 +1,8 @@
 # Maintenance preparation DATA (not available maintenance)
 
 `macos_install_maintenance` is a pure, bounded v2 DATA module. It accepts a detached
-release-producer tuple plus at most eight explicit predecessors. Each tuple binds
+release-producer tuple plus at most nine explicit starting releases. An installed
+history can retain up to eight predecessor generations. Each tuple binds
 the fixed product/profile, canonical numeric version, immutable release ID, source,
 protocol, runtime manifest, complete inventory, signing-policy digest and completed
 package digest. The final package digest is detached: do not embed it in itself.
