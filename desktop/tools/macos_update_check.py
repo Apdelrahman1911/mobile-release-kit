@@ -969,6 +969,8 @@ def fresh_check(selection, work, evidence, steps, result):
                                        "dcce7b95cf7465e51adc7df7fd141d0fe6d99b87"),
             "macos26-arm64-desktop-15": ("e5f56c3d925c76df61bf43e24a0086815405ed25",
                                        "e8db6d235daecfd3648852dfd143c4717e72dcae"),
+            "macos26-arm64-desktop-16": ("6bde41073ab878ab83f1e70ac46bfac7d0b7c185",
+                                       "410f788d127278fa8041417c4dba039596714141"),
         }.get(row["release"])
         need((origin["source"], origin["tree"]) == expected, "cold-diagnostic-exact-source")
     need(install("next", folder, steps, evidence=evidence) == 0, "fresh-install-returned-nonzero")
@@ -1008,8 +1010,9 @@ def fresh_check(selection, work, evidence, steps, result):
             records = [json.loads(line) for line in journal]
             need(any(row["event"] == "MRK_DESKTOP_CAPABILITIES=available" for row in records)
                  and records[-1].get("readerDrained") is True, "cold-bootstrap-evidence-incomplete")
-        result["diagnosticOnly"] = True
-        return
+        if os.environ.get("MRK_CHECK_FULL_FRESH_AFTER_TRACE") != "true":
+            result["diagnosticOnly"] = True
+            return
     data = manifest() if USER_DATA.exists() else {}
     result["appDataFilesAfterFirstLaunch"] = len(data)
     # Same package again: the no-op route keeps the installation and app data.
