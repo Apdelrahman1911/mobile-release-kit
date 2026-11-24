@@ -861,7 +861,7 @@ def main():
                                            "update-credentials", "release-asset", "workspace-cli",
                                            "workspace-xctest", "prepare-xctest", "performance-long", "core-recovery",
                                            "recovery-xctest", "retained-transition", "retained-prepare",
-                                           "macl-journal-recovery", "post-reinstall-prepare"), default="update")
+                                           "macl-journal-recovery", "post-reinstall-prepare", "archived-upgrade"), default="update")
     args = parser.parse_args()
     work = Path(args.work)
     evidence = work / "evidence"
@@ -876,7 +876,7 @@ def main():
              "delete-data": remove_check, "repeat": remove_check, "repeat-after-dialogs": remove_check,
              "removal-archive": remove_check, "post-reinstall-prepare": remove_check,
              "retained-transition": retained_transition_check, "retained-prepare": retained_transition_check,
-             "macl-journal-recovery": macl_journal_recovery_check,
+             "macl-journal-recovery": macl_journal_recovery_check, "archived-upgrade": archived_upgrade_check,
              "prepare-quit": prepare_quit_check, "performance": fresh_check, "release-asset": release_asset_check,
              "workspace-cli": workspace_cli_check, "workspace-xctest": workspace_xctest,
              "prepare-xctest": workspace_xctest, "performance-long": performance_long_check,
@@ -2261,6 +2261,67 @@ def macl_journal_recovery_check(selection, work, evidence, steps, result):
                                                   and update_credential_matches(credential))
         need(result["recoveryUpgradeArchivesPreserved"], "macl-recovery-upgrade-archive-changed")
         need(result["recoveryUpgradeDataPreserved"], "macl-recovery-upgrade-data-changed")
+
+
+def archived_upgrade_check(selection, work, evidence, steps, result):
+    """Exercise the signed writer on three preserved journals using one real removal."""
+    need({"recoveryInstall", "recoveryRemoval"} <= set(selection), "archived-upgrade-selection")
+    previous, current = selection["recoveryInstall"], selection["next"]
+    old_folder = fetch("archived-previous", previous, work, steps)
+    new_folder = fetch("archived-next", current, work, steps)
+    need(install("archived-previous", old_folder, steps, evidence=evidence) == 0, "archived-upgrade-initial")
+    need(installed_state()["packageSha256"] == previous["packageSha256"], "archived-upgrade-initial-identity")
+    seeded, credential = seed_user_data(), seed_update_credential()
+    # Empty pre-admission records are inert. The original signed remover
+    # independently reads this roster and creates the genuine completion.
+    for _ in range(2):
+        path = STATE / (".remove-" + secrets.token_hex(16))
+        run(["/usr/bin/sudo", "-n", "/bin/mkdir", "-m", "0700", str(path)], 15, check=True)
+    empty = removal_archive_identities()
+    need(len(empty) == 2, "archived-upgrade-empty-roster")
+    mount, _ = removal_image(selection["recoveryRemoval"], work, steps)
+    try:
+        removed = live_remove(mount, work, evidence, steps, "archived-prior-remove",
+                              observe_release=previous["release"], background=True)
+        result["removeReturn"] = removed["returncode"]
+        need(removed["returncode"] == 0, "archived-upgrade-prior-removal")
+    finally:
+        detach_macl_fixture(mount, "fixture", steps, result)
+    journals = removal_archive_identities()
+    need(len(journals) == 3 and all(journals.get(name) == identity for name, identity in empty.items()),
+         "archived-upgrade-three-original-journals")
+    result["journalsBeforeReinstall"] = len(journals)
+    result["dataPreservedAfterRemoval"] = (all(manifest().get(k) == v for k, v in seeded.items())
+                                           and update_credential_matches(credential))
+    need(result["dataPreservedAfterRemoval"], "archived-upgrade-data-after-removal")
+    result["reinstallReturn"] = install("archived-reinstall", old_folder, steps, evidence=evidence)
+    need(result["reinstallReturn"] == 0, "archived-upgrade-reinstall")
+    need(installed_state()["packageSha256"] == previous["packageSha256"], "archived-upgrade-reinstall-identity")
+    need(removal_archive_identities() == journals, "archived-upgrade-reinstall-journals")
+    previous_original = APP.lstat()
+    result["recoveryUpgradeReturn"] = install("archived-next", new_folder, steps, evidence=evidence)
+    need(result["recoveryUpgradeReturn"] == 0, "archived-upgrade-installer")
+    installed = result["afterRecoveryUpgrade"] = installed_state()
+    need(installed["packageSha256"] == current["packageSha256"], "archived-upgrade-identity")
+    state = json.loads((STATE / "installation-v2.json").read_bytes())
+    predecessors = [row for row in state["retained"] if row["release"]["packageSha256"] == previous["packageSha256"]]
+    need(len(predecessors) == 1 and hex_field(predecessors[0]["app"]["invocation"], 32),
+         "archived-upgrade-retained-predecessor")
+    old_app = STATE / (".retained-app-" + predecessors[0]["app"]["invocation"])
+    need(os.path.samestat(previous_original, old_app.lstat()), "archived-upgrade-retained-predecessor-original")
+    result["journalIdentitiesPreserved"] = removal_archive_identities() == journals
+    result["dataPreservedAfterUpgrade"] = (all(manifest().get(k) == v for k, v in seeded.items())
+                                          and update_credential_matches(credential))
+    need(result["journalIdentitiesPreserved"] and result["dataPreservedAfterUpgrade"],
+         "archived-upgrade-preservation")
+    result["recoveryUpgradeRuntime"] = launch_smoke("archived-current", work, evidence, steps, observe=first_launch_observe)
+    require_runtime(result["recoveryUpgradeRuntime"], "archived-upgrade-runtime")
+    need(android_helper_status() == 113, "archived-upgrade-helper-not-absent")
+    run_workspace_xctest("prepare-xctest", current, new_folder, installed, work, evidence, steps, result)
+    need(any("app maintenance-worker=settled route=prepare branch=ObservedAbsent" in line
+             for line in result["prepareAppTrace"]), "archived-upgrade-native-settlement")
+    need(android_helper_status() == 113 and removal_archive_identities() == journals,
+         "archived-upgrade-quit-journal-preservation")
 
 
 def retained_transition_check(selection, work, evidence, steps, result):
