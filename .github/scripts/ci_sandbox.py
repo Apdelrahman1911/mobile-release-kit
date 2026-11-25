@@ -2116,7 +2116,7 @@ def _observer_toolchain(uid: int, gid: int, *, deadline: float) -> dict:
 
     identity = lambda s: (s.st_dev, s.st_ino, s.st_mode, s.st_uid, s.st_gid,
                            s.st_size, s.st_mtime_ns, s.st_ctime_ns)
-    xcode = canonical(Path("/Applications/Xcode_26.3.app/Contents/Developer"), "xcode")
+    xcode = canonical(Path("/Applications/Xcode_27.1.app/Contents/Developer"), "xcode")
     ancestors = (xcode, *xcode.parents)
     for index, path in enumerate(ancestors):
         checked(path, phase="ancestor", role="xcode", index=index, directory=True)
@@ -2266,7 +2266,7 @@ def _observer_toolchain(uid: int, gid: int, *, deadline: float) -> dict:
     except BaseException as exc:
         raise marked(exc, "settings", "sdk", 0)
     return {"clang": clang, "linker": linker, "sdk": sdk, "toolchain": toolchain,
-            "evidence": {"xcode": "26.3", "clang_sha256": digest(clang, 512 * MiB, "compiler"),
+            "evidence": {"xcode": "27.1", "clang_sha256": digest(clang, 512 * MiB, "compiler"),
                          "linker_sha256": digest(linker, 512 * MiB, "linker"), "sdk": sdk_identity,
                          "sdk_settings_sha256": settings_hash, "provider_entries": count}}
 
@@ -3156,7 +3156,7 @@ class Session:
                 "TMPDIR": str(root / "tmp"), "TMP": str(root / "tmp"), "TEMP": str(root / "tmp"),
                 "XDG_CONFIG_HOME": str(root / "config"), "XDG_CACHE_HOME": str(root / "cache"),
                 "PYTHONDONTWRITEBYTECODE": "1", "PYTHONNOUSERSITE": "1", "PYTHONSAFEPATH": "1",
-                "DEVELOPER_DIR": "/Applications/Xcode_26.3.app/Contents/Developer"}
+                "DEVELOPER_DIR": "/Applications/Xcode_27.1.app/Contents/Developer"}
 
     def _native_pin(self, state: dict, path: Path, *, owner: tuple[int, int] = (0, 0),
                     modes: tuple[int, ...] = (0o555, 0o755)) -> None:
@@ -3297,7 +3297,7 @@ class Session:
                 or kind != "aia" and port is not None):
             raise SessionError("native AIA policy lacks its original owned responder port")
         q = lambda value: json.dumps(str(value), ensure_ascii=True)
-        runtime = (*self.tool_prefixes, Path("/Applications/Xcode_26.3.app/Contents/Developer"),
+        runtime = (*self.tool_prefixes, Path("/Applications/Xcode_27.1.app/Contents/Developer"),
                    *(Path(p) for p in ("/System/Library", "/usr/lib", "/usr/share", "/usr/bin", "/bin", "/usr/sbin", "/sbin")))
         reads = [f"(subpath {q(path)})" for path in (*runtime, state["package"], self.source / "tests",
                                                     *(state["cwd"] / name for name in _NATIVE_LEAVES))]
@@ -5590,7 +5590,7 @@ class Session:
 
         def checked_run(name: str, argv: list[str], seconds: int = 15) -> tuple[CapturedRun, dict]:
             result = self._run(argv, cwd=self.work,
-                               env={"DEVELOPER_DIR": "/Applications/Xcode_26.3.app/Contents/Developer"},
+                               env={"DEVELOPER_DIR": "/Applications/Xcode_27.1.app/Contents/Developer"},
                                seconds=seconds, cpu_seconds=60, output_limit=65536, latch=False)
             note = self._note_capture(name, result)
             if name == "process-observer-build":
