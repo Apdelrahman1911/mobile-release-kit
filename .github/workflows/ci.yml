@@ -211,8 +211,8 @@ jobs:
         run: |
           set -euo pipefail
           ruby_executable="$(command -v ruby)"
-          [[ "$MRK_PYTHON" == /* && "$ruby_executable" == /* ]]
-          [[ "$MRK_PYTHON_312" == /* && "$MRK_PYTHON_313" == /* && "$MRK_PYTHON_314" == /* ]]
+          [[ "$MRK_PYTHON" == /* && "$ruby_executable" == /* ]] || exit 1
+          [[ "$MRK_PYTHON_312" == /* && "$MRK_PYTHON_313" == /* && "$MRK_PYTHON_314" == /* ]] || exit 1
           sudo -n env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin PYTHONSAFEPATH=1 \
             /bin/bash .github/scripts/stage_ci_linux_ruby.sh \
             "$MRK_PYTHON" -I -B .github/scripts/verify_ci.py \
@@ -278,8 +278,8 @@ jobs:
         run: |
           set -euo pipefail
           ruby_executable="$(command -v ruby)"
-          [[ "$MRK_PYTHON" == /* && "$ruby_executable" == /* ]]
-          [[ "$MRK_PYTHON_312" == /* && "$MRK_PYTHON_313" == /* && "$MRK_PYTHON_314" == /* ]]
+          [[ "$MRK_PYTHON" == /* && "$ruby_executable" == /* ]] || exit 1
+          [[ "$MRK_PYTHON_312" == /* && "$MRK_PYTHON_313" == /* && "$MRK_PYTHON_314" == /* ]] || exit 1
           sudo -n env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin PYTHONSAFEPATH=1 \
             "$MRK_PYTHON" -I -B .github/scripts/verify_ci.py \
             --platform macos --source "$GITHUB_WORKSPACE" \
@@ -345,8 +345,8 @@ jobs:
         run: |
           set -euo pipefail
           ruby_executable="$(command -v ruby)"
-          [[ "$MRK_PYTHON" == /* && "$ruby_executable" == /* ]]
-          [[ "$MRK_PYTHON_312" == /* && "$MRK_PYTHON_313" == /* && "$MRK_PYTHON_314" == /* ]]
+          [[ "$MRK_PYTHON" == /* && "$ruby_executable" == /* ]] || exit 1
+          [[ "$MRK_PYTHON_312" == /* && "$MRK_PYTHON_313" == /* && "$MRK_PYTHON_314" == /* ]] || exit 1
           sudo -n env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin PYTHONSAFEPATH=1 \
             "$MRK_PYTHON" -I -B .github/scripts/verify_ci.py \
             --platform macos --source "$GITHUB_WORKSPACE" \
@@ -434,8 +434,8 @@ jobs:
         run: |
           set -euo pipefail
           ruby_executable="$(command -v ruby)"
-          [[ "$MRK_PYTHON" == /* && "$ruby_executable" == /* ]]
-          [[ "$MRK_PYTHON_312" == /* && "$MRK_PYTHON_313" == /* && "$MRK_PYTHON_314" == /* ]]
+          [[ "$MRK_PYTHON" == /* && "$ruby_executable" == /* ]] || exit 1
+          [[ "$MRK_PYTHON_312" == /* && "$MRK_PYTHON_313" == /* && "$MRK_PYTHON_314" == /* ]] || exit 1
           case "$MRK_OS" in
             ubuntu-24.04) platform=linux ;;
             macos-26) platform=macos ;;
@@ -537,8 +537,8 @@ jobs:
         run: |
           set -euo pipefail
           ruby_executable="$(command -v ruby)"
-          [[ "$MRK_PYTHON" == /* && "$ruby_executable" == /* ]]
-          [[ "$MRK_PYTHON_312" == /* && "$MRK_PYTHON_313" == /* && "$MRK_PYTHON_314" == /* ]]
+          [[ "$MRK_PYTHON" == /* && "$ruby_executable" == /* ]] || exit 1
+          [[ "$MRK_PYTHON_312" == /* && "$MRK_PYTHON_313" == /* && "$MRK_PYTHON_314" == /* ]] || exit 1
           case "$MRK_OS" in
             ubuntu-24.04) platform=linux ;;
             macos-26) platform=macos ;;

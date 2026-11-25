@@ -661,7 +661,7 @@ def main():
 
     def source_post(inventory):
         need(type(inventory) is dict and inventory.get('source') == source and type(inventory.get('files')) is list
-             and 0 < len(inventory['files']) < 4096, 'compile-source-inventory')
+             and 1 <= len(inventory['files']) <= 4128, 'compile-source-inventory')
         seen = set()
         for row in inventory['files']:
             cut(True)

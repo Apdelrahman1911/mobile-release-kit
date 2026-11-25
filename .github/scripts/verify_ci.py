@@ -3506,7 +3506,7 @@ def _native_test_failure_locations(text: str, paths: Paths, phase: str, source_f
     if deadline is not None:
         check_clock(deadline)
     if (phase not in {"source", "wheel"} or type(source_files) is not tuple
-            or len(source_files) > 512 or not paths.source.is_absolute() or not paths.work.is_absolute()):
+            or len(source_files) > 1024 or not paths.source.is_absolute() or not paths.work.is_absolute()):
         raise VerificationError("NATIVE_DIAGNOSTIC_SCOPE")
     package = paths.work / ("source-build/src/mobile_release" if phase == "source" else
                             "wheel-venv/lib/python3.11/site-packages/mobile_release")
@@ -3515,7 +3515,7 @@ def _native_test_failure_locations(text: str, paths: Paths, phase: str, source_f
         if deadline is not None:
             check_clock(deadline)
         if (type(name) is not str or not re.fullmatch(
-                r"(?:src/mobile_release|tests(?:/[A-Za-z_][A-Za-z0-9_]*)*)/[A-Za-z_][A-Za-z0-9_]*\.py", name)):
+                r"(?:src/mobile_release|tests)(?:/[A-Za-z_][A-Za-z0-9_]*)*/[A-Za-z_][A-Za-z0-9_]*\.py", name)):
             raise VerificationError("NATIVE_DIAGNOSTIC_SCOPE")
         actual = package / name.removeprefix("src/mobile_release/") if name.startswith("src/") else paths.source / name
         if str(actual) in filenames:
@@ -3564,8 +3564,11 @@ def failure_details(result, step: Step | None = None, paths: Paths | None = None
     value["locations"] = [[name, int(line)] for name, line in re.findall(
         r'File "[^"\r\n]*/(ci_sandbox\.py|ci_checks\.py)", line ([0-9]{1,6})', text)][-8:]
     value["exception_types"] = re.findall(r"(?m)^([A-Za-z_][A-Za-z0-9_.]*(?:Error|Exception)):", text)[-8:]
-    if (result.ok is False and step is not None and paths is not None and step.parser == "native"
-            and step.id in {"native-profile-source", "native-profile-wheel"}):
+    native_entry = (step is not None and step.parser == "native"
+                    and (step.id in {"native-profile-source", "native-profile-wheel"}
+                         or step.id in {"python-full", "python-wheel"}
+                         and step.native_partition in PYTHON_SINGLETON_PARTITIONS))
+    if result.ok is False and paths is not None and native_entry:
         try:
             locations = _native_entry_failure_locations(text,
                 paths.source / "tests/workflow/run_native_profile_checks.py", deadline=deadline)
@@ -3737,10 +3740,7 @@ def failure_details(result, step: Step | None = None, paths: Paths | None = None
             if deadline is not None:
                 check_clock(deadline)
             value["ruby_diagnostics_unavailable"] = True
-    if (step is not None and paths is not None and checks is not None
-            and (step.id in {"native-profile-source", "native-profile-wheel"}
-                 or step.id in {"python-full", "python-wheel"} and step.parser == "native"
-                 and step.native_partition in PYTHON_SINGLETON_PARTITIONS)):
+    if paths is not None and checks is not None and native_entry:
         stderr = result.stderr.decode("utf-8", "replace")
         lowered = stderr.lower()
         # These fixed tokens are observations of captured text, not diagnoses
@@ -3757,8 +3757,9 @@ def failure_details(result, step: Step | None = None, paths: Paths | None = None
         try:
             if deadline is not None:
                 check_clock(deadline)
-            expected = (_native_expected if _native_expected is not None else
-                        checks.native_partition_ids(paths.source, step.native_partition, deadline=deadline))
+            expected = _native_expected if _native_expected is not None else _python_expected
+            if expected is None:
+                expected = checks.native_partition_ids(paths.source, step.native_partition, deadline=deadline)
             diagnostic = native_failure_diagnostic(result.stdout.decode("utf-8", "replace") + "\n" + stderr,
                                                    expected, deadline=deadline)
             if diagnostic is not None:
