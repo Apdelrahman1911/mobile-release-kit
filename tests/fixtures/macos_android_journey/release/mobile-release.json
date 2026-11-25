@@ -1,0 +1,40 @@
+{
+  "schemaVersion": 1,
+  "version": {
+    "source": "public/version.properties",
+    "nameKey": "VERSION_NAME",
+    "buildKey": "BUILD_NUMBER"
+  },
+  "source": {
+    "candidateBranch": "main",
+    "productionBranch": "production"
+  },
+  "android": {
+    "enabled": true,
+    "module": ":app",
+    "applicationId": "org.mrk.fixture",
+    "identityStatus": "unverified"
+  },
+  "ios": {
+    "enabled": false
+  },
+  "metadata": {
+    "root": "public/store",
+    "androidLocales": [
+      "en-US",
+      "fr-FR"
+    ],
+    "iosLocales": [
+      "en-US"
+    ]
+  },
+  "services": {
+    "androidFirebase": "disabled",
+    "iosFirebase": "disabled"
+  },
+  "projectChecks": {
+    "preflight": [],
+    "androidArtifact": [],
+    "iosArtifact": []
+  }
+}

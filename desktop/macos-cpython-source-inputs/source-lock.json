@@ -1,0 +1,149 @@
+{
+  "schemaVersion": 1,
+  "profile": "cpython-3.14.10-macos26-arm64-source-v1",
+  "state": "public-source-nomination-only-not-build-or-supply-authority",
+  "target": {
+    "triple": "aarch64-apple-darwin",
+    "minimumMacOS": "26.0",
+    "pythonVersion": "3.14.10",
+    "gil": true
+  },
+  "archiveSelections": [
+    {
+      "id": "cpython",
+      "version": "3.14.10",
+      "url": "https://www.python.org/ftp/python/3.14.10/Python-3.14.10.tar.xz",
+      "bytes": 24240392,
+      "sha256": "de414a57119abef52784d8993e341d53aed635fc2b05c2607d9f98a2c5b72032",
+      "patches": [],
+      "inventory": {
+        "repositoryPath": null,
+        "bytes": 881778,
+        "sha256": "e790337df702715deef9053743df74b219c4974140849b7ca418f6d216f11e5f",
+        "originalPrefix": "/work/inputs/sources/cpython/",
+        "archiveInventory": {
+          "archiveRoot": "Python-3.14.10",
+          "decodedTar": {
+            "sha256": "f7473de81f3f262729589a2f82b4341dd425a81e58ed649d46fa14a471ed25f3",
+            "size": 122316800
+          },
+          "directoryRosterSha256": "2627c8118bcc8117467cdb47262e9071af2f4d562e4511bfe39349f24da70dcd"
+        }
+      }
+    },
+    {
+      "id": "libffi",
+      "version": "3.4.8",
+      "url": "https://github.com/libffi/libffi/releases/download/v3.4.8/libffi-3.4.8.tar.gz",
+      "bytes": 1397992,
+      "sha256": "bc9842a18898bfacb0ed1252c4febcc7e78fa139fd27fdc7a3e30d9d9356119b",
+      "patches": [],
+      "inventory": {
+        "repositoryPath": "desktop/cpython-source-inputs/libffi-source-inventory.json",
+        "bytes": 75697,
+        "sha256": "227e53ad65c74de61645883f587505a2bf06221bfa0a09c5ee5d000d088f3fcd",
+        "originalPrefix": "/work/inputs/sources/libffi/",
+        "meaning": "whole upstream SOURCE comparison metadata; not a Mac runtime or toolchain"
+      }
+    },
+    {
+      "id": "openssl",
+      "version": "3.5.9",
+      "url": "https://www.openssl.org/source/openssl-3.5.9.tar.gz",
+      "bytes": 53279637,
+      "sha256": "603f5602e2eef00d77fbd429d34dcd5822bb301757a1bc9cdb24c670f1eb859a",
+      "patches": [],
+      "inventory": {
+        "repositoryPath": null,
+        "bytes": 989736,
+        "sha256": "28c7ce464003a3df796fcbb226886a4b4f673d8732b980991a9d78baf16c3435",
+        "originalPrefix": "/work/inputs/sources/openssl/",
+        "archiveInventory": {
+          "archiveRoot": "openssl-3.5.9",
+          "decodedTar": {
+            "sha256": "5e90ea7953e72327e84d34b33f2c5754870915c04cc8c342812e1671ea86e0fb",
+            "size": 135884800
+          },
+          "directoryRosterSha256": "d586ccfdb9d439ebbb65fe1c9666d3551aacf12079547f1aaa8703f61a4de961"
+        }
+      }
+    },
+    {
+      "id": "zlib",
+      "version": "1.3.2",
+      "url": "https://github.com/madler/zlib/releases/download/v1.3.2/zlib-1.3.2.tar.gz",
+      "bytes": 1502830,
+      "sha256": "bb329a0a2cd0274d05519d61c667c062e06990d72e125ee2dfa8de64f0119d16",
+      "patches": [],
+      "inventory": {
+        "repositoryPath": "desktop/cpython-source-inputs/zlib-source-inventory.json",
+        "bytes": 41199,
+        "sha256": "46286b1857f6fa70d2f8f46572c85f6fff3c462fe3211cd077aa155ac376fc65",
+        "originalPrefix": "/work/inputs/sources/zlib/",
+        "meaning": "whole upstream SOURCE comparison metadata; not a Mac runtime or toolchain"
+      }
+    }
+  ],
+  "sourceSelectionProvenance": {
+    "repositoryPath": "desktop/cpython-source-inputs/source-lock.json",
+    "bytes": 24605,
+    "sha256": "5a10f7b24b2b081f97fd93de1f363875b570ef372e4464bc5280b632e74b60a6",
+    "claim": "Unchanged libffi/zlib upstream archive and inventory facts only. ARM64 CPython and OpenSSL use their own exact public archive pins."
+  },
+  "requiredPublicNoticeInputs": [
+    {
+      "component": "cpython",
+      "path": "LICENSE",
+      "bytes": 13804,
+      "sha256": "b0e25a78cffb43f4d92de8b61ccfa1f1f98ecbc22330b54b5251e7b6ba010231"
+    },
+    {
+      "component": "cpython",
+      "path": "Doc/license.rst",
+      "bytes": 60039,
+      "sha256": "8a7329b25131f64b2bea284155f0824876b1af9f4a2f970e6335751d97dfa6dd"
+    },
+    {
+      "component": "cpython",
+      "path": "Modules/expat/COPYING",
+      "bytes": 1144,
+      "sha256": "31b15de82aa19a845156169a17a5488bf597e561b2c318d159ed583139b25e87"
+    },
+    {
+      "component": "libffi",
+      "path": "LICENSE",
+      "bytes": 1132,
+      "sha256": "67894089811f93fca47a76f85e017da6f8582d4ba0905963c6e0f1ad6df7a195"
+    },
+    {
+      "component": "openssl",
+      "path": "LICENSE.txt",
+      "bytes": 10175,
+      "sha256": "7d5450cb2d142651b8afa315b5f238efc805dad827d91ba367d8516bc9d49e7a"
+    },
+    {
+      "component": "zlib",
+      "path": "LICENSE",
+      "bytes": 1002,
+      "sha256": "e32ff4e00d9d94930537635291da39e7e612703334bf6fde8c7f1686fe8a45a2"
+    }
+  ],
+  "noticeCoverage": "partial public SOURCE input nomination; actual CPython/HACL/internal/Clang/compiler-runtime/SDK incorporation and full notices need separate correspondence",
+  "approvals": {
+    "upstreamSourceAcquisition": false,
+    "producerConfiguration": false,
+    "nativeBuild": false,
+    "preparedSupplier": false,
+    "installedRuntime": false,
+    "distributionOrLegal": false
+  },
+  "historicalSupplierPayloadRequired": false,
+  "noFallbacks": [
+    "historical project artifact10639324707",
+    "historical private/supplier captures or local namespaces",
+    "setup-python or system Python as the shipped payload",
+    "Homebrew/PATH/ambient-library lookup",
+    "Linux compiler/rootfs/ELF configuration relabeled as Mac",
+    "unreviewed adjacent-manifest/caller-boolean approval"
+  ]
+}

@@ -1,0 +1,1249 @@
+diff --git a/desktop/src/App.tsx b/desktop/src/App.tsx
+--- a/desktop/src/App.tsx
++++ b/desktop/src/App.tsx
+@@ -2561,7 +2561,7 @@
+             projectName={session?.project.name ?? null} operationProjectName={iosArchiveState.status?.operation ? workspace.projects[iosArchiveState.status.operation.context.projectId]?.project.name ?? null : null}
+             onRefresh={() => { if (session) void loadSnapshot(session.project.id); }} refreshReason={loading ? 'Capabilities are loading.' : refreshReason}
+             onReadVersion={() => { externalObserver.beforeWorkspaceAction(); toolAcquisition.versionIntent(); appleProvisioning.versionIntent(); githubPublication.versionIntent(); void releaseVersion.read(); }} versionReason={releaseVersion.startReason()} onHelp={setHelp}
+-            onCredentials={() => navigate('credentials')} onSettings={() => navigate('settings')} onRecovery={() => navigate('recovery')} /><AgentIOSArchiveAccess controller={agentIOSArchive} /></section>} />}
++            onCredentials={() => navigate('credentials')} onSettings={() => navigate('settings')} onRecovery={() => navigate('recovery')} /><AgentIOSArchiveAccess controller={agentIOSArchive} archive={iosArchiveState} /></section>} />}
+         {page === 'artifacts' && <><Artifacts state={evidenceState} controller={releaseEvidence} inspectionState={artifactInspectionState} inspectionController={artifactInspection} projectName={session?.project.name ?? null} onHelp={setHelp} />
+           <AndroidBuildResultView state={androidBuildState} operationProjectName={androidBuildState.status?.operation ? workspace.projects[androidBuildState.status.operation.context.projectId]?.project.name ?? null : null} />
+           <IOSArchiveResultView state={iosArchiveState} operationProjectName={iosArchiveState.status?.operation ? workspace.projects[iosArchiveState.status.operation.context.projectId]?.project.name ?? null : null} /></>}
+diff --git a/desktop/src/agentIOSArchive.ts b/desktop/src/agentIOSArchive.ts
+--- a/desktop/src/agentIOSArchive.ts
++++ b/desktop/src/agentIOSArchive.ts
+@@ -1,18 +1,19 @@
+-import { BuildPermission } from './agentBuildPermission.ts';
++import { BuildPermission, parseBuildPermissionAccess } from './agentBuildPermission.ts';
++import type { BuildPermissionAccess } from './agentBuildPermission.ts';
++import { buildPermissionRevision } from './agentBuildPermissionProtocol.ts';
+ // A single exact-input START permission, separate from reading and local checks.
+ // The existing iOS controller owns display/STOP; this creates no executor.
+ import { copyBoundedComparisonData } from './offlinePreflightProtocol.ts';
+ import { copyIOSArchiveRequest } from './iosArchiveProtocol.ts';
+-import { parseLocalCheckAccess } from './agentLocalChecks.ts';
+-import type { LocalCheckAccess } from './agentLocalChecks.ts';
+ import type { PrepareIOSBuild } from './iosArchiveTypes.ts';
+ export const AGENT_IOS_ARCHIVE_CONSENT = 'agent-saved-ios-unsigned-archive-v1';
++export const AGENT_IOS_SIGNED_EXPORT_CONSENT = 'agent-saved-ios-signed-export-v1';
+ const REQUEST_LIMIT = 4096; // Same whole RAW GUI body / service frame limit, not stdin alone.
+ export interface IOSArchiveApproval { input: PrepareIOSBuild }
+-export type IOSArchiveAccess = LocalCheckAccess; // Same closed DATA shape, not a reusable grant.
+-export const parseIOSArchiveAccess = parseLocalCheckAccess;
++export type IOSArchiveAccess = BuildPermissionAccess; // MAIN-only revision DATA; never a reusable grant.
++export const parseIOSArchiveAccess = parseBuildPermissionAccess;
+ export interface AgentIOSArchiveApi {
+-  status(): Promise<IOSArchiveAccess>; allow(input: IOSArchiveApproval): Promise<IOSArchiveAccess>; revoke(): Promise<IOSArchiveAccess>;
++  status(): Promise<IOSArchiveAccess>; allow(input: IOSArchiveApproval, expectedPermissionRevision: string): Promise<IOSArchiveAccess>; revoke(): Promise<IOSArchiveAccess>;
+ }
+ type Command = 'agent_ios_archive_access' | 'allow_agent_ios_archive' | 'revoke_agent_ios_archive';
+ type Invoke = <T>(command: string, input?: Record<string, unknown> | Uint8Array) => Promise<T>;
+@@ -23,8 +24,12 @@
+     const v = copyBoundedComparisonData(value, REQUEST_LIMIT, 160);
+     if (!keys(v, ['input'])) return null;
+     const input = copyIOSArchiveRequest('prepare_ios_archive', v.input) as PrepareIOSBuild | null;
+-    if (!input || 'recovery' in input || input.signing !== undefined || input.action !== undefined) return null;
++    if (!input || 'recovery' in input || input.action !== undefined) return null;
+     Object.freeze(input.savedConfig); Object.freeze(input.savedVersion);
++    if (input.signing) {
++      for (const assignment of input.signing.assignments) Object.freeze(assignment);
++      Object.freeze(input.signing.assignments); Object.freeze(input.signing);
++    }
+     return Object.freeze({input:Object.freeze(input)});
+   } catch { return null; }
+ }
+@@ -32,8 +37,9 @@
+   try {
+     const v = copyBoundedComparisonData(value, REQUEST_LIMIT, 160);
+     if (command === 'allow_agent_ios_archive') {
+-      if (!keys(v, ['input', 'consentVersion']) || v.consentVersion !== AGENT_IOS_ARCHIVE_CONSENT ||
+-          !copyIOSArchiveApproval({ input: v.input })) return null;
++      if (!keys(v, ['input', 'consentVersion', 'expectedPermissionRevision']) || !buildPermissionRevision(v.expectedPermissionRevision)) return null;
++      const approval = copyIOSArchiveApproval({ input: v.input });
++      if (!approval || v.consentVersion !== (approval.input.signing ? AGENT_IOS_SIGNED_EXPORT_CONSENT : AGENT_IOS_ARCHIVE_CONSENT)) return null;
+     } else if ((command !== 'agent_ios_archive_access' && command !== 'revoke_agent_ios_archive') || !keys(v, [])) return null;
+     const bytes = new TextEncoder().encode(JSON.stringify(v)); return bytes.length <= REQUEST_LIMIT ? bytes : null;
+   } catch { return null; }
+@@ -47,7 +53,11 @@
+     catch { return Promise.reject(refusal()); }
+   };
+   return Object.freeze({ status: () => call('agent_ios_archive_access', {}),
+-    allow: (input: IOSArchiveApproval) => { const safe = copyIOSArchiveApproval(input); return safe ? call('allow_agent_ios_archive', { ...safe, consentVersion: AGENT_IOS_ARCHIVE_CONSENT }) : Promise.reject(refusal()); },
++    allow: (input: IOSArchiveApproval, expectedPermissionRevision: string) => {
++      const safe = copyIOSArchiveApproval(input);
++      return safe ? call('allow_agent_ios_archive', { ...safe, expectedPermissionRevision,
++        consentVersion: safe.input.signing ? AGENT_IOS_SIGNED_EXPORT_CONSENT : AGENT_IOS_ARCHIVE_CONSENT }) : Promise.reject(refusal());
++    },
+     revoke: () => call('revoke_agent_ios_archive', {}) });
+ }
+ export type PermissionContext=import('./agentBuildPermission.ts').PermissionContext<IOSArchiveApproval>;
+diff --git a/desktop/src/agentIOSArchiveOrigin.ts b/desktop/src/agentIOSArchiveOrigin.ts
+--- a/desktop/src/agentIOSArchiveOrigin.ts
++++ b/desktop/src/agentIOSArchiveOrigin.ts
+@@ -1,7 +1,7 @@
+ // Native Projection DATA only: observe/STOP, never permission to Prepare/Start.
+ import type { IOSArchiveStatus } from './iosArchiveTypes.ts';
+ export interface AgentIOSArchiveOrigin { serviceInstance: string; projectId: string; requestId: string }
+-const id = (v: unknown): v is string => typeof v === 'string' && /^[0-9a-f]{32}$/.test(v) && v !== '0'.repeat(32);
++const id = (v: unknown): v is string => typeof v === 'string' && v.length === 32 && /^[0-9a-f]{32}$/.test(v) && v !== '0'.repeat(32);
+ // Called only after the existing protocol's descriptor-safe bounded copy.
+ export function validAgentIOSArchiveOrigin(value: unknown): value is AgentIOSArchiveOrigin {
+   if (!value || typeof value !== 'object' || Array.isArray(value)) return false;
+@@ -13,7 +13,7 @@
+ }
+ export function canObserveAgentIOSArchive(previous: IOSArchiveStatus | null, next: IOSArchiveStatus, guiPending: boolean): boolean {
+   const a = previous?.operation, b = next.operation;
+-  return !guiPending && !!b && b.context.operation === 'ios-unsigned-archive' &&
++  return !guiPending && !!b && (b.context.operation === 'ios-unsigned-archive' || b.context.operation === 'ios-signed-export') &&
+     !!b.agentIosArchive && validAgentIOSArchiveOrigin(b.agentIosArchive) && (!previous || next.statusRevision > previous.statusRevision) &&
+     (!a || a.phase === 'terminal') && (!a || a.operationId !== b.operationId || a.ownerGeneration !== b.ownerGeneration);
+ }
+diff --git a/desktop/src/components/AgentIOSArchiveAccess.tsx b/desktop/src/components/AgentIOSArchiveAccess.tsx
+--- a/desktop/src/components/AgentIOSArchiveAccess.tsx
++++ b/desktop/src/components/AgentIOSArchiveAccess.tsx
+@@ -1,23 +1,27 @@
+ import { useEffect, useState } from 'react';
+ import type { AgentIOSArchivePermission } from '../agentIOSArchive.ts';
+-export function AgentIOSArchiveAccess({controller}:{controller:AgentIOSArchivePermission}){
++import type { IOSArchiveState } from '../iosArchive.ts';
++export function AgentIOSArchiveAccess({controller,archive}:{controller:AgentIOSArchivePermission;archive:IOSArchiveState}){
+   const [state,setState]=useState(controller.getState());useEffect(()=>controller.subscribe(setState),[controller]);
+-  const access=state.access;
+-  return <section className="session-review" aria-label="One agent iOS archive permission">
+-    <h3>Let an AI or CLI agent archive this project once</h3>
+-    <p>Allow one build from the current saved inputs. The agent has 15 minutes to start. This does not grant MRK signing credentials or Store publishing permission.</p>
++  const access=state.access, signed=archive.archiveMode==='signed'&&!archive.keepCandidate;
++  const unsupported=archive.keepCandidate||archive.archiveMode==='signing-check';
++  return <section className="session-review" aria-label="One agent iOS build permission">
++    <h3>Let an AI or CLI agent {signed?'export a signed IPA':'archive this project'} once</h3>
++    <p>New permission selection: {unsupported?'not supported here; choose unsigned archive or signed export without retaining a candidate.':signed?'signed export using the exact assigned Apple Distribution P12/password, profile and saved signing policy shown above.':'unsigned archive from the current saved inputs; MRK supplies no signing credentials.'}</p>
++    <p>Refresh permission, then approve this selection once. The agent has at most 15 minutes to start; signed export also ends with the original agent read permission. This never grants Store publishing.</p>
++    {signed&&<p className="review-caution">Signed export uses the existing account signing lease and private Keychain/profile setup, plus any selected Firebase file or project read token. Only owned temporary changes are restored; unresolved cleanup stays blocked. Valid Apple Distribution material and a qualified Mac/Xcode runtime are still required.</p>}
+     <p className="review-caution">Xcode and project scripts may run programs, change files, use the network, or sign using the project’s own settings. This is not a sandbox or a guarantee that scripts cannot sign.</p>
+-    <label className="check-row"><input type="checkbox" checked={state.acknowledged} disabled={!!state.pending||state.revokePending}
+-      onChange={(e)=>controller.acknowledge(e.target.checked)}/>I approve one agent build from these saved inputs, with these risks.</label>
++    <label className="check-row"><input type="checkbox" checked={state.acknowledged} disabled={!!state.pending||state.revokePending||unsupported}
++      onChange={(e)=>controller.acknowledge(e.target.checked)}/>{signed?'I approve one agent signed export with these assigned inputs and account effects.':'I approve one agent archive from these saved inputs, with these risks.'}</label>
+     <div className="button-row"><button className="button secondary" type="button" disabled={!controller.canAllow()} onClick={()=>void controller.allow()}>Allow</button>
+       <button className="button secondary" type="button" disabled={state.revokePending} onClick={()=>void controller.revoke()}>Stop</button>
+       <button className="button secondary" type="button" disabled={!!state.pending||state.revokePending} onClick={()=>void controller.status()}>Refresh</button></div>
+-    <p>{access ? access.enabled ? 'Last checked: allowed for one request.' : access.consumed ? 'Permission used. Follow the build status above.' : 'Last checked: not allowed.' : 'Permission has not been checked.'} Stop revokes permission and asks a running build to stop; cleanup may take time.</p>
++    <p>{access ? access.enabled ? 'Last checked: an original one-use permission is allowed.' : access.consumed ? 'Permission used. Follow the original build status above.' : 'Last checked: not allowed.' : 'Permission has not been checked.'} Changing the selection does not change an existing permission. Stop revokes the original permission and asks its build to stop; cleanup may take time.</p>
+     <p>Android and iOS share one build permission. Explicitly allowing either replaces the other unused permission, never a running or unconfirmed build.</p>
+     <details><summary>CLI details</summary>
+       {access?.projectId&&<p>Project <code>{access.projectId}</code> · saved observation <code>{access.observationRevision}</code></p>}
+-      <p>Use <code>mrk ios-archive-prepare PROJECT_ID OBSERVATION_REVISION --json</code>, review its response, then use its separate Start command. Keep the printed IDs for Status/Cancel and do not repeat after a lost reply.</p>
+-      <p>The same iOS panel observes and can stop the build. It cannot start the agent’s prepared build again. Preparation does not renew the permission; an admitted build keeps its existing execution deadline. Results describe an archive, not a signed IPA or a release approval.</p>
++      <p>Use <code>mrk ios-archive-prepare PROJECT_ID OBSERVATION_REVISION --json</code>, review its exact mode and response, then use its separate Start command. The CLI cannot choose a different signing mode or material. Keep the printed IDs for Status/Cancel and do not repeat after a lost reply.</p>
++      <p>The same iOS panel observes and can stop the build. It cannot start the agent’s prepared build again. Preparation does not renew permission. Results describe only that original local archive or validated signed export; no artifact digest, Store approval or candidate provenance is supplied. Recovery remains a separate Desktop action.</p>
+     </details>
+     {state.message&&<p role="status" className="review-caution">{state.message}</p>}
+   </section>;
+diff --git a/desktop/src/iosArchive.ts b/desktop/src/iosArchive.ts
+--- a/desktop/src/iosArchive.ts
++++ b/desktop/src/iosArchive.ts
+@@ -486,8 +486,11 @@
+   /** Same saved observation/selection, not a new reader or tool receipt. */
+   agentArchiveApproval():IOSArchiveApproval|null {
+     this.syncProject();const p=this.state.project;
+-    if(this.prepareReason()||this.pendingGuiSubmissions!==0||!p||p.dirtyDraft||!p.savedConfig||!p.savedVersion||this.state.archiveMode!=='unsigned'||this.state.keepCandidate)return null;
+-    return copyIOSArchiveApproval({input:{projectId:p.projectId,draftRevision:p.draftRevision,baselineGeneration:p.baselineGeneration,savedConfig:p.savedConfig,savedVersion:p.savedVersion}});
++    if(this.prepareReason()||this.pendingGuiSubmissions!==0||!p||p.dirtyDraft||!p.savedConfig||!p.savedVersion||
++      (this.state.archiveMode!=='unsigned'&&this.state.archiveMode!=='signed')||this.state.keepCandidate)return null;
++    return copyIOSArchiveApproval({input:{projectId:p.projectId,draftRevision:p.draftRevision,baselineGeneration:p.baselineGeneration,
++      savedConfig:p.savedConfig,savedVersion:p.savedVersion,
++      ...(this.state.archiveMode==='signed'?{signing:this.state.signing.policy}:{})}});
+   }
+   prepareReason = (): string | null => this.commonReason() ?? iosArchiveOwnerReason(this.state) ??
+     (this.state.status?.availability === 'busy' ? iosArchiveAvailabilityText.busy : null);
+diff --git a/desktop/src/iosArchiveProtocol.ts b/desktop/src/iosArchiveProtocol.ts
+--- a/desktop/src/iosArchiveProtocol.ts
++++ b/desktop/src/iosArchiveProtocol.ts
+@@ -434,7 +434,7 @@
+   if (value.context.operation === 'ios-local-recovery') return recoveryOperation(value, value.context);
+   if (value.context.operation === 'ios-signing-inputs-check') return signingCheckOperation(value, value.context);
+   if (!keys(value, ['operationId', 'ownerGeneration', 'context', 'phase', 'intentUsable', 'outcome', 'reason', 'stage', 'activity', 'disposition', 'result', ...(Object.hasOwn(value,'agentIosArchive') ? ['agentIosArchive'] : [])]) ||
+-      Object.hasOwn(value,'agentIosArchive') && (value.context.operation !== 'ios-unsigned-archive' || !validAgentIOSArchiveOrigin(value.agentIosArchive)) ||
++      Object.hasOwn(value,'agentIosArchive') && (!['ios-unsigned-archive', 'ios-signed-export'].includes(value.context.operation) || !validAgentIOSArchiveOrigin(value.agentIosArchive)) ||
+       !(value.activity === null || activity(value.activity, value.context)) ||
+       !(value.disposition === null || disposition(value.disposition, value.operationId)) ||
+       !(value.result === null || (value.context.operation === 'ios-candidate-inputs' ? candidateResult(value.result, value.context, value.operationId) : result(value.result, value.context, value.operationId)))) return false;
+diff --git a/desktop/src-tauri/src/agent_ios_archive.rs b/desktop/src-tauri/src/agent_ios_archive.rs
+--- a/desktop/src-tauri/src/agent_ios_archive.rs
++++ b/desktop/src-tauri/src/agent_ios_archive.rs
+@@ -1,13 +1,15 @@
+-//! The named saved unsigned iOS archive observation. All values are redacted
++//! Named saved iOS unsigned/archive and signed/export observations. All values are redacted
+ //! DATA; no tool, material, native input, window or settlement authority.
+ pub use crate::agent_android_build::Version;
+ pub(crate) use crate::agent_build_requests::{
+-    Access, ClaimKind, Entry, Inbox, NativeLink, NativeScope,
++    Access, MainAccess, permission_next, permission_revision, ClaimKind, Entry, Inbox, NativeLink, NativeScope,
+ };
+ pub use crate::agent_build_requests::{Prepare, Query, RequestState, Start, StartState};
+ pub use crate::agent_local_checks::{Config, Outcome};
+ use crate::service_protocol::{Error, Id, OperationState, Settlement};
+ use serde::{Deserialize, Serialize};
++#[path = "agent_ios_signed_export.rs"]
++pub mod signed;
+ pub const CONSENT: &str = "agent-saved-ios-unsigned-archive-v1";
+ pub const REPORT_LIMIT: usize = 4096;
+ pub(crate) const FAMILY: crate::agent_build_requests::Family =
+@@ -16,6 +18,7 @@
+ #[serde(rename_all = "kebab-case")]
+ pub enum Mode {
+     SavedIosUnsignedArchive,
++    SavedIosSignedExport,
+ }
+ #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+ #[serde(rename_all = "camelCase", deny_unknown_fields)]
+@@ -23,10 +26,16 @@
+     pub mode: Mode,
+     pub saved_config: Config,
+     pub saved_version: Version,
++    #[serde(default, deserialize_with = "signed::present", skip_serializing_if = "Option::is_none")]
++    pub signing: Option<signed::Review>,
+ }
+ impl Review {
+     pub fn valid(&self) -> bool {
+         self.saved_config.valid() && self.saved_version.valid()
++            && match self.mode {
++                Mode::SavedIosUnsignedArchive => self.signing.is_none(),
++                Mode::SavedIosSignedExport => self.signing.as_ref().is_some_and(signed::Review::valid),
++            }
+     }
+ }
+ #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+@@ -67,6 +76,14 @@
+     ArtifactUnsafe,
+     ArtifactChanged,
+     ArchiveValidationFailed,
++    SigningPolicyRequired,
++    SigningInputMissing,
++    SigningInputInvalid,
++    SigningValidationFailed,
++    AccountAdmissionRefused,
++    ArtifactValidationFailed,
++    SymbolsUploadNotRequested,
++    RecoveryAttention,
+     InputLimit,
+     ResultLimit,
+     WorkRetained,
+@@ -78,8 +95,12 @@
+     Accepted,
+     InputsBound,
+     CheckingXcode,
++    ValidatingSigning,
++    MaterializingSigning,
+     Preparing,
+     Archiving,
++    Exporting,
++    RestoringSigning,
+     Inspecting,
+     DisposingSnapshot,
+     DisposingWork,
+@@ -88,6 +109,7 @@
+ #[serde(rename_all = "kebab-case")]
+ pub enum Scope {
+     LocalUnsignedIosArchiveObservation,
++    LocalSignedIosArtifactValidation,
+ }
+ #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+ #[serde(rename_all = "camelCase", deny_unknown_fields)]
+@@ -97,6 +119,8 @@
+     pub used_version: Version,
+     pub entries: u32,
+     pub bytes: u64,
++    #[serde(default, deserialize_with = "signed::present", skip_serializing_if = "Option::is_none")]
++    pub export: Option<signed::Export>,
+ }
+ impl Report {
+     pub fn valid(&self) -> bool {
+@@ -104,6 +128,10 @@
+             && self.used_version.valid()
+             && (1..=100_000).contains(&self.entries)
+             && (1..=8 * 1024u64.pow(3)).contains(&self.bytes)
++            && match self.scope {
++                Scope::LocalUnsignedIosArchiveObservation => self.export.is_none(),
++                Scope::LocalSignedIosArtifactValidation => self.export.as_ref().is_some_and(signed::Export::valid),
++            }
+     }
+ }
+ #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+@@ -151,6 +179,22 @@
+     pub result: Option<Report>,
+ }
+ impl Operation {
++    pub(crate) fn valid_for(&self, review: &Review) -> bool {
++        self.valid() && review.valid()
++            && (review.mode == Mode::SavedIosSignedExport
++                || !matches!(self.reason, Reason::SigningPolicyRequired | Reason::SigningInputMissing
++                    | Reason::SigningInputInvalid | Reason::SigningValidationFailed | Reason::AccountAdmissionRefused
++                    | Reason::ArtifactValidationFailed | Reason::SymbolsUploadNotRequested | Reason::RecoveryAttention)
++                    && !matches!(self.stage, Some(Stage::ValidatingSigning | Stage::MaterializingSigning
++                        | Stage::Exporting | Stage::RestoringSigning)))
++            && self.result.as_ref().is_none_or(|r| {
++                r.used_config == review.saved_config && r.used_version == review.saved_version
++                    && match review.mode {
++                        Mode::SavedIosUnsignedArchive => r.scope == Scope::LocalUnsignedIosArchiveObservation,
++                        Mode::SavedIosSignedExport => r.scope == Scope::LocalSignedIosArtifactValidation,
++                    }
++            })
++    }
+     pub fn valid(&self) -> bool {
+         if self.status_revision == u32::MAX {
+             return false;
+@@ -234,15 +278,12 @@
+             || !self.do_not_replay
+             || !self.review.valid()
+             || self.operation.as_ref().is_some_and(|o| {
+-                !o.valid()
+-                    || o.result.as_ref().is_some_and(|r| {
+-                        r.used_config != self.review.saved_config
+-                            || r.used_version != self.review.saved_version
+-                    })
++                !o.valid_for(&self.review)
+             })
+             || self.history_available && self.operation.is_none()
+             || self.request_state == RequestState::OriginalAvailable && self.operation.is_none()
+             || self.start_state != StartState::NotRequested && self.operation.is_none()
++                && self.request_state != RequestState::AdmissionUnknown
+         {
+             Err(Error::InvalidRequest)
+         } else {
+diff --git a/desktop/src-tauri/src/application_service_agent_ios_archive.rs b/desktop/src-tauri/src/application_service_agent_ios_archive.rs
+--- a/desktop/src-tauri/src/application_service_agent_ios_archive.rs
++++ b/desktop/src-tauri/src/application_service_agent_ios_archive.rs
+@@ -100,6 +100,7 @@
+             observation_revision: point.revision,
+             review: archive::Review {
+                 mode: archive::Mode::SavedIosUnsignedArchive,
++                signing: None,
+                 saved_config: point.config.clone().unwrap(),
+                 saved_version: archive::Version {
+                     bytes: 32,
+@@ -109,6 +110,7 @@
+                 },
+             }
+             .into(),
++            read: None,
+             draft_revision: 1,
+             baseline_generation: 1,
+             changes,
+@@ -137,7 +139,16 @@
+                 Instant::now() + Duration::from_secs(300),
+             )
+             .unwrap();
++        let entry = claim.entry().clone();
++        assert!(entry.claim_history().unwrap().is_none());
+         claim.returned(true);
++        // Actual original private Service writer, not a manufactured native
++        // receipt. Its inert Prepared DATA cannot start Xcode in this fixture.
++        let (first, data) = entry.claim_history().unwrap().unwrap();
++        assert!(first);
++        let written = service.begin_operation(&scope.runtime_id, data.operation_id().clone(),
++            p::Action::Build, data.state(), data.settlement());
++        entry.history_returned(data.status_revision(), written).unwrap();
+         let next = service.admit_client().unwrap();
+         assert_ne!(client.client_id, next.client_id);
+         let body = service
+diff --git a/desktop/src-tauri/src/asset_session_agent_ios_archive.rs b/desktop/src-tauri/src/asset_session_agent_ios_archive.rs
+--- a/desktop/src-tauri/src/asset_session_agent_ios_archive.rs
++++ b/desktop/src-tauri/src/asset_session_agent_ios_archive.rs
+@@ -16,6 +16,7 @@
+ pub(crate) struct Allow {
+     input: wire::Prepare,
+     consent_version: String,
++    expected_permission_revision: String,
+ }
+ /// The current saved reader and edit stamp are ORIGINALS,
+ /// not decoded from the consent body. Only one grant retains this small pair.
+@@ -25,6 +26,7 @@
+     stamp: SavedEditStamp,
+     saved: ValidatedSavedInput,
+     approval: Arc<crate::saved_command_owner::AgentIOSArchiveApproval>,
++    signing: Option<ios_signing::agent::Pin>,
+ }
+ fn public(error: Error) -> BridgeError {
+     application_service::public_error(error)
+@@ -107,30 +109,42 @@
+         {
+             return Err(public(Error::Conflict));
+         }
++        match (&grant.signing, grant.approval.input().signing.is_some()) {
++            (Some(pin), true) if pin.current(state, &grant.approval.input().context(), registration, root) => {},
++            (None, false) => {},
++            _ => return Err(public(Error::Conflict)),
++        }
+         Ok(())
+     }
+     pub(crate) fn agent_ios_archive_access(
+         &self,
+         window: &str,
+-    ) -> Result<agent::Access, BridgeError> {
++    ) -> Result<agent::MainAccess, BridgeError> {
+         if window != MAIN {
+             return Err(BridgeError::invalid());
+         }
+-        match self.agent_ios_service()? {
+-            Some(s) => s.build_requests().access(agent::FAMILY).map_err(public),
+-            None => Ok(empty()),
+-        }
++        let _state = self.lock();
++        let access = match self.agent_ios_service()? {
++            Some(s) => s.build_requests().access(agent::FAMILY).map_err(public)?,
++            None => empty(),
++        };
++        Ok(agent::MainAccess::new(access, self.inner.agent_ios_archive_revoke_epoch.load(Ordering::Acquire)))
+     }
+     pub(crate) fn allow_agent_ios_archive(
+         &self,
+         window: &str,
+         args: Allow,
+-    ) -> Result<agent::Access, BridgeError> {
+-        if window != MAIN || args.consent_version != agent::CONSENT {
+-            return Err(BridgeError::invalid());
+-        }
+-        let (native, stamp, saved, approval, epoch) = {
++    ) -> Result<agent::MainAccess, BridgeError> {
++        let consent = match args.input.context().operation {
++            wire::Operation::IOSUnsignedArchive => agent::CONSENT,
++            wire::Operation::IOSSignedExport if args.input.action.is_none() && args.input.recovery.is_none() => agent::signed::CONSENT,
++            _ => return Err(BridgeError::invalid()),
++        };
++        if window != MAIN || args.consent_version != consent { return Err(BridgeError::invalid()); }
++        let expected = agent::permission_revision(&args.expected_permission_revision).map_err(public)?;
++        let (native, stamp, saved, approval, signing) = {
+             let mut state = self.lock();
++            agent::permission_next(expected, self.inner.agent_ios_archive_revoke_epoch.load(Ordering::Acquire)).map_err(public)?;
+             if self.ios_archive_gate(&state) != wire::Availability::Available {
+                 return Err(crate::ios_archive_owner::unavailable());
+             }
+@@ -158,19 +172,21 @@
+             ) {
+                 return Err(public(Error::Conflict));
+             }
++            let signing = if args.input.signing.is_some() {
++                let material = self.review_ios_material(&state, &args.input.context(), registration, &root)?;
++                Some(ios_signing::agent::Pin::capture(&material)?)
++            } else { None };
+             let approval = self
+                 .inner
+                 .bridge
+                 .ios_archive
+                 .approve_agent_ios_archive(args.input, &self.inner.session_identity)?;
+-            let epoch = self
+-                .inner
+-                .agent_ios_archive_revoke_epoch
+-                .load(Ordering::Acquire);
+-            if epoch == u64::MAX {
++            if signing.as_ref().is_some_and(|pin| pin.retained_bytes()
++                .and_then(|n| approval.signing_backing_bytes().and_then(|a| n.checked_add(a)))
++                .is_none_or(|n| n > crate::agent_build_requests::SIGNED_BINDING_BYTES)) {
+                 return Err(public(Error::StateUnknown));
+             }
+-            (native, edit.stamp()?, saved, approval, epoch)
++            (native, edit.stamp()?, saved, approval, signing)
+         };
+         // These original Host/Service calls may perform store IO. NEVER hold
+         // Doc/Edit across them. They require the already-listening read host;
+@@ -181,8 +197,8 @@
+             .application_service
+             .identity_request_service(&native)
+             .map_err(public)?;
+-        let point = service
+-            .build_point_for_runtime(&native.runtime_id)
++        let (point, read) = service
++            .build_point_with_read(&native.runtime_id)
+             .map_err(public)?;
+         let scope = Arc::new(agent::NativeScope {
+             project_id: point.project_id.clone(),
+@@ -195,6 +211,7 @@
+             document: Arc::downgrade(&self.inner.session_identity),
+             observation_revision: point.revision,
+             review: approval.review().clone().into(),
++            read: signing.as_ref().map(|_| read.clone()),
+             draft_revision: approval
+                 .input()
+                 .draft_revision
+@@ -205,7 +222,7 @@
+                 .ok_or_else(|| public(Error::Conflict))?,
+             changes: self.inner.changes.clone(),
+         });
+-        if !scope.matches(&point) {
++        if !scope.matches(&point) || !scope.matches_read(&read) {
+             return Err(public(Error::Conflict));
+         }
+         let grant = Arc::new(Grant {
+@@ -214,6 +231,7 @@
+             stamp,
+             saved,
+             approval,
++            signing,
+         });
+         let mut state = self.lock();
+         if self.ios_archive_gate(&state) != wire::Availability::Available {
+@@ -228,14 +246,7 @@
+             .edits
+             .saved_registration_guard(&self.inner.session_identity)?;
+         self.agent_ios_current(&state, &grant, &edit, registration, &root)?;
+-        if self
+-            .inner
+-            .agent_ios_archive_revoke_epoch
+-            .load(Ordering::Acquire)
+-            != epoch
+-        {
+-            return Err(public(Error::AccessDenied));
+-        }
++        let next = agent::permission_next(expected, self.inner.agent_ios_archive_revoke_epoch.load(Ordering::Acquire)).map_err(public)?;
+         if let Some(original) = self.inner.agent_ios_archive_service.get() {
+             if original.as_ptr() != Arc::as_ptr(&service) {
+                 return Err(public(Error::Conflict));
+@@ -250,12 +261,13 @@
+         // bounded memory, and has no reverse callback into this document.
+         let access = service.build_requests().allow(scope).map_err(public)?;
+         state.agent_ios_archive_grant = Some(grant);
+-        Ok(access)
++        self.inner.agent_ios_archive_revoke_epoch.store(next, Ordering::Release);
++        Ok(agent::MainAccess::new(access, next))
+     }
+     pub(crate) fn revoke_agent_ios_archive(
+         &self,
+         window: &str,
+-    ) -> Result<agent::Access, BridgeError> {
++    ) -> Result<agent::MainAccess, BridgeError> {
+         if window != MAIN {
+             return Err(BridgeError::invalid());
+         }
+@@ -270,7 +282,9 @@
+             Ok(None) => Ok(empty()),
+             Err(e) => Err(e),
+         };
+-        advanced.and(revoked) // Counter failure must not skip the original STOP.
++        // Counter failure must not skip the original STOP.
++        let access = advanced.and(revoked)?;
++        Ok(agent::MainAccess::new(access, self.inner.agent_ios_archive_revoke_epoch.load(Ordering::Acquire)))
+     }
+     fn admit_agent_ios_archive(
+         &self,
+@@ -301,12 +315,12 @@
+         }
+         match kind {
+             agent::ClaimKind::Prepare => {
++                let (point, read) = service
++                    .build_point_with_read(&grant.native.runtime_id)
++                    .map_err(public)?;
+                 if !entry.prepare_live()
+-                    || !entry.scope().matches(
+-                        &service
+-                            .build_point_for_runtime(&grant.native.runtime_id)
+-                            .map_err(public)?,
+-                    )
++                    || !entry.scope().matches(&point)
++                    || !entry.scope().matches_read(&read)
+                 {
+                     return Err(public(Error::Conflict));
+                 }
+@@ -345,19 +359,35 @@
+         }
+         match kind {
+             agent::ClaimKind::Prepare => {
++                let material = match &grant.signing {
++                    None => None,
++                    Some(pin) => {
++                        let original = self.review_ios_material(&state, &grant.approval.input().context(), registration, &root)?;
++                        if !pin.matches(&original) { return Err(public(Error::Conflict)); }
++                        Some(original)
++                    },
++                };
+                 self.inner.bridge.ios_archive.prepare_agent_ios_archive(
+                     entry.clone(),
+                     grant.approval.clone(),
+                     registration,
+                     root,
+                     gate,
++                    material,
+                 )?;
+             }
+             agent::ClaimKind::Start => {
++                let material = self.inner.bridge.ios_archive.agent_ios_archive_prepared_material(entry)?;
++                match (&grant.signing, &material) {
++                    (None, None) => {},
++                    (Some(pin), Some(original)) if pin.matches(original) => self.recheck_ios_material(&state, original, registration, &root)?,
++                    _ => return Err(public(Error::Conflict)),
++                }
+                 let admitted = self.inner.bridge.ios_archive.start_agent_ios_archive(
+                     entry,
+                     Some((registration, root)),
+                     gate,
++                    material,
+                 )?;
+                 drop(edit);
+                 drop(state);
+@@ -437,9 +467,30 @@
+         assert!(!bridge.application_service.status().unwrap().enabled);
+     }
+     #[test]
++    fn ios_delayed_first_allow_cannot_rebase_a_returned_permission_revision_after_revoke() {
++        let bridge=Arc::new(DesktopBridge::new("/unopened-ios-revision-data-fixture".into()));
++        let doc=DocumentBinding::new(bridge.clone());
++        let original=doc.agent_ios_archive_access(MAIN).unwrap();
++        assert_eq!(original.permission_revision,"0");
++        assert_eq!(doc.revoke_agent_ios_archive(MAIN).unwrap().permission_revision,"1");
++        let context=wire::tests::signed_context();
++        for signing in [None,context.signing.clone()] {
++            let signed=signing.is_some();
++            let input=wire::Prepare{project_id:context.project_id.clone(),draft_revision:context.draft_revision,
++                baseline_generation:context.baseline_generation,saved_config:context.saved_config.clone(),
++                saved_version:context.saved_version.clone(),signing,recovery:None,action:None};
++            let result=doc.allow_agent_ios_archive(MAIN,Allow{input,
++                consent_version:if signed{agent::signed::CONSENT}else{agent::CONSENT}.into(),
++                expected_permission_revision:original.permission_revision.clone()});
++            assert_eq!(result.unwrap_err(),public(Error::AccessDenied));
++        }
++        assert!(!doc.agent_ios_archive_access(MAIN).unwrap().enabled);
++        assert!(!bridge.application_service.status().unwrap().enabled);
++    }
++    #[test]
+     fn ios_consent_cannot_supply_tools_material_window_or_native_operation_ids() {
+         let base = serde_json::json!({"input":{"projectId":"p","draftRevision":0,"baselineGeneration":0,
+-            "savedConfig":{"bytes":2,"sha256":"a".repeat(64)},"savedVersion":{"source":"version.properties","bytes":3,"sha256":"b".repeat(64),"name":"1.0","build":1}},"consentVersion":agent::CONSENT});
++            "savedConfig":{"bytes":2,"sha256":"a".repeat(64)},"savedVersion":{"source":"version.properties","bytes":3,"sha256":"b".repeat(64),"name":"1.0","build":1}},"consentVersion":agent::CONSENT,"expectedPermissionRevision":"0"});
+         let decode = |v: &Value| {
+             super::super::agent_identity::decode::<Allow>(&serde_json::to_vec(v).unwrap())
+         };
+diff --git a/desktop/src-tauri/src/asset_session_ios_signing.rs b/desktop/src-tauri/src/asset_session_ios_signing.rs
+--- a/desktop/src-tauri/src/asset_session_ios_signing.rs
++++ b/desktop/src-tauri/src/asset_session_ios_signing.rs
+@@ -4,6 +4,8 @@
+ use super::*;
+ use crate::ios_archive_protocol as wire;
+ use sha2::{Digest, Sha256};
++#[path = "asset_session_agent_ios_signing.rs"]
++pub(super) mod agent;
+
+ pub(crate) const MATERIAL_PREFIX: &[u8] = b"MRK-IOS-MATERIAL/1\n";
+ pub(crate) const MATERIAL_SUFFIX: &[u8] = b"\nMRK-IOS-MATERIAL-END\n";
+diff --git a/desktop/src-tauri/src/installed_cli.rs b/desktop/src-tauri/src/installed_cli.rs
+--- a/desktop/src-tauri/src/installed_cli.rs
++++ b/desktop/src-tauri/src/installed_cli.rs
+@@ -161,6 +161,7 @@
+ Configured project checks may run programs, modify files or contact the network; this is not a sandbox.\n\
+ Keep the printed instance/request IDs: inspect or cancel the same original, never replay it.\n\
+ Android build preparation and Start are separate, one-use requests for the exact saved inputs approved in Desktop.\n\
++iOS uses the same four archive commands for an unsigned archive or separately approved signed export; no candidate/recovery or material arguments.\n\
+ The 15-minute grant authorizes START, not renewed run time. Project code can have file/network/signing effects.\n\
+ Delegated identity edits need the original Desktop source review and separate one-use exact-change permission.\n\
+ Closed configuration settings use the original Desktop editor; Apply needs exact one-use Desktop preview permission.\n\
+@@ -231,7 +232,7 @@
+     CommandCapability {command:"git-index-cancel",arguments:&["PROJECT_ID","SERVICE_INSTANCE","REQUEST_ID"],description:"STOP is not cleanup."},
+ ];
+ const IOS_ARCHIVE_COMMANDS: [CommandCapability; 4] = [
+-    CommandCapability { command: "ios-archive-prepare", arguments: &["PROJECT_ID", "OBSERVATION_REVISION"], description: "Preview unsigned archive; no GO." },
++    CommandCapability { command: "ios-archive-prepare", arguments: &["PROJECT_ID", "OBSERVATION_REVISION"], description: "Preview Desktop-approved archive/export; no GO." },
+     CommandCapability { command: "ios-archive-start", arguments: &["PROJECT_ID", "SERVICE_INSTANCE", "REQUEST_ID", "OPERATION_ID", "OWNER_GENERATION"], description: "Start original once." },
+     CommandCapability { command: "ios-archive-status", arguments: &["PROJECT_ID", "SERVICE_INSTANCE", "REQUEST_ID"], description: "Observe original; no replay." },
+     CommandCapability { command: "ios-archive-cancel", arguments: &["PROJECT_ID", "SERVICE_INSTANCE", "REQUEST_ID"], description: "STOP is not settlement." },
+@@ -285,9 +286,11 @@
+                 "commands": ANDROID_BUILD_COMMANDS,
+             },
+             "iosArchives": {
+-                "scope": "saved-ios-unsigned-archive", "defaultEnabled": false, "oneUse": true,
++                "scope": "saved-ios-archive", "defaultEnabled": false, "oneUse": true,
++                "modes": {"saved-ios-unsigned-archive":{"toolkitSigning":false},
++                    "saved-ios-signed-export":{"toolkitSigning":true,"requiresSeparateSigningConsent":true,"requiresOriginalReadThroughCompletion":true}},
+                 "maxStartWindowSeconds": crate::agent_build_requests::START_WINDOW.as_secs(), "maxRetainedRequests": crate::agent_build_requests::LIMIT,
+-                "prepareStartsBuild": false, "projectCodeEffectsPossible": true, "toolkitSigning": false, "storePublishing": false,
++                "prepareStartsBuild": false, "projectCodeEffectsPossible": true, "storePublishing": false,
+                 "readGrantAuthorizesExecution": false, "nativeAvailabilityChecked": false,
+                 "requires": {"runningDesktop": true, "projectReadGrant": true, "separateSavedInputBuildPermission": true, "qualifiedMacXcodeRuntime": true},
+                 "commands": IOS_ARCHIVE_COMMANDS, "archiveDigestAvailable": false,
+@@ -761,7 +764,12 @@
+         assert!(human.contains("mrk ios-archive-prepare") && human.contains("mrk android-build-prepare"));
+         let ios=&value["iosArchives"];
+         assert_eq!(ios["defaultEnabled"],false);assert_eq!(ios["oneUse"],true);
+-        assert_eq!(ios["nativeAvailabilityChecked"],false);assert_eq!(ios["toolkitSigning"],false);
++        assert_eq!(ios["nativeAvailabilityChecked"],false);
++        assert_eq!(ios["modes"]["saved-ios-unsigned-archive"]["toolkitSigning"],false);
++        assert_eq!(ios["modes"]["saved-ios-signed-export"]["toolkitSigning"],true);
++        assert_eq!(ios["modes"]["saved-ios-signed-export"]["requiresSeparateSigningConsent"],true);
++        assert_eq!(ios["modes"]["saved-ios-signed-export"]["requiresOriginalReadThroughCompletion"],true);
++        assert_eq!(ios["commands"].as_array().unwrap().len(),4);
+         assert_eq!(ios["storePublishing"],false);assert_eq!(ios["archiveDigestAvailable"],false);
+         assert_eq!(ios["maxRetainedRequests"],value["androidBuilds"]["maxRetainedRequests"]);
+         assert_eq!(ios["sharesBuildGrantAndRequestLimitWithAndroid"],true);
+diff --git a/desktop/src-tauri/src/installed_cli_ios_archive.rs b/desktop/src-tauri/src/installed_cli_ios_archive.rs
+--- a/desktop/src-tauri/src/installed_cli_ios_archive.rs
++++ b/desktop/src-tauri/src/installed_cli_ios_archive.rs
+@@ -24,7 +24,16 @@
+         s.start_state,
+         receipt(&s.origin)
+     );
+-    out.push_str("Scope: saved unsigned iOS archive observation. Project scripts may read/write files, use network or sign with their own configuration. MRK supplies no signing credentials and does not publish to a Store.\n");
++    match (&s.review.mode, &s.review.signing) {
++        (build::Mode::SavedIosUnsignedArchive, None) => out.push_str("Scope: saved unsigned iOS archive observation. MRK supplies no signing credentials.\n"),
++        (build::Mode::SavedIosSignedExport, Some(signing)) => {
++            out.push_str(&format!("Scope: separately approved local signed iOS export. Team {} / distribution certificate {}. Assigned Firebase: {}; project read token: {}.\n",
++                signing.team_id, signing.distribution_certificate_sha256, signing.firebase, signing.project_read_token));
++            out.push_str("Uses the original assigned P12/password/profile and account signing lease; no credential arguments or mode override. Original read revocation stops the signed operation.\n");
++        },
++        _ => out.push_str("Unconfirmed iOS mode; do not start or replay.\n"),
++    }
++    out.push_str("Project scripts may read/write files, use network or sign with their own configuration. Not a sandbox; no Store publishing or candidate provenance.\n");
+     if let Some(op) = &s.operation {
+         out.push_str(&format!(
+             "Operation {} / {} · {:?} · {:?}\n",
+@@ -41,7 +50,12 @@
+             out.push_str(&format!("Start once, only if this matches your Desktop approval:\nmrk ios-archive-start {} {} {} {} {} --json\n",s.origin.project_id.as_str(),s.origin.service_instance.as_str(),s.origin.request_id.as_str(),op.operation_id.as_str(),op.owner_generation.as_str()));
+         }
+         if let Some(r) = &op.result {
+-            out.push_str(&format!("Historical archive observation: {} entries / {} bytes. No digest was reported; not an IPA, signing check or release approval.\n",r.entries,r.bytes));
++            out.push_str(&format!("Historical archive observation: {} entries / {} bytes.\n",r.entries,r.bytes));
++            if let Some(export) = &r.export {
++                out.push_str(&format!("Original validated signed IPA: {} bytes; {} native paths / {} identities / {} present symbol slices.\n",
++                    export.ipa_bytes, export.pairing.native_paths, export.pairing.native_identities, export.pairing.present_symbol_slices));
++            } else { out.push_str("No signed IPA is reported by this unsigned mode.\n"); }
++            out.push_str("No digest or release approval is reported. Recovery uses the separate original Desktop route.\n");
+         }
+         if op.settlement == p::Settlement::Unknown {
+             out.push_str(
+@@ -102,4 +116,21 @@
+         .unwrap();
+         assert!(p::encode_request(&frame).unwrap().len() <= p::REQUEST_BYTES);
+     }
++    #[test]
++    fn signed_cli_describes_exact_approved_policy_without_credentials_or_new_commands() {
++        let value=serde_json::json!({"origin":{"projectId":"a".repeat(32),"serviceInstance":"b".repeat(32),"requestId":"c".repeat(32)},
++            "expectedObservationRevision":1,"requestState":"queued","startState":"not-requested",
++            "review":{"mode":"saved-ios-signed-export","savedConfig":{"bytes":10,"sha256":"d".repeat(64)},
++                "savedVersion":{"bytes":20,"sha256":"e".repeat(64),"name":"1.2","build":8},
++                "signing":{"teamId":"ABCDE12345","distributionCertificateSha256":"f".repeat(64),"firebase":false,"projectReadToken":true}},
++            "operation":null,"historyAvailable":false,"doNotReplay":true});
++        let status:build::Status=serde_json::from_value(value).unwrap();
++        status.validate().unwrap();
++        let text=human(&status);
++        assert!(text.contains("ABCDE12345")&&text.contains(&"f".repeat(64)));
++        assert!(text.contains("separately approved")&&text.contains("no Store publishing"));
++        assert!(!text.contains("mrk ios-archive-start"));
++        assert!(!text.contains("MRK supplies no signing credentials"));
++        for field in ["recordId","contextRevision","privateKey","profileBytes"] { assert!(!text.contains(field)); }
++    }
+ }
+diff --git a/desktop/src-tauri/src/ios_archive_owner.rs b/desktop/src-tauri/src/ios_archive_owner.rs
+--- a/desktop/src-tauri/src/ios_archive_owner.rs
++++ b/desktop/src-tauri/src/ios_archive_owner.rs
+@@ -26,8 +26,9 @@
+     pub(crate) fn new(runtime: RuntimeConfig) -> Self { Self { saved: SavedCommandOwner::ios_archive(runtime) } }
+     pub(crate) fn approve_agent_ios_archive(&self,input:Prepare,document:&Arc<()>)->Result<Arc<crate::saved_command_owner::AgentIOSArchiveApproval>,BridgeError>{self.saved.approve_agent_ios_archive(input,document)}
+     pub(crate) fn agent_ios_archive_approval_current(&self,approval:&crate::saved_command_owner::AgentIOSArchiveApproval,document:&Arc<()>)->bool{self.saved.agent_ios_archive_approval_current(approval,document)}
+-    pub(crate) fn prepare_agent_ios_archive(&self,entry:Arc<crate::agent_build_requests::Entry>,approval:Arc<crate::saved_command_owner::AgentIOSArchiveApproval>,registration:u32,root:RegisteredRoot,gate:Availability)->Result<Status,BridgeError>{self.saved.prepare_agent_ios_archive(entry,approval,registration,root,gate)}
+-    pub(crate) fn start_agent_ios_archive(&self,entry:&Arc<crate::agent_build_requests::Entry>,registered:Option<(u32,RegisteredRoot)>,gate:Availability)->Result<Admitted,BridgeError>{self.saved.start_agent_ios_archive(entry,registered,gate)}
++    pub(crate) fn prepare_agent_ios_archive(&self,entry:Arc<crate::agent_build_requests::Entry>,approval:Arc<crate::saved_command_owner::AgentIOSArchiveApproval>,registration:u32,root:RegisteredRoot,gate:Availability,material:Option<Arc<crate::asset_session::IOSSigningMaterial>>)->Result<Status,BridgeError>{self.saved.prepare_agent_ios_archive(entry,approval,registration,root,gate,material)}
++    pub(crate) fn agent_ios_archive_prepared_material(&self,entry:&Arc<crate::agent_build_requests::Entry>)->Result<Option<Arc<crate::asset_session::IOSSigningMaterial>>,BridgeError>{self.saved.agent_ios_archive_prepared_material(entry)}
++    pub(crate) fn start_agent_ios_archive(&self,entry:&Arc<crate::agent_build_requests::Entry>,registered:Option<(u32,RegisteredRoot)>,gate:Availability,material:Option<Arc<crate::asset_session::IOSSigningMaterial>>)->Result<Admitted,BridgeError>{self.saved.start_agent_ios_archive(entry,registered,gate,material)}
+     pub(crate) fn subscribe(&self) -> watch::Receiver<u32> { self.saved.subscribe() }
+     pub(crate) fn stopping(&self) -> bool { self.saved.stopping() }
+     pub(crate) fn disabled(&self) -> bool { self.saved.disabled() }
+diff --git a/desktop/src-tauri/src/ios_archive_protocol.rs b/desktop/src-tauri/src/ios_archive_protocol.rs
+--- a/desktop/src-tauri/src/ios_archive_protocol.rs
++++ b/desktop/src-tauri/src/ios_archive_protocol.rs
+@@ -939,7 +939,7 @@
+ }
+ impl TryFrom<ProjectionWire> for Projection { type Error = &'static str;
+     fn try_from(value: ProjectionWire) -> Result<Self, Self::Error> { match value {
+-        ProjectionWire::Archive(v) if !v.context.recovery() && (v.agent_ios_archive.is_none() || v.context.operation==Operation::IOSUnsignedArchive) => Ok(Self { agent_ios_archive: v.agent_ios_archive, operation_id: v.operation_id, owner_generation: v.owner_generation,
++        ProjectionWire::Archive(v) if !v.context.recovery() && (v.agent_ios_archive.is_none() || matches!(v.context.operation,Operation::IOSUnsignedArchive|Operation::IOSSignedExport)) => Ok(Self { agent_ios_archive: v.agent_ios_archive, operation_id: v.operation_id, owner_generation: v.owner_generation,
+             context: v.context, phase: v.phase, intent_usable: v.intent_usable, outcome: v.outcome, reason: v.reason, stage: v.stage,
+             activity: v.activity, disposition: v.disposition, result: v.result, report: None }),
+         ProjectionWire::Recovery(v) if v.context.recovery() => Ok(Self { agent_ios_archive:None, operation_id: v.operation_id, owner_generation: v.owner_generation,
+@@ -950,7 +950,7 @@
+ }
+ impl Serialize for Projection { fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+     use serde::ser::Error;
+-    if self.agent_ios_archive.is_some() && self.context.operation!=Operation::IOSUnsignedArchive {return Err(S::Error::custom("wrong agent archive mode"));}
++    if self.agent_ios_archive.is_some() && !matches!(self.context.operation,Operation::IOSUnsignedArchive|Operation::IOSSignedExport) {return Err(S::Error::custom("wrong agent archive mode"));}
+     if self.context.recovery() {
+         if self.disposition.is_some() || self.result.is_some() { return Err(S::Error::custom("wrong recovery status fields")); }
+         RecoveryProjectionWire { operation_id: self.operation_id.clone(), owner_generation: self.owner_generation.clone(), context: self.context.clone(),
+@@ -964,7 +964,7 @@
+     }
+ } }
+ impl Projection { fn valid(&self) -> bool {
+-    if self.agent_ios_archive.is_some() && self.context.operation!=Operation::IOSUnsignedArchive {return false;}
++    if self.agent_ios_archive.is_some() && !matches!(self.context.operation,Operation::IOSUnsignedArchive|Operation::IOSSignedExport) {return false;}
+     if !token(&self.operation_id) || !token(&self.owner_generation) || !self.context.valid()
+         ||self.context.candidate()&&!crate::android_build_protocol::candidate_id(&self.operation_id)
+         || self.stage.is_some_and(|stage| !stage.valid(&self.context))
+@@ -1142,7 +1142,7 @@
+                 {"kind":"apple-profile","recordId":"2".repeat(32),"recordRevision":2,"contextRevision":3}]});
+         let selected = Context::deserialize(&value).unwrap(); assert!(selected.valid()); selected
+     }
+-    fn signed_complete() -> Value {
++    pub(crate) fn signed_complete() -> Value {
+         let selected = signed_context(); let mut value = complete();
+         value["context"] = json!(selected);
+         value["activity"]["commands"]["export"] = json!({"outcome":"exited","exitCode":0});
+diff --git a/desktop/src-tauri/src/saved_command_agent_ios_archive.rs b/desktop/src-tauri/src/saved_command_agent_ios_archive.rs
+--- a/desktop/src-tauri/src/saved_command_agent_ios_archive.rs
++++ b/desktop/src-tauri/src/saved_command_agent_ios_archive.rs
+@@ -2,18 +2,14 @@
+ //! original runtime, Prepared/Session, native jobs and final observer are used.
+ use super::*;
+ use crate::{agent_ios_archive as agent, service_protocol as service};
++#[path = "saved_command_agent_ios_signed_export.rs"]
++mod signed_export;
+
+ fn failure() -> BridgeError {
+     BridgeError::new("agent_ios_archive_unavailable", "This original IOS build request cannot proceed. Inspect its exact request; do not replay it.")
+ }
+ pub(super) fn fixed(input: &ios_wire::Prepare) -> bool {
+-    input.signing.is_none()
+-        && input.recovery.is_none()
+-        && input.action.is_none()
+-        && input.draft_revision.is_some()
+-        && input.baseline_generation.is_some()
+-        && input.saved_config.is_some()
+-        && input.saved_version.is_some()
++    signed_export::mode(&input.context()).is_some()
+ }
+
+ fn version(v: &ios_wire::SavedVersion) -> agent::Version {
+@@ -39,6 +35,13 @@
+     }
+     pub(crate) fn review(&self) -> &agent::Review {
+         &self.review
++    }
++    pub(crate) fn signing_backing_bytes(&self) -> Option<usize> {
++        signed_export::approval_backing(&self.input, &self.review)
++    }
++    #[cfg(test)]
++    pub(crate) fn signing_backing_data(input: &ios_wire::Prepare) -> Option<usize> {
++        signed_export::approval_backing(input, &signed_export::review(&input.context()).ok()?)
+     }
+     fn current(&self, inner: &Arc<Inner>, _r: &Registry) -> bool {
+         self.owner.as_ptr() == Arc::as_ptr(inner)
+@@ -63,10 +66,7 @@
+     let Some(review) = s.review.ios() else {
+         return false;
+     };
+-    c.operation == ios_wire::Operation::IOSUnsignedArchive
+-        && c.signing.is_none()
+-        && c.recovery.is_none()
+-        && c.action.is_none()
++    signed_export::review(c).is_ok_and(|current| &current == review)
+         && c.project_id == s.runtime_id
+         && c.draft_revision == Some(s.draft_revision)
+         && c.baseline_generation == Some(s.baseline_generation)
+@@ -138,28 +138,6 @@
+     serde_json::from_value(serde_json::to_value(value).map_err(|_| failure())?)
+         .map_err(|_| failure())
+ }
+-fn report(value: &ios_wire::ResultValue) -> Result<agent::Report, BridgeError> {
+-    // The original native terminal validated this exact unsigned shape. Copy
+-    // only real counts and saved comparisons, not a path, BundleID or digest.
+-    let v = value.ordinary_build().ok_or_else(failure)?;
+-    if v.ipa.is_some() || v.ipa_bytes.is_some() || v.pairing.is_some() {
+-        return Err(failure());
+-    }
+-    let result = agent::Report {
+-        scope: agent::Scope::LocalUnsignedIosArchiveObservation,
+-        used_config: agent::Config {
+-            bytes: v.used_config.bytes,
+-            sha256: v.used_config.sha256.clone(),
+-        },
+-        used_version: version(&v.used_version),
+-        entries: v.entries,
+-        bytes: v.bytes,
+-    };
+-    if !result.valid() {
+-        return Err(failure());
+-    }
+-    Ok(result)
+-}
+ fn disposition(v: &ios_wire::Disposition) -> Result<agent::Disposition, BridgeError> {
+     Ok(agent::Disposition {
+         snapshot: copy(&v.snapshot)?,
+@@ -176,11 +154,7 @@
+     let Context::IOSArchive(c) = &p.context else {
+         return Err(failure());
+     };
+-    if c.operation != ios_wire::Operation::IOSUnsignedArchive
+-        || c.signing.is_some()
+-        || c.recovery.is_some()
+-        || c.action.is_some()
+-    {
++    if signed_export::mode(c).is_none() {
+         return Err(failure());
+     }
+     let unknown = p.phase == Phase::Unknown;
+@@ -209,7 +183,7 @@
+             Some(Terminal::IOSArchive(t)) => (
+                 t.disposition.as_ref().map(disposition).transpose()?,
+                 if outcome == agent::Outcome::Complete {
+-                    Some(report(t.result.as_ref().ok_or_else(failure)?)?)
++                    Some(signed_export::report(c,t.result.as_ref().ok_or_else(failure)?)?)
+                 } else {
+                     None
+                 },
+@@ -262,7 +236,7 @@
+         disposition,
+         result,
+     };
+-    if !output.valid() {
++    if !output.valid_for(&signed_export::review(c)?) {
+         return Err(failure());
+     }
+     Ok(output)
+@@ -315,25 +289,19 @@
+         document: &Arc<()>,
+     ) -> Result<Arc<Approval>, BridgeError> {
+         self.require_domain(SavedCommandDomain::IOSArchive)?;
+-        let input = ios_wire::prepare(&serde_json::to_value(input).map_err(|_| failure())?)?;
++        let mut input = ios_wire::prepare(&serde_json::to_value(input).map_err(|_| failure())?)?;
++        signed_export::compact_policy(&mut input);
+         if !fixed(&input) {
+             return Err(failure());
+         }
+         let r = self.inner.lock();
+         if !self.inner.ios_installed_selected()
++            || !self.inner.ios_mode_qualified(&Context::IOSArchive(input.context()), None)
+             || self.inner.availability(&r, Availability::Available) != Availability::Available
+         {
+             return Err(failure());
+         }
+-        let config = input.saved_config.as_ref().ok_or_else(failure)?;
+-        let review = agent::Review {
+-            mode: agent::Mode::SavedIosUnsignedArchive,
+-            saved_config: agent::Config {
+-                bytes: config.bytes,
+-                sha256: config.sha256.clone(),
+-            },
+-            saved_version: version(input.saved_version.as_ref().ok_or_else(failure)?),
+-        };
++        let review = signed_export::review(&input.context())?;
+         if !review.valid() {
+             return Err(failure());
+         }
+@@ -351,6 +319,7 @@
+         registration: u32,
+         root: RegisteredRoot,
+         gate: ios_wire::Availability,
++        material: Option<Arc<IOSSigningMaterial>>,
+     ) -> Result<ios_wire::Status, BridgeError> {
+         self.require_domain(SavedCommandDomain::IOSArchive)?;
+         self.prepare_bound_requests(
+@@ -358,7 +327,7 @@
+             registration,
+             root,
+             Availability::from_ios(gate),
+-            None,
++            material.map(PrivateSigningMaterial::IOS),
+             None,
+             None,
+             Some(agent_build::Preparation::Ios(Preparation {
+@@ -368,11 +337,22 @@
+         )?
+         .ios()
+     }
++    pub(crate) fn agent_ios_archive_prepared_material(&self, entry: &Arc<agent::Entry>) -> Result<Option<Arc<IOSSigningMaterial>>, BridgeError> {
++        self.require_domain(SavedCommandDomain::IOSArchive)?;
++        let r = self.inner.lock();
++        let p = r.prepared.as_ref().filter(|p| start_matches(p, Some(entry))).ok_or_else(failure)?;
++        match &p.material {
++            None => Ok(None),
++            Some(PrivateSigningMaterial::IOS(original)) => Ok(Some(original.clone())),
++            _ => Err(failure()),
++        }
++    }
+     pub(crate) fn start_agent_ios_archive(
+         &self,
+         entry: &Arc<agent::Entry>,
+         registered: Option<(u32, RegisteredRoot)>,
+         gate: ios_wire::Availability,
++        material: Option<Arc<IOSSigningMaterial>>,
+     ) -> Result<crate::ios_archive_owner::Admitted, BridgeError> {
+         self.require_domain(SavedCommandDomain::IOSArchive)?;
+         let input = {
+@@ -393,7 +373,7 @@
+             at,
+             registered,
+             Availability::from_ios(gate),
+-            None,
++            material.map(PrivateSigningMaterial::IOS),
+             None,
+             None,
+             None,
+@@ -416,7 +396,7 @@
+             "savedConfig":{"bytes":123,"sha256":"a".repeat(64)},"savedVersion":{"source":"version.properties","bytes":32,"sha256":"b".repeat(64),"name":"1.2.3","build":7}})).unwrap()
+     }
+     #[test]
+-    fn fixed_archive_cannot_borrow_signing_candidate_recovery_or_partial_inputs() {
++    fn fixed_archive_and_export_cannot_borrow_candidate_recovery_or_partial_inputs() {
+         let original = input();
+         assert!(fixed(&original));
+         for action in [
+@@ -433,7 +413,10 @@
+             distribution_certificate_sha256: "f".repeat(64),
+             assignments: vec![],
+         });
+-        assert!(!fixed(&signed));
++        // The ordinary native decoder still rejects malformed private policy.
++        assert!(ios_wire::prepare(&serde_json::to_value(&signed).unwrap()).is_err());
++        signed.signing = ios_wire::tests::signed_context().signing;
++        assert!(fixed(&signed));
+         let mut v = original.clone();
+         v.saved_version = None;
+         assert!(!fixed(&v));
+@@ -501,11 +484,13 @@
+             input_revision: 0,
+             document: Arc::downgrade(&document),
+             observation_revision: 2,
++            read: None,
+             draft_revision: input.draft_revision.unwrap(),
+             baseline_generation: input.baseline_generation.unwrap(),
+             changes,
+             review: agent::Review {
+                 mode: agent::Mode::SavedIosUnsignedArchive,
++                signing: None,
+                 saved_config: agent::Config {
+                     bytes: input.saved_config.as_ref().unwrap().bytes,
+                     sha256: input.saved_config.as_ref().unwrap().sha256.clone(),
+@@ -545,6 +530,9 @@
+             .bind(agent::FAMILY, id('a'), id('b'), 1, expires)
+             .unwrap();
+         preparing.returned(true);
++        let (_, prepared_data) = link.entry().claim_history().unwrap().unwrap();
++        // Inert publication bookkeeping only: no native grant/IO was produced.
++        link.entry().history_returned(prepared_data.status_revision(), Ok(())).unwrap();
+         let owner =
+             SavedCommandOwner::ios_archive(RuntimeConfig::packaged("/unopened-ios-runtime".into()));
+         let root = RegisteredRoot {
+@@ -626,7 +614,8 @@
+             .start_agent_ios_archive(
+                 starting.entry(),
+                 Some((1, root.clone())),
+-                ios_wire::Availability::RuntimeUnqualified
++                ios_wire::Availability::RuntimeUnqualified,
++                None,
+             )
+             .is_err());
+         assert!(owner.inner.lock().prepared.is_some());
+@@ -647,6 +636,7 @@
+                 starting.entry(),
+                 Some((1, root)),
+                 ios_wire::Availability::RuntimeUnqualified,
++                None,
+             )
+             .unwrap()
+             .release();
+@@ -654,7 +644,14 @@
+             let r = owner.inner.lock();
+             assert!(r.prepared.is_none() && r.active.is_none());
+         }
+-        let result = starting.entry().status().unwrap();
++        let entry = starting.entry().clone();
++        assert!(entry.claim_history().unwrap().is_none());
++        assert!(entry.status().unwrap().operation.as_ref().is_some_and(|o|
++            o.settlement() == service::Settlement::Pending));
++        starting.returned(true);
++        let (_, refused_data) = entry.claim_history().unwrap().unwrap();
++        entry.history_returned(refused_data.status_revision(), Ok(())).unwrap();
++        let result = entry.status().unwrap();
+         assert_eq!(result.start_state, agent::StartState::Consumed);
+         let operation = result.operation.unwrap();
+         let crate::agent_build_requests::Operation::Ios(result) = operation else {
+@@ -664,7 +661,6 @@
+             (result.outcome, result.settlement),
+             (Some(agent::Outcome::Refused), service::Settlement::Settled)
+         );
+-        starting.returned(true);
+         assert!(inbox.claim(agent::FAMILY).unwrap().is_none());
+     }
+
+@@ -699,7 +695,7 @@
+         let context = ios_wire::tests::context();
+         let terminal =
+             ios_wire::terminal(&ios_wire::tests::complete(), &context, &"a".repeat(32)).unwrap();
+-        let result = report(terminal.result.as_ref().unwrap()).unwrap();
++        let result = signed_export::report(&context,terminal.result.as_ref().unwrap()).unwrap();
+         assert!(result.valid());
+         assert_eq!((result.entries, result.bytes), (10, 1000));
+         let value = serde_json::to_value(result).unwrap();
+diff --git a/desktop/tests/agent-ios-archive.test.mjs b/desktop/tests/agent-ios-archive.test.mjs
+--- a/desktop/tests/agent-ios-archive.test.mjs
++++ b/desktop/tests/agent-ios-archive.test.mjs
+@@ -2,7 +2,7 @@
+ // No native grant, tool, process, filesystem, credential or build is exercised.
+ import assert from 'node:assert/strict';
+ import test from 'node:test';
+-import { AGENT_IOS_ARCHIVE_CONSENT, AgentIOSArchivePermission, copyIOSArchiveApproval,
++import { AGENT_IOS_ARCHIVE_CONSENT, AGENT_IOS_SIGNED_EXPORT_CONSENT, AgentIOSArchivePermission, copyIOSArchiveApproval,
+   createAgentIOSArchiveApi, encodeIOSArchiveAccessRequest, parseIOSArchiveAccess } from '../src/agentIOSArchive.ts';
+ import { canObserveAgentIOSArchive } from '../src/agentIOSArchiveOrigin.ts';
+ import { IOSArchiveController } from '../src/iosArchive.ts';
+@@ -16,14 +16,14 @@
+ const VERSION = { source: 'release/version.properties', bytes: 41, sha256: 'f'.repeat(64), name: '1.2.3', build: 42 };
+ const approval = () => ({ input: { projectId: 'p1', draftRevision: 0, baselineGeneration: 1, savedConfig: clone(CONFIG),
+   savedVersion: clone(VERSION) } });
+-const enabled = () => ({ enabled: true, remainingMs: 900_000, projectId: ORIGIN.projectId, observationRevision: 7, consumed: false });
+-const disabled = () => ({ enabled: false, remainingMs: 0, projectId: null, observationRevision: null, consumed: false });
++const enabled = (permissionRevision = '1') => ({ permissionRevision, enabled: true, remainingMs: 900_000, projectId: ORIGIN.projectId, observationRevision: 7, consumed: false });
++const disabled = (permissionRevision = '0') => ({ permissionRevision, enabled: false, remainingMs: 0, projectId: null, observationRevision: null, consumed: false });
+ const deferred = () => { let resolve, reject; const promise = new Promise((a, b) => { resolve = a; reject = b; }); return { promise, resolve, reject }; };
+ const flush = async () => { for (let n = 0; n < 18; n++) await Promise.resolve(); };
+ function port() {
+   const calls = [];
+-  const api = Object.fromEntries(['allow', 'status', 'revoke'].map((kind) => [kind, (value) => {
+-    const call = { kind, value, ...deferred() }; calls.push(call); return call.promise;
++  const api = Object.fromEntries(['allow', 'status', 'revoke'].map((kind) => [kind, (value, expectedPermissionRevision) => {
++    const call = { kind, value, expectedPermissionRevision, ...deferred() }; calls.push(call); return call.promise;
+   }]));
+   return { api, calls };
+ }
+@@ -82,11 +82,11 @@
+ }
+
+
+-test('only fixed iOS saved inputs enter its three permission routes; neither Android nor signing grants cross', async () => {
++test('only fixed iOS saved inputs enter its three permission routes with the original full revision', async () => {
+   const calls=[],api=createAgentIOSArchiveApi('native',async(command,raw)=>{assert.ok(raw instanceof Uint8Array&&raw.length<=4096);calls.push({command,value:JSON.parse(new TextDecoder().decode(raw))});return disabled();});
+-  await api.allow(approval());await api.status();await api.revoke();
++  await api.allow(approval(), '0');await api.status();await api.revoke();
+   assert.deepEqual(calls.map(c=>c.command),['allow_agent_ios_archive','agent_ios_archive_access','revoke_agent_ios_archive']);
+-  assert.deepEqual(calls[0].value,{...approval(),consentVersion:AGENT_IOS_ARCHIVE_CONSENT});
++  assert.deepEqual(calls[0].value,{...approval(),consentVersion:AGENT_IOS_ARCHIVE_CONSENT,expectedPermissionRevision:'0'});
+   for(const field of ['toolchainSelection','root','command','window','operationId','executable','environment'])assert.equal(encodeIOSArchiveAccessRequest('allow_agent_ios_archive',{...calls[0].value,[field]:'not-authority'}),null);
+   assert.equal(encodeIOSArchiveAccessRequest('allow_agent_android_build',calls[0].value),null);
+   assert.equal(encodeIOSArchiveAccessRequest('allow_agent_ios_archive',{...calls[0].value,consentVersion:'agent-saved-android-build-inspect-v1'}),null);
+@@ -95,18 +95,20 @@
+ });
+ test('bounded iOS approval copying never calls property getters and retains the saved pair only', async () => {
+   let reads=0,calls=0;const value=approval();Object.defineProperty(value.input,'savedVersion',{enumerable:true,get(){reads++;return VERSION;}});
+-  const api=createAgentIOSArchiveApi('native',async()=>{calls++;return disabled();});await assert.rejects(api.allow(value));assert.equal(reads,0);assert.equal(calls,0);
++  const api=createAgentIOSArchiveApi('native',async()=>{calls++;return disabled();});await assert.rejects(api.allow(value, '0'));assert.equal(reads,0);assert.equal(calls,0);
+   const original=approval(),copied=copyIOSArchiveApproval(original);assert.ok(copied);original.input.savedVersion.name='changed';assert.equal(copied.input.savedVersion.name,VERSION.name);assert.ok(Object.isFrozen(copied.input.savedVersion));
+   const huge=approval();huge.input.savedVersion.source='x'.repeat(4096);assert.equal(copyIOSArchiveApproval(huge),null);
+ });
+ test('iOS uses shared original UI revoke and pending-status connection retention, without a fresh Allow after reentrant Stop', async () => {
+-  const p=permission();let stopping,once=false;const unsubscribe=p.controller.subscribe(s=>{if(s.pending==='allow'&&!once){once=true;stopping=p.controller.revoke();}});
+-  p.controller.acknowledge(true);const allowing=p.controller.allow();assert.deepEqual(p.calls.map(c=>c.kind),['revoke']);p.calls[0].resolve(disabled());await stopping;await allowing;unsubscribe();
+-  const next=port(),reading=p.controller.status();p.controller.bind(next.api,approval());p.calls[1].resolve(enabled());await reading;
++  const p=permission();p.controller.acknowledge(true);await p.controller.allow();assert.equal(p.calls.length,0);
++  const first=p.controller.status();p.calls[0].resolve(disabled());await first;
++  let stopping,once=false;const unsubscribe=p.controller.subscribe(s=>{if(s.pending==='allow'&&!once){once=true;stopping=p.controller.revoke();}});
++  p.controller.acknowledge(true);const allowing=p.controller.allow();assert.deepEqual(p.calls.map(c=>c.kind),['status','revoke']);p.calls[1].resolve(disabled('1'));await stopping;await allowing;unsubscribe();
++  const next=port(),reading=p.controller.status();p.controller.bind(next.api,approval());p.calls[2].resolve(enabled('1'));await reading;
+   p.controller.acknowledge(true);await p.controller.allow();assert.equal(next.calls.length,0);
+-  const stoppingAgain=p.controller.revoke();assert.equal(p.calls[2].kind,'revoke');p.calls[2].resolve(disabled());await stoppingAgain;
+-});
+-test('native iOS origin remains unsigned-only immutable DATA, never a GUI Prepare authority',()=>{
++  const stoppingAgain=p.controller.revoke();assert.equal(p.calls[3].kind,'revoke');p.calls[3].resolve(disabled('2'));await stoppingAgain;
++});
++test('native iOS origin remains exact-mode immutable DATA, never a GUI Prepare authority',()=>{
+   const a=operation(),b=operation({phase:'running',intentUsable:false,stage:'archiving'});
+   assert.ok(parseIOSArchiveStatus(status(1,a)));assert.ok(iosArchiveOperationProgress(a,b));assert.equal(iosArchiveOperationProgress(a,unmarked(b)),false);
+   for(const change of [v=>{v.agentIosArchive.requestId=id('0');},v=>{v.agentIosArchive.window='main';},v=>{v.agentIosArchive=null;},v=>{v.agentAndroidBuild=v.agentIosArchive;delete v.agentIosArchive;},v=>{v.context.operation='ios-signed-export';},v=>{v.context.action='create';}]){const value=operation();change(value);assert.equal(parseIOSArchiveStatus(status(1,value)),null);}
+@@ -161,3 +163,59 @@
+   assert.equal(h.controller.getSnapshot().status.operation.operationId, id('d')); assert.equal(h.controller.getSnapshot().integrityFailed, false);
+   await h.controller.start(id('d'), id('e')); assert.equal(h.calls.length, 2);
+ });
++
++const signingPolicy = () => ({ teamId:'ABCDE12345',distributionCertificateSha256:'e'.repeat(64),
++  assignments:[{kind:'apple-p12',recordId:id('1'),recordRevision:2,contextRevision:3},
++    {kind:'apple-profile',recordId:id('2'),recordRevision:4,contextRevision:3}] });
++const signedApproval = () => ({input:{...approval().input,signing:signingPolicy()}});
++
++test('signed export has separate exact consent, full returned revision and no candidate, recovery or private input route', async () => {
++  const calls=[],api=createAgentIOSArchiveApi('native',async(command,raw)=>{calls.push({command,value:JSON.parse(new TextDecoder().decode(raw))});return enabled();});
++  await api.allow(signedApproval(),'9007199254740993');
++  assert.equal(calls.length,1);const request=calls[0].value;
++  assert.deepEqual(request,{...signedApproval(),expectedPermissionRevision:'9007199254740993',consentVersion:AGENT_IOS_SIGNED_EXPORT_CONSENT});
++  assert.ok(encodeIOSArchiveAccessRequest('allow_agent_ios_archive',request));
++  for(const wrong of [AGENT_IOS_ARCHIVE_CONSENT,'saved-ios-signed-export-v2','agent-saved-android-local-sign-v1'])
++    assert.equal(encodeIOSArchiveAccessRequest('allow_agent_ios_archive',{...request,consentVersion:wrong}),null);
++  for(const bad of [0,'00','01','0\n','1\r','18446744073709551616'])
++    assert.equal(encodeIOSArchiveAccessRequest('allow_agent_ios_archive',{...request,expectedPermissionRevision:bad}),null);
++  for(const action of ['create','check-signing'])assert.equal(copyIOSArchiveApproval({input:{...signedApproval().input,action}}),null);
++  assert.equal(copyIOSArchiveApproval({input:{projectId:'p1',recovery:{action:'inspect'}}}),null);
++  for(const field of ['password','p12','profile','token','native','file']){
++    const changed=signedApproval();changed.input.signing[field]='not-authority';assert.equal(copyIOSArchiveApproval(changed),null);
++  }
++  const source=signedApproval(),copied=copyIOSArchiveApproval(source);assert.ok(copied);
++  source.input.signing.assignments[0].recordRevision++;assert.equal(copied.input.signing.assignments[0].recordRevision,2);
++  assert.ok(Object.isFrozen(copied.input.signing.assignments)&&Object.isFrozen(copied.input.signing.assignments[0]));
++  let reads=0;const getter=signedApproval();Object.defineProperty(getter.input.signing,'teamId',{enumerable:true,get(){reads++;return 'ABCDE12345';}});
++  await assert.rejects(api.allow(getter,'0'));assert.equal(reads,0);assert.equal(calls.length,1);
++  const noRevision=disabled();delete noRevision.permissionRevision;assert.equal(parseIOSArchiveAccess(noRevision),null);
++});
++
++test('signed permission keeps the original Allow caller across Stop and changed selection; no second grant on late reply', async () => {
++  const p=port();let current=signedApproval();
++  const controller=new AgentIOSArchivePermission(()=>({api:p.api,project:current,blocked:false}));
++  controller.syncContext();const read=controller.status();p.calls[0].resolve(disabled('4'));await read;
++  controller.acknowledge(true);const allow=controller.allow();assert.equal(p.calls[1].kind,'allow');assert.equal(p.calls[1].expectedPermissionRevision,'4');
++  const captured=p.calls[1].value;current=signedApproval();current.input.signing.assignments[0].recordRevision++;controller.syncContext();
++  const stop=controller.revoke();p.calls[2].resolve(disabled('5'));await stop;
++  assert.equal(controller.getState().pending,'allow');assert.equal(controller.canAllow(),false);
++  p.calls[1].resolve(enabled('5'));await allow;
++  assert.equal(controller.getState().access.enabled,false);assert.equal(captured.input.signing.assignments[0].recordRevision,2);
++  assert.equal(p.calls.filter(c=>c.kind==='allow').length,1);
++});
++
++test('signed native original is observe and STOP only; signature selection and GUI consent are never reconstructed', async (t) => {
++  const a=operation({},signedApproval().input);a.context.operation='ios-signed-export';
++  const incoming=status(3,a);incoming.modeCapabilities.signed=true;
++  assert.ok(parseIOSArchiveStatus(incoming));
++  const previous=status(2,unmarked(terminal({operationId:id('1'),ownerGeneration:id('2')})));
++  assert.equal(canObserveAgentIOSArchive(previous,incoming,true),false);
++  for(const change of [v=>{v.context.operation='ios-candidate-inputs';v.context.action='create';},
++    v=>{v.context.operation='ios-signing-inputs-check';v.context.action='check-signing';},
++    v=>{v.agentIosArchive.requestId+='\n';}]){const bad=clone(incoming);change(bad.operation);assert.equal(parseIOSArchiveStatus(bad),null);}
++  const h=await nativeView(t,previous);h.emit(incoming);
++  assert.equal(h.controller.getSnapshot().integrityFailed,false);assert.equal(h.controller.getSnapshot().consent,null);
++  await h.controller.start(id('d'),id('e'));assert.equal(h.calls.length,0);
++  assert.equal(h.controller.cancel(),true);await flush();assert.deepEqual(h.calls,[{kind:'cancel',operationId:id('d'),ownerGeneration:id('e')}]);
++});
+diff --git a/desktop/tests/ios-archive.test.mjs b/desktop/tests/ios-archive.test.mjs
+--- a/desktop/tests/ios-archive.test.mjs
++++ b/desktop/tests/ios-archive.test.mjs
+@@ -5,6 +5,7 @@
+ import test from 'node:test';
+ import { IOSArchiveController, iosArchiveOwnerReason, iosArchiveHelp, iosArchiveInputHelp,
+   iosArchiveSelectionHelp, iosArchiveOutputHelp, iosArchiveCancelHelp, iosSigningHelp, iosRecoveryHelp } from '../src/iosArchive.ts';
++import { AgentIOSArchivePermission } from '../src/agentIOSArchive.ts';
+ import { ReleaseVersionController } from '../src/releaseVersion.ts';
+ import { parseAssetStatus } from '../src/assetSessionProtocol.ts';
+ import { createNativeApi } from '../src/bridge.ts';
+@@ -977,3 +978,31 @@
+   assert.ok(iosArchiveOwnerReason(h2.state)); assert.equal(h2.controller.setKeepCandidate(false), false);
+   assert.doesNotMatch(JSON.stringify(h2.state), /private transport sentinel/);
+ });
++
++
++test('agent signed-export approval reuses current saved policy and assignments; candidate and check remain separate', async (t) => {
++  const h=harness(t,{savedSnapshot:signedSnapshot(),assets:assetState(['ios-firebase','project-read-token'])});await h.ready;
++  h.controller.setArchiveMode('signed');const approved=h.controller.agentArchiveApproval();assert.ok(approved,h.controller.prepareReason());
++  assert.deepEqual(clone(approved.input.signing),signingPolicy(['ios-firebase','project-read-token']));
++  assert.equal(h.calls.length,0);assert.equal(approved.input.savedVersion.name,'1.2.3');
++  h.controller.setKeepCandidate(true);assert.equal(h.controller.agentArchiveApproval(),null);
++  h.controller.setKeepCandidate(false);h.controller.setArchiveMode('signing-check');assert.equal(h.controller.agentArchiveApproval(),null);
++  h.controller.setArchiveMode('signed');const changed=clone(h.assets);changed.status.assignments[0].recordRevision++;h.setAssets(changed);
++  assert.equal(h.controller.agentArchiveApproval(),null);assert.equal(approved.input.signing.assignments[0].recordRevision,1);
++  h.controller.setArchiveMode('unsigned');assert.equal(h.controller.agentArchiveApproval().input.signing,undefined);
++  h.dispatch({type:'edit',projectId:'p1',path:'ios.bundleId',value:'org.example.dirty'});
++  assert.equal(h.controller.agentArchiveApproval(),null);assert.equal(h.calls.length,0);
++});
++
++test('agent signed Allow rechecks actual iOS controller after notification before invoking any grant', async (t) => {
++  for(const change of [h=>h.controller.setKeepCandidate(true),h=>h.controller.setArchiveMode('unsigned'),
++    h=>{const a=clone(h.assets);a.contextCurrent=false;h.setAssets(a);}]){
++    const h=harness(t,{savedSnapshot:signedSnapshot(),assets:assetState()});await h.ready;h.controller.setArchiveMode('signed');
++    const calls=[],api={status:async()=>({enabled:false,remainingMs:0,projectId:null,observationRevision:null,consumed:false,permissionRevision:'0'}),
++      allow:async()=>{calls.push('allow');throw Error('should not invoke');},revoke:async()=>assert.fail('no implicit revoke')};
++    const permission=new AgentIOSArchivePermission(()=>({api,project:h.controller.agentArchiveApproval(),blocked:false}));
++    permission.syncContext();await permission.status();permission.acknowledge(true);assert.equal(permission.canAllow(),true);
++    let once=false;const unsub=permission.subscribe(s=>{if(s.pending==='allow'&&!once){once=true;change(h);}});
++    await permission.allow();unsub();assert.equal(calls.length,0);assert.equal(h.calls.length,0);assert.equal(permission.getState().pending,null);
++  }
++});

@@ -20,36 +20,39 @@ module MobileReleaseKit
 
     module_function
 
-    def current!(python:, module_root:, app_root:, config_path:, intent_path:, ipa_path:, intent_sha256:, environment:, tooling_directory:)
+    def current!(**arguments)
+      current_impl!(**arguments)
+    end
+
+    def current_local!(**arguments)
+      invocation = StoreLaneLifetime.current_invocation
+      raise StoreLaneLifetime::LifetimeError unless invocation
+      request = invocation.local_current_validation_request(adapter: self)
+      current_impl!(**arguments, local_request: request)
+    end
+
+    def current_impl!(python:, module_root:, app_root:, config_path:, intent_path:, ipa_path:, intent_sha256:, environment:, tooling_directory:, local_request: nil)
       unless python.is_a?(String) && python.start_with?(File::SEPARATOR) && !python.match?(/[\x00-\x1f\x7f]/) && File.file?(python) && File.executable?(python)
         raise ContractError, "Current IPA validation requires the toolkit's absolute Python interpreter"
       end
       unless intent_sha256.is_a?(String) && intent_sha256.match?(/\A[0-9a-f]{64}\z/)
         raise ContractError, "Current IPA validation requires the authenticated intent digest"
       end
-      unless module_root.is_a?(String) && module_root.start_with?(File::SEPARATOR) &&
-             !module_root.match?(/[\x00-\x1f\x7f]/) && !File.symlink?(module_root) && File.directory?(module_root)
-        raise ContractError, "Current IPA validation requires the pinned toolkit module root"
-      end
-      trusted_module_root = File.realpath(module_root)
-      source_root = File.expand_path("../src", tooling_directory)
-      if File.directory?(File.join(source_root, "mobile_release")) && trusted_module_root != File.realpath(source_root)
-        raise ContractError, "Current IPA validation module differs from the pinned source checkout"
-      end
-      module_file = MobileReleaseKit.safe_path(trusted_module_root, "mobile_release/ios_upload_validation.py")
-      raise ContractError, "Pinned current-upload validator module is missing" unless File.file?(module_file)
+      trusted_module_root = NativeUploadValidation.module_origin!(python: python, module_root: module_root,
+        tooling_directory: tooling_directory, adapter_directory: __dir__, platform: "ios")
       config = MobileReleaseKit.safe_path(app_root, config_path)
       intent = MobileReleaseKit.safe_path(app_root, intent_path)
       ipa = MobileReleaseKit.safe_path(app_root, ipa_path)
       argv = [
         # -I excludes cwd/PYTHONPATH/user site; -S also excludes site/.pth code.
-        # Only this fixed literal bootstrap can insert a module directory, and
-        # that directory comes from the actual pinned CLI's __file__, not any
+        # Only this fixed literal bootstrap can insert a module directory or the paired core.zip, and
+        # that origin comes from the actual pinned CLI's __file__, not any
         # application input or inherited Python environment.
         python, "-I", "-S", "-c", BOOTSTRAP, trusted_module_root,
         "--app-root", File.realpath(app_root), "--config-path", config,
-        "--operation-intent", intent, "--ipa", ipa, "--intent-sha256", intent_sha256,
+        (local_request ? "--local-operation-intent" : "--operation-intent"), intent, "--ipa", ipa, "--intent-sha256", intent_sha256,
       ]
+      argv += ["--local-registered-tools-json", local_request] if local_request
       clean = environment.to_h.select { |name, value| ENVIRONMENT_NAMES.include?(name) && !value.to_s.empty? }
       clean.merge!("LANG" => "C", "LC_ALL" => "C")
       binding = StoreLaneLifetime.reserve_current_validation!(role: "current-ios", adapter: self,
@@ -68,6 +71,8 @@ module MobileReleaseKit
     ensure
       binding&.finish_call!
     end
+
+    private_class_method :current_impl!
 
     def validated_result(output, intent_sha256:, artifact:)
       value = MobileReleaseKit.strict_json(output, label: "current IPA validation result")

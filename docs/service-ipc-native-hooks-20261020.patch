@@ -1,0 +1,142 @@
+diff --git a/desktop/src-tauri/src/installed_cli_ipc.rs b/desktop/src-tauri/src/installed_cli_ipc.rs
+--- a/desktop/src-tauri/src/installed_cli_ipc.rs
++++ b/desktop/src-tauri/src/installed_cli_ipc.rs
+@@ -338,7 +338,7 @@
+ mod tests {
+     use super::*;
+     use crate::{application_service::tests::{passive, poison_fixture, register_fixture}, application_state_store::{Fixture, PrivateStateDirectory, DIRECTORY}};
+-    use std::os::unix::fs::{symlink, PermissionsExt};
++    use std::{future::Future, os::unix::fs::{symlink, MetadataExt, PermissionsExt}, task::Poll};
+     use tokio::time::timeout;
+     fn list() -> p::Request { p::Request { version: 1, request_id: Id::random().unwrap(), request: p::RequestBody::Projects(p::Empty {}) } }
+     fn runtime() -> tokio::runtime::Runtime { tokio::runtime::Builder::new_current_thread().enable_all().build().unwrap() }
+@@ -374,7 +374,20 @@
+             let stalled = UnixStream::connect(f.app.join(DIRECTORY).join(SOCKET)).await.unwrap();
+             let disconnected = UnixStream::connect(f.app.join(DIRECTORY).join(SOCKET)).await.unwrap(); close_stream(disconnected).unwrap();
+             assert!(timeout(Duration::from_secs(2), request(&f.app, &list())).await.unwrap().is_ok());
++            // Cancel only this waiting observer after it has requested STOP.
++            // The same real accept task and worker joins stay in ServerHandle.
++            let mut waiting = Box::pin(host.shutdown());
++            std::future::poll_fn(|cx| {
++                assert!(waiting.as_mut().poll(cx).is_pending());
++                Poll::Ready(())
++            }).await;
++            drop(waiting);
++            assert!(host.task.is_some() && host.outcome.is_none());
+             let outcome = timeout(Duration::from_secs(2), host.shutdown()).await.unwrap().unwrap(); assert!(outcome.workers_joined >= 2);
++            assert!(host.task.is_none());
++            assert_eq!(host.shutdown().await.unwrap().workers_joined, outcome.workers_joined);
++            assert!(!f.app.join(DIRECTORY).join(SOCKET).exists());
++            assert!(!f.app.join(DIRECTORY).join(DESCRIPTOR).exists());
+             close_stream(stalled).unwrap(); service.stop().unwrap(); store.close().unwrap();
+         });
+     }
+@@ -382,7 +395,10 @@
+     fn private_capability_wrong_instance_and_revoked_access_are_rejected() {
+         runtime().block_on(async {
+             let f = Fixture::short(); let store = Arc::new(PrivateStateDirectory::open(&f.app).unwrap()); let service = Arc::new(ApplicationService::open(store.clone()).unwrap());
+-            let (id, _) = register_fixture(&service, &f.app, "project", "project-1"); service.allow_agent_read(vec![id], Duration::from_secs(30)).unwrap();
++            let (id, root) = register_fixture(&service, &f.app, "project", "project-1");
++            service.publish_passive_snapshot("project-1", &passive(&root, &"1".repeat(64))).unwrap();
++            service.allow_agent_read(vec![id.clone()], Duration::from_secs(30)).unwrap();
++            let first_instance = service.instance().clone();
+             let mut host = start(service.clone()).await.unwrap();
+             let raw = Zeroizing::new(std::fs::read(f.app.join(DIRECTORY).join(DESCRIPTOR)).unwrap());
+             for byte in [8usize, 40usize] {
+@@ -394,6 +410,40 @@
+             service.revoke_agent_read().unwrap(); assert_eq!(request(&f.app, &list()).await.err(), Some(Error::AccessDenied));
+             host.shutdown().await.unwrap(); service.stop().unwrap(); store.close().unwrap();
+             assert_eq!(request(&f.app, &list()).await.err(), Some(Error::Unavailable));
++            drop((host, service, store));
++
++            // Reopen only this fixture's persisted reference state, not a
++            // Desktop/native operation. No alias or permission is restored.
++            let store = Arc::new(PrivateStateDirectory::open(&f.app).unwrap());
++            let service = Arc::new(ApplicationService::open(store.clone()).unwrap());
++            assert_ne!(service.instance(), &first_instance);
++            assert!(!service.read_access_status().unwrap().enabled);
++            assert!(service.native_binding("project-1").is_err());
++            let mut host = start(service.clone()).await.unwrap();
++            let fresh = Zeroizing::new(std::fs::read(f.app.join(DIRECTORY).join(DESCRIPTOR)).unwrap());
++            // Never include capability bytes in an assertion's diagnostics.
++            assert!(raw[40..] != fresh[40..], "launch capability must rotate");
++            let mut old_client = UnixStream::connect(f.app.join(DIRECTORY).join(SOCKET)).await.unwrap();
++            old_client.write_all(&raw).await.unwrap();
++            let mut answer = [0u8; 1]; old_client.read_exact(&mut answer).await.unwrap();
++            assert_eq!(answer, *b"D"); close_stream(old_client).unwrap();
++            assert_eq!(request(&f.app, &list()).await.err(), Some(Error::AccessDenied));
++
++            let held_root = std::fs::File::open(&root).unwrap();
++            let metadata = held_root.metadata().unwrap();
++            let restored = service.register_native("project-7", &root, metadata.dev(), metadata.ino()).unwrap();
++            nix::unistd::close(held_root).unwrap();
++            assert_eq!(restored.project_id, id);
++            service.allow_agent_read(vec![id.clone()], Duration::from_secs(30)).unwrap();
++            match request(&f.app, &list()).await.unwrap().response {
++                p::ResponseBody::Projects(rows) => {
++                    assert_eq!(rows.len(), 1);
++                    assert_eq!(rows[0].project_id, id);
++                    assert!(rows[0].observation.as_ref().unwrap().stale);
++                }
++                _ => panic!("wrong response"),
++            }
++            host.shutdown().await.unwrap(); service.stop().unwrap(); store.close().unwrap();
+         });
+     }
+     #[test]
+diff --git a/.github/workflows/desktop-macos-components.yml b/.github/workflows/desktop-macos-components.yml
+--- a/.github/workflows/desktop-macos-components.yml
++++ b/.github/workflows/desktop-macos-components.yml
+@@ -519,7 +519,7 @@
+           # Exact SDK/Rust/profile/dependency key only. Source changes still
+           # run Cargo, including build.rs SOURCE/release env invalidation.
+           key: mac-components-v1-${{ matrix.arch }}-rust1.98.1-dev0-test0-inc0-macos26-${{ steps.cache-profile.outputs.sdk }}-${{ hashFiles('desktop/src-tauri/Cargo.lock', 'desktop/src-tauri/Cargo.toml', 'desktop/src-tauri/build.rs', 'desktop/helpers/macos-desktop-image/Cargo.lock', 'desktop/helpers/macos-desktop-image/Cargo.toml', 'desktop/helpers/macos-desktop-image/build.rs', 'desktop/helpers/macos-vault-helper/Cargo.lock', 'desktop/helpers/macos-vault-helper/Cargo.toml', 'desktop/helpers/macos-vault-helper/build.rs', 'desktop/native/macos-installed-native/Cargo.lock', 'desktop/native/macos-installed-native/Cargo.toml', 'desktop/native/macos-installed-native/build.rs') }}
+-      - name: ${{ inputs.component == 'app-typecheck' && 'Check actual shipping APIs and focused native DATA contracts' || inputs.component == 'local-keychain-contracts' && 'Compile and run focused local Keychain contracts only' || inputs.component == 'local-keychain' && 'Check app and isolated Keychain helper graphs with focused contracts' || inputs.component == 'app-contracts' && 'Test affected Mac Store and History contracts' || 'Compile packaged app and test Mac Store contracts' }}
++      - name: ${{ inputs.component == 'app-typecheck' && 'Check actual shipping APIs and focused native contracts' || inputs.component == 'local-keychain-contracts' && 'Compile and run focused local Keychain contracts only' || inputs.component == 'local-keychain' && 'Check app and isolated Keychain helper graphs with focused contracts' || inputs.component == 'app-contracts' && 'Test affected Mac Store and History contracts' || 'Compile packaged app and test Mac Store contracts' }}
+         shell: bash
+         env:
+           WORK_ROOT: ${{ steps.work.outputs.root }}
+@@ -556,8 +556,8 @@
+               --features desktop-shell,custom-protocol,macos-installed-observation \
+               --manifest-path desktop/src-tauri/Cargo.toml --test installed-shell-observation
+             # Fixed DATA only in the ordinary native library graph, separate
+-            # from the shipping image check above. No service, tool, credential
+-            # or app is launched; do not fall through into the broad suites.
++            # from the shipping image check above. These three tests launch no
++            # service, tool, credential or app; do not run the broad suites.
+             rustup run 1.98.1 cargo test --locked --no-default-features \
+               --manifest-path desktop/native/macos-installed-native/Cargo.toml --lib -- \
+               android_registration::tests::native_prepare_role_predicate_matches_closed_rust_roles \
+@@ -584,6 +584,32 @@
+               asset_source::macos::git_local_sources::branch_tests::old_commit_ref_edge_retains_its_own_branch_and_stage_cannot_select_a_ref \
+               --exact --test-threads=1 | tee "$WORK_ROOT/app-typecheck-cache-contracts.log"
+             grep -Eq '^test result: ok\. 12 passed; 0 failed; 0 ignored;' "$WORK_ROOT/app-typecheck-cache-contracts.log"
++            # Real Darwin AF_UNIX peer credentials, capability/reconnect checks
++            # and original socket/task shutdown, using the existing library.
++            # No GUI consent, native project operation, cross-UID attack test,
++            # Keychain, installed app or CLI subprocess is claimed by this run.
++            # A short fresh HOME keeps the production sockaddr_un bound; do not
++            # move the fixture to writable /tmp or relax native ancestry checks.
++            ipc_home=$(/usr/bin/mktemp -d "$HOME/.mrki.XXXXXX")
++            trap 'ipc_status=$?; if ! /bin/rmdir "$ipc_home"; then printf "%s\n" "IPC fixture retained; no recursive cleanup attempted." >&2; test "$ipc_status" -ne 0 || ipc_status=1; fi; exit "$ipc_status"' EXIT
++            HOME="$ipc_home" /usr/bin/python3 -I -B - <<'PY'
++          import os
++          home = os.environ["HOME"]
++          assert os.geteuid() != 0 and os.path.isabs(home)
++          probe = home + "/.mrks-0000000000000000/dev.mobile-release-kit.desktop/service-v1/s"
++          assert len(os.fsencode(probe)) < 104, "IPC fixture exceeds native socket path bound"
++          PY
++            HOME="$ipc_home" rustup run 1.98.1 cargo test --locked --no-default-features \
++              --manifest-path desktop/src-tauri/Cargo.toml --lib -- \
++              installed_cli_ipc::tests::real_socket_two_clients_share_completed_observations_and_history \
++              installed_cli_ipc::tests::stalled_client_and_disconnect_do_not_block_other_client_or_shutdown \
++              installed_cli_ipc::tests::private_capability_wrong_instance_and_revoked_access_are_rejected \
++              installed_cli_ipc::tests::replaced_endpoint_is_retained_and_state_cannot_close_before_join \
++              installed_cli_ipc::tests::stale_descriptor_and_symlink_are_not_an_auto_cleanup_authority \
++              installed_cli_ipc::tests::client_handshake_timeout_closes_original_and_preserves_unknown_close \
++              installed_cli_ipc::tests::poisoned_revoke_still_stops_and_joins_original_workers_once \
++              --exact --test-threads=1 | tee "$WORK_ROOT/app-typecheck-ipc-contracts.log"
++            grep -Eq '^test result: ok\. 7 passed; 0 failed; 0 ignored;' "$WORK_ROOT/app-typecheck-ipc-contracts.log"
+             exit 0
+           fi
+           if [[ "$APP_CHECKS" == local-keychain || "$APP_CHECKS" == local-keychain-contracts ]]; then

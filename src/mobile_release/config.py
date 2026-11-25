@@ -24,7 +24,7 @@ ROOT_KEYS = {
 }
 SECTION_KEYS = {
     "version": {"source", "nameKey", "buildKey"},
-    "source": {"candidateBranch", "productionBranch", "projectReadTokenRequired"},
+    "source": {"candidateBranch", "productionBranch", "projectReadTokenRequired", "localStoreEnabled"},
     "android": {
         "enabled",
         "applicationId",
@@ -54,6 +54,40 @@ SECTION_KEYS = {
     "services": {"androidFirebase", "iosFirebase"},
     "projectChecks": {"preflight", "androidArtifact", "iosArtifact"},
 }
+# Shared structural/conditional facts for validation and the pure draft editor.
+# The editor never infers policy by parsing help prose or a project's values.
+REQUIRED_SECTION_FIELDS = {
+    "version": ("source", "nameKey", "buildKey"),
+    "source": ("candidateBranch", "productionBranch"),
+    "metadata": ("root", "androidLocales", "iosLocales"),
+    "services": ("androidFirebase", "iosFirebase"),
+    "projectChecks": ("preflight", "androidArtifact", "iosArtifact"),
+}
+PLATFORM_IDENTITY_FIELDS = {"android": "applicationId", "ios": "bundleId"}
+APPROVED_IDENTITY_FIELDS = {
+    "android": ("externalTrack", "uploadCertificateSha256"),
+    "ios": (
+        "appStoreAppId", "teamId", "externalTestFlightGroup",
+        "distributionCertificateSha256", "symbols", "review",
+    ),
+}
+NESTED_SECTION_KEYS = {
+    "android.externalTrack": {"name", "kind"},
+    "ios.symbols": {"policy", "uploadCommand"},
+    "ios.review": {"usesNonExemptEncryption", "demoAccountRequired"},
+}
+REQUIRED_NESTED_FIELDS = {
+    "android.externalTrack": ("name", "kind"),
+    "ios.symbols": ("policy",),
+    "ios.review": ("usesNonExemptEncryption", "demoAccountRequired"),
+}
+IOS_PROJECT_CHOICES = ("project", "workspace")
+CONFIGURATION_OBJECT_KEYS = {"": ROOT_KEYS, **SECTION_KEYS, **NESTED_SECTION_KEYS}
+CONFIGURATION_FIELD_PATHS = tuple(sorted(
+    (f"{parent}.{key}" if parent else key)
+    for parent, keys in CONFIGURATION_OBJECT_KEYS.items() for key in keys
+    if (f"{parent}.{key}" if parent else key) not in CONFIGURATION_OBJECT_KEYS
+))
 IDENTITY_STATUSES = {"unverified", "approved", "blocked"}
 SERVICE_POLICIES = {"disabled", "required"}
 SYMBOL_POLICIES = {"disabled", "retain", "required"}
@@ -79,6 +113,27 @@ REQUIRED_ROOT_SECTIONS = {
     "projectChecks",
 }
 MAX_CONFIG_BYTES = 512 * 1024
+MAX_VERSION_BYTES = 64 * 1024
+
+
+def _section_data(data: dict[str, Any], name: str) -> dict[str, Any]:
+    value = data.get(name)
+    return value if type(value) is dict else {}
+
+
+def _enabled_state(section: dict[str, Any]) -> bool | None:
+    value = section.get("enabled")
+    return value if type(value) is bool else None
+
+
+def _approved_state(section: dict[str, Any]) -> bool | None:
+    value = section.get("identityStatus")
+    return value == "approved" if isinstance(value, str) and value in IDENTITY_STATUSES else None
+
+
+def _symbols_required_state(symbols: dict[str, Any]) -> bool | None:
+    value = symbols.get("policy")
+    return value == "required" if isinstance(value, str) and value in SYMBOL_POLICIES else None
 
 
 def _reject_duplicate_pairs(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -185,7 +240,7 @@ def _validate_config(data: dict[str, Any]) -> None:
             _reject_unknown(section, section_value, allowed)
 
     version = _object(data.get("version"), "version")
-    for key in ("source", "nameKey", "buildKey"):
+    for key in REQUIRED_SECTION_FIELDS["version"]:
         _optional_string(version, key, "version")
         if key not in version:
             raise ConfigurationError(f"version.{key} is required")
@@ -195,13 +250,14 @@ def _validate_config(data: dict[str, Any]) -> None:
             raise ConfigurationError(f"version.{key} must be an uppercase configuration key")
 
     source = _object(data.get("source"), "source")
-    for key in ("candidateBranch", "productionBranch"):
+    for key in REQUIRED_SECTION_FIELDS["source"]:
         _optional_string(source, key, "source")
         if key not in source:
             raise ConfigurationError(f"source.{key} is required")
         if len(source[key]) > 255 or not BRANCH_RE.fullmatch(source[key]):
             raise ConfigurationError(f"source.{key} is not a safe Git branch name")
     _optional_bool(source, "projectReadTokenRequired", "source")
+    _optional_bool(source, "localStoreEnabled", "source")
 
     for platform in ("android", "ios"):
         section = _object(data.get(platform), platform)
@@ -216,19 +272,19 @@ def _validate_config(data: dict[str, Any]) -> None:
             raise ConfigurationError(
                 f"{platform}.identityStatus must be one of {sorted(IDENTITY_STATUSES)}"
             )
-        if section.get("enabled"):
-            identity_key = "applicationId" if platform == "android" else "bundleId"
+        if _enabled_state(section) is True:
+            identity_key = PLATFORM_IDENTITY_FIELDS[platform]
             if not section.get(identity_key) or "identityStatus" not in section:
                 raise ConfigurationError(
                     f"enabled {platform} requires {platform}.{identity_key} and identityStatus"
                 )
         elif set(section) - {"enabled"}:
             raise ConfigurationError(f"disabled {platform} must contain only enabled=false")
-    if not any(data[platform].get("enabled") for platform in ("android", "ios")):
+    if not any(_enabled_state(data[platform]) is True for platform in ("android", "ios")):
         raise ConfigurationError("at least one release platform must be enabled")
 
     android = _object(data.get("android", {}), "android")
-    if android.get("enabled"):
+    if _enabled_state(android) is True:
         identity = android.get("applicationId", "")
         if len(identity) > 255 or not ANDROID_ID_RE.fullmatch(identity):
             raise ConfigurationError("android.applicationId is invalid")
@@ -246,8 +302,8 @@ def _validate_config(data: dict[str, Any]) -> None:
             raise ConfigurationError("android.variant must be at most 128 characters")
     if "externalTrack" in android:
         track = _object(android["externalTrack"], "android.externalTrack")
-        _reject_unknown("android.externalTrack", track, {"name", "kind"})
-        for key in ("name", "kind"):
+        _reject_unknown("android.externalTrack", track, NESTED_SECTION_KEYS["android.externalTrack"])
+        for key in REQUIRED_NESTED_FIELDS["android.externalTrack"]:
             if key not in track:
                 raise ConfigurationError(f"android.externalTrack.{key} is required")
         _optional_string(track, "name", "android.externalTrack")
@@ -263,19 +319,19 @@ def _validate_config(data: dict[str, Any]) -> None:
         android["uploadCertificateSha256"]
     ):
         raise ConfigurationError("android.uploadCertificateSha256 is invalid or a placeholder")
-    if android.get("enabled") and android.get("identityStatus") == "approved":
-        for key in ("externalTrack", "uploadCertificateSha256"):
+    if _enabled_state(android) is True and _approved_state(android) is True:
+        for key in APPROVED_IDENTITY_FIELDS["android"]:
             if key not in android:
                 raise ConfigurationError(f"approved Android identity requires android.{key}")
 
     ios = _object(data.get("ios", {}), "ios")
-    if ios.get("enabled"):
+    if _enabled_state(ios) is True:
         bundle_id = ios.get("bundleId", "")
         if len(bundle_id) > 255 or not IOS_ID_RE.fullmatch(bundle_id):
             raise ConfigurationError("ios.bundleId is invalid")
-    if "project" in ios and "workspace" in ios:
+    if all(key in ios for key in IOS_PROJECT_CHOICES):
         raise ConfigurationError("ios.project and ios.workspace are mutually exclusive")
-    for key in ("project", "workspace"):
+    for key in IOS_PROJECT_CHOICES:
         if key in ios:
             _validate_relative_path(ios[key], f"ios.{key}")
     for key in ("scheme", "archiveConfiguration", "externalTestFlightGroup"):
@@ -285,25 +341,25 @@ def _validate_config(data: dict[str, Any]) -> None:
         _validate_argv(ios["prepareCommand"], "ios.prepareCommand")
     if "symbols" in ios:
         symbols = _object(ios["symbols"], "ios.symbols")
-        _reject_unknown("ios.symbols", symbols, {"policy", "uploadCommand"})
+        _reject_unknown("ios.symbols", symbols, NESTED_SECTION_KEYS["ios.symbols"])
         if symbols.get("policy") not in SYMBOL_POLICIES:
             raise ConfigurationError(f"ios.symbols.policy must be one of {sorted(SYMBOL_POLICIES)}")
         if "uploadCommand" in symbols:
             _validate_argv(symbols["uploadCommand"], "ios.symbols.uploadCommand")
-        if symbols.get("policy") == "required" and "uploadCommand" not in symbols:
+        if _symbols_required_state(symbols) is True and "uploadCommand" not in symbols:
             raise ConfigurationError(
                 "ios.symbols.uploadCommand is required when ios.symbols.policy is required"
             )
-        if symbols.get("policy") != "required" and "uploadCommand" in symbols:
+        if _symbols_required_state(symbols) is False and "uploadCommand" in symbols:
             raise ConfigurationError(
                 "ios.symbols.uploadCommand is only allowed when ios.symbols.policy is required"
             )
     if "review" in ios:
         review = _object(ios["review"], "ios.review")
         _reject_unknown(
-            "ios.review", review, {"usesNonExemptEncryption", "demoAccountRequired"}
+            "ios.review", review, NESTED_SECTION_KEYS["ios.review"]
         )
-        for key in ("usesNonExemptEncryption", "demoAccountRequired"):
+        for key in REQUIRED_NESTED_FIELDS["ios.review"]:
             _optional_bool(review, key, "ios.review")
             if key not in review:
                 raise ConfigurationError(f"ios.review.{key} is required")
@@ -317,21 +373,14 @@ def _validate_config(data: dict[str, Any]) -> None:
         raise ConfigurationError(
             "ios.distributionCertificateSha256 is invalid or a placeholder"
         )
-    if ios.get("enabled") and ios.get("identityStatus") == "approved":
-        for key in (
-            "appStoreAppId",
-            "teamId",
-            "externalTestFlightGroup",
-            "distributionCertificateSha256",
-            "symbols",
-            "review",
-        ):
+    if _enabled_state(ios) is True and _approved_state(ios) is True:
+        for key in APPROVED_IDENTITY_FIELDS["ios"]:
             if key not in ios:
                 raise ConfigurationError(f"approved iOS identity requires ios.{key}")
 
     metadata = _object(data.get("metadata"), "metadata")
     _optional_string(metadata, "root", "metadata")
-    for key in ("root", "androidLocales", "iosLocales"):
+    for key in REQUIRED_SECTION_FIELDS["metadata"]:
         if key not in metadata:
             raise ConfigurationError(f"metadata.{key} is required")
     _validate_relative_path(metadata["root"], "metadata.root")
@@ -346,13 +395,13 @@ def _validate_config(data: dict[str, Any]) -> None:
                 raise ConfigurationError(f"metadata.{key} contains duplicate locales")
             if any(not LOCALE_RE.fullmatch(locale) for locale in values):
                 raise ConfigurationError(f"metadata.{key} contains an invalid locale")
-    if android.get("enabled") and not metadata["androidLocales"]:
+    if _enabled_state(android) is True and not metadata["androidLocales"]:
         raise ConfigurationError("enabled Android requires at least one metadata.androidLocales")
-    if ios.get("enabled") and not metadata["iosLocales"]:
+    if _enabled_state(ios) is True and not metadata["iosLocales"]:
         raise ConfigurationError("enabled iOS requires at least one metadata.iosLocales")
 
     services = _object(data.get("services"), "services")
-    for key in ("androidFirebase", "iosFirebase"):
+    for key in REQUIRED_SECTION_FIELDS["services"]:
         if key not in services:
             raise ConfigurationError(f"services.{key} is required")
     for key, value in services.items():
@@ -360,7 +409,7 @@ def _validate_config(data: dict[str, Any]) -> None:
             raise ConfigurationError(f"services.{key} must be one of {sorted(SERVICE_POLICIES)}")
 
     checks = _object(data.get("projectChecks"), "projectChecks")
-    for key in ("preflight", "androidArtifact", "iosArtifact"):
+    for key in REQUIRED_SECTION_FIELDS["projectChecks"]:
         if key not in checks:
             raise ConfigurationError(f"projectChecks.{key} is required")
     for key, commands in checks.items():
@@ -380,10 +429,194 @@ def _validate_relative_path(value: str, field: str) -> None:
         raise ConfigurationError(f"{field} must be a safe repository-relative path")
 
 
+def validate_config_data(data: Any) -> None:
+    """Validate configuration policy in memory without resolving any paths.
+
+    This is the shared CLI/API policy, not a build, account or filesystem check.
+    Malformed JSON container types must not leak an implementation TypeError
+    from enum membership tests. Valid inputs and first-policy-error ordering are
+    otherwise unchanged.
+    """
+    data = _object(data, "root")
+    try:
+        _validate_config(data)
+    except (TypeError, ValueError, OverflowError) as error:
+        raise ConfigurationError("configuration contains an invalid value type") from error
+
+
+def configuration_data_equal(first: Any, second: Any) -> bool:
+    """Compare admitted JSON without object-order or bool/number coercion.
+
+    Callers apply their finite JSON bounds before this pure recursive helper.
+    File formatting/identity is a separate observation, never inferred here.
+    """
+    if type(first) is not type(second):
+        return False
+    if type(first) is dict:
+        return first.keys() == second.keys() and all(
+            configuration_data_equal(value, second[key]) for key, value in first.items()
+        )
+    if type(first) is list:
+        return len(first) == len(second) and all(
+            configuration_data_equal(a, b) for a, b in zip(first, second)
+        )
+    return first == second
+
+
+_FIELD_MISSING = object()
+
+
+def _field_value(data: dict[str, Any], path: str) -> Any:
+    current: Any = data
+    for part in path.split("."):
+        if type(current) is not dict or part not in current:
+            return _FIELD_MISSING
+        current = current[part]
+    return current
+
+
+def _field_state(data: dict[str, Any], path: str) -> tuple[str, str]:
+    parts = path.split(".")
+    if len(parts) == 1:
+        return (("required", "The configuration schema version is required.")
+                if path == "schemaVersion" else
+                ("optional", "The schema reference is optional and is never fetched."))
+    section_name, name = parts[:2]
+    section = data.get(section_name)
+    if type(section) is not dict:
+        return "unknown", "The parent section is missing or is not an object; no value was replaced."
+    if section_name in PLATFORM_IDENTITY_FIELDS:
+        enabled = _enabled_state(section)
+        if name == "enabled":
+            return "required", "Declare a boolean platform selection; at least one platform must be enabled."
+        if enabled is None:
+            return "unknown", "Platform enabled is missing or is not a boolean; dependent settings were preserved."
+        if not enabled:
+            return "forbidden", "A disabled platform permits only enabled=false; explicitly review dependent removals."
+        if name in {PLATFORM_IDENTITY_FIELDS[section_name], "identityStatus"}:
+            return "required", "An enabled platform requires its application identity and declared identity status."
+        if section_name == "ios" and name in IOS_PROJECT_CHOICES:
+            if any(choice != name and choice in section for choice in IOS_PROJECT_CHOICES):
+                return "forbidden", "Project and workspace are mutually exclusive; explicitly choose which setting to retain."
+            return "optional", "Choose a project or workspace if needed; both cannot be configured together."
+        approved = _approved_state(section)
+        if len(parts) == 3:
+            nested = section.get(name, _FIELD_MISSING)
+            if nested is not _FIELD_MISSING and type(nested) is not dict:
+                return "unknown", "The containing setting is not an object; its malformed value was preserved."
+            if name == "symbols" and parts[2] == "uploadCommand":
+                required = _symbols_required_state(nested if type(nested) is dict else {})
+                if required is None:
+                    return "unknown", "Choose a valid symbols policy before assessing its upload command."
+                if required:
+                    return "required", "An upload command is required when symbols policy is required; it is not executed here."
+                return "forbidden", "An upload command is allowed only when symbols policy is required; removal is explicit."
+            if type(nested) is dict:
+                if parts[2] in REQUIRED_NESTED_FIELDS[f"{section_name}.{name}"]:
+                    return "required", "Every required member of this explicitly configured setting must be supplied."
+                return "optional", "This member is optional within the explicitly configured setting."
+            if approved is None:
+                return "unknown", "Identity status is missing or invalid; approval-dependent requirements are unknown."
+            if approved:
+                return "required", "A declared approved identity requires this setting; approval is not verified here."
+            return "optional", "This setting is optional for an unapproved identity; configuring it requires its members."
+        if name in APPROVED_IDENTITY_FIELDS[section_name]:
+            if approved is None:
+                return "unknown", "Identity status is missing or invalid; approval-dependent requirements are unknown."
+            if approved:
+                return "required", "A declared approved identity requires this setting; approval is not verified here."
+        return "optional", "This setting is optional for the current declared platform policy."
+    if section_name == "metadata" and name in {"androidLocales", "iosLocales"}:
+        platform = "android" if name == "androidLocales" else "ios"
+        enabled = _enabled_state(_section_data(data, platform))
+        if enabled is None:
+            return "unknown", "The locale array is required, but its minimum depends on a valid platform enabled value."
+        if enabled:
+            return "required", "An enabled platform requires a nonempty, unique list of valid locales."
+        return "required", "The locale array is required even for a disabled platform and may be empty."
+    if name in REQUIRED_SECTION_FIELDS.get(section_name, ()):
+        return "required", "This field is required by the shared configuration policy."
+    return "optional", "This field is optional under the shared configuration policy."
+
+
+def configuration_field_context(data: dict[str, Any]) -> list[dict[str, Any]]:
+    """Known-field presentation derived from the same facts as validation.
+
+    Callers admit/bound JSON first. This neither normalizes a draft nor removes
+    forbidden or malformed values. Reasons and paths never contain input text.
+    """
+    result = []
+    for path in CONFIGURATION_FIELD_PATHS:
+        state, reason = _field_state(data, path)
+        result.append({"path": path, "state": state,
+                       "present": _field_value(data, path) is not _FIELD_MISSING,
+                       "reason": reason})
+    return result
+
+
+def parse_config_text(raw: str) -> dict[str, Any]:
+    """Parse bounded UTF-8 JSON and validate policy, without reading or writing.
+
+    The optional $schema is informational: it is never fetched or imported.
+    """
+    if not isinstance(raw, str):
+        raise ConfigurationError("configuration must be UTF-8 JSON text")
+    try:
+        size = len(raw.encode("utf-8"))
+    except UnicodeError as error:
+        raise ConfigurationError("configuration must be UTF-8 JSON text") from error
+    if size > MAX_CONFIG_BYTES:
+        raise ConfigurationError("configuration file is unexpectedly large")
+
+    def reject_constant(_: str) -> None:
+        raise ConfigurationError("configuration must not contain non-finite numbers")
+
+    try:
+        data = json.loads(raw, object_pairs_hook=_reject_duplicate_pairs,
+                          parse_constant=reject_constant)
+    except json.JSONDecodeError as error:
+        raise ConfigurationError(
+            f"invalid JSON at line {error.lineno}, column {error.colno}: {error.msg}"
+        ) from error
+    except (RecursionError, ValueError) as error:
+        raise ConfigurationError("configuration JSON is too complex") from error
+    validate_config_data(data)
+    return data
+
+
 @dataclass(frozen=True)
 class ReleaseVersion:
     name: str
     build: int
+
+
+def release_version_from_values(
+    values: dict[str, str], *, name_key: str, build_key: str,
+    ios_enabled: bool, source_label: str,
+) -> ReleaseVersion:
+    """Shared release policy over parsed DATA; source_label is error context only.
+
+    File admission belongs to the caller. No path is resolved or read here, and
+    desktop callers must translate policy errors at their non-reflective boundary.
+    """
+    if name_key not in values:
+        raise ConfigurationError(f"version source does not contain {name_key}: {source_label}")
+    if build_key not in values:
+        raise ConfigurationError(f"version source does not contain {build_key}: {source_label}")
+    name = values[name_key]
+    if len(name) > 64 or not VERSION_RE.fullmatch(name):
+        raise ConfigurationError(f"invalid marketing version {name!r}; use dotted numeric form")
+    if ios_enabled and not IOS_MARKETING_VERSION_RE.fullmatch(name):
+        raise ConfigurationError(
+            "iOS marketing version must contain two or three dot-separated numeric components"
+        )
+    build_text = values[build_key]
+    if not re.fullmatch(r"[1-9][0-9]*", build_text):
+        raise ConfigurationError(f"{build_key} must be a canonical positive base-10 integer")
+    build = int(build_text, 10)
+    if build < 1 or build > 2_100_000_000:
+        raise ConfigurationError(f"{build_key} must be between 1 and 2100000000")
+    return ReleaseVersion(name=name, build=build)
 
 
 @dataclass(frozen=True)
@@ -391,6 +624,9 @@ class ReleaseConfig:
     path: Path
     root: Path
     data: dict[str, Any]
+    # Only the dedicated saved-preflight service supplies its original domain.
+    # Not a renderer field or a change to ordinary CLI input policy.
+    _preflight_budget: object = None
 
     def section(self, name: str) -> dict[str, Any]:
         return dict(self.data.get(name, {}))
@@ -403,6 +639,8 @@ class ReleaseConfig:
         return tuple(name for name in ("android", "ios") if self.platform_enabled(name))
 
     def project_path(self, value: str) -> Path:
+        if self._preflight_budget is not None:
+            self._preflight_budget.checkpoint()
         supplied = Path(value).expanduser()
         if supplied.is_absolute():
             absolute = Path(os.path.abspath(supplied))
@@ -433,35 +671,30 @@ class ReleaseConfig:
             candidate.relative_to(self.root.resolve())
         except ValueError as error:
             raise ConfigurationError(f"project path escapes repository root: {value}") from error
+        if self._preflight_budget is not None:
+            self._preflight_budget.relative(candidate)
+            self._preflight_budget.checkpoint()
         return candidate
 
     def release_version(self) -> ReleaseVersion:
         spec = self.section("version")
         path = self.project_path(spec["source"])
-        values = parse_key_value_file(path)
-        name_key = spec["nameKey"]
-        build_key = spec["buildKey"]
-        if name_key not in values:
-            raise ConfigurationError(f"version source does not contain {name_key}: {path}")
-        if build_key not in values:
-            raise ConfigurationError(f"version source does not contain {build_key}: {path}")
-        name = values[name_key]
-        if len(name) > 64 or not VERSION_RE.fullmatch(name):
-            raise ConfigurationError(f"invalid marketing version {name!r}; use dotted numeric form")
-        if self.platform_enabled("ios") and not IOS_MARKETING_VERSION_RE.fullmatch(name):
-            raise ConfigurationError(
-                "iOS marketing version must contain two or three dot-separated numeric components"
-            )
-        build_text = values[build_key]
-        if not re.fullmatch(r"[1-9][0-9]*", build_text):
-            raise ConfigurationError(f"{build_key} must be a canonical positive base-10 integer")
-        build = int(build_text, 10)
-        if build < 1 or build > 2_100_000_000:
-            raise ConfigurationError(f"{build_key} must be between 1 and 2100000000")
-        return ReleaseVersion(name=name, build=build)
+        values = parse_key_value_file(path, budget=self._preflight_budget)
+        return release_version_from_values(
+            values, name_key=spec["nameKey"], build_key=spec["buildKey"],
+            ios_enabled=self.platform_enabled("ios"), source_label=str(path),
+        )
 
     def commands(self, phase: str) -> list[list[str]]:
-        return [list(command) for command in self.data.get("projectChecks", {}).get(phase, [])]
+        commands = self.data.get("projectChecks", {}).get(phase, [])
+        if self._preflight_budget is None:
+            return [list(command) for command in commands]
+        result = self._preflight_budget.list()
+        for command in commands:
+            argv = self._preflight_budget.list()
+            argv.extend(command)
+            result.append(argv)
+        return result
 
 
 def _lexical_repository_root(start: Path) -> Path:
@@ -518,14 +751,7 @@ def load_config(path: Path | str) -> ReleaseConfig:
     finally:
         if descriptor >= 0:
             os.close(descriptor)
-    try:
-        data = json.loads(raw, object_pairs_hook=_reject_duplicate_pairs)
-    except json.JSONDecodeError as error:
-        raise ConfigurationError(
-            f"invalid JSON at line {error.lineno}, column {error.colno}: {error.msg}"
-        ) from error
-    data = _object(data, "root")
-    _validate_config(data)
+    data = parse_config_text(raw)
     root = find_repository_root(config_path.parent)
     return ReleaseConfig(path=config_path, root=root, data=data)
 
@@ -541,19 +767,45 @@ def find_repository_root(start: Path) -> Path:
     return current
 
 
-def parse_key_value_file(path: Path) -> dict[str, str]:
+def parse_key_value_file(path: Path, *, budget=None) -> dict[str, str]:
+    if budget is not None:
+        try:
+            text = budget.read(path, limit=MAX_VERSION_BYTES)
+        except UnicodeDecodeError as error:
+            raise ConfigurationError(f"version source must be UTF-8: {path}") from error
+        if text is None:
+            raise ConfigurationError(f"version source not found: {path}")
+        return parse_key_value_text(text, budget=budget)
     if not path.is_file():
         raise ConfigurationError(f"version source not found: {path}")
     if path.is_symlink():
         raise ConfigurationError(f"version source must not be a symlink: {path}")
-    if path.stat().st_size > 64 * 1024:
+    if path.stat().st_size > MAX_VERSION_BYTES:
         raise ConfigurationError(f"version source is unexpectedly large: {path}")
     try:
-        lines = path.read_text(encoding="utf-8").splitlines()
+        text = path.read_text(encoding="utf-8")
     except UnicodeDecodeError as error:
         raise ConfigurationError(f"version source must be UTF-8: {path}") from error
-    result: dict[str, str] = {}
+    return parse_key_value_text(text)
+
+
+def _iter_text_lines(text: str):
+    """Incremental str.splitlines() semantics without its input-sized list."""
+    start = 0
+    for separator in re.finditer(r"\r\n|[\n\r\v\f\x1c-\x1e\x85\u2028\u2029]", text):
+        yield text[start:separator.start()]
+        start = separator.end()
+    if start < len(text):
+        yield text[start:]
+
+
+def parse_key_value_text(text: str, *, budget=None) -> dict[str, str]:
+    """Pure legacy version-file grammar; callers own UTF-8/byte/file admission."""
+    result: dict[str, str] = {} if budget is None else budget.mapping()
+    lines = text.splitlines() if budget is None else _iter_text_lines(text)
     for number, raw_line in enumerate(lines, start=1):
+        if budget is not None:
+            budget.check()
         line = raw_line.strip()
         if not line or line.startswith(("#", "//", ";")):
             continue
@@ -574,11 +826,20 @@ def parse_key_value_file(path: Path) -> dict[str, str]:
             value = value[1:-1]
         if not value or value != value.strip():
             raise ConfigurationError(f"unsafe or empty version value on line {number}: {key}")
+        if budget is not None:
+            budget.retain(key)
+            budget.retain(value)
         result[key] = value
     return result
 
 
-def default_config(root: Path, discovered: dict[str, Any]) -> dict[str, Any]:
+def default_config_data(discovered: dict[str, Any]) -> dict[str, Any]:
+    """Pure configuration suggestions from already supplied discovery hints.
+
+    No root, file or project is inspected. Missing identities are examples;
+    platform detection and defaults never establish approved release identity.
+    The desktop admits its smaller closed hint contract before calling this.
+    """
     version_source = discovered.get("versionSource", "release/version.properties")
     android_id = (
         discovered.get("android", {}).get("applicationId") or "com.example.product"
@@ -618,3 +879,8 @@ def default_config(root: Path, discovered: dict[str, Any]) -> dict[str, Any]:
         "services": {"androidFirebase": "disabled", "iosFirebase": "disabled"},
         "projectChecks": {"preflight": [], "androidArtifact": [], "iosArtifact": []},
     }
+
+
+def default_config(root: Path, discovered: dict[str, Any]) -> dict[str, Any]:
+    """Compatibility entry point; the historical root argument is not consumed."""
+    return default_config_data(discovered)

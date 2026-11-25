@@ -1,0 +1,1251 @@
+diff --git a/desktop/src-tauri/src/supervisor.rs b/desktop/src-tauri/src/supervisor.rs
+--- a/desktop/src-tauri/src/supervisor.rs
++++ b/desktop/src-tauri/src/supervisor.rs
+@@ -42,6 +42,9 @@
+ mod history;
+ pub(crate) use history::{GitHubHistoryAdmission,GitHubHistoryReceipt,GitHubHistoryTicket};
+ use crate::github_history_protocol as history_protocol;
++#[path = "supervisor_git_read.rs"]
++mod git_read;
++pub(crate) use git_read::{GitReadAdmission, GitReadTicket, GitReadReceipt};
+ use crate::github_publication_protocol as publication_protocol;
+ #[path = "supervisor_publication.rs"]
+ mod publication;
+@@ -229,6 +232,8 @@
+     history_nomination: Option<Arc<crate::github_history_session::Nomination>>,
+     history_gate: Option<crate::asset_session::GitHubHistoryGoGate>,
+     history_endpoints: Option<history::Endpoints>,
++    git_read: Option<git_read::Invocation>,
++    git_read_endpoints: Option<git_read::Endpoints>,
+     gh_auth: Option<gh_auth::Invocation>,
+     gh_auth_endpoints: Option<gh_auth::Endpoints>,
+     setup_material: Option<SetupMaterial>,
+@@ -248,6 +253,7 @@
+     endpoint: Instant, cleanup_endpoint: Option<Instant>, error: Option<BridgeError>,
+     history_endpoints: Option<history::Endpoints>,
+     gh_auth_endpoints: Option<gh_auth::Endpoints>,
++    git_read_endpoints: Option<git_read::Endpoints>,
+     terminal: bool, unknown: bool,
+     #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+     native_unknown_pending: bool,
+@@ -271,11 +277,11 @@
+     }
+ }
+ #[derive(Debug, PartialEq)]
+-enum ReadOutcome { Passive(Value), GitHub(GitHubReadOutcome), Preflight(preflight_protocol::Reply), Release(release_protocol::Reply), Setup(setup_protocol::Reply), Publication(publication_protocol::Reply), History(history_protocol::Reply), GitHubAuth }
++enum ReadOutcome { Passive(Value), GitHub(GitHubReadOutcome), Preflight(preflight_protocol::Reply), Release(release_protocol::Reply), Setup(setup_protocol::Reply), Publication(publication_protocol::Reply), History(history_protocol::Reply), GitHubAuth, GitRead(crate::git_read_protocol::Terminal) }
+ enum DriverEnd { Ready(Result<ReadOutcome, BridgeError>), RetainedUnknown }
+
+ #[derive(Clone, Copy)]
+-enum Profile { Passive(Method), GitHubReadOnly, GitHubPreflight, GitHubRelease, GitHubSetup, GitHubPublication, GitHubHistory, GitHubAuth }
++enum Profile { Passive(Method), GitHubReadOnly, GitHubPreflight, GitHubRelease, GitHubSetup, GitHubPublication, GitHubHistory, GitHubAuth, GitRead }
+ impl Profile {
+     fn stdout_limit(self) -> usize {
+         match self {
+@@ -288,6 +294,7 @@
+             Self::GitHubPublication => publication_protocol::RESPONSE_LIMIT,
+             Self::GitHubHistory => 64*1024,
+             Self::GitHubAuth => crate::github_auth_capture_wire::RESPONSE_LIMIT,
++            Self::GitRead => crate::git_read_protocol::RESPONSE_LIMIT,
+         }
+     }
+     fn decode(self, bytes: &[u8], id: &str, preflight: Option<&preflight_protocol::Request>, release: Option<&release_protocol::Request>, setup: Option<&setup_protocol::Request>, publication: Option<&publication_protocol::Request>) -> Result<ReadOutcome, BridgeError> {
+@@ -305,7 +312,7 @@
+             Self::GitHubPublication => publication_protocol::decode_reply(id, bytes,
+                 publication.ok_or_else(BridgeError::protocol)?).map(ReadOutcome::Publication),
+             // Only drive's actual sealed-source branch may decode History.
+-            Self::GitHubHistory | Self::GitHubAuth => Err(BridgeError::protocol()),
++            Self::GitHubHistory | Self::GitHubAuth | Self::GitRead => Err(BridgeError::protocol()),
+         }
+     }
+ }
+@@ -321,17 +328,18 @@
+     Publication { request: publication_protocol::Request, gate: crate::asset_session::GitHubPublicationGoGate, end: Instant },
+     History(GitHubHistoryAdmission),
+     GitHubAuth(GitHubAuthAdmission),
++    GitRead(GitReadAdmission),
+ }
+ impl AdmissionRequest<'_> {
+     fn profile(&self) -> Profile {
+         match self { Self::Passive { method, .. } => Profile::Passive(*method), Self::GitHub { .. } => Profile::GitHubReadOnly,
+-            Self::Preflight { .. } => Profile::GitHubPreflight, Self::Release { .. } => Profile::GitHubRelease, Self::Setup { .. } => Profile::GitHubSetup, Self::Publication { .. } => Profile::GitHubPublication, Self::History(_) => Profile::GitHubHistory, Self::GitHubAuth(_) => Profile::GitHubAuth }
++            Self::Preflight { .. } => Profile::GitHubPreflight, Self::Release { .. } => Profile::GitHubRelease, Self::Setup { .. } => Profile::GitHubSetup, Self::Publication { .. } => Profile::GitHubPublication, Self::History(_) => Profile::GitHubHistory, Self::GitHubAuth(_) => Profile::GitHubAuth, Self::GitRead(_) => Profile::GitRead }
+     }
+     fn encode(self, id: &str) -> Result<(Vec<u8>, Option<preflight_protocol::Request>, Option<crate::asset_session::GitHubPreflightGoGate>,
+         Option<release_protocol::Request>, Option<crate::asset_session::GitHubReleaseGoGate>,
+         Option<setup_protocol::Request>, Option<crate::asset_session::GitHubSetupGoGate>, Option<SetupNativeAdmission>), BridgeError> {
+         match self {
+-            Self::History(_) | Self::GitHubAuth(_) | Self::Publication { .. } => Err(BridgeError::protocol()), // Handled by their fixed admission arms.
++            Self::History(_) | Self::GitHubAuth(_) | Self::GitRead(_) | Self::Publication { .. } => Err(BridgeError::protocol()), // Handled by their fixed admission arms.
+             Self::Passive { method, params } => Ok((protocol::encode_request(id, method, params)?, None, None, None, None, None, None, None)),
+             Self::GitHub { repository, expected_account_id, expected_repository_id, token } =>
+                 Ok((github_protocol::encode_private_request(id, repository, expected_account_id, expected_repository_id, token)?, None, None, None, None, None, None, None)),
+@@ -406,6 +414,7 @@
+     Publication(Arc<Mutex<GitHubPublicationReceipt>>),
+     History(Arc<Mutex<GitHubHistoryReceipt>>),
+     GitHubAuth,
++    GitRead,
+ }
+
+ /// A bounded native-only mailbox. Early unknown is not original resource
+@@ -514,7 +523,7 @@
+         Self::with_reply(endpoint, reply.map(|sender| PassiveReply::Value { sender: Some(sender) }))
+     }
+     fn with_reply(endpoint: Instant, reply: Option<PassiveReply>) -> Self {
+-        Self { endpoint, cleanup_endpoint: None, error: None, history_endpoints: None, gh_auth_endpoints: None, terminal: false, unknown: false, reply,
++        Self { endpoint, cleanup_endpoint: None, error: None, history_endpoints: None, gh_auth_endpoints: None, git_read_endpoints: None, terminal: false, unknown: false, reply,
+             #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+             native_unknown_pending: false,
+             driver_join: ManagementJoin::Pending, watchdog_join: ManagementJoin::Pending,
+@@ -535,8 +544,8 @@
+     }
+     fn fail_at(&mut self, error: BridgeError, now: Instant) {
+         if self.terminal { return; }
+-        let end = self.gh_auth_endpoints.map_or_else(|| self.history_endpoints.map_or_else(
+-            || now.min(self.endpoint) + CLEANUP_TIME, |original| original.first_failure(now)), |original| original.first_failure(now));
++        let end = self.git_read_endpoints.map_or_else(|| self.gh_auth_endpoints.map_or_else(|| self.history_endpoints.map_or_else(
++            || now.min(self.endpoint) + CLEANUP_TIME, |original| original.first_failure(now)), |original| original.first_failure(now)), |original| original.first_failure(now));
+         if self.error.is_none() || self.cleanup_endpoint.is_some_and(|prior| end < prior) { self.error = Some(error); }
+         self.cleanup_endpoint = Some(self.cleanup_endpoint.map_or(end, |prior| prior.min(end)));
+     }
+@@ -736,6 +745,10 @@
+     github_history: Option<Arc<Mutex<GitHubHistoryRuntimeSlots>>>,
+     #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+     github_auth: Option<Arc<Mutex<GitHubAuthRuntimeSlots>>>,
++    #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
++    git_read_slots: Option<Arc<Mutex<crate::installed_runtime::GitReadRuntimeSlots>>>,
++    #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
++    git_read_sources: Option<Arc<Mutex<crate::asset_source::GitReadSources>>>,
+     #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]
+     native_settlement: Option<JoinHandle<CloseOutcome>>,
+     #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]
+@@ -877,6 +890,7 @@
+             if matches!(&*receipt, GitHubPublicationReceipt::Pending) { *receipt = GitHubPublicationReceipt::RetainedUnknown; }
+         }
+         if let Some(auth) = &self.gh_auth { lock(&auth.mailbox).unknown(); }
++        if let Some(read) = &self.git_read { read.unknown(); }
+         if let Some(receipt)=&self.history_receipt{
+             let mut receipt=lock(receipt);
+             if matches!(&*receipt,GitHubHistoryReceipt::Pending){*receipt=GitHubHistoryReceipt::RetainedUnknown;}
+@@ -1020,6 +1034,13 @@
+                     }
+                 }
+             }
++            Profile::GitRead => {
++                drop(reply);
++                let outcome = result.and_then(|value| match value {
++                    ReadOutcome::GitRead(value) => Ok(value), _ => Err(BridgeError::protocol()),
++                });
++                if let Some(read) = &self.git_read { read.retire(outcome, was_unknown); }
++            }
+             Profile::GitHubAuth => {
+                 drop(reply);
+                 let outcome = result.and_then(|value| match value {
+@@ -1214,12 +1235,13 @@
+     }
+
+     fn admit(&self, request: AdmissionRequest<'_>, completion: CompletionTarget) -> Result<Arc<Owner>, BridgeError> {
++        let git_read_endpoints = match &request { AdmissionRequest::GitRead(value) => Some(value.endpoints), _ => None };
+         let gh_auth_endpoints = match &request { AdmissionRequest::GitHubAuth(admission) => Some(admission.endpoints), _ => None };
+         let history_endpoints=match &request{AdmissionRequest::History(admission)=>Some(admission.endpoints),_=>None};
+         let publication_end=match &request{AdmissionRequest::Publication{end,..}=>Some(*end),_=>None};
+         let now=Instant::now();
+         if publication_end.is_some_and(|end|end<=now || end>now+Duration::from_secs(60)){return Err(BridgeError::invalid())}
+-        let endpoint = gh_auth_endpoints.map_or_else(|| publication_end.unwrap_or_else(||history_endpoints.map_or(now+OPERATION_TIME,|original|original.work)), |original| original.work);
++        let endpoint = git_read_endpoints.map_or_else(|| gh_auth_endpoints.map_or_else(|| publication_end.unwrap_or_else(||history_endpoints.map_or(now+OPERATION_TIME,|original|original.work)), |original| original.work), |original| original.work);
+         let profile = request.profile();
+         let (reply, github_receipt, preflight_receipt, release_receipt, setup_receipt,history_receipt,publication_receipt) = match (profile, completion) {
+             (Profile::Passive(_), CompletionTarget::Passive(sender)) =>
+@@ -1232,7 +1254,7 @@
+             (Profile::GitHubSetup, CompletionTarget::Setup(receipt)) => (None, None, None, None, Some(receipt),None,None),
+             (Profile::GitHubHistory,CompletionTarget::History(receipt))=>(None,None,None,None,None,Some(receipt),None),
+             (Profile::GitHubPublication,CompletionTarget::Publication(receipt))=>(None,None,None,None,None,None,Some(receipt)),
+-            (Profile::GitHubAuth, CompletionTarget::GitHubAuth) => (None,None,None,None,None,None,None),
++            (Profile::GitHubAuth, CompletionTarget::GitHubAuth) | (Profile::GitRead, CompletionTarget::GitRead) => (None,None,None,None,None,None,None),
+             _ => return Err(BridgeError::invalid()),
+         };
+         let executor = tokio::runtime::Handle::try_current()
+@@ -1244,12 +1266,13 @@
+         let key = self.inner.next.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |value| value.checked_add(1))
+             .map_err(|_| BridgeError::new("unavailable", "The query identity space is exhausted."))?;
+         let id = match profile { Profile::Passive(_) => format!("query-{key}"), Profile::GitHubReadOnly => format!("github-read-{key}"),
+-            Profile::GitHubPreflight => format!("github-preflight-{key}"), Profile::GitHubRelease => format!("github-release-{key}"), Profile::GitHubSetup => format!("github-setup-{key}"),Profile::GitHubPublication=>format!("github-publication-{key}"),Profile::GitHubHistory=>format!("github-history-{key}"), Profile::GitHubAuth=>format!("github-auth-{key}") };
+-        let (publication,history,gh_auth,ordinary)=match request{
+-            AdmissionRequest::Publication{request,gate,..}=>(Some((request,gate)),None,None,None),
+-            AdmissionRequest::History(admission)=>(None,Some(admission),None,None),
+-            AdmissionRequest::GitHubAuth(admission)=>(None,None,Some(admission),None),
+-            other=>(None,None,None,Some(other))};
++            Profile::GitHubPreflight => format!("github-preflight-{key}"), Profile::GitHubRelease => format!("github-release-{key}"), Profile::GitHubSetup => format!("github-setup-{key}"),Profile::GitHubPublication=>format!("github-publication-{key}"),Profile::GitHubHistory=>format!("github-history-{key}"), Profile::GitHubAuth=>format!("github-auth-{key}"), Profile::GitRead=>format!("git-read-{key}") };
++        let (publication,history,gh_auth,git_read,ordinary)=match request{
++            AdmissionRequest::Publication{request,gate,..}=>(Some((request,gate)),None,None,None,None),
++            AdmissionRequest::History(admission)=>(None,Some(admission),None,None,None),
++            AdmissionRequest::GitHubAuth(admission)=>(None,None,Some(admission),None,None),
++            AdmissionRequest::GitRead(admission)=>(None,None,None,Some(admission),None),
++            other=>(None,None,None,None,Some(other))};
+         let (mut bytes, preflight_request, preflight_gate, release_request, release_gate, setup_request, setup_gate, material) = match ordinary{
+             Some(request)=>request.encode(&id)?,None=>(Vec::new(),None,None,None,None,None,None,None),
+         };
+@@ -1260,6 +1283,11 @@
+         let history_slots=history.as_ref().map(|value|value.slots.clone());
+         #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+         let gh_auth_slots = gh_auth.as_ref().map(|value| value.slots.clone());
++        #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
++        let git_read_slots = git_read.as_ref().map(|value| value.slots.clone());
++        #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
++        let git_read_sources = git_read.as_ref().map(|value| value.invocation.sources.clone());
++        let git_read = git_read.map(|value| value.invocation);
+         let gh_auth = gh_auth.map(|value| value.invocation);
+         let(history_nomination,history_gate)=match history{Some(value)=>(Some(value.nomination),Some(value.gate)),None=>(None,None)};
+         #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+@@ -1282,8 +1310,8 @@
+             key, id, profile, github_receipt, preflight_receipt, preflight_request, preflight_gate, release_receipt, release_request, release_gate, setup_receipt, setup_request, setup_gate,
+             publication_receipt,publication_request,publication_gate,
+             setup_material, setup_first_bound, secret_sealed: Mutex::new(secret_cipher),
+-            history_nomination,history_gate,history_receipt,history_endpoints, gh_auth, gh_auth_endpoints,
+-            preflight_go_claimed: AtomicBool::new(false), state: Mutex::new({let mut state=OwnerState::with_reply(endpoint,reply);state.history_endpoints=history_endpoints;state.gh_auth_endpoints=gh_auth_endpoints;state}),
++            history_nomination,history_gate,history_receipt,history_endpoints, gh_auth, gh_auth_endpoints, git_read, git_read_endpoints,
++            preflight_go_claimed: AtomicBool::new(false), state: Mutex::new({let mut state=OwnerState::with_reply(endpoint,reply);state.history_endpoints=history_endpoints;state.gh_auth_endpoints=gh_auth_endpoints;state.git_read_endpoints=git_read_endpoints;state}),
+             resources: AsyncMutex::new(Resources {
+                 #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]
+                 passive: if passive_selected(profile) {
+@@ -1311,6 +1339,10 @@
+                 github_history: history_slots,
+                 #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+                 github_auth: gh_auth_slots,
++                #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
++                git_read_slots,
++                #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
++                git_read_sources,
+                 ..Resources::default()
+             }), stop, changed: Notify::new(),
+             permit: Mutex::new(Some(permit)), driver: AsyncMutex::new(None), watchdog: AsyncMutex::new(None), observer: AsyncMutex::new(None),
+@@ -1405,7 +1437,7 @@
+         let mut observer_end=Instant::now()+CLEANUP_TIME;
+         for owner in owners {
+             owner.fail(BridgeError::shutdown());
+-            if matches!(owner.profile,Profile::GitHubHistory | Profile::GitHubAuth){
++            if matches!(owner.profile,Profile::GitHubHistory | Profile::GitHubAuth | Profile::GitRead){
+                 if let Some(end)=lock(&owner.state).cleanup_endpoint{observer_end=observer_end.max(end);}
+             }
+         }
+@@ -1816,7 +1848,7 @@
+     original && matches!((profile, expected), (Profile::GitHubPreflight, Profile::GitHubPreflight)
+         | (Profile::GitHubRelease, Profile::GitHubRelease) | (Profile::GitHubSetup, Profile::GitHubSetup)
+         | (Profile::GitHubPublication,Profile::GitHubPublication)
+-        | (Profile::GitHubHistory, Profile::GitHubHistory) | (Profile::GitHubAuth, Profile::GitHubAuth)) && !state.terminal && !state.unknown && state.error.is_none()
++        | (Profile::GitHubHistory, Profile::GitHubHistory) | (Profile::GitHubAuth, Profile::GitHubAuth) | (Profile::GitRead, Profile::GitRead)) && !state.terminal && !state.unknown && state.error.is_none()
+         && state.cleanup_endpoint.is_none() && !stopping && !disabled && !stop && now < state.endpoint
+ }
+ fn claim_preflight_go(inner: &Inner, owner: &Arc<Owner>, expected: Profile) -> bool {
+@@ -2020,9 +2052,24 @@
+     GitHubHistory(Arc<Mutex<GitHubHistoryRuntimeSlots>>),
+     #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+     GitHubAuth(Arc<Mutex<GitHubAuthRuntimeSlots>>),
++    #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
++    GitRead(Arc<Mutex<crate::installed_runtime::GitReadRuntimeSlots>>, Arc<Mutex<crate::asset_source::GitReadSources>>),
+ }
+ #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]
+ fn installed_settlement_slots(resources: &Resources, profile: Profile) -> Result<Option<InstalledSettlementSlots>, BridgeError> {
++    #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
++    {
++        if git_read::selected(profile) {
++            if resources.passive.is_some() || resources.github_readonly.is_some() || resources.github_preflight.is_some()
++                || resources.github_release.is_some() || resources.github_setup.is_some() || resources.github_history.is_some() || resources.github_auth.is_some() {
++                return Err(BridgeError::cleanup_unknown());
++            }
++            return resources.git_read_slots.as_ref().zip(resources.git_read_sources.as_ref())
++                .map(|(native, sources)| Some(InstalledSettlementSlots::GitRead(native.clone(), sources.clone())))
++                .ok_or_else(BridgeError::cleanup_unknown);
++        }
++        if resources.git_read_slots.is_some() || resources.git_read_sources.is_some() { return Err(BridgeError::cleanup_unknown()); }
++    }
+     #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+     {
+         if github_auth_selected(profile) {
+@@ -2101,11 +2148,15 @@
+             Self::GitHubHistory(native) => native.try_lock().ok().map(|slots| (slots.never_started(), slots.no_child_effect())),
+             #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+             Self::GitHubAuth(native) => native.try_lock().ok().map(|slots| (slots.never_started(), slots.no_child_effect())),
++            #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
++            Self::GitRead(native, sources) => native.try_lock().ok().zip(sources.try_lock().ok())
++                .map(|(slots, source)| (slots.never_started() && source.not_started(), slots.no_child_effect())),
+         }
+     }
+     #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+     fn settle_originals(&self, owner: &Owner) -> CloseOutcome {
+         match self {
++            Self::GitRead(native, _) => git_read::settle(owner, native),
+             Self::Passive(native) => {
+                 let mut slots = match native.lock() { Ok(slots) => slots,
+                     Err(error) => { let mut slots = error.into_inner(); slots.mark_interrupted(); slots } };
+@@ -2182,6 +2233,9 @@
+             Self::GitHubHistory(native) => native.try_lock().is_ok_and(|slots| slots.settled()),
+             #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+             Self::GitHubAuth(native) => native.try_lock().is_ok_and(|slots| slots.settled()),
++            #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
++            Self::GitRead(native, sources) => native.try_lock().is_ok_and(|slots| slots.settled())
++                && sources.try_lock().is_ok_and(|source| source.settled()),
+         }
+     }
+ }
+@@ -2264,6 +2318,19 @@
+             let owners = lock(&inner.owners); let state = lock(&owner.state);
+             if !preflight_claim_clear(owners.get(&owner.key).is_some_and(|actual| Arc::ptr_eq(actual, owner)), owner.profile,
+                 Profile::GitHubAuth, &state, Instant::now(), inner.stopping.load(Ordering::SeqCst), inner.disabled.load(Ordering::SeqCst), *owner.stop.borrow()) {
++                return Err(state.error.clone().unwrap_or_else(BridgeError::timeout));
++            }
++            slots.transfer_once().map_err(|_| BridgeError::cleanup_unknown())
++        },
++        #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
++        Some(InstalledSettlementSlots::GitRead(native, _)) => {
++            let (inspection, acquisition) = passive_borrows(resources);
++            if inspection.returned != Some(ManagementJoin::Returned) || !inspection.positive()
++                || acquisition.returned.is_some() || !acquisition.positive() { return Err(BridgeError::cleanup_unknown()); }
++            let mut slots = native.try_lock().map_err(|_| BridgeError::cleanup_unknown())?;
++            let owners = lock(&inner.owners); let state = lock(&owner.state);
++            if !preflight_claim_clear(owners.get(&owner.key).is_some_and(|actual| Arc::ptr_eq(actual, owner)), owner.profile,
++                Profile::GitRead, &state, Instant::now(), inner.stopping.load(Ordering::SeqCst), inner.disabled.load(Ordering::SeqCst), *owner.stop.borrow()) {
+                 return Err(state.error.clone().unwrap_or_else(BridgeError::timeout));
+             }
+             slots.transfer_once().map_err(|_| BridgeError::cleanup_unknown())
+@@ -2653,6 +2720,8 @@
+     let inspection_history = resources.github_history.clone();
+     #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+     let inspection_auth = resources.github_auth.clone();
++    #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
++    let inspection_git_read = resources.git_read_slots.clone();
+     #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]
+     let inspection_stop = owner.stop.subscribe();
+     #[cfg(all(test, feature = "development-runtime"))]
+@@ -2854,6 +2923,18 @@
+                 }
+                 return Err(BridgeError::unavailable("The GitHub setup action runtime is not qualified."));
+             },
++            Profile::GitRead => {
++                #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
++                if git_read::selected(profile) {
++                    let result = (|| {
++                        let read = inspection_owner.git_read.as_ref().ok_or_else(BridgeError::cleanup_unknown)?;
++                        read.inspect(&config, &inspection_owner, inspection_git_read.as_ref().ok_or_else(BridgeError::cleanup_unknown)?)
++                    })();
++                    if let Err(error) = &result { inspection_owner.fail(error.clone()); }
++                    return result;
++                }
++                return Err(BridgeError::unavailable("The fixed local Git read runtime is unavailable."));
++            },
+             Profile::GitHubAuth => {
+                 #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+                 if github_auth_selected(profile) {
+@@ -2892,7 +2973,7 @@
+         #[cfg(all(windows, test, feature = "development-runtime"))]
+         let runtime = match profile {
+             Profile::Passive(_) => hosted_tests::select_windows_bootstrap(runtime, windows_bootstrap, endpoint)?,
+-            Profile::GitHubReadOnly | Profile::GitHubPreflight | Profile::GitHubRelease | Profile::GitHubSetup | Profile::GitHubPublication | Profile::GitHubHistory | Profile::GitHubAuth => runtime, // Never a passive fixture override for GitHub actions.
++            Profile::GitHubReadOnly | Profile::GitHubPreflight | Profile::GitHubRelease | Profile::GitHubSetup | Profile::GitHubPublication | Profile::GitHubHistory | Profile::GitHubAuth | Profile::GitRead => runtime, // Never a passive fixture override for GitHub actions.
+         };
+         Ok(runtime)
+     }));
+@@ -2954,6 +3035,8 @@
+     let acquisition_history = resources.github_history.clone();
+     #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+     let acquisition_auth = resources.github_auth.clone();
++    #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
++    let acquisition_git_read = resources.git_read_slots.clone();
+     #[cfg(all(test, feature = "development-runtime"))]
+     let acquisition_gate = inner.test.acquisition.clone();
+     let (acquire_start, acquire_enter) = oneshot::channel();
+@@ -2962,7 +3045,7 @@
+         if acquire_enter.blocking_recv().is_err() {
+             let error = AcquisitionError::from(std::io::Error::new(std::io::ErrorKind::Interrupted, "original acquisition entry was not released"));
+             #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+-            if matches!(acquiring_owner.profile, Profile::GitHubPreflight | Profile::GitHubRelease | Profile::GitHubSetup | Profile::GitHubPublication | Profile::GitHubHistory | Profile::GitHubAuth) {
++            if matches!(acquiring_owner.profile, Profile::GitHubPreflight | Profile::GitHubRelease | Profile::GitHubSetup | Profile::GitHubPublication | Profile::GitHubHistory | Profile::GitHubAuth | Profile::GitRead) {
+                 acquiring_owner.observe_macos_action_acquisition_failure(&error);
+             }
+             #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+@@ -3054,6 +3137,20 @@
+             if let Err(error)=&result{acquiring_owner.observe_macos_action_acquisition_failure(error);}
+             return result;
+         }
++        if matches!(acquiring_owner.profile, Profile::GitRead) {
++            #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
++            {
++                let Some(native) = acquisition_git_read else {
++                    owner_unknown!(acquiring_owner, &acquiring_inner, None, Acquisition);
++                    return Err(AcquisitionError::unsupported("The original Git read custody is missing"));
++                };
++                let result = git_read::acquire_original(&acquiring_inner, &acquiring_owner, &native);
++                if let Err(error) = &result { acquiring_owner.observe_macos_action_acquisition_failure(error); }
++                return result;
++            }
++            #[cfg(not(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
++            return Err(AcquisitionError::unsupported("The fixed Git read runtime is unavailable"));
++        }
+         if matches!(acquiring_owner.profile, Profile::GitHubAuth) {
+             #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+             {
+@@ -3134,17 +3231,29 @@
+         None => { owner_unknown!(owner, &inner, Some(&resources), ChildMissing); return DriverEnd::RetainedUnknown; }
+     };
+     let (faults, mut fault_rx) = mpsc::channel(4);
+-    let (mut ready_send, mut ready_receive) = if matches!(profile, Profile::GitHubPreflight | Profile::GitHubRelease | Profile::GitHubSetup | Profile::GitHubPublication | Profile::GitHubHistory | Profile::GitHubAuth) {
++    let git_read_request = if matches!(profile, Profile::GitRead) {
++        match owner.git_read.as_ref().ok_or_else(BridgeError::cleanup_unknown).and_then(|read| read.request()) {
++            Ok(value) => Some(value),
++            Err(error) => { owner.fail(error); owner_unknown!(owner, &inner, Some(&resources), Io); return DriverEnd::RetainedUnknown; },
++        }
++    } else { None };
++    let (mut ready_send, mut ready_receive) = if matches!(profile, Profile::GitHubPreflight | Profile::GitHubRelease | Profile::GitHubSetup | Profile::GitHubPublication | Profile::GitHubHistory | Profile::GitHubAuth | Profile::GitRead) {
+         let (send, receive) = oneshot::channel(); (Some(send), Some(receive))
+     } else { (None, None) };
+     let preflight_digest = matches!(profile, Profile::GitHubPreflight | Profile::GitHubRelease | Profile::GitHubSetup | Profile::GitHubPublication | Profile::GitHubHistory).then(|| preflight_protocol::request_digest(&bytes));
+     // This existing fixed original POST/wait slot is shared by two closed profiles only.
+-    let (history_post_send,mut history_post_receive)=if matches!(profile,Profile::GitHubHistory | Profile::GitHubAuth){
++    let (history_post_send,mut history_post_receive)=if matches!(profile,Profile::GitHubHistory | Profile::GitHubAuth | Profile::GitRead){
+         let (send,receive)=oneshot::channel();(Some(send),Some(receive))
+     }else{(None,None)};
+     if let Some(stdin) = stdin {
+         if let Some(ready) = ready_receive.take() {
+-            if matches!(profile, Profile::GitHubAuth) {
++            if matches!(profile, Profile::GitRead) {
++                let (release, wait_returned) = oneshot::channel(); resources.history_wait_release = Some(release);
++                if let (Some(request), Some(post)) = (git_read_request.as_ref(), history_post_send) {
++                    resources.writer = Some(tokio::spawn(git_read::write(stdin, request.clone(), ready, wait_returned, post,
++                        inner.clone(), owner.clone(), faults.clone())));
++                } else { owner.fail(BridgeError::cleanup_unknown()); }
++            } else if matches!(profile, Profile::GitHubAuth) {
+                 let (release, wait_returned) = oneshot::channel(); resources.history_wait_release = Some(release);
+                 match (owner.gh_auth.as_ref(), auth_request.as_ref(), history_post_send) {
+                     (Some(auth), Some(request), Some(post)) => {
+@@ -3178,7 +3287,11 @@
+         }
+     }
+     if let Some(stdout) = stdout {
+-        if matches!(profile, Profile::GitHubAuth) {
++        if matches!(profile, Profile::GitRead) {
++            if let (Some(request), Some(ready)) = (git_read_request.as_ref(), ready_send.take()) {
++                resources.stdout = Some(tokio::spawn(git_read::read(stdout, request.clone(), ready, faults.clone())));
++            } else { owner.fail(BridgeError::cleanup_unknown()); }
++        } else if matches!(profile, Profile::GitHubAuth) {
+             match (owner.gh_auth.as_ref(), auth_request.as_ref(), ready_send.take()) {
+                 (Some(auth), Some(request), Some(ready)) => resources.stdout = Some(tokio::spawn(gh_auth::read_private(
+                     stdout, true, request.clone(), auth.mailbox.clone(), Some(ready), faults.clone()))),
+@@ -3284,14 +3397,14 @@
+                 history_post_receive.take();
+                 match request {
+                     Ok(reply)=>{
+-                        if !matches!(profile,Profile::GitHubHistory | Profile::GitHubAuth)||resources.history_post.is_some()||resources.history_post_return.is_some()
++                        if !matches!(profile,Profile::GitHubHistory | Profile::GitHubAuth | Profile::GitRead)||resources.history_post.is_some()||resources.history_post_return.is_some()
+                             ||resources.history_post_join_failed||owner.failed()||Instant::now()>=owner.endpoint(){
+                             let error=lock(&owner.state).error.clone().unwrap_or_else(BridgeError::timeout);
+                             owner.fail(error.clone());let _=reply.send(Err(error));
+                         }else{
+                             #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+                             {
+-                                let native=resources.github_history.clone();let auth_native=resources.github_auth.clone();
++                                let native=resources.github_history.clone();let auth_native=resources.github_auth.clone();let git_native=resources.git_read_slots.clone();
+                                 let original_owner=owner.clone();let source_stop=owner.stop.subscribe();
+                                 let (release,enter)=oneshot::channel();
+                                 resources.history_post_ack=Some(reply);
+@@ -3299,6 +3412,10 @@
+                                 resources.history_post=Some(tokio::task::spawn_blocking(move||{
+                                     let result=(||{
+                                         enter.blocking_recv().map_err(|_|BridgeError::cleanup_unknown())?;
++                                        if matches!(original_owner.profile, Profile::GitRead) {
++                                            return original_owner.git_read.as_ref().ok_or_else(BridgeError::cleanup_unknown)?
++                                                .before_go(&original_owner, git_native.as_ref().ok_or_else(BridgeError::cleanup_unknown)?);
++                                        }
+                                         if matches!(original_owner.profile, Profile::GitHubAuth) {
+                                             return original_owner.gh_auth.as_ref().ok_or_else(BridgeError::cleanup_unknown)?
+                                                 .post(&original_owner, auth_native.as_ref().ok_or_else(BridgeError::cleanup_unknown)?, gh_auth::SourcePost::BeforeGo);
+@@ -3434,6 +3551,17 @@
+         #[cfg(not(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+         {owner_unknown!(owner,&inner,Some(&resources),Io);return DriverEnd::RetainedUnknown;}
+     }else{None};
++    let git_read_reply = if matches!(profile, Profile::GitRead) {
++        let decoded = (|| {
++            let read = owner.git_read.as_ref().ok_or_else(BridgeError::cleanup_unknown)?;
++            read.decode_before_close(&owner, resources.out_end.as_ref().ok_or_else(BridgeError::cleanup_unknown)?,
++                resources.err_end.as_ref().ok_or_else(BridgeError::cleanup_unknown)?, resources.waited.is_some_and(|status| status.success()))
++        })();
++        match decoded {
++            Ok(value) => Some(value),
++            Err(error) => { owner.fail(error); owner_unknown!(owner, &inner, Some(&resources), Io); return DriverEnd::RetainedUnknown; },
++        }
++    } else { None };
+     // Known child custody only permits attempting the SAME native settlement;
+     // it never proves the actual source/native closes, joins or success.
+     if !settle_installed(&mut resources, &inner, &owner).await { return DriverEnd::RetainedUnknown; }
+@@ -3478,6 +3606,10 @@
+     if matches!(profile, Profile::GitHubAuth) {
+         resources.out_end.take(); resources.err_end.take(); resources.child.take();
+         return DriverEnd::Ready(Ok(ReadOutcome::GitHubAuth)); // Never raw private stdout.
++    }
++    if let Some(reply) = git_read_reply {
++        resources.out_end.take(); resources.err_end.take(); resources.child.take();
++        return DriverEnd::Ready(Ok(ReadOutcome::GitRead(reply)));
+     }
+     if let Some(reply)=history_reply{
+         // The exact previously decoded reply moves only after actual native
+@@ -5771,7 +5903,7 @@
+             key: 1, id: "query-1".into(), profile: Profile::Passive(Method::Capabilities), github_receipt: None,
+             preflight_receipt: None, preflight_request: None, preflight_gate: None, release_receipt: None, release_request: None, release_gate: None, setup_receipt: None, setup_request: None, setup_gate: None,
+             publication_receipt:None,publication_request:None,publication_gate:None,
+-            history_receipt:None,history_nomination:None,history_gate:None,history_endpoints:None, gh_auth:None, gh_auth_endpoints:None, setup_material: None, setup_first_bound:None, secret_sealed: Mutex::new(None), preflight_go_claimed: AtomicBool::new(false),
++            history_receipt:None,history_nomination:None,history_gate:None,history_endpoints:None, gh_auth:None, gh_auth_endpoints:None, git_read:None, git_read_endpoints:None, setup_material: None, setup_first_bound:None, secret_sealed: Mutex::new(None), preflight_go_claimed: AtomicBool::new(false),
+             state: Mutex::new(OwnerState::new(Instant::now() + OPERATION_TIME, None)),
+             resources: AsyncMutex::new(Resources::default()), stop, changed: Notify::new(),
+             permit: Mutex::new(None), driver: AsyncMutex::new(None), watchdog: AsyncMutex::new(None), observer: AsyncMutex::new(None),
+diff --git a/desktop/src-tauri/src/runtime.rs b/desktop/src-tauri/src/runtime.rs
+--- a/desktop/src-tauri/src/runtime.rs
++++ b/desktop/src-tauri/src/runtime.rs
+@@ -345,6 +345,20 @@
+         self.provider_nomination()?;
+         let cwd=crate::installed_runtime::runtime_root();
+         Ok(VerifiedRuntime{python:cwd.join("python/bin/python3"),bootstrap:cwd.join("github_history_bootstrap.py"),core:cwd.join("core.zip"),cwd})
++    }
++}
++
++// Fixed read-only Git sourceworker. Selection is not source/IO finality and
++// does not grant writes, network, hook execution or another runtime fallback.
++#[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
++pub(crate) struct GitReadInstalledProfile { _private: () }
++#[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
++impl GitReadInstalledProfile {
++    pub(crate) fn selection(&self) -> Result<VerifiedRuntime, BridgeError> {
++        if !macos_bindings() { return Err(unavailable()); }
++        let cwd = crate::installed_runtime::runtime_root();
++        Ok(VerifiedRuntime { python: cwd.join("python/bin/python3"), bootstrap: cwd.join("git_read_bootstrap.py"),
++            core: cwd.join("core.zip"), cwd })
+     }
+ }
+
+@@ -1804,6 +1818,18 @@
+         #[cfg(not(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+         { false }
+     }
++    pub(crate) fn git_read_profile_available(&self) -> bool {
++        #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
++        { macos_bindings() }
++        #[cfg(not(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
++        { false }
++    }
++    #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
++    pub(crate) fn resolve_git_read_installed(&self, originals: &mut crate::installed_runtime::GitReadRuntimeSlots,
++        end: Instant, stop: &tokio::sync::watch::Receiver<bool>) -> Result<VerifiedRuntime, BridgeError> {
++        if !self.git_read_profile_available() { return Err(unavailable()); }
++        originals.inspect_once(GitReadInstalledProfile { _private: () }, end, stop)
++    }
+     pub(crate) fn github_auth_profile_available(&self) -> bool {
+         #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+         { macos_bindings() && crate::github_auth_nomination::StockGhNomination::compiled().is_some() }
+diff --git a/desktop/src-tauri/src/installed_runtime_macos.rs b/desktop/src-tauri/src/installed_runtime_macos.rs
+--- a/desktop/src-tauri/src/installed_runtime_macos.rs
++++ b/desktop/src-tauri/src/installed_runtime_macos.rs
+@@ -1128,6 +1128,11 @@
+             files.insert(file.path.clone(), file);
+         }
+         for required in runtime::REQUIRED_RUNTIME_RESOURCES { if !files.contains_key(required) { return Err(AdmissionFailure::Inventory); } }
++        // This closed new profile must find its actual fixed bootstrap BEFORE
++        // claiming the child. The historical mandatory roster stays unchanged.
++        if selection.bootstrap == selection.cwd.join("git_read_bootstrap.py") && !files.contains_key("git_read_bootstrap.py") {
++            return Err(AdmissionFailure::Inventory);
++        }
+         if self.history_nomination.is_some() && (!files.contains_key("tools/gh") || !files.contains_key("github_history_bootstrap.py")){
+             return Err(AdmissionFailure::Inventory);
+         }
+@@ -1323,6 +1328,9 @@
+ slots!(PassiveRuntimeSlots, PassiveInstalledRuntime, runtime::PassiveInstalledProfile);
+ slots!(GitHubReadOnlyRuntimeSlots, GitHubReadOnlyInstalledRuntime, runtime::GitHubReadOnlyInstalledProfile);
+ slots!(GitHubAuthRuntimeSlots, GitHubAuthInstalledRuntime, runtime::GitHubAuthInstalledProfile);
++slots!(GitReadRuntimeSlots, GitReadInstalledRuntime, runtime::GitReadInstalledProfile);
++#[path = "git_read_runtime_macos.rs"]
++mod git_read_runtime;
+ #[path = "github_auth_runtime_macos.rs"]
+ mod github_auth_runtime;
+ slots!(GitHubPreflightRuntimeSlots, GitHubPreflightInstalledRuntime, runtime::GitHubPreflightInstalledProfile);
+diff --git a/desktop/src-tauri/src/asset_source.rs b/desktop/src-tauri/src/asset_source.rs
+--- a/desktop/src-tauri/src/asset_source.rs
++++ b/desktop/src-tauri/src/asset_source.rs
+@@ -1237,7 +1237,7 @@
+ #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+ pub(crate) use macos::PUBLIC_IMAGES_SOURCE_CONTROL_BYTES;
+ #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+-pub(crate) use macos::{HistorySources,LocalHistorySources,GhAuthSources};
++pub(crate) use macos::{HistorySources,LocalHistorySources,GhAuthSources,GitReadSources};
+ #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+ pub(crate) use macos::{BackupSources, BackupDestinations};
+ #[cfg(all(test, target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+diff --git a/desktop/src-tauri/src/asset_source_macos.rs b/desktop/src-tauri/src/asset_source_macos.rs
+--- a/desktop/src-tauri/src/asset_source_macos.rs
++++ b/desktop/src-tauri/src/asset_source_macos.rs
+@@ -17,6 +17,9 @@
+ pub(crate) use history_sources::HistorySources;
+ #[path = "github_auth_sources_macos.rs"]
+ mod github_auth_sources;
++#[path = "git_read_sources_macos.rs"]
++mod git_read_sources;
++pub(crate) use git_read_sources::GitReadSources;
+ pub(crate) use github_auth_sources::GhAuthSources;
+ #[path = "local_history_sources_macos.rs"]
+ mod local_history_sources;
+diff --git a/desktop/src-tauri/src/asset_session.rs b/desktop/src-tauri/src/asset_session.rs
+--- a/desktop/src-tauri/src/asset_session.rs
++++ b/desktop/src-tauri/src/asset_session.rs
+@@ -100,6 +100,9 @@
+ mod github_variable;
+ #[path = "asset_session_gh_auth.rs"]
+ mod gh_auth;
++#[path = "asset_session_git_read.rs"]
++mod git_read;
++pub(crate) use git_read::GitReadGate;
+ pub(crate) use gh_auth::{GitHubAuthGoGate, GitHubAuthRequest, GitHubAuthStatus, GitHubAuthConnectionHold, GitHubAuthCustody};
+ #[path = "asset_session_github_publication.rs"]
+ mod github_publication;
+@@ -768,6 +771,7 @@
+     quit: Option<Arc<OriginalWork>>, quit_accepted: bool, quit_cleanup_end: Option<Instant>,
+     github: ConnectionState,
+     gh_auth: Option<gh_auth::Entry>,
++    git_read: Option<git_read::Entry>,
+     evidence: EvidenceRegistry,
+     images: images::Registry,
+     installation: installation::Registry,
+@@ -1915,6 +1919,7 @@
+             self.add(crate::agent_identity_requests::document_backing_bytes())?;
+             self.add(state.images.retained_bytes().ok_or(Problem::Capacity)?)?;
+             self.add(gh_auth::retained_bytes(state).ok_or(Problem::CleanupUnknown)?)?;
++            self.add(git_read::retained_bytes(state).ok_or(Problem::CleanupUnknown)?)?;
+             if let Some(vault) = &state.vault { self.vault_session(vault)?; }
+             self.records(&state.records)?; self.assignments(&state.assignments)?;
+             if let Some(context) = &state.context { self.context(context)?; }
+@@ -1979,6 +1984,10 @@
+     // The same pure Document/storage census, not History execution authority.
+     // Gh-auth reserves its distinct complete runtime and held source set; only
+     // one joined serial capture may release that debit for the next capture.
++    // Storage arithmetic only; no History authority or live-owner census.
++    pub(super) fn git_read_admission_bytes(document:&Arc<Inner>,state:&DocumentState,future:usize)->Result<usize,Problem>{
++        history_admission_bytes(document,state,future)
++    }
+     pub(super) fn github_auth_admission_bytes(document:&Arc<Inner>,state:&DocumentState,future:usize)->Result<usize,Problem>{
+         history_admission_bytes(document,state,future)
+     }
+@@ -2357,7 +2366,7 @@
+     // lock/loss and reconciliation intentionally do not call this predicate.
+     allocation_conflict_gate(
+         state.slot.as_ref().is_some_and(|slot| !slot.owner.lookup_allocations_allowed()),
+-        state.github.setup_secret_work_pending() || state.github.history_work_pending() || gh_auth::pending(state))
++        state.github.setup_secret_work_pending() || state.github.history_work_pending() || gh_auth::pending(state) || git_read::pending(state))
+ }
+ fn allocation_conflict_gate(lookup_held:bool,secret_original_pending:bool)->Result<(),AssetError>{
+     if lookup_held||secret_original_pending{return Err(AssetError::new(Reason::Busy))}
+@@ -2374,7 +2383,7 @@
+     // The caller still holds this same document mutex through Supervisor claim.
+     if state.unknown || state.exhausted { return Err(BridgeError::cleanup_unknown()); }
+     if state.stopping { return Err(BridgeError::shutdown()); }
+-    if state.quit_pending || state.retiring || state.lock_pending || state.compatibility_picker_pending || project_path_pending(state) || images::pending(state) || installation::pending(state) || gh_auth::pending(state) {
++    if state.quit_pending || state.retiring || state.lock_pending || state.compatibility_picker_pending || project_path_pending(state) || images::pending(state) || installation::pending(state) || gh_auth::pending(state) || git_read::pending(state) {
+         return Err(BridgeError::new("busy", "Finish the original native operation first."));
+     }
+     Ok(())
+@@ -2398,7 +2407,7 @@
+     if state.unknown { return Err(AssetError::new(Reason::CleanupUnknown)); }
+     if state.stopping { return Err(AssetError::new(Reason::Shutdown)); }
+     owner_gate()?;
+-    if state.compatibility_picker_pending || installation::pending(state) || gh_auth::pending(state) { return Err(AssetError::new(Reason::Busy)); }
++    if state.compatibility_picker_pending || installation::pending(state) || gh_auth::pending(state) || git_read::pending(state) { return Err(AssetError::new(Reason::Busy)); }
+     if session && state.slot.as_ref().is_some_and(|slot| (slot.operation.evidence() || slot.operation.project_path() || slot.operation.android_source() || slot.operation.artifact() || slot.operation.images())
+         && (slot.phase != Phase::Idle || !slot.owner.resources_settled())) { return Err(AssetError::new(Reason::Busy)); }
+     if state.quit_pending || state.retiring || state.lock_pending { return Err(AssetError::new(Reason::Busy)); }
+@@ -2556,7 +2565,7 @@
+             next_operation: 0, next_context: 0, exhausted: false, lost_observed: false, session: false, stopping: false, unknown: false, quit_pending: false, retiring: false, lock_pending: false,
+             compatibility_picker_pending: false, maintenance: macos_maintenance::Closure::default(), saved_observation: None, saved_input: None, session_owner_reason: None,
+             context: None, slot: None, records: Vec::new(), assignments: Vec::new(), quit: None, quit_accepted: false, quit_cleanup_end: None,
+-            github: ConnectionState::new(), gh_auth: None, evidence: EvidenceRegistry::new(), images: images::Registry::new(), installation: installation::Registry::new(),
++            github: ConnectionState::new(), gh_auth: None, git_read: None, evidence: EvidenceRegistry::new(), images: images::Registry::new(), installation: installation::Registry::new(),
+             #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+             vault: None,
+             #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+@@ -2767,6 +2776,8 @@
+         }
+     }
+     fn bump(&self, state: &mut DocumentState) {
++        git_read::stop(state); // A real Document revision change retires only original eligibility.
++        git_read::reconcile(state);
+         #[cfg(any(target_os = "linux", target_os = "macos"))]
+         if state.quit_accepted || state.stopping || state.lost_observed || state.unknown {
+             // Accepted quit/document loss only, never merely opening or
+@@ -2878,7 +2889,7 @@
+             || (self.inner.bridge.preflight.stopping() || ((self.inner.bridge.local_store.stopping() || ((self.inner.bridge.local_store_prepare.stopping() || self.inner.bridge.local_store_reconcile.stopping()) || self.inner.bridge.local_store_execute.stopping())) || self.inner.bridge.local_history.stopping())) || (self.inner.bridge.android_build.stopping() || (self.inner.bridge.project_recovery.stopping() || (self.inner.bridge.ios_archive.stopping() || (self.inner.bridge.artifact_inspection.stopping() || self.inner.bridge.tool_acquisition.stopping())))) { return Availability::Shutdown; }
+         if !state.lifetime.original_bound() || state.lost_observed
+             || !self.inner.bridge.diagnostics.original_document_matches(&self.inner.session_identity) { return Availability::DocumentLost; }
+-        if state.quit_pending || state.retiring || state.lock_pending || state.compatibility_picker_pending || state.maintenance.closed() || gh_auth::pending(state)
++        if state.quit_pending || state.retiring || state.lock_pending || state.compatibility_picker_pending || state.maintenance.closed() || gh_auth::pending(state) || git_read::pending(state)
+             || state.slot.as_ref().is_some_and(|slot| !slot.owner.resources_settled())
+             || state.github.native_work_pending() || !self.inner.bridge.edits.can_exit()
+             || !self.inner.bridge.supervisor.can_exit() || (self.inner.bridge.preflight.busy() || ((self.inner.bridge.local_store.busy() || ((self.inner.bridge.local_store_prepare.busy() || self.inner.bridge.local_store_reconcile.busy()) || self.inner.bridge.local_store_execute.busy())) || self.inner.bridge.local_history.busy()))
+@@ -2903,7 +2914,7 @@
+         if let Some(reason) = preflight_document_gate(state, crate::offline_preflight_protocol::Profile::current()) { return reason; }
+         // Saved checks require Disconnect, not merely an idle GitHub ticket.
+         // Observe the actual retained private session, never a public tombstone.
+-        if state.quit_pending || state.retiring || state.lock_pending || state.compatibility_picker_pending || state.maintenance.closed() || gh_auth::pending(state)
++        if state.quit_pending || state.retiring || state.lock_pending || state.compatibility_picker_pending || state.maintenance.closed() || gh_auth::pending(state) || git_read::pending(state)
+             || state.saved_observation.as_ref().is_some_and(|lane| !lane.returned())
+             || state.slot.as_ref().is_some_and(|slot| slot.phase != Phase::Idle || !slot.owner.resources_settled())
+             || state.github.registration().is_some() || !self.inner.bridge.edits.can_exit() || self.inner.bridge.edits.preflight_attention()
+@@ -2925,7 +2936,7 @@
+         if let Some(reason) = local_store_document_gate(state, crate::local_store_preflight_protocol::Profile::current()) { return reason; }
+         // Saved checks require Disconnect, not merely an idle GitHub ticket.
+         // Observe the actual retained private session, never a public tombstone.
+-        if state.quit_pending || state.retiring || state.lock_pending || state.compatibility_picker_pending || state.maintenance.closed() || gh_auth::pending(state)
++        if state.quit_pending || state.retiring || state.lock_pending || state.compatibility_picker_pending || state.maintenance.closed() || gh_auth::pending(state) || git_read::pending(state)
+             || state.saved_observation.as_ref().is_some_and(|lane| !lane.returned())
+             || state.slot.as_ref().is_some_and(|slot| slot.phase != Phase::Idle || !slot.owner.resources_settled())
+             || state.github.registration().is_some() || !self.inner.bridge.edits.can_exit() || self.inner.bridge.edits.preflight_attention()
+@@ -2947,7 +2958,7 @@
+         if let Some(reason) = local_store_document_gate(state, crate::local_store_preflight_protocol::Profile::current()) { return reason; }
+         // Saved checks require Disconnect, not merely an idle GitHub ticket.
+         // Observe the actual retained private session, never a public tombstone.
+-        if state.quit_pending || state.retiring || state.lock_pending || state.compatibility_picker_pending || state.maintenance.closed() || gh_auth::pending(state)
++        if state.quit_pending || state.retiring || state.lock_pending || state.compatibility_picker_pending || state.maintenance.closed() || gh_auth::pending(state) || git_read::pending(state)
+             || state.saved_observation.as_ref().is_some_and(|lane| !lane.returned())
+             || state.slot.as_ref().is_some_and(|slot| slot.phase != Phase::Idle || !slot.owner.resources_settled())
+             || state.github.registration().is_some() || !self.inner.bridge.edits.can_exit() || self.inner.bridge.edits.preflight_attention()
+@@ -2969,7 +2980,7 @@
+         if let Some(reason) = local_store_document_gate(state, crate::local_store_preflight_protocol::Profile::current()) { return reason; }
+         // Saved checks require Disconnect, not merely an idle GitHub ticket.
+         // Observe the actual retained private session, never a public tombstone.
+-        if state.quit_pending || state.retiring || state.lock_pending || state.compatibility_picker_pending || state.maintenance.closed() || gh_auth::pending(state)
++        if state.quit_pending || state.retiring || state.lock_pending || state.compatibility_picker_pending || state.maintenance.closed() || gh_auth::pending(state) || git_read::pending(state)
+             || state.saved_observation.as_ref().is_some_and(|lane| !lane.returned())
+             || state.slot.as_ref().is_some_and(|slot| slot.phase != Phase::Idle || !slot.owner.resources_settled())
+             || state.github.registration().is_some() || !self.inner.bridge.edits.can_exit() || self.inner.bridge.edits.preflight_attention()
+@@ -2991,7 +3002,7 @@
+         if let Some(reason) = local_store_document_gate(state, crate::local_store_preflight_protocol::Profile::current()) { return reason; }
+         // Saved checks require Disconnect, not merely an idle GitHub ticket.
+         // Observe the actual retained private session, never a public tombstone.
+-        if state.quit_pending || state.retiring || state.lock_pending || state.compatibility_picker_pending || state.maintenance.closed() || gh_auth::pending(state)
++        if state.quit_pending || state.retiring || state.lock_pending || state.compatibility_picker_pending || state.maintenance.closed() || gh_auth::pending(state) || git_read::pending(state)
+             || state.saved_observation.as_ref().is_some_and(|lane| !lane.returned())
+             || state.slot.as_ref().is_some_and(|slot| slot.phase != Phase::Idle || !slot.owner.resources_settled())
+             || state.github.registration().is_some() || !self.inner.bridge.edits.can_exit() || self.inner.bridge.edits.preflight_attention()
+@@ -3010,7 +3021,7 @@
+         if state.lost_observed{return Availability::DocumentLost;}if !state.lifetime.original_bound(){return Availability::Busy;}
+         // Saved checks require Disconnect, not merely an idle GitHub ticket.
+         // Observe the actual retained private session, never a public tombstone.
+-        if state.quit_pending || state.retiring || state.lock_pending || state.compatibility_picker_pending || state.maintenance.closed() || gh_auth::pending(state)
++        if state.quit_pending || state.retiring || state.lock_pending || state.compatibility_picker_pending || state.maintenance.closed() || gh_auth::pending(state) || git_read::pending(state)
+             || state.saved_observation.as_ref().is_some_and(|lane| !lane.returned())
+             || state.slot.as_ref().is_some_and(|slot| slot.phase != Phase::Idle || !slot.owner.resources_settled())
+             || state.github.registration().is_some() || !self.inner.bridge.edits.can_exit() || self.inner.bridge.edits.preflight_attention()
+@@ -3126,7 +3137,7 @@
+         // Require actual Disconnect, not an idle/retired public GitHub ticket.
+         // Asset phase AND original resources must settle, as must all edits,
+         // recovery attention, passive queries and the other saved-command owner.
+-        if state.quit_pending || state.retiring || state.lock_pending || state.compatibility_picker_pending || state.maintenance.closed() || gh_auth::pending(state)
++        if state.quit_pending || state.retiring || state.lock_pending || state.compatibility_picker_pending || state.maintenance.closed() || gh_auth::pending(state) || git_read::pending(state)
+             || state.saved_observation.as_ref().is_some_and(|lane| !lane.returned())
+             || state.slot.as_ref().is_some_and(|slot| slot.phase != Phase::Idle || !slot.owner.resources_settled())
+             || state.github.registration().is_some() || !self.inner.bridge.edits.can_exit() || self.inner.bridge.edits.preflight_attention()
+@@ -3275,7 +3286,7 @@
+         // Require actual Disconnect, not an idle/retired public GitHub ticket.
+         // Asset phase AND original resources must settle, as must all edits,
+         // recovery attention, passive queries and the other saved-command owner.
+-        if state.quit_pending || state.retiring || state.lock_pending || state.compatibility_picker_pending || state.maintenance.closed() || gh_auth::pending(state)
++        if state.quit_pending || state.retiring || state.lock_pending || state.compatibility_picker_pending || state.maintenance.closed() || gh_auth::pending(state) || git_read::pending(state)
+             || state.saved_observation.as_ref().is_some_and(|lane| !lane.returned())
+             || state.slot.as_ref().is_some_and(|slot| slot.phase != Phase::Idle || !slot.owner.resources_settled())
+             || state.github.registration().is_some() || !self.inner.bridge.edits.can_exit() || self.inner.bridge.edits.preflight_attention()
+@@ -3335,7 +3346,7 @@
+         // Require actual Disconnect, not an idle/retired public GitHub ticket.
+         // Asset phase AND original resources must settle, as must all edits,
+         // recovery attention, passive queries and the other saved-command owner.
+-        if state.quit_pending || state.retiring || state.lock_pending || state.compatibility_picker_pending || state.maintenance.closed() || gh_auth::pending(state)
++        if state.quit_pending || state.retiring || state.lock_pending || state.compatibility_picker_pending || state.maintenance.closed() || gh_auth::pending(state) || git_read::pending(state)
+             || state.saved_observation.as_ref().is_some_and(|lane| !lane.returned())
+             || state.slot.as_ref().is_some_and(|slot| slot.phase != Phase::Idle || !slot.owner.resources_settled())
+             || state.github.registration().is_some() || !self.inner.bridge.edits.can_exit() || self.inner.bridge.edits.preflight_attention()
+@@ -3704,7 +3715,7 @@
+     }
+     fn github_gate(&self, state: &DocumentState) -> GitHubReason {
+         let base = self.github_base_gate(state);
+-        if base == GitHubReason::None && gh_auth::pending(state) { GitHubReason::Busy } else { base }
++        if base == GitHubReason::None && (gh_auth::pending(state) || git_read::pending(state)) { GitHubReason::Busy } else { base }
+     }
+     // Only the retained gh-auth original uses this companion to avoid treating
+     // its OWN pending capture as unrelated new-work admission.
+@@ -4161,7 +4172,7 @@
+         if state.stopping || self.inner.bridge.supervisor.stopping() { return Err(BridgeError::shutdown()); }
+         if self.inner.bridge.supervisor.disabled() { return Err(BridgeError::cleanup_unknown()); }
+         // SAME Document lock: reject reciprocal edits before publisher/context side effects.
+-        if gh_auth::pending(state) { return Err(BridgeError::new("busy", "Finish the original GitHub connection first.")); }
++        if gh_auth::pending(state) || git_read::pending(state) { return Err(BridgeError::new("busy", "Finish the original GitHub connection first.")); }
+         if domain == crate::edit_protocol::EditDomain::ProjectIdentity {
+             // Retire an already-ready positive Store original BEFORE a context
+             // invalidation could downgrade it and hide its continuity veto.
+@@ -4258,6 +4269,7 @@
+         Ok(generation == context.registry_generation && root.identity == context.project.identity && root.path == context.project.path)
+     }
+     fn expire(&self, state: &mut DocumentState, now: Instant) {
++        git_read::reconcile(state);
+         let owner_reason = self.live_session_owner_reason();
+         // Display changes advance the existing native revision. This is
+         // capability DATA, not a fabricated asset cleanup result, and does
+@@ -4581,6 +4593,7 @@
+     idle(state)
+ }
+ fn invalidate_all(state: &mut DocumentState) {
++    git_read::stop(state);
+     gh_auth::stop(state, if state.unknown { GitHubReason::CleanupUnknown }
+         else if state.stopping || state.lost_observed { GitHubReason::Cancelled }
+         else { GitHubReason::TargetChanged });
+@@ -7938,7 +7951,7 @@
+         DocumentState { lifetime, revision: 0, next_operation: 0, next_context: 0, exhausted: false, lost_observed: false,
+             session: false, stopping: false, unknown: false, quit_pending: false, retiring: false, lock_pending: false,
+             compatibility_picker_pending: false, maintenance: macos_maintenance::Closure::default(), saved_observation: None, saved_input: None, session_owner_reason: None, context: None, slot: None, records: Vec::new(), assignments: Vec::new(),
+-            quit: None, quit_accepted: false, quit_cleanup_end: None, github: ConnectionState::new(), gh_auth: None, evidence: EvidenceRegistry::new(), images: images::Registry::new(), installation: installation::Registry::new(),
++            quit: None, quit_accepted: false, quit_cleanup_end: None, github: ConnectionState::new(), gh_auth: None, git_read: None, evidence: EvidenceRegistry::new(), images: images::Registry::new(), installation: installation::Registry::new(),
+             #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+             vault: None,
+             #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+@@ -8071,7 +8084,7 @@
+         DocumentState { lifetime, revision: 0, next_operation: 0, next_context: 0, exhausted: false, lost_observed: false,
+             session: false, stopping: false, unknown: false, quit_pending: false, retiring: false, lock_pending: false,
+             compatibility_picker_pending: false, maintenance: macos_maintenance::Closure::default(), saved_observation: None, saved_input: None, session_owner_reason: None, context: None, slot: None, records: Vec::new(), assignments: Vec::new(),
+-            quit: None, quit_accepted: false, quit_cleanup_end: None, github: ConnectionState::new(), gh_auth: None, evidence: EvidenceRegistry::new(), images: images::Registry::new(), installation: installation::Registry::new(),
++            quit: None, quit_accepted: false, quit_cleanup_end: None, github: ConnectionState::new(), gh_auth: None, git_read: None, evidence: EvidenceRegistry::new(), images: images::Registry::new(), installation: installation::Registry::new(),
+             #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+             vault: None,
+             #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+@@ -8168,7 +8181,7 @@
+             session: true, stopping: false, unknown: false, quit_pending: false, retiring: false, lock_pending: false,
+             compatibility_picker_pending: false, maintenance: macos_maintenance::Closure::default(), saved_observation: None, saved_input: None, session_owner_reason: None,
+             context: None, slot: None, records: Vec::new(), assignments: Vec::new(), quit: None, quit_accepted: false, quit_cleanup_end: None,
+-            github: ConnectionState::new(), gh_auth: None, evidence: EvidenceRegistry::new(), images: images::Registry::new(), installation: installation::Registry::new(),
++            github: ConnectionState::new(), gh_auth: None, git_read: None, evidence: EvidenceRegistry::new(), images: images::Registry::new(), installation: installation::Registry::new(),
+             #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+             vault: None,
+             #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+diff --git a/desktop/src-tauri/src/shell.rs b/desktop/src-tauri/src/shell.rs
+--- a/desktop/src-tauri/src/shell.rs
++++ b/desktop/src-tauri/src/shell.rs
+@@ -1738,6 +1738,32 @@
+     if webview.label() != MAIN_WINDOW { return Err(github_connection_session::refused(GitHubConnectionReason::InvalidInput)); }
+     request_body(request).map_err(|_| github_connection_session::refused(GitHubConnectionReason::InvalidInput))
+ }
++fn git_read_command(name: &str, webview: &Webview, request: &tauri::ipc::Request<'_>) -> Result<crate::git_read_protocol::Command, BridgeError> {
++    if webview.label() != MAIN_WINDOW { return Err(BridgeError::invalid()); }
++    let tauri::ipc::InvokeBody::Raw(bytes) = request.body() else { return Err(BridgeError::invalid()); };
++    crate::git_read_protocol::decode_command(name, bytes)
++}
++#[tauri::command]
++async fn git_read_status(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::git_read_protocol::Status, BridgeError> {
++    fixture_command!(state, Forbidden, observed, BridgeError::unavailable("Git reads have no fixture admission."));
++    git_read_command("git_read_status", &webview, &request)?;
++    Ok(state.document.git_read_status())
++}
++#[tauri::command]
++async fn git_read_start(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::git_read_protocol::StartResult, BridgeError> {
++    fixture_command!(state, Forbidden, observed, BridgeError::unavailable("Git reads have no fixture admission."));
++    let crate::git_read_protocol::Command::Start(input) = git_read_command("git_read_start", &webview, &request)?
++        else { return Err(BridgeError::invalid()); };
++    state.document.git_read_start(input)
++}
++#[tauri::command]
++async fn git_read_cancel(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::git_read_protocol::Status, BridgeError> {
++    fixture_command!(state, Forbidden, observed, BridgeError::unavailable("Git reads have no fixture admission."));
++    let crate::git_read_protocol::Command::Cancel(id) = git_read_command("git_read_cancel", &webview, &request)?
++        else { return Err(BridgeError::invalid()); };
++    state.document.git_read_cancel(&id)
++}
++
+ fn github_auth_command(name: &str, webview: &Webview, request: &tauri::ipc::Request<'_>) -> Result<crate::github_auth_entry_protocol::Command, BridgeError> {
+     if webview.label() != MAIN_WINDOW { return Err(github_connection_session::refused(GitHubConnectionReason::InvalidInput)); }
+     // These three new routes admit RAW UTF-8 JSON only. Tauri's JSON Value
+@@ -4340,6 +4366,7 @@
+             project_identity_close, project_identity_status,
+             github_connection_status, github_connection_connect_token, github_connection_refresh, github_connection_disconnect,
+             github_auth_status, github_auth_connect, github_auth_cancel,
++            git_read_status, git_read_start, git_read_cancel,
+             github_preflight_status, github_preflight_prepare, github_preflight_dispatch, github_preflight_track,
+             github_preflight_reconcile, github_preflight_pending, github_preflight_cancel,
+             github_release_status, github_release_prepare, github_release_dispatch, github_release_track,
+diff --git a/desktop/src-tauri/src/lib.rs b/desktop/src-tauri/src/lib.rs
+--- a/desktop/src-tauri/src/lib.rs
++++ b/desktop/src-tauri/src/lib.rs
+@@ -100,6 +100,7 @@
+
+ pub mod error;
+ pub mod protocol;
++mod git_read_protocol;
+ mod service_protocol;
+ mod service_setup_guidance;
+ mod agent_identity_requests;
+diff --git a/desktop/src-tauri/build.rs b/desktop/src-tauri/build.rs
+--- a/desktop/src-tauri/build.rs
++++ b/desktop/src-tauri/build.rs
+@@ -320,6 +320,7 @@
+             "project_identity_close", "project_identity_status",
+             "github_connection_status", "github_connection_connect_token", "github_connection_refresh", "github_connection_disconnect",
+             "github_auth_status", "github_auth_connect", "github_auth_cancel",
++            "git_read_status", "git_read_start", "git_read_cancel",
+             "github_preflight_status", "github_preflight_prepare", "github_preflight_dispatch", "github_preflight_track",
+             "github_preflight_reconcile", "github_preflight_pending", "github_preflight_cancel",
+             "github_release_status", "github_release_prepare", "github_release_dispatch", "github_release_track",
+diff --git a/desktop/src-tauri/capabilities/main.json b/desktop/src-tauri/capabilities/main.json
+--- a/desktop/src-tauri/capabilities/main.json
++++ b/desktop/src-tauri/capabilities/main.json
+@@ -47,6 +47,7 @@
+     "allow-project-identity-close", "allow-project-identity-status",
+     "allow-github-connection-status", "allow-github-connection-connect-token", "allow-github-connection-refresh", "allow-github-connection-disconnect",
+     "allow-github-auth-status", "allow-github-auth-connect", "allow-github-auth-cancel",
++    "allow-git-read-status", "allow-git-read-start", "allow-git-read-cancel",
+     "allow-github-preflight-status", "allow-github-preflight-prepare", "allow-github-preflight-dispatch", "allow-github-preflight-track",
+     "allow-github-preflight-reconcile", "allow-github-preflight-pending", "allow-github-preflight-cancel",
+     "allow-github-release-status", "allow-github-release-prepare", "allow-github-release-dispatch", "allow-github-release-track",
+diff --git a/desktop/tools/prepare_runtime.py b/desktop/tools/prepare_runtime.py
+--- a/desktop/tools/prepare_runtime.py
++++ b/desktop/tools/prepare_runtime.py
+@@ -45,7 +45,7 @@
+ CURRENT_BOOTSTRAPS = (
+     *BOOTSTRAPS, "project_recovery_bootstrap.py", "github_preflight_bootstrap.py",
+     "ios_archive_bootstrap.py", "github_release_bootstrap.py", "artifact_inspection_bootstrap.py", "github_setup_bootstrap.py", "github_history_bootstrap.py", "local_release_history_bootstrap.py",
+-    "github_auth_bootstrap.py", "tool_acquisition_bootstrap.py",
++    "github_auth_bootstrap.py", "tool_acquisition_bootstrap.py", "git_read_bootstrap.py",
+ )
+ STORE_BOOTSTRAP = "local_store_preflight_bootstrap.py"
+ STORE_PREPARE_BOOTSTRAP = "local_store_prepare_bootstrap.py"
+diff --git a/desktop/tools/stage_macos_installed.py b/desktop/tools/stage_macos_installed.py
+--- a/desktop/tools/stage_macos_installed.py
++++ b/desktop/tools/stage_macos_installed.py
+@@ -142,7 +142,7 @@
+ CURRENT_BOOTSTRAPS = BOOTSTRAPS | {
+     "project_recovery_bootstrap.py", "github_preflight_bootstrap.py",
+     "ios_archive_bootstrap.py", "github_release_bootstrap.py", "artifact_inspection_bootstrap.py", "github_setup_bootstrap.py", "github_history_bootstrap.py", "local_release_history_bootstrap.py",
+-    "github_auth_bootstrap.py", "tool_acquisition_bootstrap.py",
++    "github_auth_bootstrap.py", "tool_acquisition_bootstrap.py", "git_read_bootstrap.py",
+ }
+ CURRENT_CA_SOURCE = "desktop/cpython-source-inputs/github-ca.pem"
+ CURRENT_HELPER_SOURCE = "desktop/tools/prepare_runtime.py"
+diff --git a/desktop/src/App.tsx b/desktop/src/App.tsx
+--- a/desktop/src/App.tsx
++++ b/desktop/src/App.tsx
+@@ -61,6 +61,9 @@
+ import { iosArchiveError } from './iosArchiveProtocol.ts';
+ import { GitHubRemoteSetupController, githubRemoteSetupOwnerReason } from './GitHubRemoteSetupController.ts';
+ import { GitHubRemoteSetup } from './components/GitHubRemoteSetup.tsx';
++import { GitReadController } from './gitReadController.ts';
++import { GitRepositoryController } from './gitRepositoryController.ts';
++import { LocalGitRead, LocalGitReadControls } from './components/LocalGitRead.tsx';
+ import { GitHubConnectionController } from './githubConnectionController.ts';
+ import { GitHubGhEntryController } from './githubGhEntryController.ts';
+ import type { GitHubGhApi } from './githubGhEntryProtocol.ts';
+@@ -195,6 +198,22 @@
+   const [, setPassivePending] = useState(0);
+   const externalObserverRef = useRef<ExternalProjectObservationController | null>(null);
+   const cliReadAccessControllerRef = useRef<CliReadAccessController | null>(null);
++  // One read coordinator owns the original promises across all pages. Local
++  // commit drafts belong to immutable native-service/project ports, not rows.
++  const gitReadRef = useRef<GitReadController | null>(null);
++  const gitReadAdmission = useRef<() => string | null>(() => 'Wait for the native service.');
++  const gitReadEpoch = useRef(0);
++  const gitReadGenerationLost = useRef(false);
++  const gitRepositories = useRef<{ service: object; projectId: string; controller: GitRepositoryController }[]>([]);
++  const [gitRepository, setGitRepository] = useState<GitRepositoryController | null>(null);
++  const syncGitReadRef = useRef<() => void>(() => {});
++  const gitReadBusy = useCallback(() => gitReadRef.current?.ownerReason() ?? null, []);
++  const retireGitRead = useCallback(() => {
++    if (gitReadEpoch.current === Number.MAX_SAFE_INTEGER) gitReadGenerationLost.current = true;
++    else gitReadEpoch.current += 1;
++    gitReadRef.current?.beforeContextIntent();
++    for (const entry of gitRepositories.current) entry.controller.invalidate();
++  }, []);
+   const identityRef = useRef<IdentityBinding | null>(null);
+   const [identityBinding, setIdentityBinding] = useState<IdentityBinding | null>(null);
+   const identityEpoch = useRef(0);
+@@ -211,10 +230,11 @@
+     ? 'The original app ID connection could not be closed reliably. Other tasks remain paused; keep the app open and preserve its project files.'
+     : identityRef.current?.native.ownerReason() ?? null, []);
+   const retireIdentity = useCallback(() => {
++    retireGitRead();
+     identityEpoch.current = Math.min(Number.MAX_SAFE_INTEGER, identityEpoch.current + 1);
+     identityRef.current?.native.beforeContextIntent();
+     identityRef.current?.ui.retire();
+-  }, []);
++  }, [retireGitRead]);
+   const externalBusy = useCallback(() => externalObserverRef.current?.passiveBusyReason() ?? null, []);
+   const connectionControllerRef = useRef<GitHubConnectionController | null>(null);
+   const githubGhEntryRef = useRef<GitHubGhEntryController | null>(null);
+@@ -278,7 +298,7 @@
+   // Every existing new-action/read admission includes the actual passive
+   // original. Only the observer itself uses the underlying owner-only helper.
+   const savedCommandBusy = useCallback((...args: Parameters<typeof savedOwnersBusy>) =>
+-    githubGhBusy() ?? identityBusy() ?? savedOwnersBusy(...args) ?? externalBusy() ?? cliReadAccessControllerRef.current?.pendingReason() ?? null, [githubGhBusy, identityBusy, savedOwnersBusy, externalBusy]);
++    gitReadBusy() ?? githubGhBusy() ?? identityBusy() ?? savedOwnersBusy(...args) ?? externalBusy() ?? cliReadAccessControllerRef.current?.pendingReason() ?? null, [gitReadBusy, githubGhBusy, identityBusy, savedOwnersBusy, externalBusy]);
+   const syncConnectionContext = useCallback(() => {
+     const selected = workspaceRef.current.selectedId;
+     const project = selected && Object.hasOwn(workspaceRef.current.projects, selected) ? workspaceRef.current.projects[selected] : null;
+@@ -335,6 +355,7 @@
+       applicationRepositoryRef.current = ''; setApplicationRepository('');
+     }
+     workspaceRef.current = next;
++    syncGitReadRef.current();
+     identityRef.current?.ui.sync();
+     cliReadAccessControllerRef.current?.syncContext();
+     externalObserverRef.current?.syncContext();
+@@ -366,7 +387,7 @@
+       (workflowControllerRef.current ? workflowOwnerReason(workflowControllerRef.current.getSnapshot(), projectId) : null) ??
+       (metadataControllerRef.current ? metadataOwnerReason(metadataControllerRef.current.getSnapshot(), projectId) : null),
+     selectedProject: () => { const w = workspaceRef.current; return w.selectedId ? w.projects[w.selectedId] ?? null : null; },
+-    recoveryUnavailable: () => githubGhBusy() ?? identityBusy() ?? externalBusy() ?? (passivePending.current > 0 || connectionPicking.current ? 'Finish the original observation or project selection first.' :
++    recoveryUnavailable: () => gitReadBusy() ?? githubGhBusy() ?? identityBusy() ?? externalBusy() ?? (passivePending.current > 0 || connectionPicking.current ? 'Finish the original observation or project selection first.' :
+       !pathService.current.api || !pathService.current.info ? 'Wait for the current service capabilities.' : null),
+     onRecovered: (completion) => dispatch({ type: 'config-recovery-final', projectId: completion.binding.projectId, completion }),
+     onConfirmedSave: (receipt) => dispatch({ type: 'config-save-final', projectId: receipt.binding.projectId, receipt }),
+@@ -542,6 +563,7 @@
+       metadataOwnerReason(metadataText.getSnapshot(), projectId),
+     otherOperationReason: () => localHistoryBusy() ?? storeBusy() ?? savedCommandPrerequisiteReason(true),
+     onSaveBoundary: () => {
++      retireGitRead();
+       // Retire before the submitted intent/outcome can notify subscribers, even
+       // for unchanged, failed or out-of-context saves. Never fabricate a Read.
+       releaseVersion.saveIntent(); releaseInputs.saveIntent();
+@@ -594,20 +616,20 @@
+   };
+   // Identity excludes ONLY itself; all original passive/private/build owners
+   // and retained GitHub reviews still block a new source edit.
+-  identityAdmission.current = () => githubGhBusy() ?? savedOwnersBusy() ?? savedOwnersPrerequisiteReason() ?? externalBusy() ??
++  identityAdmission.current = () => gitReadBusy() ?? githubGhBusy() ?? savedOwnersBusy() ?? savedOwnersPrerequisiteReason() ?? externalBusy() ??
+     cliReadAccessControllerRef.current?.pendingReason() ??
+     (githubPreflight.getSnapshot().status?.prepared || githubRelease.getSnapshot().status?.prepared
+       ? 'Finish the prepared GitHub review before editing the app ID.' : null);
+   // This coupled entry excludes only its own picker work and the existing
+   // Connect latch. That controller independently checks its original idle
+   // session before latching, then retains the exact handoff before native IPC.
+-  githubGhAdmission.current = () => identityBusy() ?? savedOwnersBusy() ??
++  githubGhAdmission.current = () => gitReadBusy() ?? identityBusy() ?? savedOwnersBusy() ??
+     savedOwnersPrerequisiteReason(false, false, undefined, false, false, true) ?? externalBusy() ??
+     cliReadAccessControllerRef.current?.pendingReason() ??
+     (githubPreflight.getSnapshot().status?.prepared || githubRelease.getSnapshot().status?.prepared
+       ? 'Finish the prepared GitHub review before connecting another account.' : null);
+   const savedCommandPrerequisiteReason = (...args: Parameters<typeof savedOwnersPrerequisiteReason>): string | null =>
+-    githubGhBusy() ?? toolPreparationBusy() ?? identityBusy() ?? savedOwnersPrerequisiteReason(...args) ?? externalBusy() ?? cliReadAccessControllerRef.current?.pendingReason() ?? null;
++    gitReadBusy() ?? githubGhBusy() ?? toolPreparationBusy() ?? identityBusy() ?? savedOwnersPrerequisiteReason(...args) ?? externalBusy() ?? cliReadAccessControllerRef.current?.pendingReason() ?? null;
+   const [artifactInspection] = useState(() => new ArtifactInspectionController({
+     selectedProject: () => {
+       const current=workspaceRef.current;
+@@ -642,7 +664,7 @@
+       const current = workspaceRef.current;
+       return current.selectedId && Object.hasOwn(current.projects, current.selectedId) ? current.projects[current.selectedId] ?? null : null;
+     },
+-    otherOperationReason: () => githubGhBusy() ?? identityBusy() ?? savedOwnersWithoutToolsBusy() ?? savedOwnersPrerequisiteReason() ??
++    otherOperationReason: () => gitReadBusy() ?? githubGhBusy() ?? identityBusy() ?? savedOwnersWithoutToolsBusy() ?? savedOwnersPrerequisiteReason() ??
+       externalBusy() ?? cliReadAccessControllerRef.current?.pendingReason() ?? null,
+     knownTools: () => {
+       const state = androidBuildControllerRef.current?.getSnapshot();
+@@ -779,7 +801,7 @@
+     const port = service.api?.mode === 'native' ? service.api.agentIdentity : null;
+     const book = agentRequestWork.current, slot = action === 'revoke' ? 'revoke' : 'normal';
+     const project = workspaceRef.current.selectedId;
+-    if (!port || book[slot] || action !== 'revoke' && book.revoke || action === 'allow' && (!project || identityBusy())) return;
++    if (!port || book[slot] || action !== 'revoke' && book.revoke || action === 'allow' && (!project || gitReadBusy() || identityBusy())) return;
+     if (book.epoch === Number.MAX_SAFE_INTEGER && action !== 'revoke') { setAgentMessage({ service, text: 'Request controls need attention. Keep the original Desktop task; do not replay.' }); return; }
+     const epoch = book.epoch = Math.min(Number.MAX_SAFE_INTEGER, book.epoch + 1);
+     // Bound normal+revoke slots; revoke remains available during first Allow.
+@@ -804,13 +826,48 @@
+       if (book[slot] === work) book[slot] = null;
+       setAgentRequestPending(book.normal !== null || book.revoke !== null);
+     }
+-  }, [identityBusy]);
++  }, [gitReadBusy, identityBusy]);
+   identityInvalidation.current = (projectId) => {
+     snapshotIntentBatch(projectId);
+     dispatch({ type: 'project-identity-intent', projectId });
+     releaseVersion.saveIntent(); releaseInputs.saveIntent();
+     assetSession.savedProjectChanged(projectId);
+   };
++  gitReadAdmission.current = () => githubGhBusy() ?? identityBusy() ?? savedOwnersBusy() ?? savedOwnersPrerequisiteReason() ?? externalBusy() ??
++    cliReadAccessControllerRef.current?.pendingReason() ??
++    (githubPreflight.getSnapshot().status?.prepared || githubRelease.getSnapshot().status?.prepared
++      ? 'Finish the prepared GitHub review before reading local project files.' : null);
++  const [gitRead] = useState(() => new GitReadController({ current: () => ({
++    api: pathService.current.api?.gitRead ?? null,
++    session: pathService.current.api?.mode === 'native' && !gitReadGenerationLost.current ? pathService.current : null,
++    projectId: workspaceRef.current.selectedId, epoch: gitReadEpoch.current, blocked: gitReadAdmission.current(),
++  }) }));
++  gitReadRef.current = gitRead;
++  const gitReadState = useSyncExternalStore(gitRead.subscribe, gitRead.getSnapshot, gitRead.getSnapshot);
++  const syncGitRead = useCallback(() => {
++    gitRead.syncContext();
++    const service = pathService.current, projectId = workspaceRef.current.selectedId;
++    const usable = service.api?.mode === 'native' && !!service.api.gitRead && !!projectId &&
++      Object.hasOwn(workspaceRef.current.projects, projectId) && !gitReadGenerationLost.current;
++    let entry = usable ? gitRepositories.current.find((value) => value.service === service && value.projectId === projectId) : undefined;
++    // Bounded in-memory local drafts; never evict an earlier draft or retarget
++    // its port on service replacement. Native registration has its own bounds.
++    if (!entry && usable && projectId && gitRepositories.current.length < 64) {
++      entry = { service, projectId, controller: new GitRepositoryController(projectId, gitRead.port(projectId)) };
++      gitRepositories.current.push(entry);
++    }
++    for (const value of gitRepositories.current) value.controller.setActive(value === entry);
++    setGitRepository(entry?.controller ?? null);
++  }, [gitRead]);
++  syncGitReadRef.current = syncGitRead;
++  useEffect(() => { syncGitRead(); });
++  useEffect(() => {
++    const timer = window.setInterval(() => {
++      const original = gitRead.getSnapshot();
++      if (gitRead.ownerReason() && !original.uncertain && original.original?.phase !== 'settled' && gitRead.canCheck()) void gitRead.checkStatus();
++    }, 1000);
++    return () => window.clearInterval(timer); // Stops observation only, not the original native read.
++  }, [gitRead]);
+   const requests = useRef(0);
+   const bootGeneration = useRef(0);
+   const [cliReadAccess] = useState(() => new CliReadAccessController({
+@@ -825,7 +882,7 @@
+         // Only OTHER original owners. In particular, Revoke stays available
+         // during Allow and during unrelated work. A connected GitHub session
+         // alone is not execution and does not prevent this limited read grant.
+-        busy: service !== pathService.current || !!(githubGhBusy() ?? identityBusy() ?? savedOwnersBusy() ?? savedOwnersPrerequisiteReason(false, false, undefined, false, true) ?? externalBusy()),
++        busy: service !== pathService.current || !!(gitReadBusy() ?? githubGhBusy() ?? identityBusy() ?? savedOwnersBusy() ?? savedOwnersPrerequisiteReason(false, false, undefined, false, true) ?? externalBusy()),
+       };
+     },
+   }));
+@@ -841,7 +898,7 @@
+       return { api: pathService.current.api, session: current.selectedId ? current.projects[current.selectedId] ?? null : null,
+         versionState: releaseVersionControllerRef.current?.getSnapshot() ?? null };
+     },
+-    otherOperationReason: () => githubGhBusy() ?? identityBusy() ?? savedOwnersBusy() ?? savedOwnersPrerequisiteReason() ?? cliReadAccessControllerRef.current?.pendingReason() ??
++    otherOperationReason: () => gitReadBusy() ?? githubGhBusy() ?? identityBusy() ?? savedOwnersBusy() ?? savedOwnersPrerequisiteReason() ?? cliReadAccessControllerRef.current?.pendingReason() ??
+       (githubPreflight.getSnapshot().status?.prepared || githubRelease.getSnapshot().status?.prepared
+         ? 'Review or retire the prepared GitHub task before refreshing saved files.' : null) ??
+       methodReason(pathService.current.info, 'project.snapshot', pathService.current.api?.mode ?? 'unavailable'),
+@@ -891,6 +948,8 @@
+   const localEditingLabel = nativeWorkflowAvailable || nativeMetadataAvailable || nativeVersionAvailable || nativeImagesAvailable ? 'Local file editing' : nativeSaveAvailable ? 'Configuration-only editing' : 'Read-only drafting';
+
+   const bootstrap = useCallback(async () => {
++    const originalGit = gitReadBusy();
++    if (originalGit) { setBootError({ code: 'git_read_busy', message: originalGit, retryable: false }); return; }
+     const originalGh = githubGhBusy();
+     if (originalGh) { setBootError({ code: 'github_cli_busy', message: originalGh, retryable: false }); return; }
+     githubGhEntry.beforeContextIntent();
+@@ -912,7 +971,7 @@
+     versionEdit.beginConnection();
+     metadataImages.beginConnection();
+     retirePathPicker();
+-    pathService.current = { api: null, info: null };
++    pathService.current = { api: null, info: null }; syncGitReadRef.current();
+     cliReadAccessControllerRef.current?.syncContext();
+     // Reconnection cannot discard a pending or unverified original picker.
+     if (projectPathOwnerReason(pathPickerRef.current)) return;
+@@ -981,7 +1040,7 @@
+       void githubHistory.connect(connection);
+       const appInfo = await connection.appInfo();
+       if (generation !== bootGeneration.current) return;
+-      pathService.current = { api: connection, info: appInfo };
++      pathService.current = { api: connection, info: appInfo }; syncGitReadRef.current();
+       cliService.current = pathService.current;
+       connectIdentity(pathService.current);
+       cliReadAccessControllerRef.current?.syncContext();
+@@ -1016,7 +1075,7 @@
+     } catch (error) {
+       if (generation === bootGeneration.current) {
+         retireIdentity();
+-        pathService.current = { api: null, info: null };
++        pathService.current = { api: null, info: null }; syncGitReadRef.current();
+         identityRef.current?.ui.sync();
+         cliReadAccessControllerRef.current?.invalidateContext();
+         cliReadAccessControllerRef.current?.syncContext();
+@@ -1030,7 +1089,7 @@
+       passivePending.current -= 1; setPassivePending(passivePending.current);
+       if (generation === bootGeneration.current) { bootstrapPending.current = false; setLoading(false); externalObserverRef.current?.syncContext(); identityRef.current?.ui.sync(); githubGhEntry.syncContext(); }
+     }
+-  }, [githubSetup, githubConnection, githubGhEntry, githubGhBusy, githubRemoteSetup, githubPublication, githubPreflight, githubRelease, githubHistory, environment, releaseVersion, releaseInputs, diagnostics, releaseEvidence, artifactInspection, artifactBusy, offlinePreflight, localStore, localStorePrepare, localStoreExecute, localStoreReconcile, localHistory, androidBuild, toolAcquisition, toolPreparationBusy, projectRecovery, iosArchive, androidBusy, recoveryBusy, iosBusy, savedCommandBusy, metadataText, metadataImages, versionEdit, syncConnectionContext, retirePathPicker, identityBusy, retireIdentity, connectIdentity]);
++  }, [gitReadBusy, githubSetup, githubConnection, githubGhEntry, githubGhBusy, githubRemoteSetup, githubPublication, githubPreflight, githubRelease, githubHistory, environment, releaseVersion, releaseInputs, diagnostics, releaseEvidence, artifactInspection, artifactBusy, offlinePreflight, localStore, localStorePrepare, localStoreExecute, localStoreReconcile, localHistory, androidBuild, toolAcquisition, toolPreparationBusy, projectRecovery, iosArchive, androidBusy, recoveryBusy, iosBusy, savedCommandBusy, metadataText, metadataImages, versionEdit, syncConnectionContext, retirePathPicker, identityBusy, retireIdentity, connectIdentity]);
+
+   // Only comparison invalidation. Changed catalogue/source/registration DATA
+   // retires reviews; these projections cannot authorize acquisition.
+@@ -1073,7 +1132,7 @@
+
+   useEffect(() => {
+     void bootstrap();
+-    return () => { githubGhEntry.beforeContextIntent(); githubGhApiRef.current = null; retireIdentity(); externalObserverRef.current?.beforeWorkspaceAction(); bootGeneration.current += 1; pathService.current = { api: null, info: null }; retirePathPicker(); connectionHelpGeneration.current = {}; githubConnection.setHelp(null); releaseInputs.connectionUnavailable(); };
++    return () => { githubGhEntry.beforeContextIntent(); githubGhApiRef.current = null; retireIdentity(); externalObserverRef.current?.beforeWorkspaceAction(); bootGeneration.current += 1; pathService.current = { api: null, info: null }; syncGitReadRef.current(); retirePathPicker(); connectionHelpGeneration.current = {}; githubConnection.setHelp(null); releaseInputs.connectionUnavailable(); };
+   }, [bootstrap]);
+
+   useEffect(() => { if (api) void configEdit.connect(api); }, [api, configEdit]);
+@@ -1463,6 +1522,9 @@
+               <button type="button" className="button small secondary" onClick={showIdentity}>Show app ID review</button>
+             </div>
+           </div></div>}
++        {page !== 'github' && <LocalGitReadControls controller={gitRead} compact
++          originalProjectName={gitReadState.original ? workspace.projects[gitReadState.original.context.projectId]?.project.name : undefined}
++          onShow={() => navigate('github')} />}
+         {catalogError && <ErrorNotice error={catalogError} title="The field catalogue could not be loaded" />}
+         {chooseError && <ErrorNotice error={chooseError} title="The project could not be selected" />}
+         {page !== 'settings' && cliReadNeedsAttention && <div className={`notice ${cliReadState.issue ? 'notice-warning' : 'notice-info'}`} role={cliReadState.issue ? 'alert' : 'status'}>
+@@ -1617,7 +1679,10 @@
+         {page === 'metadata' && <Metadata catalog={catalog} textEditor={<MetadataTextEditor state={metadataState} controller={metadataText} session={session} onShowProject={showMetadataProject} onHelp={setHelp} />}
+           imageEditor={<MetadataImagesEditor state={metadataImagesState} controller={metadataImages} session={session} onShowProject={showMetadataProject} onHelp={setHelp} />}>{editor(true)}</Metadata>}
+         {page === 'github' && <GitHub info={info} session={session} state={githubState} controller={githubSetup} loading={loading} onReload={() => void bootstrap()} onNavigate={navigate} credentialHelp={catalog?.credentials ?? null} onHelp={setHelp} nativeReview={workflowPanel(true)}
+-          connectionView={<><GitHubConnection state={connectionState} controller={githubConnection} onHelp={setHelp} nativeBusyReason={savedCommandBusy()}
++          connectionView={<><LocalGitRead controller={gitRead} repository={gitRepository} projectName={session?.project.name ?? 'No project selected'}
++            originalProjectName={gitReadState.original ? workspace.projects[gitReadState.original.context.projectId]?.project.name : undefined} />
++            {!gitRepository && gitRepositories.current.length >= 64 && <p className="review-caution">The local draft limit has been reached. Earlier drafts are kept; use your Git client for additional projects or service sessions.</p>}
++            <GitHubConnection state={connectionState} controller={githubConnection} onHelp={setHelp} nativeBusyReason={savedCommandBusy()}
+             repositoryInput={applicationRepository} onRepository={changeApplicationRepository} projectSelected={session !== null && !choosing}
+             handoff={connectionHandoffRef.current}
+             ghEntry={<GitHubGhEntry controller={githubGhEntry}
+diff --git a/desktop/src/types.ts b/desktop/src/types.ts
+--- a/desktop/src/types.ts
++++ b/desktop/src/types.ts
+@@ -424,6 +424,7 @@
+   readonly projectIdentity?: import('./projectIdentityNative.ts').ProjectIdentityApi | null;
+   readonly agentIdentity?: import('./projectIdentityNative.ts').AgentIdentityApi | null;
+   readonly githubGhEntry?: import('./githubGhEntryProtocol.ts').GitHubGhApi | null;
++  readonly gitRead?: import('./gitReadProtocol.ts').GitReadApi | null;
+   // Fixed original native owner only; no preview or generic transport fallback.
+   readonly toolAcquisition?: import('./toolAcquisitionNative.ts').ToolAcquisitionApi | null;
+   appInfo(): Promise<AppInfo>;
+diff --git a/desktop/src/bridge.ts b/desktop/src/bridge.ts
+--- a/desktop/src/bridge.ts
++++ b/desktop/src/bridge.ts
+@@ -83,6 +83,7 @@
+ import { cliReadAccessProjectIdFits } from './cliReadAccess.ts';
+ import { createProjectIdentityApi, createAgentIdentityApi } from './projectIdentityNative.ts';
+ import { createGitHubGhApi } from './githubGhEntryProtocol.ts';
++import { createGitReadApi } from './gitReadProtocol.ts';
+ import { createToolAcquisitionApi } from './toolAcquisitionNative.ts';
+
+ export type NativeInvoke = <T>(command: string, args?: Record<string, unknown> | Uint8Array) => Promise<T>;
+@@ -386,6 +387,7 @@
+     projectIdentity: createProjectIdentityApi(mode, invoke, listen),
+     agentIdentity: createAgentIdentityApi(mode, invoke),
+     githubGhEntry: createGitHubGhApi(mode, invoke),
++    gitRead: createGitReadApi(mode, invoke),
+     toolAcquisition: createToolAcquisitionApi(mode, invoke, listen),
+     applicationRead: mode === 'native' ? Object.freeze({
+       status: () => call<unknown>('application_read_status', {}),
+diff --git a/desktop/src-tauri/src/asset_session_local_history.rs b/desktop/src-tauri/src/asset_session_local_history.rs
+--- a/desktop/src-tauri/src/asset_session_local_history.rs
++++ b/desktop/src-tauri/src/asset_session_local_history.rs
+@@ -81,7 +81,7 @@
+         if wire::Profile::current().is_none(){return Availability::UnsupportedPlatform;}
+         if state.lost_observed{return Availability::DocumentLost;}
+         if !state.lifetime.original_bound(){return Availability::Busy;}
+-        if state.quit_pending || state.retiring || state.lock_pending || state.compatibility_picker_pending || state.maintenance.closed() || gh_auth::pending(state)
++        if state.quit_pending || state.retiring || state.lock_pending || state.compatibility_picker_pending || state.maintenance.closed() || gh_auth::pending(state) || git_read::pending(state)
+             || state.saved_observation.as_ref().is_some_and(|lane|!lane.returned())
+             || state.slot.as_ref().is_some_and(|slot|slot.phase!=Phase::Idle||!slot.owner.resources_settled())
+             || state.github.registration().is_some() || !self.inner.bridge.edits.can_exit() || self.inner.bridge.edits.preflight_attention()
+diff --git a/desktop/src-tauri/src/asset_session_tool_acquisition.rs b/desktop/src-tauri/src/asset_session_tool_acquisition.rs
+--- a/desktop/src-tauri/src/asset_session_tool_acquisition.rs
++++ b/desktop/src-tauri/src/asset_session_tool_acquisition.rs
+@@ -277,7 +277,7 @@
+             || state.lock_pending
+             || state.compatibility_picker_pending
+             || state.maintenance.closed()
+-            || gh_auth::pending(state)
++            || gh_auth::pending(state) || git_read::pending(state)
+             || state
+                 .saved_observation
+                 .as_ref()

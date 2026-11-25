@@ -1,0 +1,6 @@
+# GitHub's Xcode 27 preview pool is already used by the Git27 candidate.
+# actionlint has not added this hosted label yet; native admission also checks
+# the actual hosted environment, machine and macOS major version.
+self-hosted-runner:
+  labels:
+    - xcode-27

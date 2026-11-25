@@ -36,15 +36,20 @@ FENCE_MODES = {"fence-" + name: value for name, value in FENCE_CASES.items()}
 NO_WORKER_MODES = frozenset({"prepared-no-target-off", "prepared-prefix-input-loss"})
 HOLD_MODE = "account-hold-parent-loss"
 ACCOUNT_MODES = NO_WORKER_MODES | {HOLD_MODE}
+OBSERVE_HELD = "observe-held"
+OBSERVE_CASES = frozenset({"L3a", "L3b", "L3c", "L3d", "L4", "L5"})
+OBSERVE_READY = b"MRK_ENVIRONMENT_TARGET_READY_V1\n"
+OBSERVE_MARGIN_NS = 1_000_000_000
 MODES = frozenset({
     "observe", "body-return", "body-systemexit", "report-format-error", "reject-full",
     "reject-zero", "reject-eagain", "reject-error", "reject-partial", "arm-missing",
     "arm-partial", "post-map-pre-ready", "first-self-stop", "both-self-stop",
     "preguard-127", "guarded-import",
-}) | frozenset(FENCE_MODES) | ACCOUNT_MODES
+}) | frozenset(FENCE_MODES) | ACCOUNT_MODES | {OBSERVE_HELD}
 MAX_RECORDS, MAX_RECORD_BYTES = 32, 256
 MAX_TRACE_BYTES = MAX_RECORDS * MAX_RECORD_BYTES
 _RETAINED_CASES = []
+_RETAINED_RELAYS = []
 _MARKER = "_mrk_fir03"
 
 
@@ -92,16 +97,40 @@ class _Record:
         self.path = os.path.join(root, self.role + ".trace")
         self.identity = identities[ROLES.index(self.role)]
         self.seen, self.broken, self.sealed = set(), False, False
+        self.errors = []
         self.write, self.open, self.close, self.fstat = os.write, os.open, os.close, os.fstat
-        self.held = self.role == "C" and self.mode in (FENCE_MODES.keys() | ACCOUNT_MODES)
+        self.held = (self.mode == OBSERVE_HELD
+                     or self.role == "C" and self.mode in (FENCE_MODES.keys() | ACCOUNT_MODES))
         self.descriptor, self.descriptor_state = None, "NEW"
         self.contender = None
-        if self.held:
+        self.context = None  # Only observe-held binds the actual C/A context.
+        if self.held and self.mode != OBSERVE_HELD:
             # Before any original command work. UNKNOWN effects may not open
             # a new diagnostic owner, even when reporting only optional DATA.
             self.descriptor_state = "OPENING"
             self.descriptor = self.open(self.path, os.O_WRONLY | os.O_APPEND | os.O_CLOEXEC | os.O_NOFOLLOW)
             self.descriptor_state = "OPEN"
+
+    def acquire_observe_held(self):
+        # _record published this no-IO object in the original loader first.
+        if self.mode != OBSERVE_HELD or self.descriptor_state != "NEW":
+            raise AssertionError("fixed held observation acquisition")
+        self.descriptor_state = "OPENING"
+        try:
+            self.descriptor = self.open(self.path, os.O_WRONLY | os.O_APPEND | os.O_CLOEXEC | os.O_NOFOLLOW)
+            self.descriptor_state = "OPEN"
+            details = self.fstat(self.descriptor)
+            if (not stat.S_ISREG(details.st_mode) or stat.S_IMODE(details.st_mode) != 0o600
+                    or (details.st_dev, details.st_ino, details.st_uid) != self.identity
+                    or details.st_nlink != 1 or details.st_size != 0):
+                raise AssertionError("fixed held observation identity")
+        except BaseException as error:
+            self.broken = True
+            if self.mode == OBSERVE_HELD:
+                self.errors.append(error)
+            # A returned FD remains in its original slot; an unreturned open
+            # remains OPENING. Never retry acquisition to obtain a trace.
+            raise
 
     def close_owned(self):
         if not self.held or self.descriptor_state != "OPEN":
@@ -111,8 +140,21 @@ class _Record:
         try:
             self.close(descriptor)
             self.descriptor_state = "CLOSED"
-        except BaseException:
+        except BaseException as error:
             self.broken = True
+            if self.mode == OBSERVE_HELD:
+                self.errors.append(error)
+
+    def observation_failed(self, error):
+        self.broken = True
+        if self.mode == OBSERVE_HELD:
+            self.errors.append(error)
+            # Same original helper STOP/error latch, never another owner.
+            if self.context is not None:
+                try:
+                    self.context.record(error)
+                except BaseException as stop_error:
+                    self.errors.append(stop_error)
 
     def emit(self, event, **fields):
         # Unique events saturate even if signal.pause repeatedly returns/raises.
@@ -139,8 +181,8 @@ class _Record:
                 raise AssertionError("fixture diagnostic identity")
             if self.write(descriptor, data) != len(data):
                 raise AssertionError("partial fixture diagnostic")
-        except BaseException:
-            self.broken = True
+        except BaseException as error:
+            self.observation_failed(error)
         finally:
             if descriptor is not None and not self.held:
                 try:
@@ -155,6 +197,8 @@ def _record(loader, settings):
     record = loader.get("_mrk_fir03_record")
     if record is None:
         record = loader["_mrk_fir03_record"] = _Record(loader, settings)
+        if record.mode == OBSERVE_HELD:
+            record.acquire_observe_held()
         record.emit("boot", parent=os.getppid(), run=int(sys.argv[6]), hard=int(sys.argv[7]))
     return record
 
@@ -178,9 +222,39 @@ class _BodyReturn(BaseException):
 
 def install(command, loader, settings):
     record = _record(loader, settings)
+    if record.mode == OBSERVE_HELD and record.broken:
+        record.sealed = True
+        record.close_owned()
+        raise AssertionError("held boot observation already refused")
     # Each fresh exec imports pristine module bytes. Its original _command_spec
     # issues a new permit for the same complete selected recipe before creation.
     command._BOOTSTRAP = build_bootstrap(command._BOOTSTRAP, settings)
+    if record.mode == OBSERVE_HELD:
+        if record.role == "W":
+            # This variant needs only W's boot. Do not install send/rejection/
+            # self-stop observers, and do not use exec/CLOEXEC as close evidence.
+            record.sealed = True
+            record.close_owned()
+            if record.broken or record.descriptor_state != "CLOSED":
+                raise AssertionError("original W observation close did not return")
+        else:
+            _install_owner(command, record)
+            original_helper = loader["helper_main"]
+
+            def held_helper(*args, **kwargs):
+                try:
+                    result = original_helper(*args, **kwargs)
+                finally:
+                    # Preserve a thrown original error; a normal 0/2 return
+                    # passes only through this original one-close gate.
+                    record.sealed = True
+                    record.close_owned()
+                if record.broken or record.descriptor_state != "CLOSED":
+                    return command.HELPER_UNKNOWN
+                return result
+
+            loader["helper_main"] = held_helper
+        return
     if record.mode in ACCOUNT_MODES:
         _install_account_map(command, record)
     if record.role != "W":
@@ -320,6 +394,16 @@ def _install_owner(command, record):
         return result
 
     owner_type = command._Custodian if record.role == "C" else command._Anchor
+    if record.mode == OBSERVE_HELD:
+        initialize = owner_type.__init__
+
+        def observed_initialize(owner, context, *args, **kwargs):
+            if record.context is not None:
+                raise AssertionError("held observation context reused")
+            record.context = context  # Actual helper argument, before its effects.
+            return initialize(owner, context, *args, **kwargs)
+
+        owner_type.__init__ = observed_initialize
     finish = owner_type.finish
 
     def observed_finish(owner):
@@ -337,6 +421,10 @@ def _install_owner(command, record):
             record.emit("producer", sealed=owner.seal is not None, eof=all(owner.source_eof),
                         absent=owner.group is not None and owner.group.absent,
                         retired=owner.group is not None and owner.group.retired)
+            if record.mode == OBSERVE_HELD:
+                record.emit("capture", stdout=owner.source_counts[0], stderr=owner.source_counts[1],
+                            limit=None if owner.manifest is None else owner.manifest.limit,
+                            overflow=owner.output_overflow, failed=owner.source_failed)
         else:
             record.emit("worker_result", armed=owner.armed, rejected=owner.rejection is not None,
                         moved=owner.moved, result=None if owner.work_done is None else
@@ -373,6 +461,49 @@ def _install_owner(command, record):
             return result
 
         command._AnchorGroup.probe = observed_probe
+        if record.mode == OBSERVE_HELD:
+            source_io = command._Custodian._source_io
+            accept_stop = command._accept_stop
+
+            def observed_source_io(owner):
+                result = source_io(owner)  # Actual source read, not O's late relay.
+                ctx, now = owner.ctx, time.monotonic_ns()
+                if (owner.run_route.attempted and not owner.run_route.retired
+                        and not ctx.launch_retired and not ctx.stopped and ctx.primary is None
+                        and not owner.source_failed and not owner.output_overflow
+                        and owner.anchor_work is None and not owner.source_eof[0]
+                        and ctx.run - now >= OBSERVE_MARGIN_NS
+                        and owner.output[0].startswith(OBSERVE_READY)):
+                    record.emit("target_ready", run=ctx.run, hard=ctx.hard, at=now,
+                                marker="environment-target-v1")
+                return result
+
+            command._Custodian._source_io = observed_source_io
+
+            def observed_accept_stop(context, content):
+                # C-only, exact original context. A source-ready row is not proof
+                # that a later native cancellation beat C's own command timeout.
+                try:
+                    clean = (context is record.context and context.primary is None
+                             and context.failure_cutoff is None and not context.cleanup_unknown
+                             and not context.stopped and not context.stop_received and not context.launch_retired
+                             and "target_ready" in record.seen and not record.broken)
+                    before = time.monotonic_ns() if clean else None
+                except BaseException as error:
+                    clean = False
+                    record.observation_failed(error)
+                result = accept_stop(context, content)  # Same one original call and actual return/error.
+                if clean:
+                    try:
+                        after = time.monotonic_ns()
+                        if (before <= after < context.run and context.stop_received and context.stopped
+                                and context.primary is result and type(result) is command.ProcessError):
+                            record.emit("stop_received", run=context.run, at=after, remaining=context.run - after)
+                    except BaseException as error:
+                        record.observation_failed(error)
+                return result
+
+            command._accept_stop = observed_accept_stop
     command._command_event, command._command_spec = observed_event, observed_spec
     owner_type.finish, group_type.terminate = observed_finish, observed_terminate
 
@@ -693,6 +824,144 @@ def parse_trace(raw, *, partial=False):
     return result
 
 
+class ObserveRelay:
+    """One preowned fixed-case DATA writer; never command/finality authority."""
+    ROW_LIMIT, BYTE_LIMIT = 2048, 4096
+
+    def __init__(self, path, identity, *, case, run_id, owner_generation):
+        if (case not in OBSERVE_CASES or type(path) is not str or not os.path.isabs(path)
+                or Path(path).name != "relay.trace" or type(identity) is not tuple or len(identity) != 4
+                or any(type(value) is not int or value < 0 for value in identity)
+                or any(type(value) is not str or len(value) != 32
+                       or any(c not in "0123456789abcdef" for c in value)
+                       for value in (run_id, owner_generation))):
+            raise AssertionError("fixed relay binding")
+        self.path, self.identity = path, identity
+        self.binding = {"schemaVersion": 1, "case": case, "runId": run_id, "ownerGeneration": owner_generation}
+        self.fd, self.state, self.broken, self.sealed = None, "NEW", False, False
+        self.errors = []
+        self.ready_sent, self.final_sent, self.bytes = False, False, 0
+        self.open, self.write, self.close, self.fstat = os.open, os.write, os.close, os.fstat
+        _RETAINED_RELAYS.append(self)  # Before the sole writer acquisition.
+
+    def _check(self):
+        if self.state != "OPEN" or self.fd is None:
+            raise AssertionError("original relay writer unavailable")
+        details = self.fstat(self.fd)
+        if (not stat.S_ISREG(details.st_mode) or stat.S_IMODE(details.st_mode) != 0o600
+                or details.st_nlink != 1
+                or (details.st_dev, details.st_ino, details.st_uid, details.st_mode) != self.identity
+                or details.st_size != self.bytes):
+            raise AssertionError("original relay identity/size changed")
+
+    def acquire(self):
+        if self.state != "NEW":
+            raise AssertionError("relay acquisition reused")
+        self.state = "OPENING"
+        try:
+            self.fd = self.open(self.path, os.O_WRONLY | os.O_APPEND | os.O_CLOEXEC | os.O_NOFOLLOW)
+            self.state = "OPEN"
+            self._check()
+        except BaseException as error:
+            self.broken = True
+            self.errors.append(error)
+            raise
+        return self
+
+    def _emit(self, event, facts):
+        try:
+            if self.broken or self.sealed:
+                raise AssertionError("relay already refused or sealed")
+            self._check()
+            row = {**self.binding, "event": event, **facts}
+            data = (json.dumps(row, sort_keys=True, separators=(",", ":"), allow_nan=False) + "\n").encode("ascii")
+            if len(data) > self.ROW_LIMIT or self.bytes + len(data) > self.BYTE_LIMIT:
+                raise AssertionError("fixed relay bound")
+            if self.write(self.fd, data) != len(data):
+                raise AssertionError("partial original relay write")
+            self.bytes += len(data)
+            self._check()
+        except BaseException as error:
+            self.broken = True
+            self.errors.append(error)
+            raise
+
+    def ready(self, *, nonce, recipe, remaining, source_delay):
+        if (self.ready_sent or self.final_sent or type(nonce) is not str or len(nonce) != 32
+                or type(recipe) is not str or len(recipe) != 64
+                or any(c not in "0123456789abcdef" for c in nonce + recipe)
+                or type(remaining) is not int or not OBSERVE_MARGIN_NS <= remaining <= 3_000_000_000
+                or type(source_delay) is not int or not 0 <= source_delay <= 3_000_000_000):
+            self.broken = True
+            raise AssertionError("fixed readiness binding")
+        self.ready_sent = True  # Never retry a possibly consuming write.
+        self._emit("target-ready", {"commandNonce": nonce, "recipeSha256": recipe,
+                   "remainingNs": remaining, "sourceDelayNs": source_delay})
+
+    def finish(self, event, facts):
+        common = {"intercepts", "readyObserved", "noNextCall", "reason", "coreCode"}
+        settled = {"commandNonce", "recipeSha256", "resultIntegrity", "dispatched", "contained",
+                   "cleanupComplete", "cWait", "aWait", "cFinish", "aFinish", "targetWait",
+                   "targetMarker", "readersJoined", "traceCloses", "capture", "stopBeforeWorkNs"}
+        if (self.final_sent or type(facts) is not dict or event not in {"settled", "unexecuted"}
+                or set(facts) != common | (settled if event == "settled" else {"observerClosed"})
+                or facts["readyObserved"] is not self.ready_sent
+                or facts["noNextCall"] is not True or type(facts["coreCode"]) is not int or facts["coreCode"] != 0):
+            self.broken = True
+            raise AssertionError("fixed relay final shape")
+        if event == "unexecuted":
+            valid = (type(facts["intercepts"]) is int and facts["intercepts"] == 0
+                     and not self.ready_sent and facts["observerClosed"] is True
+                     and facts["reason"] in {"git-not-admitted", "insufficient-work-margin"})
+        else:
+            wait, capture = facts["targetWait"], facts["capture"]
+            valid = (type(facts["intercepts"]) is int and facts["intercepts"] == 1
+                     and facts["resultIntegrity"] == "incomplete"
+                     and all(facts[key] is True for key in ("dispatched", "contained", "cleanupComplete", "targetMarker", "readersJoined"))
+                     and all(type(facts[key]) is int and facts[key] in (0, 2) for key in ("cWait", "aWait", "cFinish", "aFinish"))
+                     and facts["cWait"] == facts["cFinish"] and facts["aWait"] == facts["aFinish"]
+                     and type(wait) is dict and set(wait) == {"kind", "code"} and wait["kind"] in {"exit", "signal"}
+                     and type(wait["code"]) is int and 0 <= wait["code"] < 2**31
+                     and type(facts["traceCloses"]) is dict and set(facts["traceCloses"]) == {"o", "c", "a", "w"}
+                     and all(value is True for value in facts["traceCloses"].values())
+                     and type(capture) is dict and set(capture) == {"stdout", "stderr", "limit", "overflow"}
+                     and all(type(capture[key]) is int and 0 <= capture[key] <= 16385 for key in ("stdout", "stderr"))
+                      and type(capture["limit"]) is int and capture["limit"] == 16384 and type(capture["overflow"]) is bool
+                      and (type(facts["stopBeforeWorkNs"]) is int and 1 <= facts["stopBeforeWorkNs"] <= 3_000_000_000
+                           and facts["readyObserved"] is True and facts["reason"] == "cancelled"
+                           if self.binding["case"].startswith("L3") else
+                           facts["stopBeforeWorkNs"] is None and facts["reason"] == "command-incomplete")
+                     and all(type(facts[key]) is str and len(facts[key]) == width
+                             and all(c in "0123456789abcdef" for c in facts[key])
+                             for key, width in (("commandNonce", 32), ("recipeSha256", 64))))
+        if not valid:
+            self.broken = True
+            raise AssertionError("fixed relay final values")
+        self.final_sent = True
+        self._emit(event, facts)
+
+    def close_owned(self):
+        self.sealed = True
+        if self.state == "CLOSED":
+            return not self.broken
+        if self.state != "OPEN":
+            return False
+        descriptor, self.fd = self.fd, None
+        self.state = "UNKNOWN"  # Retire before the one actual close; never retry.
+        try:
+            self.close(descriptor)
+            self.state = "CLOSED"
+        except BaseException as error:
+            self.broken = True
+            self.errors.append(error)
+        return self.state == "CLOSED" and not self.broken
+
+    def release(self):
+        if self.state != "CLOSED" or self.broken or not self.final_sent:
+            raise AssertionError("original relay has not settled")
+        _RETAINED_RELAYS.remove(self)
+
+
 class CommandCase:
     """Original O observation with preowned readers, not a new process owner."""
     def __init__(self, command, root, mode, *, interruption=None):
@@ -702,6 +971,7 @@ class CommandCase:
         self.slots, self.readers, self.settings = [], {}, None
         self.closed, self.released, self.pump_reads = False, False, 0
         self.engine = None
+        self.held_relay, self.held_active, self.held_settled = None, False, False
         _RETAINED_CASES.append(self)  # Before any path/descriptor acquisition.
 
     def _open(self, path, flags, mode=0o600):
@@ -722,6 +992,8 @@ class CommandCase:
             self.errors.append(error)
 
     def __enter__(self):
+        if self.mode == OBSERVE_HELD:
+            return self.activate_held()
         if self.mode not in MODES:
             raise AssertionError("unknown fixture mode")
         self.root.mkdir(mode=0o700)
@@ -782,6 +1054,126 @@ class CommandCase:
         command._Outer.publish, command._Outer._pump = published, pumped
         return self
 
+    def prepare_held(self, relay):
+        """Prepare before tool admission; leave every command original unpatched."""
+        if (self.mode != OBSERVE_HELD or self.interruption is not None or self.settings is not None
+                or type(relay) is not ObserveRelay or relay.state != "OPEN" or relay.broken):
+            raise AssertionError("fixed held observation preparation")
+        self.held_relay = relay
+        self.root.mkdir(mode=0o700)
+        details = self.root.lstat()
+        if not stat.S_ISDIR(details.st_mode) or stat.S_IMODE(details.st_mode) != 0o700:
+            raise AssertionError("fixture root mode/type")
+        identities = []
+        for role in ROLES:
+            path = self.root / (role + ".trace")
+            writer = self._open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL)
+            details = os.fstat(writer["fd"])
+            identity = details.st_dev, details.st_ino, details.st_uid
+            identities.append(identity)
+            self._close(writer)
+            if writer["state"] != "CLOSED":
+                raise AssertionError("fixture creation close unknown")
+            reader = self._open(path, os.O_RDONLY)
+            details = os.fstat(reader["fd"])
+            if (not stat.S_ISREG(details.st_mode) or stat.S_IMODE(details.st_mode) != 0o600
+                    or details.st_nlink != 1 or details.st_size != 0
+                    or (details.st_dev, details.st_ino, details.st_uid) != identity):
+                raise AssertionError("fixture original reader identity")
+            self.readers[role] = reader
+        self.settings = self.mode, str(Path(__file__).resolve()), str(self.root.resolve()), tuple(identities)
+        command = self.command
+        self.original = command._BOOTSTRAP, command._Outer.publish, command._Outer._pump
+        self.recipe = build_bootstrap(self.original[0], self.settings)
+        return self
+
+    def _held_ready(self, engine):
+        if self.held_relay.ready_sent or self.closed:
+            return
+        self.pump_reads += 1
+        if self.pump_reads > 4096:
+            raise AssertionError("fixed original readiness read bound")
+        slot = self.readers["C"]
+        if slot["state"] != "OPEN":
+            raise AssertionError("original C trace reader unavailable")
+        rows = parse_trace(os.pread(slot["fd"], MAX_TRACE_BYTES + 1, 0), partial=True)
+        ready = rows.get("target_ready")
+        if ready is None:
+            return
+        ctx, now = engine.ctx, time.monotonic_ns()
+        if (ctx.primary is not None or ctx.stopped or ctx.launch_retired or engine.terminal is not None
+                or not engine.run_route.attempted or engine.run_route.retired
+                or ctx.run - now < OBSERVE_MARGIN_NS):
+            return  # Late observation is never claimed as active readiness.
+        child, boot, recipe = engine.child, rows.get("boot"), rows.get("recipe")
+        digest = hashlib.sha256(self.recipe.encode()).hexdigest()
+        if (child is None or child is not ctx.child_acquisition.child or child.wait_state != "OWNED"
+                or child.numeric_retired or boot is None or recipe is None
+                or any(row["r"] != "C" or row["p"] != child.pid or row["n"] != engine.nonce.hex() for row in rows.values())
+                or boot["parent"] != ctx.pid or boot["run"] != ctx.run or boot["hard"] != ctx.hard
+                or recipe["child_role"] != "A" or recipe["digest"] != digest
+                or ready["run"] != ctx.run or ready["hard"] != ctx.hard
+                or ready["marker"] != "environment-target-v1" or type(ready["at"]) is not int
+                or not 0 <= now - ready["at"] <= 3_000_000_000):
+            raise AssertionError("original C readiness linkage")
+        self.held_relay.ready(nonce=engine.nonce.hex(), recipe=digest,
+                              remaining=ctx.run - now, source_delay=now - ready["at"])
+
+    def activate_held(self):
+        if (self.mode != OBSERVE_HELD or self.settings is None or self.held_active or self.released
+                or self.closed or self.held_relay.state != "OPEN" or self.held_relay.broken):
+            raise AssertionError("fixed held observation activation")
+        command = self.command
+        if (command._BOOTSTRAP != self.original[0] or command._Outer.publish is not self.original[1]
+                or command._Outer._pump is not self.original[2]):
+            raise AssertionError("original command changed before fixed Git dispatch")
+        self.held_active = True
+
+        def published(engine):
+            try:
+                self._snapshot()
+            finally:
+                outcome = self.original[1](engine)
+                self.outcome = outcome
+            return outcome
+
+        def pumped(engine):
+            if self.engine is None:
+                self.engine = engine
+            if self.engine is not engine:
+                raise AssertionError("fixed observer saw another original O")
+            result = self.original[2](engine)
+            try:
+                self._held_ready(engine)
+            except BaseException as error:
+                self.errors.append(error)
+                try:
+                    # Reporting failure first requests the same original core
+                    # STOP; no new process owner, fake ledger or later call.
+                    source = engine.guard._environment_source
+                    if source is None or source.guard is not engine.guard:
+                        raise AssertionError("original observation STOP source lost")
+                    source.stop("cancelled")
+                except BaseException as stop_error:
+                    self.errors.append(stop_error)
+                    raise error  # Original run_command still owns its cleanup.
+            return result
+
+        self.published, self.pumped = published, pumped
+        command._BOOTSTRAP = self.recipe
+        command._Outer.publish, command._Outer._pump = published, pumped
+        return self
+
+    def close_unactivated(self):
+        if (self.mode != OBSERVE_HELD or self.held_active or self.settings is None or self.outcome is not None
+                or self.released or self.errors):
+            raise AssertionError("unexecuted observer not in original prepared state")
+        self._snapshot()
+        if self.errors or any(self.snapshots.values()) or any(slot["state"] != "CLOSED" for slot in self.slots):
+            raise AssertionError("unexecuted observer descriptors did not settle")
+        self.held_settled = self.released = True
+        _RETAINED_CASES.remove(self)
+
     def _snapshot(self):
         if self.closed:
             self.errors.append(AssertionError("fixture publication repeated"))
@@ -797,6 +1189,22 @@ class CommandCase:
 
     def __exit__(self, kind, value, traceback):
         command = self.command
+        if self.mode == OBSERVE_HELD:
+            try:
+                self.require_finality()
+                if (command._BOOTSTRAP != self.recipe or command._Outer.publish is not self.published
+                        or command._Outer._pump is not self.pumped):
+                    raise AssertionError("fixed observation patch custody changed")
+                command._BOOTSTRAP, command._Outer.publish, command._Outer._pump = self.original
+                self.release()
+                self.held_settled = True
+            except BaseException as error:
+                self.errors.append(error)
+                # Unknown retains these exact original wrappers/owners. Preserve
+                # the real command exception rather than hide its typed lifetime.
+                if value is None:
+                    raise
+            return False
         if (command._BOOTSTRAP != self.recipe or command._Outer.publish is not self.published
                 or command._Outer._pump is not self.pumped):
             self.errors.append(AssertionError("fixture patch custody changed"))
@@ -880,6 +1288,18 @@ class CommandCase:
         assert producer["sealed"] and producer["eof"] and producer["absent"] and producer["retired"]
         assert absent["group"] == pids["A"] and absent["wait_owned"]
         assert not absent["retired"] and not absent["numeric_retired"]
+        if self.mode == OBSERVE_HELD:
+            # C0/2 alone cannot prove A's trace-close gate. Both actual waits
+            # and their source-bound pre-close helper returns must be normal.
+            assert engine.wait.status_code in (0, 2)
+            assert self.rows["C"]["owner_wait"]["kind"] == "exit"
+            assert self.rows["C"]["owner_wait"]["code"] in (0, 2)
+            assert self.rows["C"]["owner_finish"]["code"] in (0, 2)
+            assert self.rows["A"]["owner_finish"]["code"] in (0, 2)
+            assert set(self.rows["W"]) == {"boot"}
+            assert engine.outputs[0].startswith(OBSERVE_READY)
+            assert outcome.no_target is None and outcome.run_tool.attempted
+            assert self.held_relay is not None and not self.held_relay.broken
         return pids
 
     def release(self):

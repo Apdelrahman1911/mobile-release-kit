@@ -1,0 +1,995 @@
+"""Focused pure DATA and original-I/O tests, never Installer/native tools."""
+import copy
+import hashlib
+import importlib.util
+import json
+import os
+from pathlib import Path
+import stat
+import sys
+import tempfile
+from types import SimpleNamespace
+import unittest
+from unittest import mock
+
+ROOT = Path(__file__).absolute().parents[2]
+
+def load(name, filename):
+    spec = importlib.util.spec_from_file_location(name, ROOT / "desktop/tools" / filename)
+    module = importlib.util.module_from_spec(spec)
+    prior = sys.modules.get(name)
+    sys.modules[name] = module
+    try:
+        spec.loader.exec_module(module)
+    finally:
+        if prior is None: sys.modules.pop(name, None)
+        else: sys.modules[name] = prior
+    return module
+
+DATA = load("_mrk_update_test_data", "macos_update_verification.py")
+STAGER = load("_mrk_update_test_stager", "stage_macos_installed.py")
+HELPER = load("_mrk_update_test_helper", "macos_android_helper_package.py")
+
+
+def nomination():
+    policy = {"schemaVersion": 1, "kind": "mrk-macos-developer-id-code-policy-v1", "teamIdentifier": "TEAM000001",
+              "leafCertificateSha1": "1" * 40, "leafCertificateSha256": "2" * 64, "hardenedRuntime": True, "entitlements": "empty"}
+    policy_hash = DATA.sha(json.dumps(policy, separators=(",", ":")).encode("ascii"))
+    result = {"schemaVersion": 1, "mode": "configured", "targets": {}}
+    for target, arch in zip(DATA.TARGETS, ("arm64", "x86_64")):
+        member = lambda name, digest: {"name": name, "bytes": 100, "sha256": digest * 64}
+        image = member("MobileReleaseKit.dmg", "1")
+        row = {"source": "a" * 40, "runId": "123", "runAttempt": "1", "jobId": "456", "artifactId": "789",
+               "artifactBytes": 200, "artifactSha256": "2" * 64, "members": [image], "image": image,
+               "package": member("Install.pkg", "3"), "descriptor": member("producer.json", "4"),
+               "signature": member("producer.sig", "5"), "inventory": member("install-inventory.json", "6"),
+               "release": {"profile": "fixed-macos26-" + arch + "-maintenance-v2", "packageIdentifier": STAGER.PACKAGE_ID,
+                   "bundleIdentifier": STAGER.BUNDLE_ID, "packageVersion": "0.1.1", "release": "macos26-" + arch + "-desktop-01",
+                   "sourceCommit": "a" * 40, "protocolSha256": STAGER.CURRENT_PROTOCOL, "runtimeManifestSha256": "7" * 64,
+                   "inventorySha256": "6" * 64, "signingPolicySha256": policy_hash, "packageSha256": "3" * 64},
+               "signingPolicy": {"sha256": policy_hash, "policy": policy}, "publicControlsSha256": "8" * 64}
+        row["resources"] = {"reviewed": True, **DATA.resource_quote_data(row)}
+        result["targets"][target] = row
+    return result
+
+
+def nested_nomination():
+    source = nomination()
+    for row in source["targets"].values():
+        row["members"] = [{"name": name, "bytes": len(name.encode()), "sha256": DATA.sha(name.encode())}
+                          for name in DATA.ARTIFACT_PATHS]
+        row["image"] = row["members"][0]
+        row["resources"] = {"reviewed": True, **DATA.resource_quote_data(row)}
+    return source
+
+
+def manual_delivery_fixture(target=DATA.TARGETS[0], *, producer=None, observation=None, package_owner=None):
+    """Inert public DATA for the real join/export readers, never native evidence."""
+    document = nomination()
+    selected = document["targets"][target]
+    selected["source"] = selected["release"]["sourceCommit"] = "c" * 40
+    if producer is not None:
+        selected["signingPolicy"] = copy.deepcopy(producer["signingPolicies"][0])
+        selected["release"]["signingPolicySha256"] = selected["signingPolicy"]["sha256"]
+    paths = sorted({"app/" + STAGER.ENTRY_BINARY, "app/" + STAGER.APP_BINARY, "app/" + STAGER.VAULT_HELPER,
+        "app/Contents/Info.plist", "app/" + STAGER.PAYLOAD_INFO, "runtime/python/bin/python3", "runtime/manifest.json"})
+    inventory = STAGER.canonical({"schemaVersion": 1, "release": selected["release"]["release"],
+        "runtimeManifestSha256": selected["release"]["runtimeManifestSha256"], "files": [
+            {"path": path, "size": 4096 if path == "app/" + STAGER.VAULT_HELPER else 1,
+             "sha256": selected["release"]["runtimeManifestSha256"] if path == "runtime/manifest.json" else "5" * 64,
+             "executable": path in {"app/" + STAGER.ENTRY_BINARY, "app/" + STAGER.APP_BINARY,
+                                    "app/" + STAGER.VAULT_HELPER, "runtime/python/bin/python3"}} for path in paths]})
+    selected["inventory"].update(bytes=len(inventory), sha256=DATA.sha(inventory))
+    selected["release"]["inventorySha256"] = DATA.sha(inventory)
+    if producer is None:
+        current = {**selected["release"], "sourceCommit": "b" * 40, "packageVersion": "0.2.0",
+            "release": selected["release"]["release"] + "-next", "packageSha256": "8" * 64}
+        producer = {"schemaVersion": 2, "kind": "mrk-macos-install-producer-v2", "domain": "MobileReleaseKit-package-producer-v2",
+            "target": target, "releaseSet": {"schemaVersion": 2, "current": current, "acceptedPredecessors": []},
+            "signingPolicies": [selected["signingPolicy"]]}
+    producer["releaseSet"]["acceptedPredecessors"] = [selected["release"]]
+    current = producer["releaseSet"]["current"]
+    descriptor = STAGER.canonical(producer) + b"\n"
+    context = dict(source=current["sourceCommit"], workflowSource=current["sourceCommit"], target=target, runId="123", runAttempt="1")
+    owner_fields = {"schemaVersion": 1, **context, "packageRole": "ordinary-image", "workflow":
+        DATA.REPOSITORY + "/.github/workflows/desktop-macos-installed.yml@" + DATA.REF,
+        "passed": True, "targetRetired": True, "originalClosesKnown": True, "outerFinalityRequired": True,
+        "cleanupErrors": [], "directStagerIOPending": None, "productReady": False}
+    calls = lambda roles: [{"role": role, "entered": True, "returned": True, "capturesSettled": True, "returncode": 0} for role in roles]
+    facts = lambda inode, mode, size: [str(x) for x in (1, inode, mode, 501, 20, 1, 0, size, 1, 0, 1, 0)]
+    leaf = lambda inode, size, digest: {"facts": facts(inode, stat.S_IFREG | 0o600, size), "bytes": size, "sha256": digest}
+    state = {"root": facts(1, stat.S_IFDIR | 0o700, 128), "sentinel": leaf(2, len(DATA.SENTINEL), DATA.sha(DATA.SENTINEL)),
+        "vault": {"directory": facts(3, stat.S_IFDIR | 0o700, 128), "files": {
+            "vault-lock": leaf(4, 0, DATA.sha(b"")), "initialization-reservation": leaf(5, 48, "1" * 64),
+            "vault-header": leaf(6, 104, "2" * 64), "record-" + "a" * 32: leaf(7, 248, "3" * 64)}}}
+    identity = lambda inode, mode: dict(device=1, inode=inode, mode=stat.S_IFDIR | mode, uid=0, gid=0, flags=0)
+    old_generation = {"release": selected["release"], "instance": "6" * 32, "releaseDirectory": identity(101, 0o755),
+        "app": {"location": "canonical", "identity": identity(102, 0o555)}}
+    baseline = {"schemaVersion": 1, **context, "predecessorSource": selected["source"],
+        "predecessorPackageSha256": selected["package"]["sha256"], "publicControlsSha256": selected["publicControlsSha256"],
+        "nominationSha256": DATA.sha(STAGER.canonical(selected)), "expectedCurrentDescriptorSha256": DATA.sha(descriptor),
+        "freshCurrentBytesReadback": True, "originalInstallerReturnedZero": True, "originalMountDetached": True, "productReady": False,
+        "readback": {"previous": {"invocation": "6" * 32, "sha256": "6" * 64}, "rootIdentity": identity(100, 0o755),
+                     "generation": old_generation}, "requestId": "7" * 32, "census": {"7" * 32: {"sha256": "7" * 64}},
+        "sentinel": {"identity": [1, 2, stat.S_IFREG | 0o600, 1, 501, 20, len(DATA.SENTINEL), 1000000000, 1000000000],
+            "parentIdentity": [1, 1, stat.S_IFDIR | 0o700, 501, 20], "bytes": len(DATA.SENTINEL), "sha256": DATA.sha(DATA.SENTINEL)}}
+    baseline_body = STAGER.canonical({**owner_fields, "phase": DATA.PHASE, "originalCalls": calls(DATA.ROLES), "updateBaseline": baseline}) + b"\n"
+    bootstrap = {"schemaVersion": 1, "scope": DATA.CREDENTIAL_SCOPE, "segment": "p0-bootstrap", "sourceCommit": context["source"],
+        "applicationSourceCommit": selected["source"], "target": target, "runId": "123", "runAttempt": "1",
+        "nominationSha256": baseline["nominationSha256"], "baselineReceiptSha256": DATA.sha(baseline_body), "helperSha256": "5" * 64,
+        "helperBytes": 4096, "state": state, "recordRevision": 1, "testAdmissionSha256": "6" * 64,
+        "summaryAdmissionSha256": "7" * 64, "nativeSummarySha256": "8" * 64, "fixtureOriginalClosesCompleted": True,
+        "normalQuitObserved": True, "gateReleased": True, "originalCommandsSettled": True, "productReady": False}
+    bootstrap_body = STAGER.canonical(bootstrap) + b"\n"
+    if observation is None:
+        request, invocation = "1" * 32, "2" * 32
+        result = {"schemaVersion": 2, "kind": "maintenance-parent-pending-finalization", "invocation": invocation,
+            "requestId": request, "resultName": "MobileReleaseKit-InstallerResult-v2-" + request + ".json",
+            "resultFinality": "pending-own-write-readback-close-and-outer-return", "action": "update",
+            "writerState": "installed", "writerExit": 0, "intentSha256": "3" * 64, "stateSha256": "4" * 64,
+            "capsuleSha256": "5" * 64, "payloadWriteCount": 1, "payloadWriteBytes": 10, "originalWriterJoined": True,
+            "parentFinality": "pending-original-closes-and-outer-return", "retainedGate": "parent-command-reference-until-kernel-exit",
+            "historicalOuterExit": "unverified", "registrationReservation": {"schemaVersion": 1, "entered": True,
+                "creation": "existing-not-modified", "fixedBytes": 38, "writtenBytes": 0, "sealed": False,
+                "filePersisted": False, "parentPersisted": False, "writer": "not-attempted", "verified": True,
+                "exclusiveAttempted": True, "exclusiveAcquired": True, "participant": "closed", "closedUnderMaintenance": True,
+                "verifiedAfterGo": False, "cleanup": "original-closes-only-permanent-reservation-retained"}}
+        observation = {"schemaVersion": 2, "sourceCommit": context["source"], "release": current["release"],
+            "runtimeManifestSha256": current["runtimeManifestSha256"], "inventorySha256": current["inventorySha256"],
+            "completedPackageSha256": current["packageSha256"], "requestId": request, "invocation": invocation,
+            "originalInstallerReturnedZero": True, "originalWriterJoined": True, "applicationLaunched": False, "guiSaveQualified": False,
+            "originalInstallerResult": result, "nonrootReadbackFileCount": 7,
+            "installationMetadata": [{"release": current["release"], "instance": invocation, "verifiedCurrentFiles": 7}]}
+    observation["originalInstallerResult"]["action"] = "update"
+    observation["installationMetadata"].append({"release": selected["release"]["release"], "instance": old_generation["instance"],
+        "verifiedCurrentFiles": 0, "historicalOuterExit": "unverified"})
+    package_owner = {} if package_owner is None else package_owner
+    package_owner.update(owner_fields, phase="package-install", originalCalls=calls(STAGER.PACKAGING_CALL_ROLES))
+    distribution = package_owner.setdefault("distribution", {})
+    distribution.update(schemaVersion=1, kind="mrk-ordinary-package-observed-v2", target=target,
+        release=current["release"], packageVersion=current["packageVersion"], requestId=observation["requestId"],
+        packageSha256=current["packageSha256"], descriptorSha256=DATA.sha(descriptor), originalInstallerReturnedZero=True,
+        sameRequestV2Readback=True, originalMountDetached=True, groupEndpointMet=True, originalOuterReturnRequired=True, productReady=False)
+    if "producerSummary" in distribution:
+        distribution["producerSummary"].update(descriptorSha256=DATA.sha(descriptor), descriptorBytes=len(descriptor))
+    # Exercise the existing writer with inert already-observed inputs; this is
+    # not a mocked native pass or new receipt schema supplied to the reader.
+    op = SimpleNamespace(image_source=context["source"], target=target, receipt=package_owner,
+        environment={"GITHUB_SHA": context["source"], "GITHUB_RUN_ID": "123", "GITHUB_RUN_ATTEMPT": "1"},
+        installer_zero=True, installation_readback=True, mount_detached=True, package_settled=lambda: True,
+        update={"baseline": baseline, "credentialBootstrapSha256": DATA.sha(bootstrap_body), "nomination": selected,
+            "facts": {"previous": {"invocation": observation["invocation"]}, "rootIdentity": baseline["readback"]["rootIdentity"],
+                "generation": {"instance": observation["installationMetadata"][0]["instance"]}}})
+    DATA.current_complete(op)
+    return dict(nomination_body=STAGER.canonical(document), baseline_body=baseline_body, bootstrap_body=bootstrap_body,
+        package_body=STAGER.canonical(package_owner) + b"\n", predecessor_inventory=inventory, descriptor=descriptor,
+        observation=observation, statuses={name: b"0\n" for name in DATA.MANUAL_DELIVERY_STATUSES},
+        source=context["source"], target=target, run="123", attempt="1")
+
+
+class UpdateDataTests(unittest.TestCase):
+
+    def test_manual_delivery_join_preserves_p0_finality_without_claiming_p1_access(self):
+        with mock.patch.object(DATA.os, "getuid", return_value=501), mock.patch.object(DATA.os, "getgid", return_value=20):
+            for target in DATA.TARGETS:
+                value = manual_delivery_fixture(target)
+                original = copy.deepcopy(value)
+                result = DATA.manual_delivery_data(STAGER, **value)
+                self.assertEqual(value, original, "the delivery join must not mutate its originals")
+                self.assertEqual(result["deliveryOutcome"], "manual-p1-verification-required")
+                self.assertTrue(result["p0CredentialBootstrapObserved"] and result["ownedAppDataOriginalsPreserved"])
+                self.assertEqual(result["p1UIAndCredentialCompatibility"], "unverified")
+                self.assertFalse(result["allUserDataCompatible"] or result["productReady"] or result["fullUIQualified"])
+                self.assertNotIn("record-", json.dumps(result))
+                self.assertNotIn("state", result)
+                for name in DATA.MANUAL_DELIVERY_STATUSES:
+                    for status in (None, b"1\n", b"0", b"false\n"):
+                        bad = copy.deepcopy(value)
+                        if status is None: del bad["statuses"][name]
+                        else: bad["statuses"][name] = status
+                        with self.subTest(target=target, status=name, value=status), self.assertRaises(ValueError):
+                            DATA.manual_delivery_data(STAGER, **bad)
+            value = manual_delivery_fixture()
+            faults = (("bootstrap_body", ("normalQuitObserved",), False), ("bootstrap_body", ("gateReleased",), False),
+                ("bootstrap_body", ("originalCommandsSettled",), False), ("bootstrap_body", ("applicationSourceCommit",), "d" * 40),
+                ("bootstrap_body", ("helperSha256",), "f" * 64), ("bootstrap_body", ("state", "vault", "files", "vault-header", "sha256"), "f" * 64),
+                ("baseline_body", ("passed",), False), ("baseline_body", ("originalCalls", 1, "returncode"), 1),
+                ("baseline_body", ("updateBaseline", "predecessorSource"), "f" * 40),
+                ("package_body", ("originalCalls", 13, "capturesSettled"), False),
+                ("package_body", ("originalClosesKnown",), False), ("package_body", ("directStagerIOPending",), "update-credential-state-post"),
+                ("package_body", ("workflow",), "foreign-workflow"), ("package_body", ("runAttempt",), "2"),
+                ("package_body", ("positiveUpdate", "credentialBootstrapSha256"), "f" * 64),
+                ("package_body", ("positiveUpdate", "testedAppDataOriginalPreserved"), False),
+                ("package_body", ("positiveUpdate", "rootIdentityPreserved"), 1),
+                ("package_body", ("positiveUpdate", "currentInvocation"), "f" * 32),
+                ("package_body", ("positiveUpdate", "previousExportUnchanged"), False),
+                ("package_body", ("positiveUpdate", "allUserDataCompatible"), True),
+                ("package_body", ("positiveUpdate", "productReady"), True), ("package_body", ("positiveUpdate",), None),
+                ("descriptor", ("releaseSet", "acceptedPredecessors"), []))
+            for key, path, replacement in faults:
+                bad = copy.deepcopy(value); parsed = json.loads(bad[key]); parent = parsed
+                for part in path[:-1]: parent = parent[part]
+                parent[path[-1]] = replacement
+                bad[key] = STAGER.canonical(parsed) + b"\n"
+                with self.subTest(input=key, path=path), self.assertRaises((ValueError, STAGER.Refused)):
+                    DATA.manual_delivery_data(STAGER, **bad)
+            for path, replacement in ((('originalInstallerResult', 'action'), 'fresh-install'),
+                (('installationMetadata', 0, 'instance'), '6' * 32), (('invocation',), 'f' * 32),
+                (('completedPackageSha256',), 'f' * 64), (('originalInstallerReturnedZero',), False)):
+                bad = copy.deepcopy(value); parent = bad['observation']
+                for part in path[:-1]: parent = parent[part]
+                parent[path[-1]] = replacement
+                with self.subTest(observation=path), self.assertRaises((ValueError, STAGER.Refused)):
+                    DATA.manual_delivery_data(STAGER, **bad)
+            bad = copy.deepcopy(value); bad['predecessor_inventory'] += b'\n'
+            with self.assertRaises(ValueError): DATA.manual_delivery_data(STAGER, **bad)
+
+    def test_workflow_manual_delivery_keeps_p0_and_installer_gates_without_p1_ui(self):
+        import re
+        workflow = (ROOT / '.github/workflows/desktop-macos-installed.yml').read_text()
+        self.assertNotIn('id: update_p1_credentials', workflow)
+        self.assertNotIn('run: *mrk_update_credentials', workflow)
+        names = ('Notarize, staple and verify only the final user image',
+            'Prepare the fixed two-file removal package without executing it',
+            'Sign and notarize the completed removal package without executing it',
+            'Emit the genuine removal descriptor and readonly carrier without Installer',
+            'Notarize staple and verify the separate readonly removal carrier',
+            'Stage only the audited normal early-preview deliverables',
+            'Upload only the normal user preview package and guide',
+            "Remove only this completed preview build's disposable compiler outputs")
+        for name in names:
+            step = workflow.split('      - name: ' + name + '\n', 1)[1].split('      - name: ', 1)[0]
+            condition = next(line.strip()[4:] for line in step.splitlines() if line.strip().startswith('if: '))
+            self.assertNotIn('update_p1', condition)
+            steps = SimpleNamespace(**{key: SimpleNamespace(outcome='skipped') for key in re.findall(r'steps\.(\w+)\.outcome', condition)})
+            env = SimpleNamespace(**{key: 'disabled' for key in re.findall(r'env\.(\w+)', condition)})
+            for key in ('update_p0_credentials', 'package_install', 'preview', 'preview_upload', 'public_evidence', 'evidence'):
+                setattr(steps, key, SimpleNamespace(outcome='success'))
+            scope = dict(github=SimpleNamespace(ref=DATA.REF), steps=steps, env=env, always=lambda: True)
+            expression = condition.replace('&&', ' and ').replace('||', ' or ')
+            self.assertTrue(eval(expression, {'__builtins__': {}}, scope), name)
+            for required in ('update_p0_credentials', 'package_install'):
+                for outcome in ('failure', 'skipped', 'cancelled'):
+                    getattr(steps, required).outcome = outcome
+                    self.assertFalse(eval(expression, {'__builtins__': {}}, scope), (name, required, outcome))
+                getattr(steps, required).outcome = 'success'
+
+    def test_workflow_credential_pairs_preserve_original_status_and_fail_fast(self):
+        """Execute the real inline Bash; only its native Python child is inert."""
+        import subprocess
+        import textwrap
+
+        workflow = (ROOT / ".github/workflows/desktop-macos-installed.yml").read_text()
+        step = workflow.split("        id: update_p0_credentials\n", 1)[1].split("\n      - name:", 1)[0]
+        script = textwrap.dedent(step.split("        run: |\n", 1)[1])
+        for segment in ("update-p0-bootstrap", "update-p1-resume"):
+            for scenario in ("success", "test-fails", "summary-fails", "test-status-fails",
+                             "original-and-status-fail", "summary-status-fails", "missing-context"):
+                with self.subTest(segment=segment, scenario=scenario), tempfile.TemporaryDirectory() as temporary:
+                    root = Path(temporary)
+                    normal = root / "normal-ui"
+                    (normal / "tmp").mkdir(parents=True)
+                    child = root / "desktop/tools/macos_normal_ui_runner.py"
+                    child.parent.mkdir(parents=True)
+                    child.write_text(textwrap.dedent(f"""
+                        import os, pathlib, sys
+                        phase = sys.argv[-1].rsplit('-', 1)[1]
+                        assert phase in ('test', 'summary')
+                        assert sys.argv[1:] == ['--target', 'aarch64-apple-darwin', '--normal-{segment}-' + phase]
+                        assert sys.flags.isolated and sys.flags.no_site and sys.dont_write_bytecode
+                        assert 'SHOULD_NOT_REACH_NATIVE' not in os.environ
+                        assert os.environ['GITHUB_SHA'] == os.environ['GITHUB_WORKFLOW_SHA'] == 'b' * 40
+                        assert os.environ['TEST_RUNNER_MRK_NORMAL_UI_APPLICATION_SOURCE'] == 'b' * 40
+                        assert os.environ['TEST_RUNNER_MRK_NORMAL_UI_HARNESS_SOURCE'] == 'b' * 40
+                        assert os.environ['GITHUB_REF'] == 'refs/heads/verify/desktop-macos-positive-update'
+                        assert os.environ['GITHUB_RUN_ID'] == '123' and os.environ['GITHUB_RUN_ATTEMPT'] == '1'
+                        with (pathlib.Path(os.environ['TMPDIR']) / 'calls.txt').open('a') as output:
+                            output.write(phase + '\\n')
+                        if phase == 'test' and {scenario!r} in ('test-fails', 'original-and-status-fail'):
+                            sys.exit(17)
+                        if phase == 'summary' and {scenario!r} == 'summary-fails':
+                            sys.exit(19)
+                    """))
+                    failed_status = ("test" if scenario in ("test-status-fails", "original-and-status-fail")
+                                     else "summary" if scenario == "summary-status-fails" else None)
+                    if failed_status:
+                        (normal / f"{segment}-{failed_status}.status").mkdir()
+                    environment = {
+                        "PATH": "/usr/bin:/bin", "MRK_UPDATE_SEGMENT": segment, "MRK_PYTHON": sys.executable,
+                        "MRK_MACOS_WORK": str(root), "MRK_MACOS_TARGET": "aarch64-apple-darwin",
+                        "MRK_MACOS_HOSTED_JOB": "github-hosted-macos26-arm64", "GITHUB_SHA": "b" * 40,
+                        "GITHUB_WORKFLOW_SHA": "b" * 40, "GITHUB_REF": "refs/heads/verify/desktop-macos-positive-update",
+                        "GITHUB_REPOSITORY": "Apdelrahman1911/mobile-release-kit", "GITHUB_EVENT_NAME": "push",
+                        "GITHUB_WORKFLOW_REF": "synthetic-workflow-context", "GITHUB_WORKSPACE": str(root),
+                        "GITHUB_RUN_ID": "123", "GITHUB_RUN_ATTEMPT": "1", "RUNNER_ENVIRONMENT": "github-hosted",
+                        "RUNNER_OS": "macOS", "RUNNER_ARCH": "ARM64", "SHOULD_NOT_REACH_NATIVE": "synthetic-ambient-value",
+                    }
+                    if scenario == "missing-context":
+                        del environment["GITHUB_WORKFLOW_SHA"]
+                    actual = subprocess.run(["/bin/bash", "--noprofile", "--norc", "-c", script],
+                                            cwd=root, env=environment, capture_output=True, timeout=10)
+                    expected = (0 if scenario == "success" else 17 if scenario in ("test-fails", "original-and-status-fail")
+                                else 19 if scenario == "summary-fails" else 1)
+                    if scenario == "missing-context":
+                        self.assertNotEqual(actual.returncode, 0, "unset context must stop before the child")
+                    else:
+                        self.assertEqual(actual.returncode, expected, actual.stderr.decode(errors="replace"))
+                    calls = normal / "tmp/calls.txt"
+                    observed = calls.read_text().splitlines() if calls.exists() else []
+                    self.assertEqual(observed, [] if scenario == "missing-context" else ["test", "summary"]
+                                     if scenario in ("success", "summary-fails", "summary-status-fails") else ["test"])
+                    for phase in observed:
+                        status = normal / f"{segment}-{phase}.status"
+                        if phase != failed_status:
+                            code = 17 if phase == "test" and scenario == "test-fails" else 19 if phase == "summary" and scenario == "summary-fails" else 0
+                            self.assertEqual(status.read_text(), f"{code}\n")
+                    self.assertFalse((normal / f"{segment}.result.json").exists(), "Bash must not manufacture native results")
+                    self.assertFalse((normal / f"{segment}.stdout").exists(), "runner-owned capture name must stay free")
+                    self.assertFalse((normal / f"{segment}.stderr").exists(), "runner-owned capture name must stay free")
+
+    def test_credential_update_closed_state_and_original_bootstrap_handoff(self):
+        facts = lambda inode, mode, size, links=1: [str(x) for x in (1, inode, mode, 501, 20, links, 0, size, 1, 0, 1, 0)]
+        leaf = lambda inode, size, digest: {"facts": facts(inode, stat.S_IFREG | 0o600, size), "bytes": size, "sha256": digest}
+        sentinel = leaf(2, len(DATA.SENTINEL), DATA.sha(DATA.SENTINEL))
+        state = {"root": facts(1, stat.S_IFDIR | 0o700, 128, 3), "sentinel": sentinel,
+            "vault": {"directory": facts(3, stat.S_IFDIR | 0o700, 128, 2), "files": {
+                "vault-lock": leaf(4, 0, DATA.sha(b"")), "initialization-reservation": leaf(5, 48, "1" * 64),
+                "vault-header": leaf(6, 104, "2" * 64), "record-" + "a" * 32: leaf(7, 248, "3" * 64)}}}
+        baseline_sentinel = {"identity": [1, 2, stat.S_IFREG | 0o600, 1, 501, 20, len(DATA.SENTINEL), 1000000000, 1000000000],
+            "parentIdentity": [1, 1, stat.S_IFDIR | 0o700, 501, 20], "bytes": len(DATA.SENTINEL), "sha256": DATA.sha(DATA.SENTINEL)}
+        selected = nomination()["targets"][DATA.TARGETS[0]]
+        baseline = {"sentinel": baseline_sentinel, "nominationSha256": DATA.sha(DATA.encoded_credential(selected))}
+        result = {"schemaVersion": 1, "scope": DATA.CREDENTIAL_SCOPE, "segment": "p0-bootstrap", "sourceCommit": "b" * 40,
+            "applicationSourceCommit": selected["source"], "target": DATA.TARGETS[0], "runId": "123", "runAttempt": "1",
+            "nominationSha256": baseline["nominationSha256"], "baselineReceiptSha256": "4" * 64, "helperSha256": "5" * 64,
+            "helperBytes": 4096, "state": state, "recordRevision": 1, "testAdmissionSha256": "6" * 64,
+            "summaryAdmissionSha256": "7" * 64, "nativeSummarySha256": "8" * 64, "fixtureOriginalClosesCompleted": True,
+            "normalQuitObserved": True, "gateReleased": True, "originalCommandsSettled": True, "productReady": False}
+        args = dict(baseline_sha="4" * 64, source="b" * 40, target=DATA.TARGETS[0], run="123", attempt="1", selected=selected)
+        with mock.patch.object(DATA.os, "getuid", return_value=501), mock.patch.object(DATA.os, "getgid", return_value=20):
+            self.assertEqual(DATA.credential_bootstrap_data(result, baseline, **args), result)
+            for key, value in (("applicationSourceCommit", "b" * 40), ("recordRevision", True), ("helperBytes", True),
+                ("baselineReceiptSha256", "9" * 64), ("fixtureOriginalClosesCompleted", False),
+                ("originalCommandsSettled", False), ("productReady", True), ("segment", "p1-resume")):
+                bad = copy.deepcopy(result); bad[key] = value
+                with self.subTest(field=key), self.assertRaises(ValueError): DATA.credential_bootstrap_data(bad, baseline, **args)
+            for fault in ("foreign-root", "foreign-sentinel", "vault-mode", "extra-record", "duplicate-inode", "header-size", "extra-control", "debris"):
+                bad = copy.deepcopy(state); files = bad["vault"]["files"]
+                if fault == "foreign-root": bad["root"][1] = "99"
+                elif fault == "foreign-sentinel": bad["sentinel"]["sha256"] = "9" * 64
+                elif fault == "vault-mode": bad["vault"]["directory"][2] = str(stat.S_IFDIR | 0o755)
+                elif fault == "extra-record": files["record-" + "b" * 32] = leaf(8, 248, "4" * 64)
+                elif fault == "duplicate-inode": files["vault-header"]["facts"][1] = "5"
+                elif fault == "header-size": files["vault-header"]["facts"][7] = "105"; files["vault-header"]["bytes"] = 105
+                elif fault == "extra-control": files["foreign"] = leaf(8, 248, "4" * 64)
+                else: files[".pending"] = leaf(8, 1, "4" * 64)
+                with self.subTest(state=fault), self.assertRaises(ValueError): DATA.credential_state_data(bad, baseline_sentinel, records=1)
+            deleted = copy.deepcopy(state); del deleted["vault"]["files"]["record-" + "a" * 32]
+            self.assertEqual(DATA.credential_state_data(deleted, baseline_sentinel, records=0), deleted)
+            with self.assertRaises(ValueError): DATA.credential_state_data(deleted, baseline_sentinel, records=1)
+        source = (ROOT / "desktop/tools/macos_update_verification.py").read_text()
+        before = source.split("def before_current(op, descriptor):", 1)[1].split("def current_readback", 1)[0]
+        self.assertLess(before.index("baseline_input(op)"), before.index("credential_bootstrap_input(op, row)"))
+        self.assertLess(before.index("sentinel_post(op, sentinel)"), before.index("credential_bootstrap_input(op, row)"))
+        self.assertIn('io(op, "credential-state", credential_state_open, op, bootstrap["state"])', before)
+        post = source.split("def current_readback(op, args):", 1)[1].split("def current_complete", 1)[0]
+        self.assertIn('io(op, "credential-state-post", credential_state_post, op)', post)
+        for flag in ("op.package_settled()", 'op.stager_io_pending = "update-" + name', '"CompletionUnknown"'):
+            self.assertIn(flag, source.split("def io(op, name, function", 1)[1].split("def retain", 1)[0])
+
+    def test_update_product_inventory_uses_full_runtime_cpio_without_relaxing_validation(self):
+        # Real small CPIO/package-info parsers; only outer XAR transport is inert.
+        def odc(name, mode, body=b"", *, uid=0):
+            encoded = name.encode("ascii") + b"\0"
+            header = b"070707" + ("%06o%06o%06o%06o%06o%06o%06o%011o%06o%011o" %
+                (0, 1, mode, uid, 0, 1, 0, 0, len(encoded), len(body))).encode("ascii")
+            return header + encoded + body
+        inventory = b'{"public":"synthetic inventory correspondence only"}\n'
+        inventory_name = "input/" + STAGER.INSTALLATION_INVENTORY_NAME
+        root = odc(".", stat.S_IFDIR | 0o755)
+        manifest = odc(inventory_name, stat.S_IFREG | 0o444, inventory)
+        trailer = odc("TRAILER!!!", 0)
+        files = b"".join(odc("input/runtime/store/lib/row%04d.rb" % i,
+                              stat.S_IFREG | 0o444, b"x") for i in range(4097))
+        scoped = odc("input/runtime/store/licenses/Locked Gems.txt", stat.S_IFREG | 0o444, b"public")
+        archive = root + manifest + files + scoped + trailer
+        self.assertLess(len(archive), 1 << 20)
+        # Unrelated/default callers keep the old bound and grammar unchanged.
+        with self.assertRaisesRegex(STAGER.Refused, "scripts-entry-count"):
+            STAGER.cpio_members(archive)
+        with self.assertRaisesRegex(STAGER.Refused, "scripts-entry-owner"):
+            STAGER.cpio_members(root + scoped + trailer)
+        for target in DATA.TARGETS:
+            selected = nomination()["targets"][target]
+            selected["inventory"] = {"name": STAGER.INSTALLATION_INVENTORY_NAME,
+                "bytes": len(inventory), "sha256": DATA.sha(inventory)}
+            info = ('<pkg-info identifier="%s" version="%s" install-location="/" auth="root">'
+                '<scripts><postinstall file="postinstall"/></scripts></pkg-info>' %
+                (STAGER.PACKAGE_ID, selected["release"]["packageVersion"])).encode("ascii")
+            op = SimpleNamespace(stager=STAGER, target=target)
+            def read(body, *, nested=False):
+                component = {"PackageInfo": info, "Scripts": body}
+                outer = ({STAGER.INSTALL_COMPONENT: b"inert component"} if nested else
+                         {STAGER.INSTALL_COMPONENT + "/" + key: value for key, value in component.items()})
+                with mock.patch.object(STAGER, "install_product_members", return_value=outer), \
+                     mock.patch.object(STAGER, "xar_members", return_value=component):
+                    return DATA.product_inventory(op, b"inert outer XAR", selected)
+            for nested in (False, True):
+                with self.subTest(target=target, nested=nested):
+                    self.assertEqual(read(archive, nested=nested), inventory)
+                    self.assertEqual(read(root + manifest + trailer, nested=nested), inventory)
+            mutations = {
+                "missing-inventory": root + files + scoped + trailer,
+                "inventory-tamper": root + odc(inventory_name, stat.S_IFREG | 0o444, b"x" * len(inventory)) + trailer,
+                "late-owner": root + manifest + files + odc("input/runtime/store/late.rb", stat.S_IFREG | 0o444, b"x", uid=501) + trailer,
+                "traversal": root + manifest + odc("input/runtime/store/../escape", stat.S_IFREG | 0o444) + trailer,
+                "outside-store": root + manifest + odc("input/Other Data.txt", stat.S_IFREG | 0o444) + trailer,
+                "duplicate": root + manifest + manifest + trailer,
+                "writable": root + manifest + odc("input/runtime/store/write.rb", stat.S_IFREG | 0o644) + trailer,
+                "symlink": root + manifest + odc("input/runtime/store/link", stat.S_IFLNK | 0o777, b"elsewhere") + trailer,
+            }
+            for fault, body in mutations.items():
+                with self.subTest(target=target, fault=fault), self.assertRaises((ValueError, STAGER.Refused)):
+                    read(body)
+
+    def test_closed_nomination_requires_source_controls_and_independent_release(self):
+        source = nomination()
+        for target in DATA.TARGETS:
+            self.assertEqual(DATA.nomination_data(source, target, STAGER), source["targets"][target])
+        with self.assertRaisesRegex(ValueError, "unconfigured"):
+            DATA.nomination_data({"schemaVersion": 1, "mode": "unconfigured"}, DATA.TARGETS[0], STAGER)
+        for key, value in (("source", "a" * 39), ("artifactId", "0"), ("artifactBytes", True),
+                           ("publicControlsSha256", "0" * 64), ("resources", {"reviewed": False}),
+                           ("package", {"name": "../Install.pkg", "bytes": 100, "sha256": "3" * 64})):
+            bad = copy.deepcopy(source); bad["targets"][DATA.TARGETS[0]][key] = value
+            with self.assertRaises((ValueError, STAGER.Refused)): DATA.nomination_data(bad, DATA.TARGETS[0], STAGER)
+        bad = copy.deepcopy(source); bad["targets"][DATA.TARGETS[0]]["members"] *= 2
+        with self.assertRaises(ValueError): DATA.nomination_data(bad, DATA.TARGETS[0], STAGER)
+        # The reference labels actual public DATA, not a historical qualification.
+        # Old-only, both-key, missing and malformed spellings cannot become an alias.
+        for fault in ("old-only", "both", "missing", "malformed"):
+            bad = copy.deepcopy(source); row = bad["targets"][DATA.TARGETS[0]]
+            if fault == "old-only": row["qualificationEvidenceSha256"] = row.pop("publicControlsSha256")
+            elif fault == "both": row["qualificationEvidenceSha256"] = row["publicControlsSha256"]
+            elif fault == "missing": del row["publicControlsSha256"]
+            else: row["publicControlsSha256"] = "not-public-controls"
+            with self.subTest(provenance=fault), self.assertRaises((ValueError, STAGER.Refused)):
+                DATA.nomination_data(bad, DATA.TARGETS[0], STAGER)
+        self.assertEqual(DATA.REPOSITORY, "Apdelrahman1911/mobile-release-kit")
+        # Installed-only carrier retention keeps one binary image and one
+        # finite binding in the existing flat contract; neither qualifies P0.
+        flat = nomination()
+        for row in flat["targets"].values():
+            row["members"].append({"name": "PREVIEW.json", "bytes": 128, "sha256": "9" * 64})
+            row["artifactBytes"] = 400
+            row["resources"] = {"reviewed": True, **DATA.resource_quote_data(row)}
+        for target in DATA.TARGETS:
+            self.assertEqual(DATA.nomination_data(flat, target, STAGER), flat["targets"][target])
+        for fault in ("duplicate", "traversal", "aggregate", "hash"):
+            bad = copy.deepcopy(flat); row = bad["targets"][DATA.TARGETS[0]]
+            if fault == "duplicate": row["members"].append(dict(row["members"][1]))
+            elif fault == "traversal": row["members"][1]["name"] = "../PREVIEW.json"
+            elif fault == "aggregate": row["members"][1]["bytes"] = DATA.LIMIT
+            else: row["members"][1]["sha256"] = "0" * 64
+            with self.subTest(flat_carrier=fault), self.assertRaises((ValueError, STAGER.Refused)):
+                DATA.nomination_data(bad, DATA.TARGETS[0], STAGER)
+        source = nested_nomination()
+        for target in DATA.TARGETS:
+            self.assertEqual(DATA.nomination_data(source, target, STAGER), source["targets"][target])
+            for fault in ("missing", "extra", "duplicate", "flat", "prefix", "traversal", "case", "separator", "removal", "hash"):
+                bad = copy.deepcopy(source); row = bad["targets"][target]
+                if fault == "missing": row["members"].pop()
+                elif fault == "extra": row["members"].append(dict(row["members"][0], name="extra.txt"))
+                elif fault == "duplicate": row["members"][-1] = dict(row["members"][0])
+                elif fault in ("flat", "prefix", "traversal", "case", "separator"):
+                    row["members"][0]["name"] = {"flat": "MobileReleaseKit.dmg", "prefix": "other/MobileReleaseKit.dmg",
+                        "traversal": "preview/../MobileReleaseKit.dmg", "case": "Preview/MobileReleaseKit.dmg",
+                        "separator": "preview\\MobileReleaseKit.dmg"}[fault]
+                elif fault == "removal": row["image"] = row["members"][3]
+                else: row["members"][1]["sha256"] = "0" * 64
+                with self.subTest(target=target, artifact=fault), self.assertRaises((ValueError, STAGER.Refused)):
+                    DATA.nomination_data(bad, target, STAGER)
+        # The mounted package parser never acquires the new artifact path grant.
+        with self.assertRaises(ValueError): DATA.member_data(source["targets"][DATA.TARGETS[0]]["image"])
+
+    def test_target_subset_requires_the_selected_platform_and_validates_every_supplied_row(self):
+        source = nomination()
+        for target in DATA.TARGETS:
+            with self.subTest(single_target=target):
+                single = copy.deepcopy(source)
+                single["targets"] = {target: single["targets"][target]}
+                self.assertEqual(DATA.nomination_data(single, target, STAGER), single["targets"][target])
+                missing = next(value for value in DATA.TARGETS if value != target)
+                with self.assertRaisesRegex(ValueError, "update-source-target-unconfigured"):
+                    DATA.nomination_data(single, missing, STAGER)
+        for targets in ({}, {"unsupported-platform": source["targets"][DATA.TARGETS[0]]},
+                        {**source["targets"], "unsupported-platform": source["targets"][DATA.TARGETS[0]]}):
+            with self.subTest(targets=tuple(targets)):
+                bad = copy.deepcopy(source)
+                bad["targets"] = targets
+                with self.assertRaisesRegex(ValueError, "update-nomination-fields"):
+                    DATA.nomination_data(bad, DATA.TARGETS[0], STAGER)
+        # The unselected platform remains fully checked, including the exact
+        # release tuple, signing policy and resource bounds—not just its keys.
+        for fault in ("row", "identity", "release", "signing", "resources"):
+            with self.subTest(unselected_fault=fault):
+                bad = copy.deepcopy(source)
+                row = bad["targets"][DATA.TARGETS[1]]
+                if fault == "row": row["extra"] = True
+                elif fault == "identity": row["artifactSha256"] = "0" * 64
+                elif fault == "release": row["release"]["sourceCommit"] = "b" * 40
+                elif fault == "signing": row["signingPolicy"]["policy"]["hardenedRuntime"] = False
+                else: row["resources"]["additionalDiskBytes"] = 1
+                with self.assertRaises((ValueError, STAGER.Refused)):
+                    DATA.nomination_data(bad, DATA.TARGETS[0], STAGER)
+
+    def test_stager_readback_accepts_source_target_subsets_without_changing_current_selection(self):
+        # The real source reader and both DATA selectors execute; no Installer,
+        # process call, signed input creation or production nomination changes.
+        def arguments(target, row):
+            old = row["release"]
+            return SimpleNamespace(target=target, expected_source=old["sourceCommit"],
+                expected_inventory=old["inventorySha256"], expected_manifest=old["runtimeManifestSha256"],
+                expected_package=old["packageSha256"])
+        def selection(target, row):
+            return STAGER.BuildSelection(target, row["release"]["packageVersion"], row["release"]["release"])
+        with mock.patch("subprocess.Popen", side_effect=AssertionError("no native/process execution")):
+            source = STAGER.decode(STAGER.read(ROOT / DATA.NOMINATION, DATA.RECORD_LIMIT))
+            row = DATA.nomination_data(source, STAGER.ARM_TARGET, STAGER)
+            current = STAGER.source_build_selection(STAGER.ARM_TARGET)
+            self.assertEqual(STAGER.update_predecessor_selection(arguments(STAGER.ARM_TARGET, row), row),
+                             selection(STAGER.ARM_TARGET, row))
+            self.assertEqual(STAGER.source_build_selection(STAGER.ARM_TARGET), current)
+            with tempfile.TemporaryDirectory() as temporary:
+                desktop = Path(temporary)
+                path = desktop / "macos-installed-inputs/update-predecessors.json"
+                path.parent.mkdir()
+                def publish(document):
+                    path.write_bytes(STAGER.canonical(document) + b"\n")
+                    path.chmod(0o644)
+                with mock.patch.object(STAGER, "DESKTOP", desktop):
+                    comparison = nomination()  # Existing explicitly inert two-target fixture.
+                    for target in DATA.TARGETS:
+                        selected = comparison["targets"][target]
+                        args = arguments(target, selected)
+                        for targets in (comparison["targets"], {target: selected}):
+                            publish(dict(comparison, targets=targets))
+                            self.assertEqual(STAGER.update_predecessor_selection(args, selected), selection(target, selected))
+                        other = next(value for value in DATA.TARGETS if value != target)
+                        for targets in ({}, {other: comparison["targets"][other]},
+                                        {"unsupported": selected}, {**comparison["targets"], "unsupported": selected},
+                                        {target: None}):
+                            publish(dict(comparison, targets=targets))
+                            with self.subTest(target=target, keys=tuple(targets)), self.assertRaisesRegex(STAGER.Refused, "update-source-nomination"):
+                                STAGER.update_predecessor_selection(args, selected)
+                        publish(dict(comparison, targets={target: selected}))
+                        with self.assertRaisesRegex(STAGER.Refused, "update-source-nomination"):
+                            STAGER.update_predecessor_selection(args, dict(selected, source="b" * 40))
+                        for key in ("expected_source", "expected_inventory", "expected_manifest", "expected_package"):
+                            bad_args = SimpleNamespace(**vars(args))
+                            setattr(bad_args, key, "f" * (40 if key == "expected_source" else 64))
+                            with self.subTest(binding=key), self.assertRaisesRegex(STAGER.Refused, "update-baseline-source-binding"):
+                                STAGER.update_predecessor_selection(bad_args, selected)
+                        malformed = copy.deepcopy(selected)
+                        malformed["release"]["packageVersion"] = "not-a-version"
+                        publish(dict(comparison, targets={target: malformed}))
+                        with self.assertRaises(STAGER.Refused): STAGER.update_predecessor_selection(args, malformed)
+
+    def test_complete_artifact_originals_keep_nested_namespaces_and_post(self):
+        # Real existing descriptor-bound owner IO, hashes, POST and consuming
+        # closes. No original process, mount, signing or Installer is started.
+        def operation(root, selected):
+            environment = {"GITHUB_SHA": "a" * 40, "GITHUB_WORKFLOW_SHA": "a" * 40,
+                           "GITHUB_WORKFLOW_REF": "inert-data-fixture", "GITHUB_RUN_ID": "1", "GITHUB_RUN_ATTEMPT": "1"}
+            op = HELPER.Operation(None, root, root, DATA.PHASE, environment, STAGER)
+            op.update = {"nomination": selected, "imageOriginal": None, "readonlyMount": None}
+            op.update_api = HELPER; op.update_module = DATA
+            op.package_clock = lambda: 1
+            return op
+
+        for fault in (None, "flat", "missing", "extra-root", "extra-child", "case", "hash-install", "hash-removal",
+                      "symlink-file", "symlink-directory", "hardlink", "post-replace", "post-extra", "post-directory"):
+            with self.subTest(artifact=fault), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                selected = (nomination() if fault == "flat" else nested_nomination())["targets"][DATA.TARGETS[0]]
+                download = root / "update-predecessor"; download.mkdir(mode=0o700)
+                for row in selected["members"]:
+                    path = download / row["name"]; path.parent.mkdir(parents=True, exist_ok=True)
+                    body = row["name"].encode()
+                    path.write_bytes(body); path.chmod(0o644)
+                    row["bytes"], row["sha256"] = len(body), DATA.sha(body)
+                leaf = download / selected["image"]["name"]
+                if fault == "missing": (download / "remove-preview/REMOVE.md").unlink()
+                elif fault == "extra-root": (download / "extra").write_bytes(b"inert")
+                elif fault == "extra-child": (download / "preview/extra").write_bytes(b"inert")
+                elif fault == "case":
+                    (download / "preview").rename(download / "case-original")
+                    (download / "case-original").rename(download / "Preview")
+                elif fault in ("hash-install", "hash-removal"):
+                    altered = leaf if fault == "hash-install" else download / "remove-preview/REMOVE.md"
+                    altered.write_bytes(b"X" * altered.stat().st_size)
+                elif fault == "symlink-file":
+                    target = root / "other"; target.write_bytes(leaf.read_bytes()); leaf.unlink(); leaf.symlink_to(target)
+                elif fault == "symlink-directory":
+                    (download / "preview").rename(root / "other"); (download / "preview").symlink_to(root / "other")
+                elif fault == "hardlink": os.link(leaf, root / "other")
+                op = operation(root, selected)
+                try:
+                    op.work_entry = op.register(os.open(root, HELPER.READ_FLAGS | os.O_DIRECTORY), "work", "directory")
+                    op.work_entry["identity"] = HELPER.directory_identity(os.fstat(op.work_entry["fd"]))
+                    if fault in (None, "flat", "post-replace", "post-extra", "post-directory"):
+                        image = DATA.artifact_inputs(op, selected)
+                        self.assertEqual(op.read(image), selected["image"]["name"].encode())
+                        self.assertEqual(len(op.package_outputs), 1 if fault == "flat" else 6)
+                        self.assertEqual(len(op.package_roots), 1 if fault == "flat" else 3)
+                        self.assertEqual(len(op.entries), 3 if fault == "flat" else 10)  # Includes the existing work FD.
+                        op.package_post()
+                        if fault == "post-replace":
+                            replacement = root / "new"; replacement.write_bytes(leaf.read_bytes()); replacement.chmod(0o644); replacement.replace(leaf)
+                        elif fault == "post-extra": (download / "remove-preview/new").write_bytes(b"inert")
+                        elif fault == "post-directory":
+                            (download / "preview").rename(root / "old"); (download / "preview").mkdir()
+                        if fault and fault.startswith("post-"):
+                            with self.assertRaises(HELPER.Refused): op.package_post()
+                    else:
+                        with self.assertRaises((ValueError, OSError)): DATA.artifact_inputs(op, selected)
+                finally:
+                    for entry in reversed(op.entries): op.close(entry)
+                self.assertTrue(all(entry["closed"] for entry in op.entries)); self.assertEqual(op.errors, [])
+
+        # Same real artifact owner/FDs and actual mount_custody/package_post
+        # order. ONLY macOS mount facts and returned native calls are inert
+        # DATA ports; the private directory below is not a qualified mount.
+        fields = ("st_dev", "st_ino", "st_mode", "st_uid", "st_gid", "st_nlink", "st_size", "st_mtime_ns", "st_ctime_ns")
+        faults = (None, "ctime", "pre-attach", "in-read", "hash", "short", *fields[:8], "other-file",
+                  "return", "capture", "nonzero", "pending", "facts", "readonly", "device", "namespace", "repeat",
+                  "foreign-image", "foreign-mount", "phase", "length", "digest", "closed-live",
+                  "detached", "detach-return", "detach-capture", "detach-live", "detach-close", "readback")
+        for fault in faults:
+            with self.subTest(readonly_image=fault), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory); selected = nested_nomination()["targets"][DATA.TARGETS[0]]
+                download = root / "update-predecessor"; download.mkdir(mode=0o700)
+                for row in selected["members"]:
+                    path = download / row["name"]; path.parent.mkdir(parents=True, exist_ok=True)
+                    path.write_bytes(row["name"].encode()); path.chmod(0o644)
+                op = operation(root, selected)
+                try:
+                    op.work_entry = op.register(os.open(root, HELPER.READ_FLAGS | os.O_DIRECTORY), "work", "directory")
+                    op.work_entry["identity"] = HELPER.directory_identity(os.fstat(op.work_entry["fd"]))
+                    image = DATA.artifact_inputs(op, selected); acquired = image["identity"]
+                    op.update["imageOriginal"] = image
+                    op.package_post()  # Unchanged all-nine pre-attach read.
+                    op.transport_mount = root / "readonly-mount"
+                    op.transport_volumes = op.work_entry
+                    op.removal_unknown = False; op.removal_scan_state = "closed"
+                    op.removal_control_reserved = op.removal_original_reserved = 0
+                    # Same pre-create cut as transport_mount_admit: retain the
+                    # actual held-parent roster, not a fabricated empty list.
+                    op.transport_roster = op.removal_roster(op.transport_volumes)
+                    self.assertNotIn(op.transport_mount.name, op.transport_roster)
+                    parent_facts = HELPER.signature(os.fstat(op.work_entry["fd"]))
+                    # The mount/device relation is a fixed DATA port; ordinary
+                    # directory/file identity still uses its actual private FD.
+                    op.transport_volumes["removal_policy"] = (True, False, False)
+                    op.transport_volumes["removal_facts"] = ((parent_facts[0] + 1, *parent_facts[1:]), 0, {})
+                    op.transport_mount.mkdir(mode=0o700)
+                    if fault == "namespace": (root / "unexpected-peer").write_bytes(b"inert")
+                    op.mount_entered = True; op.mount_known = op.mount_detached = op.installer_entered = False
+                    op.mount_entry = None; op.mount_device = None
+                    op.installer_zero = op.installation_readback = False
+                    op.calls = [{"role": DATA.ROLES[0], "entered": True, "returned": True,
+                                 "capturesSettled": True, "returncode": 0}]
+                    if fault == "return": op.calls[0]["returned"] = False
+                    elif fault == "capture": op.calls[0]["capturesSettled"] = False
+                    elif fault == "nonzero": op.calls[0]["returncode"] = 1
+                    elif fault == "pending": op.stager_io_pending = "inert-unjoined"
+                    events = []
+                    op.transport_source_post = lambda: None
+                    def mount_facts(entry, *, protected=False, readonly=False, private=False):
+                        if entry is op.transport_volumes:
+                            self.assertEqual((protected, readonly, private), (True, False, False))
+                            facts = HELPER.signature(os.fstat(entry["fd"]))
+                            return (facts[0] + 1, *facts[1:]), 0, {}
+                        self.assertIs(entry, op.mount_entry); self.assertTrue(readonly)
+                        return HELPER.signature(os.fstat(entry["fd"])), 0, {
+                            "flags": 0x1000 if fault == "readonly" else 0x1001, "typeName": "hfs",
+                            "mountOn": str(op.transport_mount),
+                            "mountFrom": "/dev/disk98" if fault == "device" else "/dev/disk99"}
+                    def transport_facts():
+                        events.append("transport-facts")
+                        self.assertIsNone(op.update["readonlyMount"]); self.assertFalse(op.mount_known)
+                        self.assertEqual(op.removal_roster(op.transport_volumes), {
+                            **op.transport_roster, op.transport_mount.name:
+                            (op.mount_entry["identity"][0], op.mount_entry["identity"][1], stat.S_IFDIR)})
+                        if fault == "facts": raise HELPER.Refused("inert-transport-facts")
+                    op.removal_directory_facts = mount_facts; op.transport_mount_facts = transport_facts
+                    op.stager = STAGER
+                    attached = SimpleNamespace(stdout=HELPER.plistlib.dumps({"system-entities": [{
+                        "dev-entry": "/dev/disk99", "mount-point": str(op.transport_mount),
+                        "potentially-mountable": True}]}), stderr=b"", returncode=0)
+                    raw_fstat, raw_stat, raw_pread = os.fstat, os.stat, os.pread
+                    image_fd, image_parent, image_name = image["fd"], image["parent"], image["name"]
+                    other = next(entry for entry, _ in op.package_outputs if entry is not image)
+                    drift = [1 if fault is not None else 0]
+                    def adjusted(info, *, target):
+                        values = {name: getattr(info, name) for name in fields}
+                        if target == "image":
+                            values["st_ctime_ns"] += drift[0]
+                            if fault in fields[:8]: values[fault] += 1
+                        elif fault == "other-file": values["st_ctime_ns"] += 1
+                        return SimpleNamespace(**values)
+                    def observed_fd(fd):
+                        info = raw_fstat(fd)
+                        return adjusted(info, target="image" if fd == image_fd else "other") if fd in (image_fd, other["fd"]) else info
+                    def observed_name(name, *args, **kwargs):
+                        info = raw_stat(name, *args, **kwargs)
+                        if (name, kwargs.get("dir_fd")) == (image_name, image_parent): return adjusted(info, target="image")
+                        if (name, kwargs.get("dir_fd")) == (other["name"], other["parent"]): return adjusted(info, target="other")
+                        return info
+                    def observed_read(fd, size, offset):
+                        body = raw_pread(fd, size, offset)
+                        if fd == image_fd:
+                            if fault == "in-read": drift[0] += 1
+                            elif fault == "hash": return b"X" + body[1:]
+                            elif fault == "short": return body[:-1]
+                        return body
+                    with mock.patch.object(os, "fstat", side_effect=observed_fd), \
+                         mock.patch.object(os, "stat", side_effect=observed_name), \
+                         mock.patch.object(os, "pread", side_effect=observed_read):
+                        if fault == "pre-attach":
+                            with self.assertRaises(HELPER.Refused): op.package_post()
+                            self.assertIsNone(op.update["readonlyMount"]); self.assertFalse(op.mount_known)
+                        elif fault in ("in-read", "hash", "short", *fields[:8], "other-file", "return", "capture",
+                                       "nonzero", "pending", "facts", "readonly", "device", "namespace"):
+                            with self.assertRaises((ValueError, HELPER.Refused)):
+                                op.mount_custody(attached, "update-readonly-mount")
+                            self.assertFalse(op.mount_known or op.mount_detached or op.installer_entered)
+                            if fault in ("return", "capture", "nonzero", "pending", "facts", "readonly", "device", "namespace"):
+                                self.assertIsNone(op.update["readonlyMount"])
+                        else:
+                            op.mount_custody(attached, "update-readonly-mount")
+                            mount = op.mount_entry
+                            self.assertEqual(events, ["transport-facts"])
+                            self.assertIs(op.update["readonlyMount"], mount)
+                            self.assertTrue(op.mount_known); self.assertFalse(op.installer_entered or op.mount_detached)
+                            self.assertEqual(len(op.calls), 1)
+                            if fault is not None:
+                                with self.assertRaises(HELPER.Refused): op.read(image)  # Still all nine.
+                            if fault == "repeat":
+                                op.mount_known = False  # Repeat at the original pre-publication cut.
+                                with self.assertRaises(ValueError): DATA.image_mounted(op, mount)
+                                self.assertIs(op.update["readonlyMount"], mount)
+                                op.mount_known = True
+                            elif fault == "foreign-image":
+                                op.update["imageOriginal"] = dict(image)
+                                with self.assertRaises(ValueError): DATA.image_post(op, image, selected["image"]["sha256"])
+                            elif fault == "foreign-mount":
+                                op.mount_entry = dict(mount)
+                                with self.assertRaises(ValueError): op.package_post()
+                            elif fault == "phase":
+                                op.phase = "package-install"
+                                with self.assertRaises(ValueError): DATA.image_post(op, image, selected["image"]["sha256"])
+                            elif fault in ("length", "digest"):
+                                selected["image"]["bytes" if fault == "length" else "sha256"] = 1 if fault == "length" else "f" * 64
+                                with self.assertRaises(ValueError): op.package_post()
+                            elif fault == "closed-live":
+                                op.close(mount)
+                                with self.assertRaises(ValueError): op.package_post()
+                            elif fault in ("detached", "detach-return", "detach-capture", "detach-live", "detach-close", "readback"):
+                                # Actual close of the SAME retained private FD;
+                                # completed native/namespace facts remain DATA.
+                                if fault != "detach-live": op.close(mount)
+                                op.calls.extend({"role": role, "entered": True, "returned": True,
+                                                 "capturesSettled": True, "returncode": 0} for role in DATA.ROLES[1:])
+                                op.installer_entered = op.installer_zero = op.installation_readback = op.mount_detached = True
+                                if fault == "detach-return": op.calls[-1]["returned"] = False
+                                elif fault == "detach-capture": op.calls[-1]["capturesSettled"] = False
+                                elif fault == "detach-close": mount["closed"] = False
+                                elif fault == "readback": op.installation_readback = False
+                                if fault == "detached": op.package_post()
+                                else:
+                                    with self.assertRaises(ValueError): op.package_post()
+                                if fault == "detach-close": mount["closed"] = True  # Fixture bookkeeping only; real close already returned.
+                            else:
+                                op.package_post()  # Same full digest on each later POST.
+                    self.assertEqual(image["identity"], acquired)  # Never rebase original authority.
+                finally:
+                    for entry in reversed(op.entries): op.close(entry)
+                self.assertTrue(all(entry["closed"] for entry in op.entries)); self.assertEqual(op.errors, [])
+
+    def test_generation_bounds_are_individual_with_a_separate_storage_quota(self):
+        limit, files = 512 * 1024 * 1024, 16384
+        storage = 9 * limit + 128 * 1024 * 1024
+        self.assertEqual((DATA.PREDECESSOR_LIMIT, DATA.CONTROL_LIMIT), (8, 128 * 1024 * 1024))
+        # The archived owner pair (#49 budget refusal): each generation is under
+        # its own ceiling while the sum exceeds one ceiling by 78,875,959 bytes.
+        pair = [(7203, 283_826_469), (7230, 331_920_402)]
+        self.assertEqual(sum(v[1] for v in pair) - limit, 78_875_959)
+        self.assertEqual(DATA.aggregate_data(pair, files, limit, 68),
+                         {"declaredFiles": 14_435, "declaredBytes": 615_746_939})
+        # Each generation's own ceiling is exact and still enforced.
+        self.assertEqual(DATA.aggregate_data([(files, limit), (files, limit)], files, limit, 0),
+                         {"declaredFiles": 2 * files + 2, "declaredBytes": 2 * limit})
+        with self.assertRaisesRegex(ValueError, "payload-bound"): DATA.aggregate_data([(1, limit + 1), (1, 1)], files, limit, 0)
+        with self.assertRaisesRegex(ValueError, "file-bound"): DATA.aggregate_data([(files + 1, 1), (1, 1)], files, limit, 0)
+        with self.assertRaisesRegex(ValueError, "file-bound"): DATA.aggregate_data([(0, 1), (1, 1)], files, limit, 0)
+        # The total storage quota is exact, including the gate/metadata charge.
+        self.assertEqual(DATA.aggregate_data([(1, limit), (1, limit)], files, limit, storage - 2 * limit)["declaredBytes"], storage)
+        with self.assertRaisesRegex(ValueError, "storage-quota"):
+            DATA.aggregate_data([(1, limit), (1, limit)], files, limit, storage - 2 * limit + 1)
+        for counts in ([(True, 1), (1, 1)], [(1, 1)], [(1, -1), (1, 1)]):
+            with self.assertRaisesRegex(ValueError, "types"): DATA.aggregate_data(counts, files, limit, 0)
+
+    def test_resource_quote_is_not_per_generation(self):
+        limit = 512 * 1024 * 1024
+        row = nomination()["targets"][DATA.TARGETS[0]]
+        self.assertEqual(DATA.resource_quote_data(row), {"additionalDiskBytes": 300 + limit + 4 * 1024**2,
+            "rawPayloadBytes": 6 * limit + 80 * 1024**2, "maximumOriginals": 96})
+        row["resources"]["rawPayloadBytes"] -= 1
+        source = nomination(); source["targets"][DATA.TARGETS[0]] = row
+        with self.assertRaisesRegex(ValueError, "too-small"): DATA.nomination_data(source, DATA.TARGETS[0], STAGER)
+
+    def test_pair_requires_exact_real_policy_lineage_and_distinct_current_release(self):
+        # Genuine producer/release parsers; the inventory-byte reducer is an
+        # explicit fixed DATA port here, separately exercised by full stager
+        # current/retained reader groups. No fabricated native qualification.
+        for target in DATA.TARGETS:
+            old = nomination()["targets"][target]
+            newer = {**old["release"], "sourceCommit": "b" * 40, "packageVersion": "0.2.1",
+                     "release": old["release"]["release"] + "-next", "packageSha256": "9" * 64}
+            descriptor = {"schemaVersion": 2, "kind": "mrk-macos-install-producer-v2",
+                "domain": "MobileReleaseKit-package-producer-v2", "target": target,
+                "releaseSet": {"schemaVersion": 2, "current": newer, "acceptedPredecessors": [old["release"]]},
+                "signingPolicies": [old["signingPolicy"]]}
+            stager = SimpleNamespace(maintenance_producer_data=STAGER.maintenance_producer_data,
+                BuildSelection=STAGER.BuildSelection, MAX_FILES=STAGER.MAX_FILES, MAX_BYTES=STAGER.MAX_BYTES,
+                MAINTENANCE_GATE_BYTES=STAGER.MAINTENANCE_GATE_BYTES, REGISTRATION_GATE_BYTES=STAGER.REGISTRATION_GATE_BYTES,
+                observation_inventory_bytes=mock.Mock(return_value={"file": {"size": 1}}))
+            result = DATA.pair_data(stager, old, STAGER.canonical(descriptor), b"old", b"new", old_metadata=1, new_metadata=1)
+            self.assertEqual(result["declaredFiles"], 4)
+            self.assertEqual(stager.observation_inventory_bytes.call_count, 2)
+            self.assertEqual([call.kwargs["selection"].release for call in stager.observation_inventory_bytes.call_args_list],
+                             [old["release"]["release"], newer["release"]])
+            for field in ("sourceCommit", "packageVersion", "release", "packageSha256"):
+                bad = copy.deepcopy(descriptor); bad["releaseSet"]["current"][field] = old["release"][field]
+                with self.assertRaises((ValueError, STAGER.Refused)):
+                    DATA.pair_data(stager, old, STAGER.canonical(bad), b"old", b"new", old_metadata=1, new_metadata=1)
+            for predecessors, policies in (([], descriptor["signingPolicies"]),
+                    ([{**old["release"], "sourceCommit": "f" * 40}], descriptor["signingPolicies"]), ([old["release"]], [])):
+                bad = copy.deepcopy(descriptor); bad["releaseSet"]["acceptedPredecessors"] = predecessors; bad["signingPolicies"] = policies
+                with self.assertRaises((ValueError, STAGER.Refused)):
+                    DATA.pair_data(stager, old, STAGER.canonical(bad), b"old", b"new", old_metadata=1, new_metadata=1)
+
+    def test_census_preserves_baseline_and_adds_only_one_request(self):
+        a, b = "a" * 32, "b" * 32
+        old = {a: {"sha256": "1" * 64, "identity": [1], "bytes": 10}}
+        new = {**old, b: {"sha256": "2" * 64, "identity": [2], "bytes": 11}}
+        self.assertEqual(DATA.census_data({}, old), a)
+        self.assertEqual(DATA.census_data(old, new, baseline=a), b)
+        for before, after in (({}, new), (old, old), (old, {**new, "c" * 32: {}}),
+                              (old, {**new, a: {"sha256": "f" * 64}})):
+            with self.assertRaises(ValueError): DATA.census_data(before, after, baseline=a)
+
+    def test_fixed_original_dispatch_clock_and_finality_do_not_accept_unknown(self):
+        rows = [{"role": role, "entered": True, "returned": True, "capturesSettled": True, "returncode": 0} for role in DATA.ROLES]
+        self.assertTrue(DATA.phase_credit(rows, phase=DATA.PHASE))
+        for key, value in (("returncode", False), ("returncode", 1), ("returned", False), ("capturesSettled", None)):
+            bad = copy.deepcopy(rows); bad[1][key] = value
+            with self.assertRaises(ValueError): DATA.phase_credit(bad, phase=DATA.PHASE)
+        environment = {"GITHUB_RUN_ID": "123", "GITHUB_RUN_ATTEMPT": "1"}
+        with mock.patch.dict(os.environ, environment, clear=True):
+            op = SimpleNamespace(phase=DATA.PHASE, calls=[], work=Path("/inert/work"), mount_device=None,
+                                 update={"nomination": nomination()["targets"][DATA.TARGETS[0]]}, package_settled=lambda: True,
+                                 mount_entered=False, installer_entered=False, mount_known=False, mount_detached=False,
+                                 target=DATA.TARGETS[0], environment=os.environ,
+                                 update_api=HELPER)
+            op.transport_mount = HELPER.transport_mount_path_data(environment, op.target, DATA.PHASE)
+            attach = ["/usr/bin/hdiutil", "attach", "/inert/work/update-predecessor/MobileReleaseKit.dmg", "-readonly", "-nobrowse",
+                      "-noautoopen", "-mountpoint", str(op.transport_mount), "-plist"]
+            DATA.dispatch(op, DATA.ROLES[0], attach); self.assertTrue(op.mount_entered)
+            wrong = list(attach); wrong[wrong.index("-mountpoint") + 1] = "/inert/work/package-mount"
+            with self.assertRaises(ValueError): DATA.dispatch(op, DATA.ROLES[0], wrong)
+            wrong = list(attach); wrong[wrong.index("-mountpoint") + 1] = str(HELPER.transport_mount_path_data(environment, DATA.TARGETS[1], DATA.PHASE))
+            with self.assertRaises(ValueError): DATA.dispatch(op, DATA.ROLES[0], wrong)
+            with self.assertRaises(ValueError): DATA.dispatch(op, DATA.ROLES[0], attach + ["-owners", "off"])
+            op.update["nomination"] = nested_nomination()["targets"][DATA.TARGETS[0]]
+            nested_attach = list(attach); nested_attach[2] = "/inert/work/update-predecessor/preview/MobileReleaseKit.dmg"
+            DATA.dispatch(op, DATA.ROLES[0], nested_attach)
+            for bad in (attach, [*nested_attach[:2], "/inert/work/update-predecessor/remove-preview/MobileReleaseKit-Remove.dmg", *nested_attach[3:]]):
+                with self.assertRaises(ValueError): DATA.dispatch(op, DATA.ROLES[0], bad)
+            self.assertIs(op.environment, os.environ)
+            self.assertIsNot(type(op.environment), dict)
+            for invalid in ({"GITHUB_RUN_ATTEMPT": "1"},
+                            {**environment, "GITHUB_RUN_ID": "0"},
+                            {**environment, "GITHUB_RUN_ATTEMPT": "01"}):
+                with mock.patch.dict(os.environ, invalid, clear=True):
+                    with self.assertRaisesRegex(HELPER.Refused, "^package-transport-context$"):
+                        DATA.dispatch(op, DATA.ROLES[0], nested_attach)
+            op.calls = rows[:1]
+            with self.assertRaisesRegex(ValueError, "^update-fixed-original-argv$"):
+                DATA.dispatch(op, DATA.ROLES[1], [])
+        now = 100
+        op.update = {"start": 10, "observed": 10, "workEnd": 100, "hardEnd": 200}
+        op.update_api = SimpleNamespace(time=SimpleNamespace(monotonic_ns=lambda: now))
+        with self.assertRaises(ValueError): DATA.clock(op)
+        self.assertEqual(DATA.clock(op, work=False), 100)
+        self.assertEqual(HELPER.package_timeout_data(1, 420_000_000_001, 123, phase=DATA.PHASE, role=DATA.ROLES[1]), 123)
+        with self.assertRaises(HELPER.Refused): HELPER.package_timeout_data(418_000_000_000, 420_000_000_000, 123, phase=DATA.PHASE, role=DATA.ROLES[1])
+
+    def test_stager_unknown_blocks_future_dispatch_and_retains_first_failure(self):
+        op = SimpleNamespace(package_settled=lambda: True, package_clock=lambda: 1, stager_io_pending=None, errors=[])
+        error = RuntimeError("inert primary")
+        def failed(): raise error
+        with self.assertRaises(RuntimeError) as caught: DATA.io(op, "baseline-readback", failed)
+        self.assertIs(caught.exception, error)
+        self.assertEqual(op.stager_io_pending, "update-baseline-readback")
+        self.assertEqual(op.errors, [{"stage": "update-io", "operation": "baseline-readback", "type": "CompletionUnknown"}])
+
+    def test_source_original_reader_rejects_duplicate_and_same_size_rewrite(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); path = root / DATA.NOMINATION
+            path.parent.mkdir(parents=True)
+            path.write_bytes(b'{"schemaVersion":1,"mode":"unconfigured"}\n'); path.chmod(0o644)
+            self.assertEqual(DATA.source_document(root), {"schemaVersion": 1, "mode": "unconfigured"})
+            path.write_bytes(b'{"mode":1,"mode":2}')
+            with self.assertRaisesRegex(ValueError, "duplicate"): DATA.source_document(root)
+            first = b'{"schemaVersion":1,"mode":"unconfigured"}\n'
+            path.write_bytes(first)
+            actual = DATA.os.pread; calls = 0
+            def changed(fd, size, offset):
+                nonlocal calls
+                value = actual(fd, size, offset); calls += 1
+                if calls == 1: path.write_bytes(first.replace(b'1', b'2', 1))
+                return value
+            with mock.patch.object(DATA.os, "pread", side_effect=changed):
+                with self.assertRaisesRegex(ValueError, "post"): DATA.source_document(root)
+
+
+    def test_real_sentinel_originals_reject_replacement_without_reading_other_user_data(self):
+        # Only the logical filesystem root is redirected into this test's own
+        # tiny tree. Every descendant permission, inode, link, byte, FD and
+        # consuming close is genuine; account/console admission has its own case.
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory); (root / "home/Library/Application Support").mkdir(parents=True)
+            actual_open, actual_stat = os.open, os.stat
+            def open_root(name, flags, *args, **kwargs):
+                return actual_open(root if name == "/" and kwargs.get("dir_fd") is None else name, flags, *args, **kwargs)
+            def stat_root(name, *args, **kwargs):
+                return actual_stat(root if name == "/" and kwargs.get("dir_fd") is None else name, *args, **kwargs)
+            environment = {"GITHUB_SHA": "a" * 40, "GITHUB_WORKFLOW_SHA": "a" * 40,
+                           "GITHUB_WORKFLOW_REF": "inert-data-fixture", "GITHUB_RUN_ID": "123",
+                           "GITHUB_RUN_ATTEMPT": "1", "MRK_MACOS_GUI_HOME": "/home"}
+            operation = HELPER.Operation(None, root, root, DATA.PHASE, environment, STAGER)
+            operation.update = {"sentinelEntries": []}
+            operation.update_api = HELPER
+            operation.package_clock = lambda: 1
+            try:
+                with mock.patch.object(DATA.os, "open", side_effect=open_root), mock.patch.object(DATA.os, "stat", side_effect=stat_root), \
+                     mock.patch.object(DATA, "gui_home_data", return_value="/home"):
+                    expected = DATA.sentinel_open(operation, True, None)
+                    DATA.sentinel_post(operation, expected)
+                    self.assertEqual(DATA.sentinel_open(operation, False, expected), expected)
+                    with self.assertRaises(FileExistsError): DATA.sentinel_open(operation, True, None)
+                    leaf = root / "home/Library/Application Support" / DATA.IDENTIFIER / "mrk-update-preservation-123-1.txt"
+                    self.assertEqual(leaf.read_bytes(), DATA.SENTINEL)
+                    leaf.unlink(); leaf.write_bytes(DATA.SENTINEL); leaf.chmod(0o600)
+                    with self.assertRaisesRegex(ValueError, "original-post"): DATA.sentinel_post(operation, expected)
+                    with self.assertRaisesRegex(ValueError, "original-changed"): DATA.sentinel_open(operation, False, expected)
+            finally:
+                for entry in reversed(operation.entries): operation.close(entry)
+            self.assertTrue(all(entry["closed"] for entry in operation.entries))
+            self.assertEqual(operation.errors, [])
+
+    def test_gui_home_requires_the_actual_console_account_not_sanitized_home(self):
+        account = SimpleNamespace(pw_uid=501, pw_gid=20, pw_name="runner", pw_dir="/actual/home")
+        with mock.patch.object(DATA.os, "getuid", return_value=501), mock.patch.object(DATA.os, "geteuid", return_value=501), \
+             mock.patch.object(DATA.os, "getgid", return_value=20), mock.patch.object(DATA.os, "getegid", return_value=20), \
+             mock.patch.object(DATA.os, "stat", return_value=SimpleNamespace(st_uid=501)), \
+             mock.patch.object(DATA.pwd, "getpwuid", return_value=account):
+            self.assertEqual(DATA.gui_home_data({"MRK_MACOS_GUI_HOME": "/actual/home", "HOME": "/private/task"}), "/actual/home")
+            for value in (None, "/Users/runner", "/private/task"):
+                with self.assertRaises(ValueError): DATA.gui_home_data({"MRK_MACOS_GUI_HOME": value})
+
+
+if __name__ == "__main__":
+    unittest.main()

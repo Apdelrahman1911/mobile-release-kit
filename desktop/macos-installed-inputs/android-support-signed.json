@@ -1,0 +1,124 @@
+{
+  "schemaVersion": 1,
+  "kind": "mrk-macos-signed-android-support-v1",
+  "upstreamManifestSha256": "3450a83882cecdc9d8e402380ccf21e6dc5cec65382cbc7c18b4e6ff6a9aeb8f",
+  "producer": {
+    "repository": "Apdelrahman1911/mobile-release-kit",
+    "sourceCommit": "8e4a942c5f23dd6bfd850ddd31b6addf347fc0b3",
+    "sourceTree": "316dd3a8e5314b88382609745f55f85c6ac6ac84",
+    "workflow": ".github/workflows/desktop-macos-android-support-signing.yml",
+    "runId": "38109802320",
+    "runAttempt": "1",
+    "artifactId": "11691308054",
+    "artifactName": "mrk-macos-android-signed-support",
+    "artifactSha256": "7c921bd7a1b95c18a82b51c582999a2413996d1cfb8a931d69dae7db902254b2"
+  },
+  "receipt": {
+    "fileName": "android-support-signed-receipt.json",
+    "size": 7246,
+    "sha256": "e2173da3cfe294ea8dd8d1365c115973d5b20c9fb90eb2b315dbfb7a34234918"
+  },
+  "archives": [
+    {
+      "id": "bundletool",
+      "fileName": "bundletool-all-1.18.3.jar",
+      "resourcePath": "Contents/Resources/android-support/bundletool-all-1.18.3.jar",
+      "upstream": {
+        "url": "https://github.com/google/bundletool/releases/download/1.18.3/bundletool-all-1.18.3.jar",
+        "size": 32520401,
+        "sha256": "a099cfa1543f55593bc2ed16a70a7c67fe54b1747bb7301f37fdfd6d91028e29"
+      },
+      "derived": {
+        "size": 32494771,
+        "sha256": "b87fef6d0b3c7a6c43debb7b069639136af549d8b0f0bb7bac452328f0eb5a18"
+      },
+      "inventorySha256": "cabce07ec3d7126e518c4d53113cf4ee6cb90f32a1cc7a64e4b57c7dfb66189f"
+    },
+    {
+      "id": "aapt2",
+      "fileName": "aapt2-8.9.2-12782657-osx.jar",
+      "resourcePath": "Contents/Resources/android-support/aapt2-8.9.2-12782657-osx.jar",
+      "upstream": {
+        "url": "https://dl.google.com/dl/android/maven2/com/android/tools/build/aapt2/8.9.2-12782657/aapt2-8.9.2-12782657-osx.jar",
+        "size": 4339472,
+        "sha256": "5d0aec6851fffbc9f6c8a8b50390c0bc976aa0ddf57a8a3a39061ed54b609ad1"
+      },
+      "derived": {
+        "size": 4328126,
+        "sha256": "8326ffc2288059ba6af3357ea96f5db93220e4c65ffd1909f9330951302fde21"
+      },
+      "inventorySha256": "e7e625fbbbc7c99ab31881c8ff230cf98d42225dc8e22648602631fe43cbeb2b"
+    }
+  ],
+  "members": [
+    {
+      "role": "bundletool-aapt2",
+      "archiveId": "bundletool",
+      "path": "macos/aapt2",
+      "upstream": {
+        "size": 11186368,
+        "sha256": "995cf1a04fb55045dd22ae3d6248f32d649bac9dfa7bf9357507499794051c6b"
+      },
+      "derived": {
+        "size": 11155600,
+        "sha256": "f92ad6590ec0af754fa653a8adf0d81744ccaf2bc1cd8c57b235d4cd797e120a"
+      },
+      "slices": [
+        {
+          "cpuType": 16777223,
+          "cpuSubtype": -2147483645
+        },
+        {
+          "cpuType": 16777228,
+          "cpuSubtype": 0
+        }
+      ]
+    },
+    {
+      "role": "bundletool-jna",
+      "archiveId": "bundletool",
+      "path": "com/sun/jna/darwin/libjnidispatch.jnilib",
+      "upstream": {
+        "size": 180932,
+        "sha256": "e8ad39879b107ed955388d29555ddbcff3ada41598780eef579246752dd96c75"
+      },
+      "derived": {
+        "size": 237664,
+        "sha256": "287f2e19f62834b151a3bc36fbe8bf12e026e314dfa6e8ce5e40bf9f4461359f"
+      },
+      "slices": [
+        {
+          "cpuType": 7,
+          "cpuSubtype": 3
+        },
+        {
+          "cpuType": 16777223,
+          "cpuSubtype": 3
+        }
+      ]
+    },
+    {
+      "role": "agp-aapt2",
+      "archiveId": "aapt2",
+      "path": "aapt2",
+      "upstream": {
+        "size": 11143368,
+        "sha256": "213e3d049e2c85daa930ed777bbd5627c1c5479a8d6698029b8f9c0161ad0a7e"
+      },
+      "derived": {
+        "size": 11163520,
+        "sha256": "388f89156088e0b64416381af414e21604488c83df7f3aad2ae787f14347d820"
+      },
+      "slices": [
+        {
+          "cpuType": 16777223,
+          "cpuSubtype": -2147483645
+        },
+        {
+          "cpuType": 16777228,
+          "cpuSubtype": 0
+        }
+      ]
+    }
+  ]
+}

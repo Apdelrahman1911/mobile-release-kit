@@ -1,0 +1,74 @@
+{
+  "archives": [
+    {
+      "fileName": "bundletool-all-1.18.3.jar",
+      "id": "bundletool",
+      "notices": [
+        {
+          "member": "LICENSE",
+          "resourcePath": "Contents/Resources/android-support/notices/bundletool/LICENSE",
+          "sha256": "65df395b026964510cd1af832232fce9d1c217cfeda70b25d27e8fd1299a6e14",
+          "size": 19782
+        },
+        {
+          "member": "NOTICE",
+          "resourcePath": "Contents/Resources/android-support/notices/bundletool/NOTICE",
+          "sha256": "8d3aac34baacf26983c482ad1c1715cfcaf87f38f77ac2beb1157890d6b568b9",
+          "size": 10694
+        },
+        {
+          "member": "META-INF/LICENSE",
+          "resourcePath": "Contents/Resources/android-support/notices/bundletool/META-INF/LICENSE",
+          "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30",
+          "size": 11358
+        },
+        {
+          "member": "META-INF/LICENSE.txt",
+          "resourcePath": "Contents/Resources/android-support/notices/bundletool/META-INF/LICENSE.txt",
+          "sha256": "e90eaa08dea089df10f2bf7f9dba63a5f6237c01562c4741e2e86773e78582d5",
+          "size": 1126
+        },
+        {
+          "member": "macos/NOTICE",
+          "resourcePath": "Contents/Resources/android-support/notices/bundletool/macos/NOTICE",
+          "sha256": "8d3aac34baacf26983c482ad1c1715cfcaf87f38f77ac2beb1157890d6b568b9",
+          "size": 10694
+        },
+        {
+          "member": "linux/NOTICE",
+          "resourcePath": "Contents/Resources/android-support/notices/bundletool/linux/NOTICE",
+          "sha256": "8d3aac34baacf26983c482ad1c1715cfcaf87f38f77ac2beb1157890d6b568b9",
+          "size": 10694
+        },
+        {
+          "member": "windows/NOTICE",
+          "resourcePath": "Contents/Resources/android-support/notices/bundletool/windows/NOTICE",
+          "sha256": "8d3aac34baacf26983c482ad1c1715cfcaf87f38f77ac2beb1157890d6b568b9",
+          "size": 10694
+        }
+      ],
+      "resourcePath": "Contents/Resources/android-support/bundletool-all-1.18.3.jar",
+      "sha256": "a099cfa1543f55593bc2ed16a70a7c67fe54b1747bb7301f37fdfd6d91028e29",
+      "size": 32520401,
+      "url": "https://github.com/google/bundletool/releases/download/1.18.3/bundletool-all-1.18.3.jar"
+    },
+    {
+      "fileName": "aapt2-8.9.2-12782657-osx.jar",
+      "id": "aapt2",
+      "notices": [
+        {
+          "member": "NOTICE",
+          "resourcePath": "Contents/Resources/android-support/notices/aapt2/NOTICE",
+          "sha256": "1c0a082e6d1591229d5bc1f93b52bafafa26eb4d0628055f296bd754d26c462c",
+          "size": 107181
+        }
+      ],
+      "resourcePath": "Contents/Resources/android-support/aapt2-8.9.2-12782657-osx.jar",
+      "sha256": "5d0aec6851fffbc9f6c8a8b50390c0bc976aa0ddf57a8a3a39061ed54b609ad1",
+      "size": 4339472,
+      "url": "https://dl.google.com/dl/android/maven2/com/android/tools/build/aapt2/8.9.2-12782657/aapt2-8.9.2-12782657-osx.jar"
+    }
+  ],
+  "platform": "macos",
+  "schemaVersion": 1
+}

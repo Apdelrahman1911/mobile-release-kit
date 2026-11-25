@@ -1,0 +1,55 @@
+name: "Fail fast on native Scripts ownership and package format (never Installer)"
+description: "Shared original recipe; job retains its original result and timeout"
+runs:
+  using: "composite"
+  steps:
+    - name: "Fail fast on native Scripts ownership and package format (never Installer)"
+      id: "recipe"
+      shell: "bash"
+      run: |
+        set -euo pipefail
+        set -o noclobber
+        umask 077
+        [[ "$(/usr/bin/id -u)" != 0 ]] || exit 1
+        "$MRK_PYTHON" -I -S -B desktop/tools/stage_macos_installed.py package-format-input --target "$MRK_MACOS_TARGET" \
+          --output "$MRK_MACOS_WORK/package-format-scripts" > "$MRK_MACOS_WORK/package-format-input.json"
+        [[ ! -e "$MRK_MACOS_WORK/PackageFormat-original.pkg" && ! -L "$MRK_MACOS_WORK/PackageFormat-original.pkg" ]] || exit 1
+        /usr/bin/pkgbuild --nopayload --scripts "$MRK_MACOS_WORK/package-format-scripts" \
+          --identifier dev.mobile-release-kit.desktop.installed --version "$MRK_MACOS_SOURCE_PACKAGE_VERSION" \
+          --install-location / --ownership recommended "$MRK_MACOS_WORK/PackageFormat-original.pkg"
+        "$MRK_PYTHON" -I -S -B desktop/tools/stage_macos_installed.py prepare-package --target "$MRK_MACOS_TARGET" \
+          --scripts "$MRK_MACOS_WORK/package-format-scripts" --package "$MRK_MACOS_WORK/PackageFormat-original.pkg" \
+          --output "$MRK_MACOS_WORK/package-format-parts" > "$MRK_MACOS_WORK/package-format-prepare.json"
+        # Native tools only write fresh outputs as this nonroot account.
+        # Preparation is not final0:0 acceptance; preserve the original pkg.
+        # BSD tar pads stdout even when compressed; use the fresh private file.
+        [[ ! -e "$MRK_MACOS_WORK/package-format-parts/Scripts" && ! -L "$MRK_MACOS_WORK/package-format-parts/Scripts" ]] || exit 1
+        set +e
+        (
+          cd "$MRK_MACOS_WORK/package-format-scripts" || exit
+          /usr/bin/env -i PATH=/usr/bin:/bin LC_ALL=C TZ=UTC COPYFILE_DISABLE=1 \
+            /usr/bin/tar -c -z -f "$MRK_MACOS_WORK/package-format-parts/Scripts" --format=odc --uid=0 --gid=0 \
+            --no-acls --no-xattrs --no-fflags --no-mac-metadata .
+        )
+        tar_status=$?
+        set -e
+        printf '%s\n' "$tar_status" > "$MRK_MACOS_WORK/package-format-tar.status"
+        [[ $tar_status == 0 ]] || exit "$tar_status"
+        # xar is not a streaming/O_EXCL tool: reserve its private output parent.
+        /bin/mkdir -m 700 "$MRK_MACOS_WORK/package-format-final"
+        [[ ! -e "$MRK_MACOS_WORK/package-format-final/PackageFormat.pkg" && ! -L "$MRK_MACOS_WORK/package-format-final/PackageFormat.pkg" ]] || exit 1
+        set +e
+        (
+          cd "$MRK_MACOS_WORK/package-format-parts" || exit
+          /usr/bin/env -i PATH=/usr/bin:/bin LC_ALL=C TZ=UTC COPYFILE_DISABLE=1 \
+            /usr/bin/xar -c -f "$MRK_MACOS_WORK/package-format-final/PackageFormat.pkg" \
+            --compression=none PackageInfo Scripts
+        )
+        xar_status=$?
+        set -e
+        printf '%s\n' "$xar_status" > "$MRK_MACOS_WORK/package-format-xar.status"
+        [[ $xar_status == 0 ]] || exit "$xar_status"
+        "$MRK_PYTHON" -I -S -B desktop/tools/stage_macos_installed.py audit-package --target "$MRK_MACOS_TARGET" \
+          --scripts "$MRK_MACOS_WORK/package-format-scripts" --package "$MRK_MACOS_WORK/package-format-final/PackageFormat.pkg" \
+          --original-package "$MRK_MACOS_WORK/PackageFormat-original.pkg" > "$MRK_MACOS_WORK/package-format-audit.json"
+        # Only inert archive bytes were checked. Never run this exit97 hook.

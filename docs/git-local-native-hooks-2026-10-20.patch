@@ -1,0 +1,1137 @@
+--- a/desktop/src-tauri/src/supervisor.rs
++++ b/desktop/src-tauri/src/supervisor.rs
+@@ -51,6 +51,11 @@
+ #[path = "supervisor_git_read.rs"]
+ mod git_read;
+ pub(crate) use git_read::{GitReadAdmission, GitReadTicket, GitReadReceipt};
++#[path = "supervisor_git_local.rs"]
++mod git_local;
++pub(crate) use git_local::{GitLocalAdmission, GitLocalTicket, GitLocalReceipt, GitLocalPublication};
++#[cfg(any(target_os = "linux", target_os = "macos"))]
++pub(crate) use git_local::GitLocalNativeJoined;
+ use crate::github_publication_protocol as publication_protocol;
+ #[path = "supervisor_publication.rs"]
+ mod publication;
+@@ -239,7 +244,9 @@
+     history_gate: Option<crate::asset_session::GitHubHistoryGoGate>,
+     history_endpoints: Option<history::Endpoints>,
+     git_read: Option<git_read::Invocation>,
++    git_local: Option<git_local::Invocation>,
+     git_read_endpoints: Option<git_read::Endpoints>,
++    git_local_endpoints: Option<git_local::Endpoints>,
+     gh_auth: Option<gh_auth::Invocation>,
+     version_allocation_source: Option<version_allocation::Invocation>,
+     gh_auth_endpoints: Option<gh_auth::Endpoints>,
+@@ -262,6 +269,7 @@
+     history_endpoints: Option<history::Endpoints>,
+     gh_auth_endpoints: Option<gh_auth::Endpoints>,
+     git_read_endpoints: Option<git_read::Endpoints>,
++    git_local_endpoints: Option<git_local::Endpoints>,
+     version_allocation_source_endpoints: Option<version_allocation::Endpoints>,
+     terminal: bool, unknown: bool,
+     #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+@@ -286,11 +294,11 @@
+     }
+ }
+ #[derive(Debug, PartialEq)]
+-enum ReadOutcome { Passive(Value), GitHub(GitHubReadOutcome), Preflight(preflight_protocol::Reply), Release(release_protocol::Reply), Setup(setup_protocol::Reply), Publication(publication_protocol::Reply), History(history_protocol::Reply), GitHubAuth, GitRead(crate::git_read_protocol::Terminal), VersionAllocationSource }
++enum ReadOutcome { Passive(Value), GitHub(GitHubReadOutcome), Preflight(preflight_protocol::Reply), Release(release_protocol::Reply), Setup(setup_protocol::Reply), Publication(publication_protocol::Reply), History(history_protocol::Reply), GitHubAuth, GitRead(crate::git_read_protocol::Terminal), GitLocal, VersionAllocationSource }
+ enum DriverEnd { Ready(Result<ReadOutcome, BridgeError>), RetainedUnknown }
+ 
+ #[derive(Clone, Copy)]
+-enum Profile { Passive(Method), GitHubReadOnly, GitHubPreflight, GitHubRelease, GitHubSetup, GitHubPublication, GitHubHistory, GitHubAuth, GitRead, VersionAllocationSource }
++enum Profile { Passive(Method), GitHubReadOnly, GitHubPreflight, GitHubRelease, GitHubSetup, GitHubPublication, GitHubHistory, GitHubAuth, GitRead, GitLocal, VersionAllocationSource }
+ impl Profile {
+     fn stdout_limit(self) -> usize {
+         match self {
+@@ -304,6 +312,7 @@
+             Self::GitHubHistory => 64*1024,
+             Self::GitHubAuth => crate::github_auth_capture_wire::RESPONSE_LIMIT,
+             Self::GitRead => crate::git_read_protocol::RESPONSE_LIMIT,
++            Self::GitLocal => crate::git_local_protocol::RESPONSE_LIMIT,
+             Self::VersionAllocationSource => 2048,
+         }
+     }
+@@ -322,7 +331,7 @@
+             Self::GitHubPublication => publication_protocol::decode_reply(id, bytes,
+                 publication.ok_or_else(BridgeError::protocol)?).map(ReadOutcome::Publication),
+             // Only drive's actual sealed-source branch may decode History.
+-            Self::GitHubHistory | Self::GitHubAuth | Self::GitRead | Self::VersionAllocationSource => Err(BridgeError::protocol()),
++            Self::GitHubHistory | Self::GitHubAuth | Self::GitRead | Self::GitLocal | Self::VersionAllocationSource => Err(BridgeError::protocol()),
+         }
+     }
+ }
+@@ -339,18 +348,19 @@
+     History(GitHubHistoryAdmission),
+     GitHubAuth(GitHubAuthAdmission),
+     GitRead(GitReadAdmission),
++    GitLocal(GitLocalAdmission),
+     VersionAllocationSource(VersionAllocationSourceAdmission),
+ }
+ impl AdmissionRequest<'_> {
+     fn profile(&self) -> Profile {
+         match self { Self::Passive { method, .. } => Profile::Passive(*method), Self::GitHub { .. } => Profile::GitHubReadOnly,
+-            Self::Preflight { .. } => Profile::GitHubPreflight, Self::Release { .. } => Profile::GitHubRelease, Self::Setup { .. } => Profile::GitHubSetup, Self::Publication { .. } => Profile::GitHubPublication, Self::History(_) => Profile::GitHubHistory, Self::GitHubAuth(_) => Profile::GitHubAuth, Self::GitRead(_) => Profile::GitRead, Self::VersionAllocationSource(_) => Profile::VersionAllocationSource }
++            Self::Preflight { .. } => Profile::GitHubPreflight, Self::Release { .. } => Profile::GitHubRelease, Self::Setup { .. } => Profile::GitHubSetup, Self::Publication { .. } => Profile::GitHubPublication, Self::History(_) => Profile::GitHubHistory, Self::GitHubAuth(_) => Profile::GitHubAuth, Self::GitRead(_) => Profile::GitRead, Self::GitLocal(_) => Profile::GitLocal, Self::VersionAllocationSource(_) => Profile::VersionAllocationSource }
+     }
+     fn encode(self, id: &str) -> Result<(Vec<u8>, Option<preflight_protocol::Request>, Option<crate::asset_session::GitHubPreflightGoGate>,
+         Option<release_protocol::Request>, Option<crate::asset_session::GitHubReleaseGoGate>,
+         Option<setup_protocol::Request>, Option<crate::asset_session::GitHubSetupGoGate>, Option<SetupNativeAdmission>), BridgeError> {
+         match self {
+-            Self::History(_) | Self::GitHubAuth(_) | Self::GitRead(_) | Self::VersionAllocationSource(_) | Self::Publication { .. } => Err(BridgeError::protocol()), // Handled by their fixed admission arms.
++            Self::History(_) | Self::GitHubAuth(_) | Self::GitRead(_) | Self::GitLocal(_) | Self::VersionAllocationSource(_) | Self::Publication { .. } => Err(BridgeError::protocol()), // Handled by their fixed admission arms.
+             Self::Passive { method, params } => Ok((protocol::encode_request(id, method, params)?, None, None, None, None, None, None, None)),
+             Self::GitHub { repository, expected_account_id, expected_repository_id, token } =>
+                 Ok((github_protocol::encode_private_request(id, repository, expected_account_id, expected_repository_id, token)?, None, None, None, None, None, None, None)),
+@@ -426,6 +436,7 @@
+     History(Arc<Mutex<GitHubHistoryReceipt>>),
+     GitHubAuth,
+     GitRead,
++    GitLocal,
+     VersionAllocationSource,
+ }
+ 
+@@ -535,7 +546,7 @@
+         Self::with_reply(endpoint, reply.map(|sender| PassiveReply::Value { sender: Some(sender) }))
+     }
+     fn with_reply(endpoint: Instant, reply: Option<PassiveReply>) -> Self {
+-        Self { endpoint, cleanup_endpoint: None, error: None, history_endpoints: None, gh_auth_endpoints: None, git_read_endpoints: None, version_allocation_source_endpoints: None, terminal: false, unknown: false, reply,
++        Self { endpoint, cleanup_endpoint: None, error: None, history_endpoints: None, gh_auth_endpoints: None, git_read_endpoints: None, git_local_endpoints: None, version_allocation_source_endpoints: None, terminal: false, unknown: false, reply,
+             #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+             native_unknown_pending: false,
+             driver_join: ManagementJoin::Pending, watchdog_join: ManagementJoin::Pending,
+@@ -556,8 +567,8 @@
+     }
+     fn fail_at(&mut self, error: BridgeError, now: Instant) {
+         if self.terminal { return; }
+-        let end = self.version_allocation_source_endpoints.map_or_else(|| self.git_read_endpoints.map_or_else(|| self.gh_auth_endpoints.map_or_else(|| self.history_endpoints.map_or_else(
+-            || now.min(self.endpoint) + CLEANUP_TIME, |original| original.first_failure(now)), |original| original.first_failure(now)), |original| original.first_failure(now)), |original| original.first_failure(now));
++        let end = self.git_local_endpoints.map_or_else(|| self.version_allocation_source_endpoints.map_or_else(|| self.git_read_endpoints.map_or_else(|| self.gh_auth_endpoints.map_or_else(|| self.history_endpoints.map_or_else(
++            || now.min(self.endpoint) + CLEANUP_TIME, |original| original.first_failure(now)), |original| original.first_failure(now)), |original| original.first_failure(now)), |original| original.first_failure(now)), |original| original.first_failure(now));
+         if self.error.is_none() || self.cleanup_endpoint.is_some_and(|prior| end < prior) { self.error = Some(error); }
+         self.cleanup_endpoint = Some(self.cleanup_endpoint.map_or(end, |prior| prior.min(end)));
+     }
+@@ -761,6 +772,11 @@
+     git_read_slots: Option<Arc<Mutex<crate::installed_runtime::GitReadRuntimeSlots>>>,
+     #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+     git_read_sources: Option<Arc<Mutex<crate::asset_source::GitReadSources>>>,
++    #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
++    git_local_slots: Option<Arc<Mutex<crate::installed_runtime::GitLocalRuntimeSlots>>>,
++    #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
++    git_local_sources: Option<Arc<Mutex<crate::asset_source::GitLocalSources>>>,
++    git_local: Option<git_local::LocalResources>,
+     #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]
+     native_settlement: Option<JoinHandle<CloseOutcome>>,
+     #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]
+@@ -904,6 +920,7 @@
+         }
+         if let Some(auth) = &self.gh_auth { lock(&auth.mailbox).unknown(); }
+         if let Some(read) = &self.git_read { read.unknown(); }
++        if let Some(local) = &self.git_local { local.unknown(); }
+         if let Some(source) = &self.version_allocation_source { source.unknown(); }
+         if let Some(receipt)=&self.history_receipt{
+             let mut receipt=lock(receipt);
+@@ -937,6 +954,12 @@
+         if expired { None } else { Some(endpoint) }
+     }
+     fn retire(self: &Arc<Self>, inner: &Inner) -> bool {
++        // The same original management observer must join final journal CAS,
++        // NativeUse retirement and Publisher resolution before releasing debit.
++        if matches!(self.profile, Profile::GitLocal) && !self.resources.try_lock()
++            .is_ok_and(|r|r.git_local.as_ref().is_some_and(git_local::LocalResources::complete)) {
++            self.unknown(inner); return false;
++        }
+         #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+         if self.setup_material.as_ref().and_then(SetupMaterial::secret).is_some() && self.setup_request.as_ref().is_some_and(|r|r.kind==setup_protocol::Kind::Prepare)
+             && !self.resources.try_lock().is_ok_and(|r|
+@@ -1055,6 +1078,11 @@
+                 });
+                 if let Some(read) = &self.git_read { read.retire(outcome, was_unknown); }
+             }
++            Profile::GitLocal => {
++                drop(reply);
++                let outcome=result.and_then(|value|match value {ReadOutcome::GitLocal=>Ok(()),_=>Err(BridgeError::protocol())});
++                if let Some(local)=&self.git_local {local.retire(outcome,was_unknown);}
++            }
+             Profile::VersionAllocationSource => {
+                 drop(reply);
+                 let outcome = result.and_then(|value| match value {
+@@ -1257,13 +1285,14 @@
+ 
+     fn admit(&self, request: AdmissionRequest<'_>, completion: CompletionTarget) -> Result<Arc<Owner>, BridgeError> {
+         let git_read_endpoints = match &request { AdmissionRequest::GitRead(value) => Some(value.endpoints), _ => None };
++        let git_local_endpoints = match &request { AdmissionRequest::GitLocal(value) => Some(value.endpoints), _ => None };
+         let version_allocation_source_endpoints = match &request { AdmissionRequest::VersionAllocationSource(admission) => Some(admission.endpoints), _ => None };
+         let gh_auth_endpoints = match &request { AdmissionRequest::GitHubAuth(admission) => Some(admission.endpoints), _ => None };
+         let history_endpoints=match &request{AdmissionRequest::History(admission)=>Some(admission.endpoints),_=>None};
+         let publication_end=match &request{AdmissionRequest::Publication{end,..}=>Some(*end),_=>None};
+         let now=Instant::now();
+         if publication_end.is_some_and(|end|end<=now || end>now+Duration::from_secs(60)){return Err(BridgeError::invalid())}
+-        let endpoint = version_allocation_source_endpoints.map_or_else(|| git_read_endpoints.map_or_else(|| gh_auth_endpoints.map_or_else(|| publication_end.unwrap_or_else(||history_endpoints.map_or(now+OPERATION_TIME,|original|original.work)), |original| original.work), |original| original.work), |original| original.work);
++        let endpoint = git_local_endpoints.map_or_else(|| version_allocation_source_endpoints.map_or_else(|| git_read_endpoints.map_or_else(|| gh_auth_endpoints.map_or_else(|| publication_end.unwrap_or_else(||history_endpoints.map_or(now+OPERATION_TIME,|original|original.work)), |original| original.work), |original| original.work), |original| original.work), |original| original.work);
+         let profile = request.profile();
+         let (reply, github_receipt, preflight_receipt, release_receipt, setup_receipt,history_receipt,publication_receipt) = match (profile, completion) {
+             (Profile::Passive(_), CompletionTarget::Passive(sender)) =>
+@@ -1276,7 +1305,7 @@
+             (Profile::GitHubSetup, CompletionTarget::Setup(receipt)) => (None, None, None, None, Some(receipt),None,None),
+             (Profile::GitHubHistory,CompletionTarget::History(receipt))=>(None,None,None,None,None,Some(receipt),None),
+             (Profile::GitHubPublication,CompletionTarget::Publication(receipt))=>(None,None,None,None,None,None,Some(receipt)),
+-            (Profile::GitHubAuth, CompletionTarget::GitHubAuth) | (Profile::GitRead, CompletionTarget::GitRead) | (Profile::VersionAllocationSource, CompletionTarget::VersionAllocationSource) => (None,None,None,None,None,None,None),
++            (Profile::GitHubAuth, CompletionTarget::GitHubAuth) | (Profile::GitRead, CompletionTarget::GitRead) | (Profile::GitLocal, CompletionTarget::GitLocal) | (Profile::VersionAllocationSource, CompletionTarget::VersionAllocationSource) => (None,None,None,None,None,None,None),
+             _ => return Err(BridgeError::invalid()),
+         };
+         let executor = tokio::runtime::Handle::try_current()
+@@ -1288,14 +1317,15 @@
+         let key = self.inner.next.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |value| value.checked_add(1))
+             .map_err(|_| BridgeError::new("unavailable", "The query identity space is exhausted."))?;
+         let id = match profile { Profile::Passive(_) => format!("query-{key}"), Profile::GitHubReadOnly => format!("github-read-{key}"),
+-            Profile::GitHubPreflight => format!("github-preflight-{key}"), Profile::GitHubRelease => format!("github-release-{key}"), Profile::GitHubSetup => format!("github-setup-{key}"),Profile::GitHubPublication=>format!("github-publication-{key}"),Profile::GitHubHistory=>format!("github-history-{key}"), Profile::GitHubAuth=>format!("github-auth-{key}"), Profile::GitRead=>format!("git-read-{key}"), Profile::VersionAllocationSource=>format!("version-source-{key}") };
+-        let (publication,history,gh_auth,git_read,version_allocation_source,ordinary)=match request{
+-            AdmissionRequest::Publication{request,gate,..}=>(Some((request,gate)),None,None,None,None,None),
+-            AdmissionRequest::History(admission)=>(None,Some(admission),None,None,None,None),
+-            AdmissionRequest::GitHubAuth(admission)=>(None,None,Some(admission),None,None,None),
+-            AdmissionRequest::GitRead(admission)=>(None,None,None,Some(admission),None,None),
+-            AdmissionRequest::VersionAllocationSource(admission)=>(None,None,None,None,Some(admission),None),
+-            other=>(None,None,None,None,None,Some(other))};
++            Profile::GitHubPreflight => format!("github-preflight-{key}"), Profile::GitHubRelease => format!("github-release-{key}"), Profile::GitHubSetup => format!("github-setup-{key}"),Profile::GitHubPublication=>format!("github-publication-{key}"),Profile::GitHubHistory=>format!("github-history-{key}"), Profile::GitHubAuth=>format!("github-auth-{key}"), Profile::GitRead=>format!("git-read-{key}"), Profile::GitLocal=>format!("git-local-{key}"), Profile::VersionAllocationSource=>format!("version-source-{key}") };
++        let (publication,history,gh_auth,git_read,git_local,version_allocation_source,ordinary)=match request{
++            AdmissionRequest::Publication{request,gate,..}=>(Some((request,gate)),None,None,None,None,None,None),
++            AdmissionRequest::History(admission)=>(None,Some(admission),None,None,None,None,None),
++            AdmissionRequest::GitHubAuth(admission)=>(None,None,Some(admission),None,None,None,None),
++            AdmissionRequest::GitRead(admission)=>(None,None,None,Some(admission),None,None,None),
++            AdmissionRequest::GitLocal(admission)=>(None,None,None,None,Some(admission),None,None),
++            AdmissionRequest::VersionAllocationSource(admission)=>(None,None,None,None,None,Some(admission),None),
++            other=>(None,None,None,None,None,None,Some(other))};
+         let (mut bytes, preflight_request, preflight_gate, release_request, release_gate, setup_request, setup_gate, material) = match ordinary{
+             Some(request)=>request.encode(&id)?,None=>(Vec::new(),None,None,None,None,None,None,None),
+         };
+@@ -1311,6 +1341,12 @@
+         #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+         let git_read_sources = git_read.as_ref().map(|value| value.invocation.sources.clone());
+         let git_read = git_read.map(|value| value.invocation);
++        #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
++        let git_local_slots=git_local.as_ref().map(|value|value.slots.clone());
++        #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
++        let git_local_sources=git_local.as_ref().map(|value|value.invocation.sources.clone());
++        let local_resources=git_local.as_ref().map(|value|git_local::LocalResources::new(value.invocation.phase));
++        let git_local=git_local.map(|value|value.invocation);
+         let gh_auth = gh_auth.map(|value| value.invocation);
+         let source_resources = version_allocation_source.as_ref().map(version_allocation::SourceResources::from_admission);
+         let version_allocation_source = version_allocation_source.map(|value| value.invocation);
+@@ -1335,8 +1371,8 @@
+             key, id, profile, github_receipt, preflight_receipt, preflight_request, preflight_gate, release_receipt, release_request, release_gate, setup_receipt, setup_request, setup_gate,
+             publication_receipt,publication_request,publication_gate,
+             setup_material, setup_first_bound, secret_sealed: Mutex::new(secret_cipher),
+-            history_nomination,history_gate,history_receipt,history_endpoints, gh_auth, gh_auth_endpoints, git_read, git_read_endpoints, version_allocation_source, version_allocation_source_endpoints,
+-            preflight_go_claimed: AtomicBool::new(false), state: Mutex::new({let mut state=OwnerState::with_reply(endpoint,reply);state.history_endpoints=history_endpoints;state.gh_auth_endpoints=gh_auth_endpoints;state.git_read_endpoints=git_read_endpoints;state.version_allocation_source_endpoints=version_allocation_source_endpoints;state}),
++            history_nomination,history_gate,history_receipt,history_endpoints, gh_auth, gh_auth_endpoints, git_read, git_read_endpoints, git_local, git_local_endpoints, version_allocation_source, version_allocation_source_endpoints,
++            preflight_go_claimed: AtomicBool::new(false), state: Mutex::new({let mut state=OwnerState::with_reply(endpoint,reply);state.history_endpoints=history_endpoints;state.gh_auth_endpoints=gh_auth_endpoints;state.git_read_endpoints=git_read_endpoints;state.git_local_endpoints=git_local_endpoints;state.version_allocation_source_endpoints=version_allocation_source_endpoints;state}),
+             resources: AsyncMutex::new(Resources {
+                 #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]
+                 passive: if passive_selected(profile) {
+@@ -1368,6 +1404,11 @@
+                 git_read_slots,
+                 #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+                 git_read_sources,
++                #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
++                git_local_slots,
++                #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
++                git_local_sources,
++                git_local: local_resources,
+                 version_allocation_source: source_resources,
+                 ..Resources::default()
+             }), stop, changed: Notify::new(),
+@@ -1464,7 +1505,7 @@
+         let mut observer_end=Instant::now()+CLEANUP_TIME;
+         for owner in owners {
+             owner.fail(BridgeError::shutdown());
+-            if matches!(owner.profile,Profile::GitHubHistory | Profile::GitHubAuth | Profile::GitRead | Profile::VersionAllocationSource){
++            if matches!(owner.profile,Profile::GitHubHistory | Profile::GitHubAuth | Profile::GitRead | Profile::GitLocal | Profile::VersionAllocationSource){
+                 if let Some(end)=lock(&owner.state).cleanup_endpoint{observer_end=observer_end.max(end);}
+             }
+         }
+@@ -1537,7 +1578,12 @@
+             let state = lock(&owner.state);
+             (state.driver_join == ManagementJoin::Pending, state.watchdog_join == ManagementJoin::Pending, state.management_ready())
+         };
+-        if ready && owner.retire(&inner) { return; }
++        if ready {
++            if matches!(owner.profile, Profile::GitLocal) && !git_local::finalize(&inner,&owner).await {
++                owner_unknown!(owner,&inner,None,Management); pending::<()>().await;
++            }
++            if owner.retire(&inner) {return;}
++        }
+         if !driver_pending && !watchdog_pending {
+             owner_unknown!(owner, &inner, None, Management);
+             // Failed originals and their books remain retained. No replacement
+@@ -1875,7 +1921,7 @@
+     original && matches!((profile, expected), (Profile::GitHubPreflight, Profile::GitHubPreflight)
+         | (Profile::GitHubRelease, Profile::GitHubRelease) | (Profile::GitHubSetup, Profile::GitHubSetup)
+         | (Profile::GitHubPublication,Profile::GitHubPublication)
+-        | (Profile::GitHubHistory, Profile::GitHubHistory) | (Profile::GitHubAuth, Profile::GitHubAuth) | (Profile::GitRead, Profile::GitRead)) && !state.terminal && !state.unknown && state.error.is_none()
++        | (Profile::GitHubHistory, Profile::GitHubHistory) | (Profile::GitHubAuth, Profile::GitHubAuth) | (Profile::GitRead, Profile::GitRead) | (Profile::GitLocal, Profile::GitLocal)) && !state.terminal && !state.unknown && state.error.is_none()
+         && state.cleanup_endpoint.is_none() && !stopping && !disabled && !stop && now < state.endpoint
+ }
+ fn claim_preflight_go(inner: &Inner, owner: &Arc<Owner>, expected: Profile) -> bool {
+@@ -2086,12 +2132,28 @@
+     #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+     GitRead(Arc<Mutex<crate::installed_runtime::GitReadRuntimeSlots>>, Arc<Mutex<crate::asset_source::GitReadSources>>),
+     #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
++    GitLocal(Arc<Mutex<crate::installed_runtime::GitLocalRuntimeSlots>>, Arc<Mutex<crate::asset_source::GitLocalSources>>),
++    #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+     VersionAllocationSource(Arc<Mutex<version_allocation::Originals>>),
+ }
+ #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]
+ fn installed_settlement_slots(resources: &Resources, profile: Profile) -> Result<Option<InstalledSettlementSlots>, BridgeError> {
+     #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+     {
++        if git_local::selected(profile) {
++            if resources.passive.is_some() || resources.github_readonly.is_some() || resources.github_preflight.is_some()
++                || resources.github_release.is_some() || resources.github_setup.is_some() || resources.github_history.is_some()
++                || resources.github_auth.is_some() || resources.version_allocation_source.is_some()
++                || resources.git_read_slots.is_some() || resources.git_read_sources.is_some() || resources.git_local.is_none() {
++                return Err(BridgeError::cleanup_unknown());
++            }
++            return resources.git_local_slots.as_ref().zip(resources.git_local_sources.as_ref())
++                .map(|(native,sources)|Some(InstalledSettlementSlots::GitLocal(native.clone(),sources.clone())))
++                .ok_or_else(BridgeError::cleanup_unknown);
++        }
++        if resources.git_local_slots.is_some() || resources.git_local_sources.is_some() || resources.git_local.is_some() {
++            return Err(BridgeError::cleanup_unknown());
++        }
+         if git_read::selected(profile) {
+             if resources.passive.is_some() || resources.github_readonly.is_some() || resources.github_preflight.is_some()
+                 || resources.github_release.is_some() || resources.github_setup.is_some() || resources.github_history.is_some() || resources.github_auth.is_some() || resources.version_allocation_source.is_some() {
+@@ -2195,6 +2257,9 @@
+             Self::GitRead(native, sources) => native.try_lock().ok().zip(sources.try_lock().ok())
+                 .map(|(slots, source)| (slots.never_started() && source.not_started(), slots.no_child_effect())),
+             #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
++            Self::GitLocal(native, sources) => native.try_lock().ok().zip(sources.try_lock().ok())
++                .map(|(slots, source)| (slots.never_started() && source.not_started(), slots.no_child_effect())),
++            #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+             Self::VersionAllocationSource(native) => native.try_lock().ok().map(|original| original.no_child_state()),
+         }
+     }
+@@ -2202,6 +2267,7 @@
+     fn settle_originals(&self, owner: &Owner) -> CloseOutcome {
+         match self {
+             Self::GitRead(native, _) => git_read::settle(owner, native),
++            Self::GitLocal(native, _) => git_local::settle(owner, native),
+             Self::VersionAllocationSource(native) => {
+                 let mut original = match native.lock() { Ok(original) => original,
+                     Err(error) => { let mut original = error.into_inner(); original.interrupted(); original } };
+@@ -2287,6 +2353,9 @@
+             Self::GitRead(native, sources) => native.try_lock().is_ok_and(|slots| slots.settled())
+                 && sources.try_lock().is_ok_and(|source| source.settled()),
+             #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
++            Self::GitLocal(native, sources) => native.try_lock().is_ok_and(|slots| slots.settled())
++                && sources.try_lock().is_ok_and(|source| source.settled()),
++            #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+             Self::VersionAllocationSource(native) => native.try_lock().is_ok_and(|original| original.settled()),
+         }
+     }
+@@ -2385,6 +2454,19 @@
+             let owners = lock(&inner.owners); let state = lock(&owner.state);
+             if !preflight_claim_clear(owners.get(&owner.key).is_some_and(|actual| Arc::ptr_eq(actual, owner)), owner.profile,
+                 Profile::GitRead, &state, Instant::now(), inner.stopping.load(Ordering::SeqCst), inner.disabled.load(Ordering::SeqCst), *owner.stop.borrow()) {
++                return Err(state.error.clone().unwrap_or_else(BridgeError::timeout));
++            }
++            slots.transfer_once().map_err(|_| BridgeError::cleanup_unknown())
++        },
++        #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
++        Some(InstalledSettlementSlots::GitLocal(native, _)) => {
++            let (inspection, acquisition) = passive_borrows(resources);
++            if inspection.returned != Some(ManagementJoin::Returned) || !inspection.positive()
++                || acquisition.returned.is_some() || !acquisition.positive() { return Err(BridgeError::cleanup_unknown()); }
++            let mut slots = native.try_lock().map_err(|_| BridgeError::cleanup_unknown())?;
++            let owners = lock(&inner.owners); let state = lock(&owner.state);
++            if !preflight_claim_clear(owners.get(&owner.key).is_some_and(|actual| Arc::ptr_eq(actual, owner)), owner.profile,
++                Profile::GitLocal, &state, Instant::now(), inner.stopping.load(Ordering::SeqCst), inner.disabled.load(Ordering::SeqCst), *owner.stop.borrow()) {
+                 return Err(state.error.clone().unwrap_or_else(BridgeError::timeout));
+             }
+             slots.transfer_once().map_err(|_| BridgeError::cleanup_unknown())
+@@ -2604,7 +2686,8 @@
+             Err(_) => { owner_unknown!(owner, inner, Some(&*resources), Settlement); return false; },
+         };
+         if resources.history_post.is_some() || resources.history_post_join_failed || resources.gh_auth_after.is_some() || resources.gh_auth_after_failed
+-            || resources.version_allocation_source.as_ref().is_some_and(|s| !s.jobs_settled()) {
++            || resources.version_allocation_source.as_ref().is_some_and(|s| !s.jobs_settled())
++            || resources.git_local.as_ref().is_some_and(|s| !s.jobs_settled()) {
+             owner_unknown!(owner, inner, Some(&*resources), Settlement); return false;
+         }
+         let (inspection, acquisition) = passive_borrows(resources);
+@@ -2750,13 +2833,19 @@
+     true
+ }
+ 
+-enum Event { SourcePostRequest(Result<oneshot::Sender<Result<(),BridgeError>>,oneshot::error::RecvError>), SourcePost(Result<Result<(),BridgeError>,tokio::task::JoinError>), HistoryPostRequest(Result<oneshot::Sender<Result<(),BridgeError>>,oneshot::error::RecvError>), HistoryPost(Result<Result<(),BridgeError>,tokio::task::JoinError>), Wait(std::io::Result<ExitStatus>), Write(Result<WriteEnd, tokio::task::JoinError>), Out(Result<ReadEnd, tokio::task::JoinError>), Err(Result<ReadEnd, tokio::task::JoinError>), Fault(Option<BridgeError>), Stop }
++enum Event { GitLocalCandidate(Result<Arc<crate::git_local_protocol::Candidate>,oneshot::error::RecvError>), SourcePostRequest(Result<oneshot::Sender<Result<(),BridgeError>>,oneshot::error::RecvError>), SourcePost(Result<Result<(),BridgeError>,tokio::task::JoinError>), HistoryPostRequest(Result<oneshot::Sender<Result<(),BridgeError>>,oneshot::error::RecvError>), HistoryPost(Result<Result<(),BridgeError>,tokio::task::JoinError>), Wait(std::io::Result<ExitStatus>), Write(Result<WriteEnd, tokio::task::JoinError>), Out(Result<ReadEnd, tokio::task::JoinError>), Err(Result<ReadEnd, tokio::task::JoinError>), Fault(Option<BridgeError>), Stop }
+ 
+ async fn drive(inner: Arc<Inner>, owner: Arc<Owner>, bytes: Vec<u8>) -> DriverEnd {
+     let mut resources = owner.resources.lock().await;
+     if owner.failed() || Instant::now() >= owner.endpoint() {
+         owner.fail(BridgeError::timeout());
+         return ready_after_custody(&mut resources, &inner, &owner, Err(BridgeError::timeout())).await;
++    }
++    if matches!(owner.profile,Profile::GitLocal) {
++        if let Err(error)=git_local::startup(&mut resources,&inner,&owner).await {
++            owner.fail(error.clone());
++            return ready_after_custody(&mut resources,&inner,&owner,Err(error)).await;
++        }
+     }
+     let config = inner.runtime.clone();
+     let endpoint = owner.endpoint();
+@@ -2777,6 +2866,12 @@
+     let inspection_auth = resources.github_auth.clone();
+     #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+     let inspection_git_read = resources.git_read_slots.clone();
++    #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
++    let local_preparing=if matches!(profile,Profile::GitLocal) {
++        match resources.git_local.as_ref().ok_or_else(BridgeError::cleanup_unknown).and_then(|local|local.preparing()) {
++            Ok(value)=>value,Err(error)=>{owner.fail(error.clone());return ready_after_custody(&mut resources,&inner,&owner,Err(error)).await;}
++        }
++    }else{None};
+     #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+     let inspection_source = resources.version_allocation_source.as_ref().and_then(|s| s.originals.clone());
+     #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")), all(target_os = "windows", target_arch = "x86_64", target_env = "msvc")))]
+@@ -2992,6 +3087,18 @@
+                 }
+                 return Err(BridgeError::unavailable("The fixed local Git read runtime is unavailable."));
+             },
++            Profile::GitLocal => {
++                #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
++                if git_local::selected(profile) {
++                    let result=(|| {
++                        let local=inspection_owner.git_local.as_ref().ok_or_else(BridgeError::cleanup_unknown)?;
++                        local.inspect(&config,&inspection_owner,local_preparing.as_deref())
++                    })();
++                    if let Err(error)=&result {inspection_owner.fail(error.clone());}
++                    return result;
++                }
++                return Err(BridgeError::unavailable("The fixed local Git write runtime is unavailable."));
++            },
+             Profile::VersionAllocationSource => {
+                 #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+                 if version_allocation::selected(profile) {
+@@ -3043,7 +3150,7 @@
+         #[cfg(all(windows, test, feature = "development-runtime"))]
+         let runtime = match profile {
+             Profile::Passive(_) => hosted_tests::select_windows_bootstrap(runtime, windows_bootstrap, endpoint)?,
+-            Profile::GitHubReadOnly | Profile::GitHubPreflight | Profile::GitHubRelease | Profile::GitHubSetup | Profile::GitHubPublication | Profile::GitHubHistory | Profile::GitHubAuth | Profile::GitRead | Profile::VersionAllocationSource => runtime, // Never a passive fixture override for GitHub actions.
++            Profile::GitHubReadOnly | Profile::GitHubPreflight | Profile::GitHubRelease | Profile::GitHubSetup | Profile::GitHubPublication | Profile::GitHubHistory | Profile::GitHubAuth | Profile::GitRead | Profile::GitLocal | Profile::VersionAllocationSource => runtime, // Never a passive fixture override for GitHub actions.
+         };
+         Ok(runtime)
+     }));
+@@ -3108,6 +3215,8 @@
+     #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+     let acquisition_git_read = resources.git_read_slots.clone();
+     #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
++    let acquisition_git_local=resources.git_local_slots.clone();
++    #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+     let acquisition_source = resources.version_allocation_source.as_ref().and_then(|s| s.originals.clone());
+     #[cfg(all(test, feature = "development-runtime"))]
+     let acquisition_gate = inner.test.acquisition.clone();
+@@ -3117,7 +3226,7 @@
+         if acquire_enter.blocking_recv().is_err() {
+             let error = AcquisitionError::from(std::io::Error::new(std::io::ErrorKind::Interrupted, "original acquisition entry was not released"));
+             #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+-            if matches!(acquiring_owner.profile, Profile::GitHubPreflight | Profile::GitHubRelease | Profile::GitHubSetup | Profile::GitHubPublication | Profile::GitHubHistory | Profile::GitHubAuth | Profile::GitRead | Profile::VersionAllocationSource) {
++            if matches!(acquiring_owner.profile, Profile::GitHubPreflight | Profile::GitHubRelease | Profile::GitHubSetup | Profile::GitHubPublication | Profile::GitHubHistory | Profile::GitHubAuth | Profile::GitRead | Profile::GitLocal | Profile::VersionAllocationSource) {
+                 acquiring_owner.observe_macos_action_acquisition_failure(&error);
+             }
+             #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+@@ -3223,6 +3332,20 @@
+             #[cfg(not(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+             return Err(AcquisitionError::unsupported("The fixed Git read runtime is unavailable"));
+         }
++        if matches!(acquiring_owner.profile, Profile::GitLocal) {
++            #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
++            {
++                let Some(native) = acquisition_git_local else {
++                    owner_unknown!(acquiring_owner, &acquiring_inner, None, Acquisition);
++                    return Err(AcquisitionError::unsupported("The original Git local write custody is missing"));
++                };
++                let result = git_local::acquire_original(&acquiring_inner, &acquiring_owner, &native);
++                if let Err(error) = &result { acquiring_owner.observe_macos_action_acquisition_failure(error); }
++                return result;
++            }
++            #[cfg(not(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
++            return Err(AcquisitionError::unsupported("The fixed Git local write runtime is unavailable"));
++        }
+         if matches!(acquiring_owner.profile, Profile::VersionAllocationSource) {
+             #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+             {
+@@ -3323,12 +3446,22 @@
+             Err(error) => { owner.fail(error); owner_unknown!(owner, &inner, Some(&resources), Io); return DriverEnd::RetainedUnknown; },
+         }
+     } else { None };
+-    let (mut ready_send, mut ready_receive) = if matches!(profile, Profile::GitHubPreflight | Profile::GitHubRelease | Profile::GitHubSetup | Profile::GitHubPublication | Profile::GitHubHistory | Profile::GitHubAuth | Profile::GitRead) {
++    let git_local_request=if matches!(profile,Profile::GitLocal) {
++        match owner.git_local.as_ref().ok_or_else(BridgeError::cleanup_unknown).and_then(|local|local.request()) {
++            Ok(value)=>Some(value),Err(error)=>{owner.fail(error);owner_unknown!(owner,&inner,Some(&resources),Io);return DriverEnd::RetainedUnknown;}
++        }
++    }else{None};
++    let (mut local_candidate,mut local_ack)=if matches!(profile,Profile::GitLocal) {
++        match git_local::channels(&mut resources) {
++            Ok(value)=>(Some(value.candidate),Some(value.ack)),Err(error)=>{owner.fail(error);owner_unknown!(owner,&inner,Some(&resources),Io);return DriverEnd::RetainedUnknown;}
++        }
++    }else{(None,None)};
++    let (mut ready_send, mut ready_receive) = if matches!(profile, Profile::GitHubPreflight | Profile::GitHubRelease | Profile::GitHubSetup | Profile::GitHubPublication | Profile::GitHubHistory | Profile::GitHubAuth | Profile::GitRead | Profile::GitLocal) {
+         let (send, receive) = oneshot::channel(); (Some(send), Some(receive))
+     } else { (None, None) };
+     let preflight_digest = matches!(profile, Profile::GitHubPreflight | Profile::GitHubRelease | Profile::GitHubSetup | Profile::GitHubPublication | Profile::GitHubHistory).then(|| preflight_protocol::request_digest(&bytes));
+     // History/Auth/GitRead share this fixed POST/wait slot; SOURCE retains its separate posts.
+-    let (history_post_send,mut history_post_receive)=if matches!(profile,Profile::GitHubHistory | Profile::GitHubAuth | Profile::GitRead){
++    let (history_post_send,mut history_post_receive)=if matches!(profile,Profile::GitHubHistory | Profile::GitHubAuth | Profile::GitRead | Profile::GitLocal){
+         let (send,receive)=oneshot::channel();(Some(send),Some(receive))
+     }else{(None,None)};
+     let mut source_post_receive = None;
+@@ -3345,7 +3478,14 @@
+     } else {
+     if let Some(stdin) = stdin {
+         if let Some(ready) = ready_receive.take() {
+-            if matches!(profile, Profile::GitRead) {
++            if matches!(profile,Profile::GitLocal) {
++                let (release,wait_returned)=oneshot::channel();resources.history_wait_release=Some(release);
++                match (git_local_request.as_ref(),history_post_send,local_ack.take()) {
++                    (Some(request),Some(post),Some(ack))=>resources.writer=Some(tokio::spawn(git_local::write(stdin,request.clone(),ready,wait_returned,post,ack,
++                        inner.clone(),owner.clone(),faults.clone()))),
++                    _=>owner.fail(BridgeError::cleanup_unknown()),
++                }
++            } else if matches!(profile, Profile::GitRead) {
+                 let (release, wait_returned) = oneshot::channel(); resources.history_wait_release = Some(release);
+                 if let (Some(request), Some(post)) = (git_read_request.as_ref(), history_post_send) {
+                     resources.writer = Some(tokio::spawn(git_read::write(stdin, request.clone(), ready, wait_returned, post,
+@@ -3385,7 +3525,12 @@
+         }
+     }
+     if let Some(stdout) = stdout {
+-        if matches!(profile, Profile::GitRead) {
++        if matches!(profile,Profile::GitLocal) {
++            match (git_local_request.as_ref(),ready_send.take(),local_candidate.take()) {
++                (Some(request),Some(ready),Some(candidate))=>resources.stdout=Some(tokio::spawn(git_local::read(stdout,request.clone(),ready,candidate,faults.clone()))),
++                _=>owner.fail(BridgeError::cleanup_unknown()),
++            }
++        } else if matches!(profile, Profile::GitRead) {
+             if let (Some(request), Some(ready)) = (git_read_request.as_ref(), ready_send.take()) {
+                 resources.stdout = Some(tokio::spawn(git_read::read(stdout, request.clone(), ready, faults.clone())));
+             } else { owner.fail(BridgeError::cleanup_unknown()); }
+@@ -3478,11 +3623,14 @@
+         let err_pending = resources.stderr.is_some();
+         let post_pending=resources.history_post.is_some();
+         let source_post_pending = resources.version_allocation_source.as_ref().is_some_and(|source| source.before_go_pending());
++        let local_candidate_pending=resources.git_local.as_ref().is_some_and(|local|local.candidate_pending());
+         if !wait_pending && !write_pending && !out_pending && !err_pending && !post_pending && history_post_receive.is_none()
+-            && !source_post_pending && source_post_receive.is_none() { break; }
++            && !source_post_pending && source_post_receive.is_none() && !local_candidate_pending { break; }
+         let event = {
+-            let Resources { child, writer, stdout, stderr, history_post, version_allocation_source, .. } = &mut *resources;
++            let Resources { child, writer, stdout, stderr, history_post, version_allocation_source, git_local, .. } = &mut *resources;
+             tokio::select! {
++                candidate=async {match git_local {Some(local)=>local.receive_candidate().await,None=>std::future::pending().await}},
++                    if local_candidate_pending=>Event::GitLocalCandidate(candidate),
+                 request = async { match &mut source_post_receive { Some(value) => value.await, None => std::future::pending().await } },
+                     if source_post_receive.is_some() => Event::SourcePostRequest(request),
+                 result = async { match version_allocation_source { Some(source) => source.join_before_go().await, None => std::future::pending().await } },
+@@ -3498,6 +3646,7 @@
+             }
+         };
+         match event {
++            Event::GitLocalCandidate(candidate)=>git_local::candidate_returned(&mut resources,&inner,&owner,candidate).await,
+             Event::SourcePostRequest(request) => {
+                 source_post_receive.take();
+                 match (request, resources.version_allocation_source.as_mut()) {
+@@ -3516,7 +3665,7 @@
+                 history_post_receive.take();
+                 match request {
+                     Ok(reply)=>{
+-                        if !matches!(profile,Profile::GitHubHistory | Profile::GitHubAuth | Profile::GitRead)||resources.history_post.is_some()||resources.history_post_return.is_some()
++                        if !matches!(profile,Profile::GitHubHistory | Profile::GitHubAuth | Profile::GitRead | Profile::GitLocal)||resources.history_post.is_some()||resources.history_post_return.is_some()
+                             ||resources.history_post_join_failed||owner.failed()||Instant::now()>=owner.endpoint(){
+                             let error=lock(&owner.state).error.clone().unwrap_or_else(BridgeError::timeout);
+                             owner.fail(error.clone());let _=reply.send(Err(error));
+@@ -3531,6 +3680,9 @@
+                                 resources.history_post=Some(tokio::task::spawn_blocking(move||{
+                                     let result=(||{
+                                         enter.blocking_recv().map_err(|_|BridgeError::cleanup_unknown())?;
++                                        if matches!(original_owner.profile,Profile::GitLocal) {
++                                            return original_owner.git_local.as_ref().ok_or_else(BridgeError::cleanup_unknown)?.before_go(&original_owner);
++                                        }
+                                         if matches!(original_owner.profile, Profile::GitRead) {
+                                             return original_owner.git_read.as_ref().ok_or_else(BridgeError::cleanup_unknown)?
+                                                 .before_go(&original_owner, git_native.as_ref().ok_or_else(BridgeError::cleanup_unknown)?);
+@@ -3685,6 +3837,11 @@
+             Err(error) => { owner.fail(error); owner_unknown!(owner, &inner, Some(&resources), Io); return DriverEnd::RetainedUnknown; },
+         }
+     } else { None };
++    if matches!(profile,Profile::GitLocal) {
++        let decoded=owner.git_local.as_ref().ok_or_else(BridgeError::cleanup_unknown)
++            .and_then(|local|local.decode_before_close(&owner,&resources));
++        if let Err(error)=decoded {owner.fail(error);owner_unknown!(owner,&inner,Some(&resources),Io);return DriverEnd::RetainedUnknown;}
++    }
+     // Known child custody only permits attempting the SAME native settlement;
+     // it never proves the actual source/native closes, joins or success.
+     if !settle_installed(&mut resources, &inner, &owner).await { return DriverEnd::RetainedUnknown; }
+@@ -3733,6 +3890,10 @@
+     if matches!(profile, Profile::GitHubAuth) {
+         resources.out_end.take(); resources.err_end.take(); resources.child.take();
+         return DriverEnd::Ready(Ok(ReadOutcome::GitHubAuth)); // Never raw private stdout.
++    }
++    if matches!(profile,Profile::GitLocal) {
++        resources.out_end.take();resources.err_end.take();resources.child.take();
++        return DriverEnd::Ready(Ok(ReadOutcome::GitLocal));
+     }
+     if let Some(reply) = git_read_reply {
+         resources.out_end.take(); resources.err_end.take(); resources.child.take();
+@@ -6030,7 +6191,7 @@
+             key: 1, id: "query-1".into(), profile: Profile::Passive(Method::Capabilities), github_receipt: None,
+             preflight_receipt: None, preflight_request: None, preflight_gate: None, release_receipt: None, release_request: None, release_gate: None, setup_receipt: None, setup_request: None, setup_gate: None,
+             publication_receipt:None,publication_request:None,publication_gate:None,
+-            history_receipt:None,history_nomination:None,history_gate:None,history_endpoints:None, gh_auth:None, gh_auth_endpoints:None, git_read:None, git_read_endpoints:None, version_allocation_source:None, version_allocation_source_endpoints:None, setup_material: None, setup_first_bound:None, secret_sealed: Mutex::new(None), preflight_go_claimed: AtomicBool::new(false),
++            history_receipt:None,history_nomination:None,history_gate:None,history_endpoints:None, gh_auth:None, gh_auth_endpoints:None, git_read:None, git_read_endpoints:None, git_local:None, git_local_endpoints:None, version_allocation_source:None, version_allocation_source_endpoints:None, setup_material: None, setup_first_bound:None, secret_sealed: Mutex::new(None), preflight_go_claimed: AtomicBool::new(false),
+             state: Mutex::new(OwnerState::new(Instant::now() + OPERATION_TIME, None)),
+             resources: AsyncMutex::new(Resources::default()), stop, changed: Notify::new(),
+             permit: Mutex::new(None), driver: AsyncMutex::new(None), watchdog: AsyncMutex::new(None), observer: AsyncMutex::new(None),
+--- a/desktop/src-tauri/src/asset_session.rs
++++ b/desktop/src-tauri/src/asset_session.rs
+@@ -109,6 +109,10 @@
+ #[path = "asset_session_git_read.rs"]
+ mod git_read;
+ pub(crate) use git_read::GitReadGate;
++#[cfg_attr(any(target_os="linux",target_os="macos"),path="asset_session_git_local.rs")]
++#[cfg_attr(not(any(target_os="linux",target_os="macos")),path="asset_session_git_local_unavailable.rs")]
++mod git_local;
++pub(crate) use git_local::GitLocalGate;
+ pub(crate) use gh_auth::{GitHubAuthGoGate, GitHubAuthRequest, GitHubAuthStatus, GitHubAuthConnectionHold, GitHubAuthCustody};
+ #[path = "asset_session_github_publication.rs"]
+ mod github_publication;
+@@ -797,6 +801,8 @@
+     github: ConnectionState,
+     gh_auth: Option<gh_auth::Entry>,
+     git_read: Option<git_read::Entry>,
++    git_local: Option<git_local::Entry>,
++    git_local_review: Option<git_local::ReadyReview>,
+     evidence: EvidenceRegistry,
+     images: images::Registry,
+     installation: installation::Registry,
+@@ -1030,7 +1036,7 @@
+ }
+ fn assets_can_exit_locked(state: &DocumentState) -> bool {
+     !state.retiring && session_data_empty(state) && state.slot.as_ref().is_none_or(|slot| slot.owner.resources_settled())
+-        && gh_auth::can_exit(state)
++        && gh_auth::can_exit(state) && !git_local::pending(state)
+ }
+ fn complete_empty_session_lock(state: &mut DocumentState) -> bool {
+     // The caller must have reinserted its exact original slot. Empty data alone
+@@ -1957,6 +1963,7 @@
+             self.add(state.images.retained_bytes().ok_or(Problem::Capacity)?)?;
+             self.add(gh_auth::retained_bytes(state).ok_or(Problem::CleanupUnknown)?)?;
+             self.add(git_read::retained_bytes(state).ok_or(Problem::CleanupUnknown)?)?;
++            self.add(git_local::retained_bytes(state).ok_or(Problem::CleanupUnknown)?)?;
+             self.add(version_allocation::retained_bytes(state).ok_or(Problem::CleanupUnknown)?)?;
+             if let Some(vault) = &state.vault { self.vault_session(vault)?; }
+             self.records(&state.records)?; self.assignments(&state.assignments)?;
+@@ -2025,6 +2032,12 @@
+     // Storage arithmetic only; no History authority or live-owner census.
+     pub(super) fn git_read_admission_bytes(document:&Arc<Inner>,state:&DocumentState,future:usize)->Result<usize,Problem>{
+         history_admission_bytes(document,state,future)
++    }
++    // Storage arithmetic only; GitLocal retains its OWN publisher, sources,
++    // NativeUse and fixed runtime. The read facet supplies no mutation grant.
++    pub(super) fn git_local_admission_bytes(document:&Arc<Inner>,state:&DocumentState,future:usize)->Result<usize,Problem>{
++        let retained=retained_document_bytes(document,state)?;
++        crate::git_local_protocol::admission_bytes(retained,future).ok_or(Problem::Capacity)
+     }
+     pub(super) fn github_auth_admission_bytes(document:&Arc<Inner>,state:&DocumentState,future:usize)->Result<usize,Problem>{
+         history_admission_bytes(document,state,future)
+@@ -2440,7 +2453,7 @@
+     // lock/loss and reconciliation intentionally do not call this predicate.
+     allocation_conflict_gate(
+         state.slot.as_ref().is_some_and(|slot| !slot.owner.lookup_allocations_allowed()),
+-        state.github.setup_secret_work_pending() || state.github.history_work_pending() || gh_auth::pending(state) || version_allocation::pending(state) || git_read::pending(state))
++        state.github.setup_secret_work_pending() || state.github.history_work_pending() || gh_auth::pending(state) || version_allocation::pending(state) || git_read::pending(state) || git_local::pending(state))
+ }
+ fn allocation_conflict_gate(lookup_held:bool,secret_original_pending:bool)->Result<(),AssetError>{
+     if lookup_held||secret_original_pending{return Err(AssetError::new(Reason::Busy))}
+@@ -2458,7 +2471,7 @@
+     // The caller still holds this same document mutex through Supervisor claim.
+     if state.unknown || state.exhausted { return Err(BridgeError::cleanup_unknown()); }
+     if state.stopping { return Err(BridgeError::shutdown()); }
+-    if state.quit_pending || state.retiring || state.lock_pending || state.compatibility_picker_pending || project_path_pending(state) || images::pending(state) || installation::pending(state) || gh_auth::pending(state) || git_read::pending(state) {
++    if state.quit_pending || state.retiring || state.lock_pending || state.compatibility_picker_pending || project_path_pending(state) || images::pending(state) || installation::pending(state) || gh_auth::pending(state) || git_read::pending(state) || git_local::pending(state) {
+         return Err(BridgeError::new("busy", "Finish the original native operation first."));
+     }
+     Ok(())
+@@ -2484,7 +2497,7 @@
+     if state.unknown { return Err(AssetError::new(Reason::CleanupUnknown)); }
+     if state.stopping { return Err(AssetError::new(Reason::Shutdown)); }
+     owner_gate()?;
+-    if state.compatibility_picker_pending || installation::pending(state) || gh_auth::pending(state) || version_allocation::pending(state) || git_read::pending(state) { return Err(AssetError::new(Reason::Busy)); }
++    if state.compatibility_picker_pending || installation::pending(state) || gh_auth::pending(state) || version_allocation::pending(state) || git_read::pending(state) || git_local::pending(state) { return Err(AssetError::new(Reason::Busy)); }
+     if session && state.slot.as_ref().is_some_and(|slot| (slot.operation.evidence() || slot.operation.project_path() || slot.operation.android_source() || slot.operation.artifact() || slot.operation.images())
+         && (slot.phase != Phase::Idle || !slot.owner.resources_settled())) { return Err(AssetError::new(Reason::Busy)); }
+     if state.quit_pending || state.retiring || state.lock_pending { return Err(AssetError::new(Reason::Busy)); }
+@@ -2642,7 +2655,7 @@
+             next_operation: 0, next_context: 0, exhausted: false, lost_observed: false, session: false, stopping: false, unknown: false, quit_pending: false, retiring: false, lock_pending: false,
+             compatibility_picker_pending: false, maintenance: macos_maintenance::Closure::default(), saved_observation: None, saved_input: None, apple_provisioning_ready:None, version_allocation_source: None, session_owner_reason: None,
+             context: None, slot: None, records: Vec::new(), assignments: Vec::new(), quit: None, quit_accepted: false, quit_cleanup_end: None,
+-            github: ConnectionState::new(), gh_auth: None, git_read: None, evidence: EvidenceRegistry::new(), images: images::Registry::new(), installation: installation::Registry::new(),
++            github: ConnectionState::new(), gh_auth: None, git_read: None, git_local: None, git_local_review: None, evidence: EvidenceRegistry::new(), images: images::Registry::new(), installation: installation::Registry::new(),
+             #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+             vault: None,
+             #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+@@ -2853,6 +2866,7 @@
+         }
+     }
+     fn bump(&self, state: &mut DocumentState) {
++        git_local::invalidate(state);
+         git_read::stop(state); // A real Document revision change retires only original eligibility.
+         git_read::reconcile(state);
+         #[cfg(any(target_os = "linux", target_os = "macos"))]
+@@ -2966,7 +2980,7 @@
+             || (self.inner.bridge.preflight.stopping() || (((self.inner.bridge.local_store.stopping() || self.inner.bridge.apple_provisioning.stopping()) || ((self.inner.bridge.local_store_prepare.stopping() || self.inner.bridge.local_store_reconcile.stopping()) || self.inner.bridge.local_store_execute.stopping())) || self.inner.bridge.local_history.stopping())) || (self.inner.bridge.android_build.stopping() || (self.inner.bridge.project_recovery.stopping() || (self.inner.bridge.ios_archive.stopping() || (self.inner.bridge.artifact_inspection.stopping() || (self.inner.bridge.tool_acquisition.stopping() || self.inner.bridge.upload_key.stopping()))))) { return Availability::Shutdown; }
+         if !state.lifetime.original_bound() || state.lost_observed
+             || !self.inner.bridge.diagnostics.original_document_matches(&self.inner.session_identity) { return Availability::DocumentLost; }
+-        if state.quit_pending || state.retiring || state.lock_pending || state.compatibility_picker_pending || state.maintenance.closed() || gh_auth::pending(state) || version_allocation::pending(state) || git_read::pending(state)
++        if state.quit_pending || state.retiring || state.lock_pending || state.compatibility_picker_pending || state.maintenance.closed() || gh_auth::pending(state) || version_allocation::pending(state) || git_read::pending(state) || git_local::pending(state)
+             || state.slot.as_ref().is_some_and(|slot| !slot.owner.resources_settled())
+             || state.github.native_work_pending() || !self.inner.bridge.edits.can_exit()
+             || !self.inner.bridge.supervisor.can_exit() || (self.inner.bridge.preflight.busy() || (((self.inner.bridge.local_store.busy() || self.inner.bridge.apple_provisioning.busy()) || ((self.inner.bridge.local_store_prepare.busy() || self.inner.bridge.local_store_reconcile.busy()) || self.inner.bridge.local_store_execute.busy())) || self.inner.bridge.local_history.busy()))
+@@ -2991,7 +3005,7 @@
+         if let Some(reason) = preflight_document_gate(state, crate::offline_preflight_protocol::Profile::current()) { return reason; }
+         // Saved checks require Disconnect, not merely an idle GitHub ticket.
+         // Observe the actual retained private session, never a public tombstone.
+-        if state.quit_pending || state.retiring || state.lock_pending || state.compatibility_picker_pending || state.maintenance.closed() || gh_auth::pending(state) || version_allocation::pending(state) || git_read::pending(state)
++        if state.quit_pending || state.retiring || state.lock_pending || state.compatibility_picker_pending || state.maintenance.closed() || gh_auth::pending(state) || version_allocation::pending(state) || git_read::pending(state) || git_local::pending(state)
+             || state.saved_observation.as_ref().is_some_and(|lane| !lane.returned())
+             || state.slot.as_ref().is_some_and(|slot| slot.phase != Phase::Idle || !slot.owner.resources_settled())
+             || state.github.registration().is_some() || !self.inner.bridge.edits.can_exit() || self.inner.bridge.edits.preflight_attention()
+@@ -3020,7 +3034,7 @@
+         if let Some(reason) = local_store_document_gate(state, crate::local_store_preflight_protocol::Profile::current()) { return reason; }
+         // Saved checks require Disconnect, not merely an idle GitHub ticket.
+         // Observe the actual retained private session, never a public tombstone.
+-        if state.quit_pending || state.retiring || state.lock_pending || state.compatibility_picker_pending || state.maintenance.closed() || gh_auth::pending(state) || version_allocation::pending(state) || git_read::pending(state)
++        if state.quit_pending || state.retiring || state.lock_pending || state.compatibility_picker_pending || state.maintenance.closed() || gh_auth::pending(state) || version_allocation::pending(state) || git_read::pending(state) || git_local::pending(state)
+             || state.saved_observation.as_ref().is_some_and(|lane| !lane.returned())
+             || state.slot.as_ref().is_some_and(|slot| slot.phase != Phase::Idle || !slot.owner.resources_settled())
+             || state.github.registration().is_some() || !self.inner.bridge.edits.can_exit() || self.inner.bridge.edits.preflight_attention()
+@@ -3042,7 +3056,7 @@
+         if let Some(reason) = local_store_document_gate(state, crate::local_store_preflight_protocol::Profile::current()) { return reason; }
+         // Saved checks require Disconnect, not merely an idle GitHub ticket.
+         // Observe the actual retained private session, never a public tombstone.
+-        if state.quit_pending || state.retiring || state.lock_pending || state.compatibility_picker_pending || state.maintenance.closed() || gh_auth::pending(state) || version_allocation::pending(state) || git_read::pending(state)
++        if state.quit_pending || state.retiring || state.lock_pending || state.compatibility_picker_pending || state.maintenance.closed() || gh_auth::pending(state) || version_allocation::pending(state) || git_read::pending(state) || git_local::pending(state)
+             || state.saved_observation.as_ref().is_some_and(|lane| !lane.returned())
+             || state.slot.as_ref().is_some_and(|slot| slot.phase != Phase::Idle || !slot.owner.resources_settled())
+             || state.github.registration().is_some() || !self.inner.bridge.edits.can_exit() || self.inner.bridge.edits.preflight_attention()
+@@ -3064,7 +3078,7 @@
+         if let Some(reason) = local_store_document_gate(state, crate::local_store_preflight_protocol::Profile::current()) { return reason; }
+         // Saved checks require Disconnect, not merely an idle GitHub ticket.
+         // Observe the actual retained private session, never a public tombstone.
+-        if state.quit_pending || state.retiring || state.lock_pending || state.compatibility_picker_pending || state.maintenance.closed() || gh_auth::pending(state) || version_allocation::pending(state) || git_read::pending(state)
++        if state.quit_pending || state.retiring || state.lock_pending || state.compatibility_picker_pending || state.maintenance.closed() || gh_auth::pending(state) || version_allocation::pending(state) || git_read::pending(state) || git_local::pending(state)
+             || state.saved_observation.as_ref().is_some_and(|lane| !lane.returned())
+             || state.slot.as_ref().is_some_and(|slot| slot.phase != Phase::Idle || !slot.owner.resources_settled())
+             || state.github.registration().is_some() || !self.inner.bridge.edits.can_exit() || self.inner.bridge.edits.preflight_attention()
+@@ -3086,7 +3100,7 @@
+         if let Some(reason) = local_store_document_gate(state, crate::local_store_preflight_protocol::Profile::current()) { return reason; }
+         // Saved checks require Disconnect, not merely an idle GitHub ticket.
+         // Observe the actual retained private session, never a public tombstone.
+-        if state.quit_pending || state.retiring || state.lock_pending || state.compatibility_picker_pending || state.maintenance.closed() || gh_auth::pending(state) || version_allocation::pending(state) || git_read::pending(state)
++        if state.quit_pending || state.retiring || state.lock_pending || state.compatibility_picker_pending || state.maintenance.closed() || gh_auth::pending(state) || version_allocation::pending(state) || git_read::pending(state) || git_local::pending(state)
+             || state.saved_observation.as_ref().is_some_and(|lane| !lane.returned())
+             || state.slot.as_ref().is_some_and(|slot| slot.phase != Phase::Idle || !slot.owner.resources_settled())
+             || state.github.registration().is_some() || !self.inner.bridge.edits.can_exit() || self.inner.bridge.edits.preflight_attention()
+@@ -3105,7 +3119,7 @@
+         if state.lost_observed{return Availability::DocumentLost;}if !state.lifetime.original_bound(){return Availability::Busy;}
+         // Saved checks require Disconnect, not merely an idle GitHub ticket.
+         // Observe the actual retained private session, never a public tombstone.
+-        if state.quit_pending || state.retiring || state.lock_pending || state.compatibility_picker_pending || state.maintenance.closed() || gh_auth::pending(state) || version_allocation::pending(state) || git_read::pending(state)
++        if state.quit_pending || state.retiring || state.lock_pending || state.compatibility_picker_pending || state.maintenance.closed() || gh_auth::pending(state) || version_allocation::pending(state) || git_read::pending(state) || git_local::pending(state)
+             || state.saved_observation.as_ref().is_some_and(|lane| !lane.returned())
+             || state.slot.as_ref().is_some_and(|slot| slot.phase != Phase::Idle || !slot.owner.resources_settled())
+             || state.github.registration().is_some() || !self.inner.bridge.edits.can_exit() || self.inner.bridge.edits.preflight_attention()
+@@ -3221,7 +3235,7 @@
+         // Require actual Disconnect, not an idle/retired public GitHub ticket.
+         // Asset phase AND original resources must settle, as must all edits,
+         // recovery attention, passive queries and the other saved-command owner.
+-        if state.quit_pending || state.retiring || state.lock_pending || state.compatibility_picker_pending || state.maintenance.closed() || gh_auth::pending(state) || version_allocation::pending(state) || git_read::pending(state)
++        if state.quit_pending || state.retiring || state.lock_pending || state.compatibility_picker_pending || state.maintenance.closed() || gh_auth::pending(state) || version_allocation::pending(state) || git_read::pending(state) || git_local::pending(state)
+             || state.saved_observation.as_ref().is_some_and(|lane| !lane.returned())
+             || state.slot.as_ref().is_some_and(|slot| slot.phase != Phase::Idle || !slot.owner.resources_settled())
+             || state.github.registration().is_some() || !self.inner.bridge.edits.can_exit() || self.inner.bridge.edits.preflight_attention()
+@@ -3370,7 +3384,7 @@
+         // Require actual Disconnect, not an idle/retired public GitHub ticket.
+         // Asset phase AND original resources must settle, as must all edits,
+         // recovery attention, passive queries and the other saved-command owner.
+-        if state.quit_pending || state.retiring || state.lock_pending || state.compatibility_picker_pending || state.maintenance.closed() || gh_auth::pending(state) || version_allocation::pending(state) || git_read::pending(state)
++        if state.quit_pending || state.retiring || state.lock_pending || state.compatibility_picker_pending || state.maintenance.closed() || gh_auth::pending(state) || version_allocation::pending(state) || git_read::pending(state) || git_local::pending(state)
+             || state.saved_observation.as_ref().is_some_and(|lane| !lane.returned())
+             || state.slot.as_ref().is_some_and(|slot| slot.phase != Phase::Idle || !slot.owner.resources_settled())
+             || state.github.registration().is_some() || !self.inner.bridge.edits.can_exit() || self.inner.bridge.edits.preflight_attention()
+@@ -3430,7 +3444,7 @@
+         // Require actual Disconnect, not an idle/retired public GitHub ticket.
+         // Asset phase AND original resources must settle, as must all edits,
+         // recovery attention, passive queries and the other saved-command owner.
+-        if state.quit_pending || state.retiring || state.lock_pending || state.compatibility_picker_pending || state.maintenance.closed() || gh_auth::pending(state) || version_allocation::pending(state) || git_read::pending(state)
++        if state.quit_pending || state.retiring || state.lock_pending || state.compatibility_picker_pending || state.maintenance.closed() || gh_auth::pending(state) || version_allocation::pending(state) || git_read::pending(state) || git_local::pending(state)
+             || state.saved_observation.as_ref().is_some_and(|lane| !lane.returned())
+             || state.slot.as_ref().is_some_and(|slot| slot.phase != Phase::Idle || !slot.owner.resources_settled())
+             || state.github.registration().is_some() || !self.inner.bridge.edits.can_exit() || self.inner.bridge.edits.preflight_attention()
+@@ -3812,7 +3826,7 @@
+     }
+     fn github_gate(&self, state: &DocumentState) -> GitHubReason {
+         let base = self.github_base_gate(state);
+-        if base == GitHubReason::None && (gh_auth::pending(state) || version_allocation::pending(state) || git_read::pending(state)) { GitHubReason::Busy } else { base }
++        if base == GitHubReason::None && (gh_auth::pending(state) || version_allocation::pending(state) || git_read::pending(state) || git_local::pending(state)) { GitHubReason::Busy } else { base }
+     }
+     // Only the retained gh-auth original uses this companion to avoid treating
+     // its OWN pending capture as unrelated new-work admission.
+@@ -4270,7 +4284,7 @@
+         if state.stopping || self.inner.bridge.supervisor.stopping() { return Err(BridgeError::shutdown()); }
+         if self.inner.bridge.supervisor.disabled() { return Err(BridgeError::cleanup_unknown()); }
+         // SAME Document lock: reject reciprocal edits before publisher/context side effects.
+-        if gh_auth::pending(state) || git_read::pending(state) || version_allocation::pending(state) { return Err(BridgeError::new("busy", "Finish the original native connection or saved-source inspection first.")); }
++        if gh_auth::pending(state) || git_read::pending(state) || git_local::pending(state) || version_allocation::pending(state) { return Err(BridgeError::new("busy", "Finish the original native connection or saved-source inspection first.")); }
+         if domain == crate::edit_protocol::EditDomain::ProjectIdentity {
+             // Retire an already-ready positive Store original BEFORE a context
+             // invalidation could downgrade it and hide its continuity veto.
+@@ -4368,6 +4382,7 @@
+     }
+     fn expire(&self, state: &mut DocumentState, now: Instant) {
+         git_read::reconcile(state);
++        git_local::reconcile(&self.inner,state);
+         let owner_reason = self.live_session_owner_reason();
+         // Display changes advance the existing native revision. This is
+         // capability DATA, not a fabricated asset cleanup result, and does
+@@ -4692,6 +4707,7 @@
+ }
+ fn invalidate_all(state: &mut DocumentState) {
+     git_read::stop(state);
++    git_local::invalidate(state);
+     version_allocation::stop(state);
+     gh_auth::stop(state, if state.unknown { GitHubReason::CleanupUnknown }
+         else if state.stopping || state.lost_observed { GitHubReason::Cancelled }
+@@ -8058,7 +8074,7 @@
+         DocumentState { lifetime, revision: 0, next_operation: 0, next_context: 0, exhausted: false, lost_observed: false,
+             session: false, stopping: false, unknown: false, quit_pending: false, retiring: false, lock_pending: false,
+             compatibility_picker_pending: false, maintenance: macos_maintenance::Closure::default(), saved_observation: None, saved_input: None, apple_provisioning_ready:None, version_allocation_source: None, session_owner_reason: None, context: None, slot: None, records: Vec::new(), assignments: Vec::new(),
+-            quit: None, quit_accepted: false, quit_cleanup_end: None, github: ConnectionState::new(), gh_auth: None, git_read: None, evidence: EvidenceRegistry::new(), images: images::Registry::new(), installation: installation::Registry::new(),
++            quit: None, quit_accepted: false, quit_cleanup_end: None, github: ConnectionState::new(), gh_auth: None, git_read: None, git_local: None, git_local_review: None, evidence: EvidenceRegistry::new(), images: images::Registry::new(), installation: installation::Registry::new(),
+             #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+             vault: None,
+             #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+@@ -8191,7 +8207,7 @@
+         DocumentState { lifetime, revision: 0, next_operation: 0, next_context: 0, exhausted: false, lost_observed: false,
+             session: false, stopping: false, unknown: false, quit_pending: false, retiring: false, lock_pending: false,
+             compatibility_picker_pending: false, maintenance: macos_maintenance::Closure::default(), saved_observation: None, saved_input: None, apple_provisioning_ready:None, version_allocation_source: None, session_owner_reason: None, context: None, slot: None, records: Vec::new(), assignments: Vec::new(),
+-            quit: None, quit_accepted: false, quit_cleanup_end: None, github: ConnectionState::new(), gh_auth: None, git_read: None, evidence: EvidenceRegistry::new(), images: images::Registry::new(), installation: installation::Registry::new(),
++            quit: None, quit_accepted: false, quit_cleanup_end: None, github: ConnectionState::new(), gh_auth: None, git_read: None, git_local: None, git_local_review: None, evidence: EvidenceRegistry::new(), images: images::Registry::new(), installation: installation::Registry::new(),
+             #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+             vault: None,
+             #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+@@ -8288,7 +8304,7 @@
+             session: true, stopping: false, unknown: false, quit_pending: false, retiring: false, lock_pending: false,
+             compatibility_picker_pending: false, maintenance: macos_maintenance::Closure::default(), saved_observation: None, saved_input: None, apple_provisioning_ready:None, version_allocation_source: None, session_owner_reason: None,
+             context: None, slot: None, records: Vec::new(), assignments: Vec::new(), quit: None, quit_accepted: false, quit_cleanup_end: None,
+-            github: ConnectionState::new(), gh_auth: None, git_read: None, evidence: EvidenceRegistry::new(), images: images::Registry::new(), installation: installation::Registry::new(),
++            github: ConnectionState::new(), gh_auth: None, git_read: None, git_local: None, git_local_review: None, evidence: EvidenceRegistry::new(), images: images::Registry::new(), installation: installation::Registry::new(),
+             #[cfg(any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+             vault: None,
+             #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+--- a/desktop/src-tauri/src/saved_command_android_registration.rs
++++ b/desktop/src-tauri/src/saved_command_android_registration.rs
+@@ -225,6 +225,10 @@
+     pub(crate) fn same_slot(&self, slot: &Arc<ControlSlot>) -> bool { Arc::ptr_eq(&self.slot, slot) }
+     /// Read-only comparison for the exact ordinary source-picker publisher.
+     /// epoch() remains strict for every other caller. No acceptance or renewal.
++    pub(crate) fn git_local_epoch(&self) -> Result<u64, BridgeError> {
++        // Same exact sole-publisher proof, no widening of ordinary epoch().
++        self.tool_source_epoch()
++    }
+     pub(crate) fn tool_source_epoch(&self) -> Result<u64, BridgeError> {
+         let book = self.slot.book.try_lock().map_err(|_| BridgeError::cleanup_unknown())?;
+         if self.finished || self.index >= 8 || self.slot.is_unknown() || book.cancel.is_some()
+--- a/desktop/src-tauri/src/runtime.rs
++++ b/desktop/src-tauri/src/runtime.rs
+@@ -378,6 +378,20 @@
+         if !macos_bindings() { return Err(unavailable()); }
+         let cwd = crate::installed_runtime::runtime_root();
+         Ok(VerifiedRuntime { python: cwd.join("python/bin/python3"), bootstrap: cwd.join("git_read_bootstrap.py"),
++            core: cwd.join("core.zip"), cwd })
++    }
++}
++
++// Fixed local-write bootstrap. Selection alone is not mutation authority;
++// the original Doc/Publisher, source, NativeUse and joins remain mandatory.
++#[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
++pub(crate) struct GitLocalInstalledProfile { _private: () }
++#[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
++impl GitLocalInstalledProfile {
++    pub(crate) fn selection(&self) -> Result<VerifiedRuntime, BridgeError> {
++        if !macos_bindings() { return Err(unavailable()); }
++        let cwd = crate::installed_runtime::runtime_root();
++        Ok(VerifiedRuntime { python: cwd.join("python/bin/python3"), bootstrap: cwd.join("git_local_bootstrap.py"),
+             core: cwd.join("core.zip"), cwd })
+     }
+ }
+@@ -1864,6 +1878,18 @@
+         if !self.git_read_profile_available() { return Err(unavailable()); }
+         originals.inspect_once(GitReadInstalledProfile { _private: () }, end, stop)
+     }
++    pub(crate) fn git_local_profile_available(&self) -> bool {
++        #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
++        { macos_bindings() }
++        #[cfg(not(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
++        { false }
++    }
++    #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
++    pub(crate) fn resolve_git_local_installed(&self, originals: &mut crate::installed_runtime::GitLocalRuntimeSlots,
++        end: Instant, stop: &tokio::sync::watch::Receiver<bool>) -> Result<VerifiedRuntime, BridgeError> {
++        if !self.git_local_profile_available() { return Err(unavailable()); }
++        originals.inspect_once(GitLocalInstalledProfile { _private: () }, end, stop)
++    }
+     pub(crate) fn version_allocation_source_profile_available(&self) -> bool {
+         #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+         { macos_bindings() }
+--- a/desktop/src-tauri/src/installed_runtime_macos.rs
++++ b/desktop/src-tauri/src/installed_runtime_macos.rs
+@@ -1135,6 +1135,9 @@
+         if selection.bootstrap == selection.cwd.join("git_read_bootstrap.py") && !files.contains_key("git_read_bootstrap.py") {
+             return Err(AdmissionFailure::Inventory);
+         }
++        if selection.bootstrap == selection.cwd.join("git_local_bootstrap.py") && !files.contains_key("git_local_bootstrap.py") {
++            return Err(AdmissionFailure::Inventory);
++        }
+         if self.history_nomination.is_some() && (!files.contains_key("tools/gh") || !files.contains_key("github_history_bootstrap.py")){
+             return Err(AdmissionFailure::Inventory);
+         }
+@@ -1333,6 +1336,9 @@
+ slots!(GitReadRuntimeSlots, GitReadInstalledRuntime, runtime::GitReadInstalledProfile);
+ #[path = "git_read_runtime_macos.rs"]
+ mod git_read_runtime;
++slots!(GitLocalRuntimeSlots, GitLocalInstalledRuntime, runtime::GitLocalInstalledProfile);
++#[path = "git_local_runtime_macos.rs"]
++mod git_local_runtime;
+ // Distinct SOURCE original, not a Setup or GitRead slot. The existing fixed
+ // github_setup_bootstrap.py inventory row is required for every Book inspection.
+ slots!(VersionAllocationSourceRuntimeSlots, VersionAllocationSourceInstalledRuntime, runtime::VersionAllocationSourceInstalledProfile);
+--- a/desktop/src-tauri/src/asset_source_macos.rs
++++ b/desktop/src-tauri/src/asset_source_macos.rs
+@@ -20,6 +20,9 @@
+ #[path = "git_read_sources_macos.rs"]
+ mod git_read_sources;
+ pub(crate) use git_read_sources::GitReadSources;
++#[path = "git_local_sources_macos.rs"]
++mod git_local_sources;
++pub(crate) use git_local_sources::GitLocalSources;
+ pub(crate) use github_auth_sources::GhAuthSources;
+ #[path = "local_history_sources_macos.rs"]
+ mod local_history_sources;
+--- a/desktop/src-tauri/src/asset_source.rs
++++ b/desktop/src-tauri/src/asset_source.rs
+@@ -1237,7 +1237,7 @@
+ #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+ pub(crate) use macos::PUBLIC_IMAGES_SOURCE_CONTROL_BYTES;
+ #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+-pub(crate) use macos::{HistorySources,LocalHistorySources,GhAuthSources,GitReadSources};
++pub(crate) use macos::{HistorySources,LocalHistorySources,GhAuthSources,GitReadSources,GitLocalSources};
+ #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+ pub(crate) use macos::{BackupSources, BackupDestinations};
+ #[cfg(all(test, target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+--- a/desktop/src-tauri/src/git_read_protocol.rs
++++ b/desktop/src-tauri/src/git_read_protocol.rs
+@@ -38,7 +38,7 @@
+         .as_object()
+         .is_some_and(|v| v.len() == names.len() && names.iter().all(|name| v.contains_key(*name)))
+ }
+-fn text(value: &str, limit: usize, multiline: bool) -> bool {
++pub(crate) fn text(value: &str, limit: usize, multiline: bool) -> bool {
+     value.len() <= limit
+         && !value
+             .chars()
+@@ -47,10 +47,10 @@
+ pub(crate) fn digest(value: &str) -> bool {
+     value.len() == 64 && value.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+ }
+-fn oid(value: &str) -> bool {
++pub(crate) fn oid(value: &str) -> bool {
+     matches!(value.len(), 40 | 64) && value.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+ }
+-fn relative(value: &str) -> bool {
++pub(crate) fn relative(value: &str) -> bool {
+     !value.is_empty()
+         && text(value, 1024, false)
+         && !value.contains('\\')
+@@ -69,7 +69,7 @@
+             .split('/')
+             .all(|v| !v.is_empty() && !v.starts_with('.') && !v.ends_with('.') && !v.ends_with(".lock"))
+ }
+-fn branch(value: &str) -> bool {
++pub(crate) fn branch(value: &str) -> bool {
+     value.starts_with("refs/heads/") && reference(value)
+ }
+ 
+@@ -447,7 +447,7 @@
+             && rows.iter().filter_map(Value::as_str).collect::<BTreeSet<_>>().len() == rows.len()
+     })
+ }
+-fn observation(v: &Value) -> bool {
++pub(crate) fn observation(v: &Value) -> bool {
+     if !keys(
+         v,
+         &[
+@@ -526,7 +526,7 @@
+         _ => false,
+     }
+ }
+-fn validate_result(action: &Action, v: &Value) -> Result<(), BridgeError> {
++pub(crate) fn validate_result(action: &Action, v: &Value) -> Result<(), BridgeError> {
+     match action.kind {
+         Kind::Observe => need(
+             keys(v, &["observation", "referenceRevision", "tracking", "basis"])
+--- a/desktop/src-tauri/src/lib.rs
++++ b/desktop/src-tauri/src/lib.rs
+@@ -104,6 +104,9 @@
+ pub mod error;
+ pub mod protocol;
+ mod git_read_protocol;
++mod git_local_protocol;
++#[cfg(any(target_os = "linux", target_os = "macos"))]
++mod git_local_state;
+ mod service_protocol;
+ mod service_setup_guidance;
+ mod agent_identity_requests;
+--- a/desktop/src-tauri/tests/installed_shell_observation.rs
++++ b/desktop/src-tauri/tests/installed_shell_observation.rs
+@@ -13,6 +13,9 @@
+ // SAME current application module graph, still the original nonshipping
+ // observer executable. No library duplicate owner, helper/publisher/CLI entry.
+ #[path = "../src/git_read_protocol.rs"] mod git_read_protocol;
++#[path = "../src/git_local_protocol.rs"] mod git_local_protocol;
++#[cfg(any(target_os = "linux", target_os = "macos"))]
++#[path = "../src/git_local_state.rs"] mod git_local_state;
+ #[path = "../src/service_protocol.rs"] mod service_protocol;
+ #[path = "../src/service_setup_guidance.rs"] mod service_setup_guidance;
+ #[path = "../src/agent_identity_requests.rs"] mod agent_identity_requests;
+--- a/desktop/tools/prepare_runtime.py
++++ b/desktop/tools/prepare_runtime.py
+@@ -45,7 +45,7 @@
+ CURRENT_BOOTSTRAPS = (
+     *BOOTSTRAPS, "project_recovery_bootstrap.py", "github_preflight_bootstrap.py",
+     "ios_archive_bootstrap.py", "github_release_bootstrap.py", "artifact_inspection_bootstrap.py", "github_setup_bootstrap.py", "github_history_bootstrap.py", "local_release_history_bootstrap.py",
+-    "github_auth_bootstrap.py", "tool_acquisition_bootstrap.py", "git_read_bootstrap.py", "android_upload_key_bootstrap.py",
++    "github_auth_bootstrap.py", "tool_acquisition_bootstrap.py", "git_read_bootstrap.py", "git_local_bootstrap.py", "android_upload_key_bootstrap.py",
+ )
+ APPLE_PROVISIONING_BOOTSTRAP = "apple_provisioning_bootstrap.py"
+ STORE_BOOTSTRAP = "local_store_preflight_bootstrap.py"
+--- a/desktop/tools/stage_macos_installed.py
++++ b/desktop/tools/stage_macos_installed.py
+@@ -142,7 +142,7 @@
+ CURRENT_BOOTSTRAPS = BOOTSTRAPS | {
+     "project_recovery_bootstrap.py", "github_preflight_bootstrap.py",
+     "ios_archive_bootstrap.py", "github_release_bootstrap.py", "artifact_inspection_bootstrap.py", "github_setup_bootstrap.py", "github_history_bootstrap.py", "local_release_history_bootstrap.py",
+-    "github_auth_bootstrap.py", "tool_acquisition_bootstrap.py", "git_read_bootstrap.py", "android_upload_key_bootstrap.py",
++    "github_auth_bootstrap.py", "tool_acquisition_bootstrap.py", "git_read_bootstrap.py", "git_local_bootstrap.py", "android_upload_key_bootstrap.py",
+ }
+ CURRENT_CA_SOURCE = "desktop/cpython-source-inputs/github-ca.pem"
+ CURRENT_HELPER_SOURCE = "desktop/tools/prepare_runtime.py"
+--- a/desktop/src-tauri/src/shell.rs
++++ b/desktop/src-tauri/src/shell.rs
+@@ -1799,6 +1799,45 @@
+     let crate::git_read_protocol::Command::Cancel(id) = git_read_command("git_read_cancel", &webview, &request)?
+         else { return Err(BridgeError::invalid()); };
+     state.document.git_read_cancel(&id)
++}
++
++// Closed RAW-only local Git commands. No caller process/path or persisted
++// review DTO can replace the original native review/selection/publisher.
++fn git_local_command(name:&str,webview:&Webview,request:&tauri::ipc::Request<'_>)->Result<crate::git_local_protocol::Command,BridgeError> {
++    if webview.label()!=MAIN_WINDOW {return Err(BridgeError::invalid());}
++    let tauri::ipc::InvokeBody::Raw(bytes)=request.body() else {return Err(BridgeError::invalid());};
++    crate::git_local_protocol::decode_command(name,bytes)
++}
++#[tauri::command]
++async fn git_local_status(webview:Webview,request:tauri::ipc::Request<'_>,state:State<'_,ShellState>)->Result<crate::git_local_protocol::Status,BridgeError> {
++    fixture_command!(state, Forbidden, observed, BridgeError::unavailable("Local Git writes have no fixture admission."));
++    git_local_command("git_local_status",&webview,&request)?;
++    Ok(state.document.git_local_status())
++}
++#[tauri::command]
++async fn git_local_prepare(webview:Webview,request:tauri::ipc::Request<'_>,state:State<'_,ShellState>)->Result<crate::git_local_protocol::StartResult,BridgeError> {
++    fixture_command!(state, Forbidden, observed, BridgeError::unavailable("Local Git writes have no fixture admission."));
++    let crate::git_local_protocol::Command::Prepare(args)=git_local_command("git_local_prepare",&webview,&request)? else {return Err(BridgeError::invalid());};
++    state.document.git_local_prepare(args)
++}
++#[tauri::command]
++async fn git_local_apply(app:AppHandle,webview:Webview,request:tauri::ipc::Request<'_>,state:State<'_,ShellState>)->Result<crate::git_local_protocol::StartResult,BridgeError> {
++    fixture_command!(state, Forbidden, observed, BridgeError::unavailable("Local Git writes have no fixture admission."));
++    let crate::git_local_protocol::Command::Apply(args)=git_local_command("git_local_apply",&webview,&request)? else {return Err(BridgeError::invalid());};
++    let app_data=app.path().app_local_data_dir().map_err(|_|BridgeError::unavailable("The application's private data folder is unavailable."))?;
++    state.document.git_local_apply(args,&app_data)
++}
++#[tauri::command]
++async fn git_local_discard(webview:Webview,request:tauri::ipc::Request<'_>,state:State<'_,ShellState>)->Result<crate::git_local_protocol::Status,BridgeError> {
++    fixture_command!(state, Forbidden, observed, BridgeError::unavailable("Local Git writes have no fixture admission."));
++    let crate::git_local_protocol::Command::Discard(id)=git_local_command("git_local_discard",&webview,&request)? else {return Err(BridgeError::invalid());};
++    state.document.git_local_discard(&id)
++}
++#[tauri::command]
++async fn git_local_cancel(webview:Webview,request:tauri::ipc::Request<'_>,state:State<'_,ShellState>)->Result<crate::git_local_protocol::Status,BridgeError> {
++    fixture_command!(state, Forbidden, observed, BridgeError::unavailable("Local Git writes have no fixture admission."));
++    let crate::git_local_protocol::Command::Cancel(id)=git_local_command("git_local_cancel",&webview,&request)? else {return Err(BridgeError::invalid());};
++    state.document.git_local_cancel(&id)
+ }
+ 
+ fn github_auth_command(name: &str, webview: &Webview, request: &tauri::ipc::Request<'_>) -> Result<crate::github_auth_entry_protocol::Command, BridgeError> {
+@@ -4482,6 +4521,7 @@
+             github_connection_status, github_connection_connect_token, github_connection_refresh, github_connection_disconnect,
+             github_auth_status, github_auth_connect, github_auth_cancel, github_auth_accounts,
+             git_read_status, git_read_start, git_read_cancel,
++            git_local_status, git_local_prepare, git_local_apply, git_local_discard, git_local_cancel,
+             github_preflight_status, github_preflight_prepare, github_preflight_dispatch, github_preflight_track,
+             github_preflight_reconcile, github_preflight_pending, github_preflight_cancel,
+             github_release_status, github_release_prepare, github_release_dispatch, github_release_track,
+--- a/desktop/src-tauri/build.rs
++++ b/desktop/src-tauri/build.rs
+@@ -322,6 +322,7 @@
+             "github_connection_status", "github_connection_connect_token", "github_connection_refresh", "github_connection_disconnect",
+             "github_auth_status", "github_auth_connect", "github_auth_cancel", "github_auth_accounts",
+             "git_read_status", "git_read_start", "git_read_cancel",
++            "git_local_status", "git_local_prepare", "git_local_apply", "git_local_discard", "git_local_cancel",
+             "github_preflight_status", "github_preflight_prepare", "github_preflight_dispatch", "github_preflight_track",
+             "github_preflight_reconcile", "github_preflight_pending", "github_preflight_cancel",
+             "github_release_status", "github_release_prepare", "github_release_dispatch", "github_release_track",
+--- a/desktop/src-tauri/capabilities/main.json
++++ b/desktop/src-tauri/capabilities/main.json
+@@ -49,6 +49,7 @@
+     "allow-github-connection-status", "allow-github-connection-connect-token", "allow-github-connection-refresh", "allow-github-connection-disconnect",
+     "allow-github-auth-status", "allow-github-auth-connect", "allow-github-auth-cancel", "allow-github-auth-accounts",
+     "allow-git-read-status", "allow-git-read-start", "allow-git-read-cancel",
++    "allow-git-local-status", "allow-git-local-prepare", "allow-git-local-apply", "allow-git-local-discard", "allow-git-local-cancel",
+     "allow-github-preflight-status", "allow-github-preflight-prepare", "allow-github-preflight-dispatch", "allow-github-preflight-track",
+     "allow-github-preflight-reconcile", "allow-github-preflight-pending", "allow-github-preflight-cancel",
+     "allow-github-release-status", "allow-github-release-prepare", "allow-github-release-dispatch", "allow-github-release-track",
+--- a/desktop/src-tauri/src/application_service_host.rs
++++ b/desktop/src-tauri/src/application_service_host.rs
+@@ -510,6 +510,12 @@
+         Ok(())
+     }
+     pub(crate) fn finish_native_state(&self, ticket: NativeStateTicket, current: &NativeProject) -> Result<NativeStateReady, Error> {
++        self.finish_native_state_retained(&ticket, current)
++    }
++    /// The GitLocal original job retains its sole ticket on a refused or
++    /// uncertain handoff. Same pending/epoch/current checks, no cloned ticket
++    /// or new authority; an error is not proof that pending remained intact.
++    pub(crate) fn finish_native_state_retained(&self, ticket: &NativeStateTicket, current: &NativeProject) -> Result<NativeStateReady, Error> {
+         let mut state = self.try_native_lock()?;
+         self.check_startup(&state, &ticket.0)?;
+         state.pending = None;
+@@ -1272,3 +1278,7 @@
+         });
+     }
+ }
++
++#[cfg(test)]
++#[path="application_service_git_local_tests.rs"]
++mod git_local_lock_tests;

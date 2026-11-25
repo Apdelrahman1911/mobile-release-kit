@@ -10,6 +10,7 @@ import shlex
 import shutil
 import subprocess
 import sys
+import zipimport
 from dataclasses import dataclass
 from contextlib import ExitStack, nullcontext
 from pathlib import Path
@@ -31,9 +32,11 @@ from .owned_process import ProcessError, preserve_lifetime_error, run_owned
 from ._profile_callers import first_primary_context
 from ._store_lane_evidence import StoreLaneCallEvidence, StoreLaneEvidenceError
 from ._store_lane_files import StoreLaneAttempt, StoreLaneFiles
+from ._store_runtime import StoreRuntimeContext
 from .discovery import GitContext, valid_observed_source
 from .errors import MutationGuardError, StoreOperationError, ValidationError
 from .reporting import FAILING_STATUSES, Finding, Status
+from .release_confirmation import expected_confirmation
 from .provenance import (
     _reject_duplicate_pairs,
     load_store_receipt,
@@ -149,10 +152,6 @@ class StoreRequest:
     recovery_confirmation: str | None = None
 
 
-def expected_confirmation(stage: str, platform: str, release: ReleaseVersion) -> str:
-    return f"{stage}:{platform}:{release.name}:{release.build}"
-
-
 def guard_ci_mutation(
     *,
     request: StoreRequest,
@@ -200,6 +199,34 @@ def guard_ci_mutation(
         raise MutationGuardError("Store identity must be explicitly approved in reviewed configuration")
 
 
+def _validation_module_root(tooling_root: Path) -> Path:
+    """Select this executing core's origin, not an application-supplied module.
+
+    Directory installs keep their source/wheel behavior. The optional Desktop
+    ZIP layout must be the same runtime as the selected Python and Store tools.
+    These path checks do not authenticate a runtime: the installed owner's
+    original complete signed inventory/custody remains required.
+    """
+    module = Path(__file__).absolute()
+    if not isinstance(__loader__, zipimport.zipimporter):
+        return module.resolve().parent.parent
+    try:
+        archive = Path(__loader__.archive).absolute()
+        runtime = archive.parent
+        python = Path(sys.executable).absolute()
+        tooling = tooling_root.absolute()
+        if (archive.name != "core.zip" or module != archive / "mobile_release/stores.py"
+                or not archive.is_file() or archive.is_symlink() or archive.resolve(strict=True) != archive
+                or tooling != runtime / "store/tooling" or tooling.resolve(strict=True) != tooling
+                or not tooling.is_dir()
+                or python != runtime / "python/bin/python3" or python.resolve(strict=True) != python
+                or not python.is_file() or not os.access(python, os.X_OK)):
+            raise StoreOperationError("Current-upload validation requires the original paired Desktop runtime")
+        return archive
+    except (OSError, ValueError):
+        raise StoreOperationError("Current-upload validation requires the original paired Desktop runtime") from None
+
+
 def _store_environment(
     config: ReleaseConfig,
     release: ReleaseVersion,
@@ -208,7 +235,7 @@ def _store_environment(
     tooling_root: Path,
     *, material: SelectedStoreMaterial, invocation: InvocationCustody,
     lane_evidence: StoreLaneCallEvidence, source_environment: Mapping[str, str],
-    authority: Mapping[str, object],
+    authority: Mapping[str, object] | None,
 ) -> dict[str, str]:
     material.require_store(config=config, platform=request.platform, invocation=invocation,
                            lane_evidence=lane_evidence)
@@ -218,7 +245,14 @@ def _store_environment(
         if not (raw_path := source_environment.get(name)):
             continue
         artifact = _repository_path(config, raw_path, name)
-        if not artifact.is_file():
+        local=getattr(invocation.cancellation,'_local_store_source',None)
+        if name=='MOBILE_RELEASE_IOS_ARCHIVE_PATH' and local is not None:
+            from .local_store_execute import LocalStoreExecuteRun
+            from .local_store_reconcile import LocalStoreReconcileRun
+            owner=local.require_operation()
+            if type(owner) not in (LocalStoreExecuteRun,LocalStoreReconcileRun) or not owner.archive_artifact(config,request,lane_evidence,invocation,artifact):
+                raise StoreOperationError("Local archive lacks its original Execute owner")
+        elif not artifact.is_file():
             raise StoreOperationError(f"{name} must identify a regular release artifact")
         env[name] = str(artifact)
     platform_config = config.section(request.platform)
@@ -239,7 +273,7 @@ def _store_environment(
             # environment command. Fastlane invokes only the toolkit's isolated
             # current-upload validator through this interpreter.
             "MOBILE_RELEASE_VALIDATION_PYTHON": str(Path(sys.executable).absolute()),
-            "MOBILE_RELEASE_VALIDATION_MODULE_ROOT": str(Path(__file__).resolve().parent.parent),
+            "MOBILE_RELEASE_VALIDATION_MODULE_ROOT": str(_validation_module_root(tooling_root)),
         }
     )
     if request.operation_intent:
@@ -251,9 +285,20 @@ def _store_environment(
         env["MOBILE_RELEASE_RECOVERY_RUN_ID"] = request.recovery_run_id
     if request.recovery_confirmation:
         env["MOBILE_RELEASE_RECOVERY_CONFIRMATION"] = request.recovery_confirmation
-    env["MOBILE_RELEASE_EXECUTION_AUTHORITY_JSON"] = json.dumps(
-        authority, sort_keys=True, separators=(",", ":")
-    )
+    execute=invocation.cancellation._store_execution_source
+    if execute is not None:
+        original=execute.require_operation()
+        if authority is not original.authority or not original.local_environment(request,lane_evidence):
+            raise StoreOperationError("Local execution authority is unavailable")
+        env["MOBILE_RELEASE_CONFIRMATION"]=request.confirmation
+    elif authority is None:
+        local=getattr(invocation.cancellation,"_store_prepare_source",None)
+        if local is None or not local.require_operation().local_environment(request,lane_evidence):
+            raise StoreOperationError("Local preparation authority is unavailable")
+    else:
+        env["MOBILE_RELEASE_EXECUTION_AUTHORITY_JSON"] = json.dumps(
+            authority, sort_keys=True, separators=(",", ":")
+        )
     if request.platform == "android":
         if request.stage == "candidate":
             # Public validation inputs only. Missing/stale tools must block a
@@ -288,74 +333,20 @@ def _store_environment(
     return env
 
 
-def _require_fastlane_bundle(tooling_root: Path, *, cancellation: DefaultCancellation | None = None,
-                             source_environment: Mapping[str, str] | None = None) -> None:
-    gemfile = tooling_root / "Gemfile"
-    source_environment = os.environ if source_environment is None else source_environment
-    environment = _runtime_environment(source_environment)
-    environment.update(
-        {
-            "BUNDLE_GEMFILE": str(gemfile),
-            "FASTLANE_HIDE_CHANGELOG": "true",
-            "FASTLANE_OPT_OUT_USAGE": "true",
-            "FASTLANE_SKIP_DOCS": "true",
-            "FASTLANE_SKIP_UPDATE_CHECK": "true",
-        }
-    )
-    if shutil.which("ruby", path=environment.get("PATH")) is None:
-        raise StoreOperationError(
-            "Pinned Store tooling requires Ruby 3.3.12 and Bundler 4.0.16; "
-            "dependencies are never installed automatically."
-        )
-
-    def run(argv: list[str]) -> subprocess.CompletedProcess[str] | None:
+def _store_ruby_release(tooling_root: Path) -> str:
+    if sys.platform == "darwin":
         try:
-            return run_owned(
-                argv,
-                cwd=tooling_root,
-                environ=environment,
-                capture=True,
-                timeout=60,
-                cancellation=cancellation,
-            )
-        except ProcessError as error:
-            if error.fatal:
-                raise
-            return None
-        except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
-            return None
+            with (tooling_root / "Gemfile").open("rb") as gemfile:
+                if b'\nruby "3.3.14"\n' in gemfile.read(64 * 1024):
+                    return "3.3.14"
+        except FileNotFoundError:
+            pass
+    return "3.3.12"
 
-    ruby = run(["ruby", "-e", "print RUBY_VERSION"])
-    if ruby is None or ruby.returncode or ruby.stdout.strip() != "3.3.12":
-        raise StoreOperationError(
-            "Pinned Store tooling requires Ruby 3.3.12. Select that exact version before running "
-            "online preflight or a Store lane."
-        )
-    bundler = run(["bundle", "--version"])
-    # Pinned Bundler 4's --version prints the bare version; its help command
-    # alone adds the human-readable "Bundler version" prefix.
-    if (bundler is None or bundler.returncode
-            or bundler.stdout.strip() != "4.0.16"):
-        raise StoreOperationError(
-            "Bundler 4.0.16 is unavailable for the pinned Store tooling. Install it under Ruby 3.3.12; "
-            "dependencies are never installed automatically."
-        )
-    completed = run(["bundle", "check"])
-    if completed is None or completed.returncode:
-        command = (
-            f"BUNDLE_GEMFILE={shlex.quote(str(gemfile))} "
-            "bundle install --jobs 4 --retry 3"
-        )
-        raise StoreOperationError(
-            "Pinned Fastlane dependencies from Gemfile.lock are unavailable. "
-            f"Run `{command}` with Ruby 3.3.12 and Bundler 4.0.16, then rerun preflight; dependencies are never "
-            "installed automatically."
-        )
-    # The isolated helpers intentionally disable gems; the outer capture runs
-    # under the locked bundle. Admit BOTH actual loaded Fiddle origins, rather
-    # than treating one version string as proof of the other runtime.
+
+def _fastlane_probe_commands(tooling_root: Path) -> tuple[tuple[str, ...], ...]:
     primitive = str(tooling_root / "fastlane/native_process_spawn.rb")
-    marker = "MRK_RUNTIME_3.3.12_FIDDLE_1.1.2"
+    marker = f"MRK_RUNTIME_{_store_ruby_release(tooling_root)}_FIDDLE_1.1.2"
     probe = (
         "require ARGV.fetch(0); "
         "MobileReleaseKit::NativeProcessSpawn.admit_runtime!; "
@@ -369,12 +360,94 @@ def _require_fastlane_bundle(tooling_root: Path, *, cancellation: DefaultCancell
         ],
         ["bundle", "exec", "ruby", "-e", probe, "--", primitive],
     )
+    return (("ruby", "-e", "print RUBY_VERSION"), ("bundle", "--version"), ("bundle", "check"),
+            *(tuple(command) for command in commands))
+
+
+def _require_fastlane_bundle(tooling_root: Path, *, cancellation: DefaultCancellation | None = None,
+                             source_environment: Mapping[str, str] | None = None,
+                             runtime_context: StoreRuntimeContext | None = None) -> None:
+    gemfile = tooling_root / "Gemfile"
+    ruby_release = _store_ruby_release(tooling_root)
+    if runtime_context is not None:
+        if (type(runtime_context) is not StoreRuntimeContext or tooling_root != runtime_context.tooling_root
+                or cancellation is not runtime_context._invocation.cancellation or source_environment is not None):
+            raise StoreOperationError("Selected Store runtime context cannot mix caller environment or tooling")
+        source_environment = runtime_context.environment()
+    else:
+        source_environment = os.environ if source_environment is None else source_environment
+    environment = _runtime_environment(source_environment)
+    environment.update(
+        {
+            "BUNDLE_GEMFILE": str(gemfile),
+            "FASTLANE_HIDE_CHANGELOG": "true",
+            "FASTLANE_OPT_OUT_USAGE": "true",
+            "FASTLANE_SKIP_DOCS": "true",
+            "FASTLANE_SKIP_UPDATE_CHECK": "true",
+        }
+    )
+    if shutil.which("ruby", path=environment.get("PATH")) is None:
+        raise StoreOperationError(
+            f"Pinned Store tooling requires Ruby {ruby_release} and Bundler 4.0.16; "
+            "dependencies are never installed automatically."
+        )
+
+    def run(argv: list[str]) -> subprocess.CompletedProcess[str] | None:
+        try:
+            with runtime_context.command(argv, capture=True) if runtime_context is not None else nullcontext():
+                return run_owned(
+                    argv,
+                    cwd=tooling_root,
+                    environ=environment,
+                    capture=True,
+                    timeout=60,
+                    cancellation=cancellation,
+                )
+        except ProcessError as error:
+            if error.fatal:
+                raise
+            return None
+        except (FileNotFoundError, subprocess.TimeoutExpired, OSError):
+            return None
+
+    probes = _fastlane_probe_commands(tooling_root)
+    ruby = run(list(probes[0]))
+    if ruby is None or ruby.returncode or ruby.stdout.strip() != ruby_release:
+        raise StoreOperationError(
+            f"Pinned Store tooling requires Ruby {ruby_release}. Select that exact version before running "
+            "online preflight or a Store lane."
+        )
+    bundler = run(list(probes[1]))
+    # Pinned Bundler 4's --version prints the bare version; its help command
+    # alone adds the human-readable "Bundler version" prefix.
+    if (bundler is None or bundler.returncode
+            or bundler.stdout.strip() != "4.0.16"):
+        raise StoreOperationError(
+            f"Bundler 4.0.16 is unavailable for the pinned Store tooling. Install it under Ruby {ruby_release}; "
+            "dependencies are never installed automatically."
+        )
+    completed = run(list(probes[2]))
+    if completed is None or completed.returncode:
+        command = (
+            f"BUNDLE_GEMFILE={shlex.quote(str(gemfile))} "
+            "bundle install --jobs 4 --retry 3"
+        )
+        raise StoreOperationError(
+            "Pinned Fastlane dependencies from Gemfile.lock are unavailable. "
+            f"Run `{command}` with Ruby {ruby_release} and Bundler 4.0.16, then rerun preflight; dependencies are never "
+            "installed automatically."
+        )
+    # The isolated helpers intentionally disable gems; the outer capture runs
+    # under the locked bundle. Admit BOTH actual loaded Fiddle origins, rather
+    # than treating one version string as proof of the other runtime.
+    marker = f"MRK_RUNTIME_{ruby_release}_FIDDLE_1.1.2"
+    commands = probes[3:]
     for command in commands:
-        runtime = run(command)
+        runtime = run(list(command))
         if (runtime is None or runtime.returncode or runtime.stdout != marker
                 or runtime.stderr):
             raise StoreOperationError(
-                "Pinned Ruby 3.3.12/Fiddle 1.1.2 native-validation tooling is unavailable "
+                f"Pinned Ruby {ruby_release}/Fiddle 1.1.2 native-validation tooling is unavailable "
                 "or its loaded origin is not the pinned distribution. Install the complete "
                 "reviewed Ruby and locked bundle; dependencies are never installed automatically."
             )
@@ -578,8 +651,9 @@ def _run_store_lane(
     # Retain its original private ancestry on the encompassing resource stack
     # through the command, terminal read, file disposal and final scope checks.
     # A point-in-time mkdir (or chmod of existing state) is not that custody.
+    local=getattr(cancellation,"_local_store_source",None)
     namespace = resources.enter_context(_app_private_directory(
-        receipt_path.parent, app_root=config.root, cancellation=cancellation))
+        receipt_path.parent, app_root=config.root, cancellation=cancellation,exclusive=local is not None))
     if namespace is None:
         receipt_path.parent.mkdir(parents=True, exist_ok=True)
         _repository_path(config, receipt_path, "Store output path")
@@ -606,9 +680,10 @@ def _run_store_lane(
         argv = record.seal_command(runner=tooling_root / "fastlane/run_lane.rb", cwd=files.cwd,
                                    environ=environment, cancellation=cancellation)
         try:
-            completed = run_owned(argv, cwd=files.cwd, environ=environment, capture=False,
-                timeout=3600, cancellation=cancellation,
-                _evidence=record.command_evidence(cancellation=cancellation))
+            with local.require_operation().command(local.require_operation().runtime,argv,capture=False) if local is not None else nullcontext():
+                completed = run_owned(argv, cwd=files.cwd, environ=environment, capture=False,
+                    timeout=3600, cancellation=cancellation,
+                    _evidence=record.command_evidence(cancellation=cancellation))
         except BaseException as error:
             primary = error
             record._remember(error)
@@ -691,7 +766,23 @@ def _store_operation(*, config: ReleaseConfig, release: ReleaseVersion, request:
                      operation_intent: Mapping[str, object] | None,
                      lane_evidence: StoreLaneCallEvidence | None,
                      cancellation: DefaultCancellation | None,
-                     invocation: InvocationCustody | None) -> dict[str, object] | StoreLaneReadback:
+                     invocation: InvocationCustody | None, _local_prepare=None, _local_execute=None, _local_reconcile=None) -> dict[str, object] | StoreLaneReadback:
+    if _local_reconcile is not None:
+        from .local_store_reconcile import LocalStoreReconcileRun
+        if _local_prepare is not None or _local_execute is not None or type(_local_reconcile) is not LocalStoreReconcileRun or not _local_reconcile.admit_store(config,release,request,lane_evidence,cancellation,invocation):
+            raise StoreOperationError("Local reconciliation requires its original owner")
+    elif _local_execute is not None:
+        from .local_store_execute import LocalStoreExecuteRun
+        if _local_prepare is not None or type(_local_execute) is not LocalStoreExecuteRun or not _local_execute.admit_store(config,release,request,lane_evidence,cancellation,invocation):
+            raise StoreOperationError("Local execution requires its original owner")
+    elif _local_prepare is not None:
+        from .local_store_prepare import LocalStorePrepareRun
+        if type(_local_prepare) is not LocalStorePrepareRun or not _local_prepare.admit_store(config,release,request,lane_evidence,cancellation,invocation):
+            raise StoreOperationError("Local preparation requires its original owner")
+    elif cancellation is not None and getattr(cancellation,"_local_store_source",None) is not None:
+        raise StoreOperationError("Local preparation cannot use the CI route")
+    _local_execute = _local_execute or _local_reconcile  # Admitted closed execution/reconcile interface only.
+    local=_local_execute or _local_prepare
     borrowed = lane_evidence is not None
     if invocation is not None and not borrowed:
         raise StoreLaneEvidenceError(attempted=False)
@@ -722,29 +813,37 @@ def _store_operation(*, config: ReleaseConfig, release: ReleaseVersion, request:
                 if not request.prepare:
                     if operation_intent is None or request.operation_intent is None:
                         raise StoreOperationError("Store execution requires its authenticated original operation intent")
-                    validate_operation_intent(operation_intent)
+                    if _local_execute is None:validate_operation_intent(operation_intent)
+                    else:
+                        _local_execute._prepared_post()
+                        record._require(operation_intent is _local_execute.intent)
                     intent_path = _repository_path(config, request.operation_intent, "operation intent path")
-                    if load_operation_intent(intent_path) != operation_intent:
+                    if _local_execute is None and load_operation_intent(intent_path) != operation_intent:
                         raise StoreOperationError("operation-intent file differs from the validated authorization")
                 output = Path(record._output)
                 if os.path.lexists(output):
+                    if local is not None:raise StoreOperationError("Local Store outputs are never adopted")
                     if request.prepare:
                         raise StoreOperationError("Store precondition output already exists; it is never renamed or adopted")
                     readback = _raw_readback(record=record, cancellation=guard, config=config, release=release,
                                              request=request, operation_intent=operation_intent)
                 else:
-                    source_environment = dict(os.environ)
-                    authority = workflow_authority(request.stage)
-                    tooling_root = resolve_tooling_root()
+                    source_environment = (dict(os.environ) if local is None else local.runtime.environment()
+                        if _local_execute is None else _local_execute.runtime_environment())
+                    authority = workflow_authority(request.stage) if local is None else _local_execute.authority if _local_execute is not None else None
+                    tooling_root = resolve_tooling_root() if local is None else local.runtime.tooling_root
                     if tooling_root is None or not _complete_tooling_root(tooling_root):
                         raise StoreOperationError("Pinned shared Fastlane/Gem tooling is unavailable or incomplete")
                     _require_fastlane_bundle(tooling_root, cancellation=guard,
-                                             source_environment=source_environment)
+                        **({"source_environment":source_environment} if local is None else {"runtime_context":local.runtime}))
                     material = resources.enter_context(_selected_store_material(config,
-                        values=credential_values_from_environment(source_environment), platforms=(request.platform,),
+                        values=credential_values_from_environment(source_environment) if local is None else local.material_values(), platforms=(request.platform,),
                         stage="production" if request.stage == "production-submit" else request.stage,
-                        invocation=invocation, cancellation=guard, lane_evidence=record))
-                    findings = material.validate()
+                        invocation=invocation, cancellation=guard, lane_evidence=record,
+                        **({} if local is None else {"scratch_parent":local.home._path})))
+                    findings = (material.validate(runtime_context=local.runtime)
+                                if local is not None and local.apple_store and request.platform == "ios"
+                                else material.validate())
                     if any(item.status in FAILING_STATUSES for item in findings):
                         raise StoreOperationError("Selected Store credential material is missing or invalid")
                     content = _run_store_lane(config=config, release=release, request=request,
@@ -754,7 +853,7 @@ def _store_operation(*, config: ReleaseConfig, release: ReleaseVersion, request:
                         operation_intent=operation_intent)
                     raw = _decode_store_document(content)
                     document = (validate_store_precondition(raw, stage=request.stage, platform=request.platform)
-                                if request.prepare else validate_store_receipt(raw, config=config, release=release,
+                                if request.prepare else _local_execute.validate_receipt(content) if _local_execute is not None else validate_store_receipt(raw, config=config, release=release,
                                     stage=request.stage, platform=request.platform, operation_intent=operation_intent,
                                     recovery_run_id=request.recovery_run_id))
                     readback = StoreLaneReadback(record, output, content, document)
@@ -818,12 +917,18 @@ def online_preflight_findings(
     platforms: tuple[str, ...],
     material: SelectedStoreMaterial,
     invocation: InvocationCustody,
+    runtime_context: StoreRuntimeContext | None = None,
 ) -> list[Finding]:
     if type(material) is not SelectedStoreMaterial or type(invocation) is not InvocationCustody:
         raise StoreOperationError("Online preflight requires its original selected material and invocation")
     material.require(config=config, platforms=platforms, invocation=invocation)
     cancellation = invocation.cancellation
-    explicit_readback = os.environ.get("MOBILE_RELEASE_PREFLIGHT_READBACK_PATH")
+    if runtime_context is not None:
+        if type(runtime_context) is not StoreRuntimeContext:
+            raise StoreOperationError("Selected Store runtime context is not original")
+        runtime_context.require(root=config.root, invocation=invocation)
+    explicit_readback = (None if runtime_context is not None else
+                         os.environ.get("MOBILE_RELEASE_PREFLIGHT_READBACK_PATH"))
     # One caller filename cannot safely hold two platforms without overwriting.
     # Refuse before even the tooling probes; never invent filename suffixes.
     if explicit_readback and len(platforms) != 1:
@@ -832,7 +937,7 @@ def online_preflight_findings(
                      if explicit_readback else None)
     if explicit_path is not None and os.path.lexists(explicit_path):
         raise StoreOperationError("Refusing to overwrite an existing Store preflight readback")
-    tooling_root = resolve_tooling_root()
+    tooling_root = runtime_context.tooling_root if runtime_context is not None else resolve_tooling_root()
     if tooling_root is None:
         return [Finding("store.online.tooling", Status.FAIL,
             "Shared Fastlane assets are unavailable; install the complete pinned distribution "
@@ -842,7 +947,10 @@ def online_preflight_findings(
         return [Finding("store.online.fastfile", Status.FAIL,
                         "Pinned shared Fastlane/Gem bundle is incomplete.", category="store-access")]
     try:
-        _require_fastlane_bundle(tooling_root, cancellation=cancellation)
+        if runtime_context is None:
+            _require_fastlane_bundle(tooling_root, cancellation=cancellation)
+        else:
+            _require_fastlane_bundle(tooling_root, cancellation=cancellation, runtime_context=runtime_context)
     except ProcessError:
         raise
     except StoreOperationError as error:
@@ -862,7 +970,8 @@ def online_preflight_findings(
         # Close each platform's actual output/cwd scopes before another platform
         # can start; an unresolved writer or disposal cannot become a diagnostic
         # that allows later commands to continue.
-        with finite_scratch(layout="online-runner", cancellation=cancellation) as runner_scratch:
+        with finite_scratch(layout="online-runner", cancellation=cancellation,
+                            parent=runtime_context.private_directory if runtime_context is not None else None) as runner_scratch:
             output_context = (finite_scratch(layout="online-readback", cancellation=cancellation,
                                               parent=private_root)
                               if explicit_path is None else nullcontext(None))
@@ -881,7 +990,7 @@ def online_preflight_findings(
                 runner_scratch._owner()
                 runner_scratch._check()
                 runner_directory = runner_scratch._path
-                environment = _runtime_environment(os.environ)
+                environment = _runtime_environment(runtime_context.environment() if runtime_context is not None else os.environ)
                 environment.update(material.lane_environment(platform=platform))
                 environment.update({
                     "MOBILE_RELEASE_APP_ROOT": str(config.root),
@@ -893,9 +1002,10 @@ def online_preflight_findings(
                         if evidence is None else evidence.seal_readback(
                             runner=runner, cwd=runner_directory, environ=environment))
                 try:
-                    completed = run_owned(argv, cwd=runner_directory, environ=environment,
-                                          capture=False, timeout=15 * 60,
-                                          cancellation=cancellation, _evidence=evidence)
+                    with runtime_context.command(argv, capture=False) if runtime_context is not None else nullcontext():
+                        completed = run_owned(argv, cwd=runner_directory, environ=environment,
+                                              capture=False, timeout=15 * 60,
+                                              cancellation=cancellation, _evidence=evidence)
                 except ProcessError as error:
                     if error.fatal:
                         raise
@@ -920,6 +1030,8 @@ def online_preflight_findings(
                         category="store-access"))
                     continue
                 material.require(config=config, platforms=platforms, invocation=invocation)
+                if runtime_context is not None:
+                    runtime_context.require(root=config.root, invocation=invocation)
                 findings.append(Finding(f"store.online.{platform}", Status.PASS,
                     f"Non-publishing {platform} Store access, identity, destinations, and build uniqueness are valid.",
                     category="store-access"))

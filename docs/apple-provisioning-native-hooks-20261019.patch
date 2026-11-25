@@ -1,0 +1,1091 @@
+diff --git a/desktop/src-tauri/build.rs b/desktop/src-tauri/build.rs
+--- a/desktop/src-tauri/build.rs
++++ b/desktop/src-tauri/build.rs
+@@ -289,2 +289,3 @@
+             "prepare_local_release_history", "start_local_release_history", "local_release_history_status", "cancel_local_release_history",
++            "prepare_apple_provisioning", "start_apple_provisioning", "apple_provisioning_status", "cancel_apple_provisioning",
+             "prepare_local_store_preflight", "start_local_store_preflight", "local_store_preflight_status", "cancel_local_store_preflight",
+diff --git a/desktop/src-tauri/capabilities/main.json b/desktop/src-tauri/capabilities/main.json
+--- a/desktop/src-tauri/capabilities/main.json
++++ b/desktop/src-tauri/capabilities/main.json
+@@ -16,2 +16,3 @@
+     "allow-prepare-local-release-history", "allow-start-local-release-history", "allow-local-release-history-status", "allow-cancel-local-release-history",
++    "allow-prepare-apple-provisioning", "allow-start-apple-provisioning", "allow-apple-provisioning-status", "allow-cancel-apple-provisioning",
+     "allow-prepare-local-store-preflight", "allow-start-local-store-preflight", "allow-local-store-preflight-status", "allow-cancel-local-store-preflight",
+diff --git a/desktop/src-tauri/src/android_build_wiring_tests.rs b/desktop/src-tauri/src/android_build_wiring_tests.rs
+--- a/desktop/src-tauri/src/android_build_wiring_tests.rs
++++ b/desktop/src-tauri/src/android_build_wiring_tests.rs
+@@ -10,3 +10,3 @@
+         maintenance: macos_maintenance::Closure::default(),
+-        saved_observation: None, saved_input: None, git_read: None, version_allocation_source: None, session_owner_reason: None, context: None, slot: None, records: Vec::new(), assignments: Vec::new(), quit: None,
++        saved_observation: None, saved_input: None, apple_provisioning_ready:None, git_read: None, version_allocation_source: None, session_owner_reason: None, context: None, slot: None, records: Vec::new(), assignments: Vec::new(), quit: None,
+         quit_accepted: false, quit_cleanup_end: None, github: ConnectionState::new(), gh_auth: None, evidence: EvidenceRegistry::new(), images: images::Registry::new(), installation: installation::Registry::new(),
+diff --git a/desktop/src-tauri/src/asset_session.rs b/desktop/src-tauri/src/asset_session.rs
+--- a/desktop/src-tauri/src/asset_session.rs
++++ b/desktop/src-tauri/src/asset_session.rs
+@@ -20,3 +20,6 @@
+ mod saved_observation;
+-use saved_observation::{SavedObservationLane, SavedInputBinding};
++use saved_observation::{SavedObservationLane, SavedInputBinding, AppleProvisioningSavedInput};
++#[path="asset_session_apple_provisioning.rs"]
++mod apple_provisioning;
++pub(crate) use apple_provisioning::AppleProvisioningDocumentInput;
+ pub(crate) use saved_observation::{SavedObservationCompletion, ValidatedSavedInput, UploadKeySavedInput};
+@@ -786,2 +789,3 @@
+     saved_observation: Option<Arc<SavedObservationLane>>, saved_input: Option<SavedInputBinding>,
++    apple_provisioning_ready: Option<Arc<crate::application_service_host::NativeStateReady>>,
+     version_allocation_source: Option<Arc<version_allocation::Lane>>,
+@@ -1938,2 +1942,3 @@
+             self.add(crate::saved_command_owner::identity_continuity_document_backing_bytes().ok_or(Problem::Capacity)?)?;
++            self.add(crate::saved_command_owner::apple_provisioning_retained_document_backing_bytes().ok_or(Problem::Capacity)?)?;
+             #[cfg(any(target_os = "linux", target_os = "macos"))]
+@@ -2626,3 +2631,3 @@
+             next_operation: 0, next_context: 0, exhausted: false, lost_observed: false, session: false, stopping: false, unknown: false, quit_pending: false, retiring: false, lock_pending: false,
+-            compatibility_picker_pending: false, maintenance: macos_maintenance::Closure::default(), saved_observation: None, saved_input: None, version_allocation_source: None, session_owner_reason: None,
++            compatibility_picker_pending: false, maintenance: macos_maintenance::Closure::default(), saved_observation: None, saved_input: None, apple_provisioning_ready:None, version_allocation_source: None, session_owner_reason: None,
+             context: None, slot: None, records: Vec::new(), assignments: Vec::new(), quit: None, quit_accepted: false, quit_cleanup_end: None,
+@@ -2876,3 +2881,3 @@
+         self.inner.bridge.diagnostics.document_lost();
+-        self.inner.bridge.preflight.document_lost(); self.inner.bridge.local_store.document_lost(); self.inner.bridge.local_store_prepare.document_lost(); self.inner.bridge.local_store_reconcile.document_lost(); self.inner.bridge.local_store_execute.document_lost(); self.inner.bridge.local_history.document_lost();
++        self.inner.bridge.preflight.document_lost(); self.inner.bridge.local_store.document_lost(); self.inner.bridge.apple_provisioning.document_lost(); self.inner.bridge.local_store_prepare.document_lost(); self.inner.bridge.local_store_reconcile.document_lost(); self.inner.bridge.local_store_execute.document_lost(); self.inner.bridge.local_history.document_lost();
+         self.inner.bridge.android_build.document_lost_published(None); self.inner.bridge.project_recovery.document_lost(); self.inner.bridge.ios_archive.document_lost(); self.inner.bridge.artifact_inspection.document_lost(); self.inner.bridge.tool_acquisition.document_lost(); self.inner.bridge.upload_key.document_lost();
+@@ -2897,3 +2902,3 @@
+         self.inner.bridge.edits.document_lost_published(MAIN, publisher);
+-        self.inner.bridge.diagnostics.document_lost(); self.inner.bridge.preflight.document_lost(); self.inner.bridge.local_store.document_lost(); self.inner.bridge.local_store_prepare.document_lost(); self.inner.bridge.local_store_reconcile.document_lost(); self.inner.bridge.local_store_execute.document_lost(); self.inner.bridge.local_history.document_lost();
++        self.inner.bridge.diagnostics.document_lost(); self.inner.bridge.preflight.document_lost(); self.inner.bridge.local_store.document_lost(); self.inner.bridge.apple_provisioning.document_lost(); self.inner.bridge.local_store_prepare.document_lost(); self.inner.bridge.local_store_reconcile.document_lost(); self.inner.bridge.local_store_execute.document_lost(); self.inner.bridge.local_history.document_lost();
+         self.inner.bridge.android_build.document_lost_published(publisher); self.inner.bridge.project_recovery.document_lost(); self.inner.bridge.ios_archive.document_lost(); self.inner.bridge.artifact_inspection.document_lost(); self.inner.bridge.tool_acquisition.document_lost(); self.inner.bridge.upload_key.document_lost(); self.bump(state);
+@@ -2947,5 +2952,5 @@
+         if state.unknown || state.exhausted || self.inner.bridge.supervisor.disabled() || self.inner.bridge.edits.disabled()
+-            || (self.inner.bridge.preflight.disabled() || ((self.inner.bridge.local_store.disabled() || ((self.inner.bridge.local_store_prepare.disabled() || self.inner.bridge.local_store_reconcile.disabled()) || self.inner.bridge.local_store_execute.disabled())) || self.inner.bridge.local_history.disabled())) || (self.inner.bridge.android_build.disabled() || (self.inner.bridge.project_recovery.disabled() || (self.inner.bridge.ios_archive.disabled() || (self.inner.bridge.artifact_inspection.disabled() || (self.inner.bridge.tool_acquisition.disabled() || self.inner.bridge.upload_key.disabled()))))) { return Availability::CleanupUnknown; }
++            || (self.inner.bridge.preflight.disabled() || (((self.inner.bridge.local_store.disabled() || self.inner.bridge.apple_provisioning.disabled()) || ((self.inner.bridge.local_store_prepare.disabled() || self.inner.bridge.local_store_reconcile.disabled()) || self.inner.bridge.local_store_execute.disabled())) || self.inner.bridge.local_history.disabled())) || (self.inner.bridge.android_build.disabled() || (self.inner.bridge.project_recovery.disabled() || (self.inner.bridge.ios_archive.disabled() || (self.inner.bridge.artifact_inspection.disabled() || (self.inner.bridge.tool_acquisition.disabled() || self.inner.bridge.upload_key.disabled()))))) { return Availability::CleanupUnknown; }
+         if state.stopping || self.inner.bridge.supervisor.stopping() || self.inner.bridge.edits.stopping()
+-            || (self.inner.bridge.preflight.stopping() || ((self.inner.bridge.local_store.stopping() || ((self.inner.bridge.local_store_prepare.stopping() || self.inner.bridge.local_store_reconcile.stopping()) || self.inner.bridge.local_store_execute.stopping())) || self.inner.bridge.local_history.stopping())) || (self.inner.bridge.android_build.stopping() || (self.inner.bridge.project_recovery.stopping() || (self.inner.bridge.ios_archive.stopping() || (self.inner.bridge.artifact_inspection.stopping() || (self.inner.bridge.tool_acquisition.stopping() || self.inner.bridge.upload_key.stopping()))))) { return Availability::Shutdown; }
++            || (self.inner.bridge.preflight.stopping() || (((self.inner.bridge.local_store.stopping() || self.inner.bridge.apple_provisioning.stopping()) || ((self.inner.bridge.local_store_prepare.stopping() || self.inner.bridge.local_store_reconcile.stopping()) || self.inner.bridge.local_store_execute.stopping())) || self.inner.bridge.local_history.stopping())) || (self.inner.bridge.android_build.stopping() || (self.inner.bridge.project_recovery.stopping() || (self.inner.bridge.ios_archive.stopping() || (self.inner.bridge.artifact_inspection.stopping() || (self.inner.bridge.tool_acquisition.stopping() || self.inner.bridge.upload_key.stopping()))))) { return Availability::Shutdown; }
+         if !state.lifetime.original_bound() || state.lost_observed
+@@ -2955,3 +2960,3 @@
+             || state.github.native_work_pending() || !self.inner.bridge.edits.can_exit()
+-            || !self.inner.bridge.supervisor.can_exit() || (self.inner.bridge.preflight.busy() || ((self.inner.bridge.local_store.busy() || ((self.inner.bridge.local_store_prepare.busy() || self.inner.bridge.local_store_reconcile.busy()) || self.inner.bridge.local_store_execute.busy())) || self.inner.bridge.local_history.busy()))
++            || !self.inner.bridge.supervisor.can_exit() || (self.inner.bridge.preflight.busy() || (((self.inner.bridge.local_store.busy() || self.inner.bridge.apple_provisioning.busy()) || ((self.inner.bridge.local_store_prepare.busy() || self.inner.bridge.local_store_reconcile.busy()) || self.inner.bridge.local_store_execute.busy())) || self.inner.bridge.local_history.busy()))
+             || (self.inner.bridge.android_build.busy() || (self.inner.bridge.project_recovery.busy() || (self.inner.bridge.ios_archive.busy() || (self.inner.bridge.artifact_inspection.busy() || (self.inner.bridge.tool_acquisition.busy() || self.inner.bridge.upload_key.busy()))))) { return Availability::Busy; }
+@@ -2970,6 +2975,6 @@
+         if state.unknown || state.exhausted || self.inner.bridge.supervisor.disabled()
+-            || self.inner.bridge.edits.disabled() || self.inner.bridge.diagnostics.disabled() || ((self.inner.bridge.local_store.disabled() || ((self.inner.bridge.local_store_prepare.disabled() || self.inner.bridge.local_store_reconcile.disabled()) || self.inner.bridge.local_store_execute.disabled())) || self.inner.bridge.local_history.disabled())
++            || self.inner.bridge.edits.disabled() || self.inner.bridge.diagnostics.disabled() || (((self.inner.bridge.local_store.disabled() || self.inner.bridge.apple_provisioning.disabled()) || ((self.inner.bridge.local_store_prepare.disabled() || self.inner.bridge.local_store_reconcile.disabled()) || self.inner.bridge.local_store_execute.disabled())) || self.inner.bridge.local_history.disabled())
+             || (self.inner.bridge.android_build.disabled() || (self.inner.bridge.project_recovery.disabled() || (self.inner.bridge.ios_archive.disabled() || (self.inner.bridge.artifact_inspection.disabled() || (self.inner.bridge.tool_acquisition.disabled() || self.inner.bridge.upload_key.disabled()))))) { return Availability::CleanupUnknown; }
+         if state.stopping || self.inner.bridge.supervisor.stopping() || self.inner.bridge.edits.stopping()
+-            || self.inner.bridge.diagnostics.stopping() || ((self.inner.bridge.local_store.stopping() || ((self.inner.bridge.local_store_prepare.stopping() || self.inner.bridge.local_store_reconcile.stopping()) || self.inner.bridge.local_store_execute.stopping())) || self.inner.bridge.local_history.stopping()) || (self.inner.bridge.android_build.stopping() || (self.inner.bridge.project_recovery.stopping() || (self.inner.bridge.ios_archive.stopping() || (self.inner.bridge.artifact_inspection.stopping() || (self.inner.bridge.tool_acquisition.stopping() || self.inner.bridge.upload_key.stopping()))))) { return Availability::Shutdown; }
++            || self.inner.bridge.diagnostics.stopping() || (((self.inner.bridge.local_store.stopping() || self.inner.bridge.apple_provisioning.stopping()) || ((self.inner.bridge.local_store_prepare.stopping() || self.inner.bridge.local_store_reconcile.stopping()) || self.inner.bridge.local_store_execute.stopping())) || self.inner.bridge.local_history.stopping()) || (self.inner.bridge.android_build.stopping() || (self.inner.bridge.project_recovery.stopping() || (self.inner.bridge.ios_archive.stopping() || (self.inner.bridge.artifact_inspection.stopping() || (self.inner.bridge.tool_acquisition.stopping() || self.inner.bridge.upload_key.stopping()))))) { return Availability::Shutdown; }
+         if let Some(reason) = preflight_document_gate(state, crate::offline_preflight_protocol::Profile::current()) { return reason; }
+@@ -2981,3 +2986,3 @@
+             || state.github.registration().is_some() || !self.inner.bridge.edits.can_exit() || self.inner.bridge.edits.preflight_attention()
+-            || !self.inner.bridge.supervisor.can_exit() || self.inner.bridge.diagnostics.busy() || ((self.inner.bridge.local_store.busy() || ((self.inner.bridge.local_store_prepare.busy() || self.inner.bridge.local_store_reconcile.busy()) || self.inner.bridge.local_store_execute.busy())) || self.inner.bridge.local_history.busy())
++            || !self.inner.bridge.supervisor.can_exit() || self.inner.bridge.diagnostics.busy() || (((self.inner.bridge.local_store.busy() || self.inner.bridge.apple_provisioning.busy()) || ((self.inner.bridge.local_store_prepare.busy() || self.inner.bridge.local_store_reconcile.busy()) || self.inner.bridge.local_store_execute.busy())) || self.inner.bridge.local_history.busy())
+             || (self.inner.bridge.android_build.busy() || (self.inner.bridge.project_recovery.busy() || (self.inner.bridge.ios_archive.busy() || (self.inner.bridge.artifact_inspection.busy() || (self.inner.bridge.tool_acquisition.busy() || self.inner.bridge.upload_key.busy()))))) { return Availability::Busy; }
+@@ -2986,2 +2991,9 @@
+     fn local_store_gate(&self, state: &DocumentState) -> crate::local_store_preflight_protocol::Availability {
++        use crate::local_store_preflight_protocol::Availability;
++        if self.inner.bridge.apple_provisioning.disabled(){return Availability::CleanupUnknown;}
++        if self.inner.bridge.apple_provisioning.stopping(){return Availability::Shutdown;}
++        if self.inner.bridge.apple_provisioning.busy(){return Availability::Busy;}
++        self.local_store_base_gate(state)
++    }
++    fn local_store_base_gate(&self, state: &DocumentState) -> crate::local_store_preflight_protocol::Availability {
+         use crate::local_store_preflight_protocol::Availability;
+@@ -3009,5 +3021,5 @@
+         use crate::local_store_preflight_protocol::Availability;
+-        if self.inner.bridge.local_store.disabled() || self.inner.bridge.local_store_execute.disabled() || self.inner.bridge.local_store_reconcile.disabled() || self.inner.bridge.local_history.disabled() {return Availability::CleanupUnknown;}
+-        if self.inner.bridge.local_store.stopping() || self.inner.bridge.local_store_execute.stopping() || self.inner.bridge.local_store_reconcile.stopping() || self.inner.bridge.local_history.stopping() {return Availability::Shutdown;}
+-        if self.inner.bridge.local_store.busy() || self.inner.bridge.local_store_execute.busy() || self.inner.bridge.local_store_reconcile.busy() || self.inner.bridge.local_history.busy() {return Availability::Busy;}
++        if (self.inner.bridge.local_store.disabled() || self.inner.bridge.apple_provisioning.disabled()) || self.inner.bridge.local_store_execute.disabled() || self.inner.bridge.local_store_reconcile.disabled() || self.inner.bridge.local_history.disabled() {return Availability::CleanupUnknown;}
++        if (self.inner.bridge.local_store.stopping() || self.inner.bridge.apple_provisioning.stopping()) || self.inner.bridge.local_store_execute.stopping() || self.inner.bridge.local_store_reconcile.stopping() || self.inner.bridge.local_history.stopping() {return Availability::Shutdown;}
++        if (self.inner.bridge.local_store.busy() || self.inner.bridge.apple_provisioning.busy()) || self.inner.bridge.local_store_execute.busy() || self.inner.bridge.local_store_reconcile.busy() || self.inner.bridge.local_history.busy() {return Availability::Busy;}
+
+@@ -3031,5 +3043,5 @@
+         use crate::local_store_preflight_protocol::Availability;
+-        if self.inner.bridge.local_store.disabled() || self.inner.bridge.local_store_prepare.disabled() || self.inner.bridge.local_store_execute.disabled() || self.inner.bridge.local_history.disabled() {return Availability::CleanupUnknown;}
+-        if self.inner.bridge.local_store.stopping() || self.inner.bridge.local_store_prepare.stopping() || self.inner.bridge.local_store_execute.stopping() || self.inner.bridge.local_history.stopping() {return Availability::Shutdown;}
+-        if self.inner.bridge.local_store.busy() || self.inner.bridge.local_store_prepare.busy() || self.inner.bridge.local_store_execute.busy() || self.inner.bridge.local_history.busy() {return Availability::Busy;}
++        if (self.inner.bridge.local_store.disabled() || self.inner.bridge.apple_provisioning.disabled()) || self.inner.bridge.local_store_prepare.disabled() || self.inner.bridge.local_store_execute.disabled() || self.inner.bridge.local_history.disabled() {return Availability::CleanupUnknown;}
++        if (self.inner.bridge.local_store.stopping() || self.inner.bridge.apple_provisioning.stopping()) || self.inner.bridge.local_store_prepare.stopping() || self.inner.bridge.local_store_execute.stopping() || self.inner.bridge.local_history.stopping() {return Availability::Shutdown;}
++        if (self.inner.bridge.local_store.busy() || self.inner.bridge.apple_provisioning.busy()) || self.inner.bridge.local_store_prepare.busy() || self.inner.bridge.local_store_execute.busy() || self.inner.bridge.local_history.busy() {return Availability::Busy;}
+
+@@ -3053,5 +3065,5 @@
+         use crate::local_store_preflight_protocol::Availability;
+-        if (self.inner.bridge.local_store.disabled() || (self.inner.bridge.local_store_prepare.disabled() || self.inner.bridge.local_store_reconcile.disabled())) || self.inner.bridge.local_history.disabled() {return Availability::CleanupUnknown;}
+-        if (self.inner.bridge.local_store.stopping() || (self.inner.bridge.local_store_prepare.stopping() || self.inner.bridge.local_store_reconcile.stopping())) || self.inner.bridge.local_history.stopping() {return Availability::Shutdown;}
+-        if (self.inner.bridge.local_store.busy() || (self.inner.bridge.local_store_prepare.busy() || self.inner.bridge.local_store_reconcile.busy())) || self.inner.bridge.local_history.busy() {return Availability::Busy;}
++        if ((self.inner.bridge.local_store.disabled() || self.inner.bridge.apple_provisioning.disabled()) || (self.inner.bridge.local_store_prepare.disabled() || self.inner.bridge.local_store_reconcile.disabled())) || self.inner.bridge.local_history.disabled() {return Availability::CleanupUnknown;}
++        if ((self.inner.bridge.local_store.stopping() || self.inner.bridge.apple_provisioning.stopping()) || (self.inner.bridge.local_store_prepare.stopping() || self.inner.bridge.local_store_reconcile.stopping())) || self.inner.bridge.local_history.stopping() {return Availability::Shutdown;}
++        if ((self.inner.bridge.local_store.busy() || self.inner.bridge.apple_provisioning.busy()) || (self.inner.bridge.local_store_prepare.busy() || self.inner.bridge.local_store_reconcile.busy())) || self.inner.bridge.local_history.busy() {return Availability::Busy;}
+
+@@ -3077,5 +3089,5 @@
+             || self.inner.bridge.edits.disabled() || self.inner.bridge.diagnostics.disabled()
+-            || ((self.inner.bridge.android_build.disabled() || (self.inner.bridge.tool_acquisition.disabled() || self.inner.bridge.upload_key.disabled())) || (self.inner.bridge.project_recovery.disabled() || (self.inner.bridge.ios_archive.disabled() || (self.inner.bridge.preflight.disabled() || ((self.inner.bridge.local_store.disabled() || ((self.inner.bridge.local_store_prepare.disabled() || self.inner.bridge.local_store_reconcile.disabled()) || self.inner.bridge.local_store_execute.disabled())) || self.inner.bridge.local_history.disabled()))))) { return Availability::CleanupUnknown; }
++            || ((self.inner.bridge.android_build.disabled() || (self.inner.bridge.tool_acquisition.disabled() || self.inner.bridge.upload_key.disabled())) || (self.inner.bridge.project_recovery.disabled() || (self.inner.bridge.ios_archive.disabled() || (self.inner.bridge.preflight.disabled() || (((self.inner.bridge.local_store.disabled() || self.inner.bridge.apple_provisioning.disabled()) || ((self.inner.bridge.local_store_prepare.disabled() || self.inner.bridge.local_store_reconcile.disabled()) || self.inner.bridge.local_store_execute.disabled())) || self.inner.bridge.local_history.disabled()))))) { return Availability::CleanupUnknown; }
+         if state.stopping || self.inner.bridge.supervisor.stopping() || self.inner.bridge.edits.stopping()
+-            || self.inner.bridge.diagnostics.stopping() || ((self.inner.bridge.android_build.stopping() || (self.inner.bridge.tool_acquisition.stopping() || self.inner.bridge.upload_key.stopping())) || (self.inner.bridge.project_recovery.stopping() || (self.inner.bridge.ios_archive.stopping() || (self.inner.bridge.preflight.stopping() || ((self.inner.bridge.local_store.stopping() || ((self.inner.bridge.local_store_prepare.stopping() || self.inner.bridge.local_store_reconcile.stopping()) || self.inner.bridge.local_store_execute.stopping())) || self.inner.bridge.local_history.stopping()))))) { return Availability::Shutdown; }
++            || self.inner.bridge.diagnostics.stopping() || ((self.inner.bridge.android_build.stopping() || (self.inner.bridge.tool_acquisition.stopping() || self.inner.bridge.upload_key.stopping())) || (self.inner.bridge.project_recovery.stopping() || (self.inner.bridge.ios_archive.stopping() || (self.inner.bridge.preflight.stopping() || (((self.inner.bridge.local_store.stopping() || self.inner.bridge.apple_provisioning.stopping()) || ((self.inner.bridge.local_store_prepare.stopping() || self.inner.bridge.local_store_reconcile.stopping()) || self.inner.bridge.local_store_execute.stopping())) || self.inner.bridge.local_history.stopping()))))) { return Availability::Shutdown; }
+         if crate::artifact_inspection_protocol::Profile::current().is_none(){return Availability::UnsupportedPlatform;}
+@@ -3089,3 +3101,3 @@
+             || !self.inner.bridge.supervisor.can_exit() || self.inner.bridge.diagnostics.busy()
+-            || ((self.inner.bridge.android_build.busy() || (self.inner.bridge.tool_acquisition.busy() || self.inner.bridge.upload_key.busy())) || (self.inner.bridge.project_recovery.busy() || (self.inner.bridge.ios_archive.busy() || (self.inner.bridge.preflight.busy() || ((self.inner.bridge.local_store.busy() || ((self.inner.bridge.local_store_prepare.busy() || self.inner.bridge.local_store_reconcile.busy()) || self.inner.bridge.local_store_execute.busy())) || self.inner.bridge.local_history.busy()))))) { return Availability::Busy; }
++            || ((self.inner.bridge.android_build.busy() || (self.inner.bridge.tool_acquisition.busy() || self.inner.bridge.upload_key.busy())) || (self.inner.bridge.project_recovery.busy() || (self.inner.bridge.ios_archive.busy() || (self.inner.bridge.preflight.busy() || (((self.inner.bridge.local_store.busy() || self.inner.bridge.apple_provisioning.busy()) || ((self.inner.bridge.local_store_prepare.busy() || self.inner.bridge.local_store_reconcile.busy()) || self.inner.bridge.local_store_execute.busy())) || self.inner.bridge.local_history.busy()))))) { return Availability::Busy; }
+         Availability::Available
+@@ -3192,5 +3204,5 @@
+             || self.inner.bridge.edits.disabled() || self.inner.bridge.diagnostics.disabled()
+-            || (self.inner.bridge.preflight.disabled() || ((self.inner.bridge.local_store.disabled() || ((self.inner.bridge.local_store_prepare.disabled() || self.inner.bridge.local_store_reconcile.disabled()) || self.inner.bridge.local_store_execute.disabled())) || self.inner.bridge.local_history.disabled())) || (self.inner.bridge.project_recovery.disabled() || (self.inner.bridge.ios_archive.disabled() || (self.inner.bridge.artifact_inspection.disabled() || (self.inner.bridge.tool_acquisition.disabled() || self.inner.bridge.upload_key.disabled())))) { return Availability::CleanupUnknown; }
++            || (self.inner.bridge.preflight.disabled() || (((self.inner.bridge.local_store.disabled() || self.inner.bridge.apple_provisioning.disabled()) || ((self.inner.bridge.local_store_prepare.disabled() || self.inner.bridge.local_store_reconcile.disabled()) || self.inner.bridge.local_store_execute.disabled())) || self.inner.bridge.local_history.disabled())) || (self.inner.bridge.project_recovery.disabled() || (self.inner.bridge.ios_archive.disabled() || (self.inner.bridge.artifact_inspection.disabled() || (self.inner.bridge.tool_acquisition.disabled() || self.inner.bridge.upload_key.disabled())))) { return Availability::CleanupUnknown; }
+         if state.stopping || self.inner.bridge.supervisor.stopping() || self.inner.bridge.edits.stopping()
+-            || self.inner.bridge.diagnostics.stopping() || (self.inner.bridge.preflight.stopping() || ((self.inner.bridge.local_store.stopping() || ((self.inner.bridge.local_store_prepare.stopping() || self.inner.bridge.local_store_reconcile.stopping()) || self.inner.bridge.local_store_execute.stopping())) || self.inner.bridge.local_history.stopping())) || (self.inner.bridge.project_recovery.stopping() || (self.inner.bridge.ios_archive.stopping() || (self.inner.bridge.artifact_inspection.stopping() || (self.inner.bridge.tool_acquisition.stopping() || self.inner.bridge.upload_key.stopping())))) { return Availability::Shutdown; }
++            || self.inner.bridge.diagnostics.stopping() || (self.inner.bridge.preflight.stopping() || (((self.inner.bridge.local_store.stopping() || self.inner.bridge.apple_provisioning.stopping()) || ((self.inner.bridge.local_store_prepare.stopping() || self.inner.bridge.local_store_reconcile.stopping()) || self.inner.bridge.local_store_execute.stopping())) || self.inner.bridge.local_history.stopping())) || (self.inner.bridge.project_recovery.stopping() || (self.inner.bridge.ios_archive.stopping() || (self.inner.bridge.artifact_inspection.stopping() || (self.inner.bridge.tool_acquisition.stopping() || self.inner.bridge.upload_key.stopping())))) { return Availability::Shutdown; }
+         if let Some(reason) = android_build_document_gate(state, crate::android_build_protocol::Profile::current()) { return reason; }
+@@ -3205,3 +3217,3 @@
+             || !self.inner.bridge.supervisor.can_exit() || self.inner.bridge.diagnostics.busy()
+-            || (self.inner.bridge.preflight.busy() || ((self.inner.bridge.local_store.busy() || ((self.inner.bridge.local_store_prepare.busy() || self.inner.bridge.local_store_reconcile.busy()) || self.inner.bridge.local_store_execute.busy())) || self.inner.bridge.local_history.busy())) || (self.inner.bridge.project_recovery.busy() || (self.inner.bridge.ios_archive.busy() || (self.inner.bridge.artifact_inspection.busy() || (self.inner.bridge.tool_acquisition.busy() || self.inner.bridge.upload_key.busy())))) { return Availability::Busy; }
++            || (self.inner.bridge.preflight.busy() || (((self.inner.bridge.local_store.busy() || self.inner.bridge.apple_provisioning.busy()) || ((self.inner.bridge.local_store_prepare.busy() || self.inner.bridge.local_store_reconcile.busy()) || self.inner.bridge.local_store_execute.busy())) || self.inner.bridge.local_history.busy())) || (self.inner.bridge.project_recovery.busy() || (self.inner.bridge.ios_archive.busy() || (self.inner.bridge.artifact_inspection.busy() || (self.inner.bridge.tool_acquisition.busy() || self.inner.bridge.upload_key.busy())))) { return Availability::Busy; }
+         Availability::Available
+@@ -3342,5 +3354,5 @@
+             || self.inner.bridge.edits.disabled() || self.inner.bridge.diagnostics.disabled()
+-            || (self.inner.bridge.preflight.disabled() || ((self.inner.bridge.local_store.disabled() || ((self.inner.bridge.local_store_prepare.disabled() || self.inner.bridge.local_store_reconcile.disabled()) || self.inner.bridge.local_store_execute.disabled())) || self.inner.bridge.local_history.disabled())) || self.inner.bridge.android_build.disabled() || (self.inner.bridge.ios_archive.disabled() || (self.inner.bridge.artifact_inspection.disabled() || (self.inner.bridge.tool_acquisition.disabled() || self.inner.bridge.upload_key.disabled()))) { return Availability::CleanupUnknown; }
++            || (self.inner.bridge.preflight.disabled() || (((self.inner.bridge.local_store.disabled() || self.inner.bridge.apple_provisioning.disabled()) || ((self.inner.bridge.local_store_prepare.disabled() || self.inner.bridge.local_store_reconcile.disabled()) || self.inner.bridge.local_store_execute.disabled())) || self.inner.bridge.local_history.disabled())) || self.inner.bridge.android_build.disabled() || (self.inner.bridge.ios_archive.disabled() || (self.inner.bridge.artifact_inspection.disabled() || (self.inner.bridge.tool_acquisition.disabled() || self.inner.bridge.upload_key.disabled()))) { return Availability::CleanupUnknown; }
+         if state.stopping || self.inner.bridge.supervisor.stopping() || self.inner.bridge.edits.stopping()
+-            || self.inner.bridge.diagnostics.stopping() || (self.inner.bridge.preflight.stopping() || ((self.inner.bridge.local_store.stopping() || ((self.inner.bridge.local_store_prepare.stopping() || self.inner.bridge.local_store_reconcile.stopping()) || self.inner.bridge.local_store_execute.stopping())) || self.inner.bridge.local_history.stopping())) || self.inner.bridge.android_build.stopping() || (self.inner.bridge.ios_archive.stopping() || (self.inner.bridge.artifact_inspection.stopping() || (self.inner.bridge.tool_acquisition.stopping() || self.inner.bridge.upload_key.stopping()))) { return Availability::Shutdown; }
++            || self.inner.bridge.diagnostics.stopping() || (self.inner.bridge.preflight.stopping() || (((self.inner.bridge.local_store.stopping() || self.inner.bridge.apple_provisioning.stopping()) || ((self.inner.bridge.local_store_prepare.stopping() || self.inner.bridge.local_store_reconcile.stopping()) || self.inner.bridge.local_store_execute.stopping())) || self.inner.bridge.local_history.stopping())) || self.inner.bridge.android_build.stopping() || (self.inner.bridge.ios_archive.stopping() || (self.inner.bridge.artifact_inspection.stopping() || (self.inner.bridge.tool_acquisition.stopping() || self.inner.bridge.upload_key.stopping()))) { return Availability::Shutdown; }
+         if let Some(reason) = project_recovery_document_gate(state, crate::project_recovery_protocol::Profile::current()) { return reason; }
+@@ -3354,3 +3366,3 @@
+             || !self.inner.bridge.supervisor.can_exit() || self.inner.bridge.diagnostics.busy()
+-            || (self.inner.bridge.preflight.busy() || ((self.inner.bridge.local_store.busy() || ((self.inner.bridge.local_store_prepare.busy() || self.inner.bridge.local_store_reconcile.busy()) || self.inner.bridge.local_store_execute.busy())) || self.inner.bridge.local_history.busy())) || self.inner.bridge.android_build.busy() || (self.inner.bridge.ios_archive.busy() || (self.inner.bridge.artifact_inspection.busy() || (self.inner.bridge.tool_acquisition.busy() || self.inner.bridge.upload_key.busy()))) { return Availability::Busy; }
++            || (self.inner.bridge.preflight.busy() || (((self.inner.bridge.local_store.busy() || self.inner.bridge.apple_provisioning.busy()) || ((self.inner.bridge.local_store_prepare.busy() || self.inner.bridge.local_store_reconcile.busy()) || self.inner.bridge.local_store_execute.busy())) || self.inner.bridge.local_history.busy())) || self.inner.bridge.android_build.busy() || (self.inner.bridge.ios_archive.busy() || (self.inner.bridge.artifact_inspection.busy() || (self.inner.bridge.tool_acquisition.busy() || self.inner.bridge.upload_key.busy()))) { return Availability::Busy; }
+         Availability::Available
+@@ -3402,5 +3414,5 @@
+             || self.inner.bridge.edits.disabled() || self.inner.bridge.diagnostics.disabled()
+-            || (self.inner.bridge.preflight.disabled() || ((self.inner.bridge.local_store.disabled() || ((self.inner.bridge.local_store_prepare.disabled() || self.inner.bridge.local_store_reconcile.disabled()) || self.inner.bridge.local_store_execute.disabled())) || self.inner.bridge.local_history.disabled())) || self.inner.bridge.android_build.disabled() || (self.inner.bridge.project_recovery.disabled() || (self.inner.bridge.artifact_inspection.disabled() || (self.inner.bridge.tool_acquisition.disabled() || self.inner.bridge.upload_key.disabled()))) { return Availability::CleanupUnknown; }
++            || (self.inner.bridge.preflight.disabled() || (((self.inner.bridge.local_store.disabled() || self.inner.bridge.apple_provisioning.disabled()) || ((self.inner.bridge.local_store_prepare.disabled() || self.inner.bridge.local_store_reconcile.disabled()) || self.inner.bridge.local_store_execute.disabled())) || self.inner.bridge.local_history.disabled())) || self.inner.bridge.android_build.disabled() || (self.inner.bridge.project_recovery.disabled() || (self.inner.bridge.artifact_inspection.disabled() || (self.inner.bridge.tool_acquisition.disabled() || self.inner.bridge.upload_key.disabled()))) { return Availability::CleanupUnknown; }
+         if state.stopping || self.inner.bridge.supervisor.stopping() || self.inner.bridge.edits.stopping()
+-            || self.inner.bridge.diagnostics.stopping() || (self.inner.bridge.preflight.stopping() || ((self.inner.bridge.local_store.stopping() || ((self.inner.bridge.local_store_prepare.stopping() || self.inner.bridge.local_store_reconcile.stopping()) || self.inner.bridge.local_store_execute.stopping())) || self.inner.bridge.local_history.stopping())) || self.inner.bridge.android_build.stopping() || (self.inner.bridge.project_recovery.stopping() || (self.inner.bridge.artifact_inspection.stopping() || (self.inner.bridge.tool_acquisition.stopping() || self.inner.bridge.upload_key.stopping()))) { return Availability::Shutdown; }
++            || self.inner.bridge.diagnostics.stopping() || (self.inner.bridge.preflight.stopping() || (((self.inner.bridge.local_store.stopping() || self.inner.bridge.apple_provisioning.stopping()) || ((self.inner.bridge.local_store_prepare.stopping() || self.inner.bridge.local_store_reconcile.stopping()) || self.inner.bridge.local_store_execute.stopping())) || self.inner.bridge.local_history.stopping())) || self.inner.bridge.android_build.stopping() || (self.inner.bridge.project_recovery.stopping() || (self.inner.bridge.artifact_inspection.stopping() || (self.inner.bridge.tool_acquisition.stopping() || self.inner.bridge.upload_key.stopping()))) { return Availability::Shutdown; }
+         if let Some(reason) = ios_archive_document_gate(state, crate::ios_archive_protocol::Profile::current()) { return reason; }
+@@ -3414,3 +3426,3 @@
+             || !self.inner.bridge.supervisor.can_exit() || self.inner.bridge.diagnostics.busy()
+-            || (self.inner.bridge.preflight.busy() || ((self.inner.bridge.local_store.busy() || ((self.inner.bridge.local_store_prepare.busy() || self.inner.bridge.local_store_reconcile.busy()) || self.inner.bridge.local_store_execute.busy())) || self.inner.bridge.local_history.busy())) || self.inner.bridge.android_build.busy() || (self.inner.bridge.project_recovery.busy() || (self.inner.bridge.artifact_inspection.busy() || (self.inner.bridge.tool_acquisition.busy() || self.inner.bridge.upload_key.busy()))) { return Availability::Busy; }
++            || (self.inner.bridge.preflight.busy() || (((self.inner.bridge.local_store.busy() || self.inner.bridge.apple_provisioning.busy()) || ((self.inner.bridge.local_store_prepare.busy() || self.inner.bridge.local_store_reconcile.busy()) || self.inner.bridge.local_store_execute.busy())) || self.inner.bridge.local_history.busy())) || self.inner.bridge.android_build.busy() || (self.inner.bridge.project_recovery.busy() || (self.inner.bridge.artifact_inspection.busy() || (self.inner.bridge.tool_acquisition.busy() || self.inner.bridge.upload_key.busy()))) { return Availability::Busy; }
+         Availability::Available
+@@ -3477,3 +3489,3 @@
+         }
+-        self.inner.bridge.preflight.ensure_idle()?; self.inner.bridge.local_store.ensure_idle()?; self.inner.bridge.local_store_prepare.ensure_idle()?; self.inner.bridge.local_store_reconcile.ensure_idle()?; self.inner.bridge.local_store_execute.ensure_idle()?; self.inner.bridge.local_history.ensure_idle()?;
++        self.inner.bridge.preflight.ensure_idle()?; self.inner.bridge.local_store.ensure_idle()?; self.inner.bridge.apple_provisioning.ensure_idle()?; self.inner.bridge.local_store_prepare.ensure_idle()?; self.inner.bridge.local_store_reconcile.ensure_idle()?; self.inner.bridge.local_store_execute.ensure_idle()?; self.inner.bridge.local_history.ensure_idle()?;
+         self.inner.bridge.android_build.ensure_idle()?;
+@@ -3490,5 +3502,5 @@
+         if state.unknown || state.exhausted || !state.lifetime.original_bound() || state.lost_observed || state.stopping { return Err(BridgeError::cleanup_unknown()); }
+-        self.inner.bridge.preflight.context_changed(); self.inner.bridge.local_store.context_changed(); self.inner.bridge.local_store_prepare.context_changed(); self.inner.bridge.local_store_reconcile.context_changed(); self.inner.bridge.local_store_execute.context_changed(); self.inner.bridge.local_history.context_changed();
++        self.inner.bridge.preflight.context_changed(); self.inner.bridge.local_store.context_changed(); self.inner.bridge.apple_provisioning.context_changed(); self.inner.bridge.local_store_prepare.context_changed(); self.inner.bridge.local_store_reconcile.context_changed(); self.inner.bridge.local_store_execute.context_changed(); self.inner.bridge.local_history.context_changed();
+         self.inner.bridge.android_build.context_changed(); self.inner.bridge.project_recovery.context_changed(); self.inner.bridge.ios_archive.context_changed(); self.inner.bridge.artifact_inspection.context_changed(); self.inner.bridge.tool_acquisition.context_changed(); self.inner.bridge.upload_key.context_changed();
+-        self.inner.bridge.preflight.ensure_idle()?; self.inner.bridge.local_store.ensure_idle()?; self.inner.bridge.local_store_prepare.ensure_idle()?; self.inner.bridge.local_store_reconcile.ensure_idle()?; self.inner.bridge.local_store_execute.ensure_idle()?; self.inner.bridge.local_history.ensure_idle()?;
++        self.inner.bridge.preflight.ensure_idle()?; self.inner.bridge.local_store.ensure_idle()?; self.inner.bridge.apple_provisioning.ensure_idle()?; self.inner.bridge.local_store_prepare.ensure_idle()?; self.inner.bridge.local_store_reconcile.ensure_idle()?; self.inner.bridge.local_store_execute.ensure_idle()?; self.inner.bridge.local_history.ensure_idle()?;
+         self.inner.bridge.android_build.ensure_idle()?;
+@@ -3506,3 +3518,3 @@
+         }
+-        self.inner.bridge.preflight.ensure_idle()?; self.inner.bridge.local_store.ensure_idle()?; self.inner.bridge.local_store_prepare.ensure_idle()?; self.inner.bridge.local_store_reconcile.ensure_idle()?; self.inner.bridge.local_store_execute.ensure_idle()?; self.inner.bridge.local_history.ensure_idle()?;
++        self.inner.bridge.preflight.ensure_idle()?; self.inner.bridge.local_store.ensure_idle()?; self.inner.bridge.apple_provisioning.ensure_idle()?; self.inner.bridge.local_store_prepare.ensure_idle()?; self.inner.bridge.local_store_reconcile.ensure_idle()?; self.inner.bridge.local_store_execute.ensure_idle()?; self.inner.bridge.local_history.ensure_idle()?;
+         self.inner.bridge.offline_fixture_registration(permit)
+@@ -3600,3 +3612,3 @@
+         state.saved_input = None;
+-        self.inner.bridge.preflight.context_changed(); self.inner.bridge.local_store.context_changed(); self.inner.bridge.local_store_prepare.context_changed(); self.inner.bridge.local_store_reconcile.context_changed(); self.inner.bridge.local_store_execute.context_changed(); self.inner.bridge.local_history.context_changed();
++        self.inner.bridge.preflight.context_changed(); self.inner.bridge.local_store.context_changed(); self.inner.bridge.apple_provisioning.context_changed(); self.inner.bridge.local_store_prepare.context_changed(); self.inner.bridge.local_store_reconcile.context_changed(); self.inner.bridge.local_store_execute.context_changed(); self.inner.bridge.local_history.context_changed();
+         self.inner.bridge.android_build.context_changed_published(Some(&publisher)); self.inner.bridge.project_recovery.context_changed(); self.inner.bridge.ios_archive.context_changed(); self.inner.bridge.artifact_inspection.context_changed(); self.inner.bridge.tool_acquisition.context_changed(); self.inner.bridge.upload_key.context_changed();
+@@ -3604,3 +3616,3 @@
+         state.github.setup_ensure_idle()?;
+-        self.inner.bridge.preflight.ensure_idle()?; self.inner.bridge.local_store.ensure_idle()?; self.inner.bridge.local_store_prepare.ensure_idle()?; self.inner.bridge.local_store_reconcile.ensure_idle()?; self.inner.bridge.local_store_execute.ensure_idle()?; self.inner.bridge.local_history.ensure_idle()?;
++        self.inner.bridge.preflight.ensure_idle()?; self.inner.bridge.local_store.ensure_idle()?; self.inner.bridge.apple_provisioning.ensure_idle()?; self.inner.bridge.local_store_prepare.ensure_idle()?; self.inner.bridge.local_store_reconcile.ensure_idle()?; self.inner.bridge.local_store_execute.ensure_idle()?; self.inner.bridge.local_history.ensure_idle()?;
+         self.inner.bridge.android_build.ensure_idle()?;
+@@ -3622,5 +3634,5 @@
+         self.inner.bridge.diagnostics.context_changed();
+-        self.inner.bridge.preflight.context_changed(); self.inner.bridge.local_store.context_changed(); self.inner.bridge.local_store_prepare.context_changed(); self.inner.bridge.local_store_reconcile.context_changed(); self.inner.bridge.local_store_execute.context_changed(); self.inner.bridge.local_history.context_changed();
++        self.inner.bridge.preflight.context_changed(); self.inner.bridge.local_store.context_changed(); self.inner.bridge.apple_provisioning.context_changed(); self.inner.bridge.local_store_prepare.context_changed(); self.inner.bridge.local_store_reconcile.context_changed(); self.inner.bridge.local_store_execute.context_changed(); self.inner.bridge.local_history.context_changed();
+         self.inner.bridge.android_build.context_changed_published(Some(&publisher)); self.inner.bridge.project_recovery.context_changed(); self.inner.bridge.ios_archive.context_changed(); self.inner.bridge.artifact_inspection.context_changed(); self.inner.bridge.tool_acquisition.context_changed(); self.inner.bridge.upload_key.context_changed();
+-        self.inner.bridge.preflight.ensure_idle()?; self.inner.bridge.local_store.ensure_idle()?; self.inner.bridge.local_store_prepare.ensure_idle()?; self.inner.bridge.local_store_reconcile.ensure_idle()?; self.inner.bridge.local_store_execute.ensure_idle()?; self.inner.bridge.local_history.ensure_idle()?;
++        self.inner.bridge.preflight.ensure_idle()?; self.inner.bridge.local_store.ensure_idle()?; self.inner.bridge.apple_provisioning.ensure_idle()?; self.inner.bridge.local_store_prepare.ensure_idle()?; self.inner.bridge.local_store_reconcile.ensure_idle()?; self.inner.bridge.local_store_execute.ensure_idle()?; self.inner.bridge.local_history.ensure_idle()?;
+         self.inner.bridge.android_build.ensure_idle()?;
+@@ -3647,3 +3659,3 @@
+         if !state.compatibility_picker_pending { return Err(BridgeError::invalid()); }
+-        self.inner.bridge.preflight.ensure_idle()?; self.inner.bridge.local_store.ensure_idle()?; self.inner.bridge.local_store_prepare.ensure_idle()?; self.inner.bridge.local_store_reconcile.ensure_idle()?; self.inner.bridge.local_store_execute.ensure_idle()?; self.inner.bridge.local_history.ensure_idle()?;
++        self.inner.bridge.preflight.ensure_idle()?; self.inner.bridge.local_store.ensure_idle()?; self.inner.bridge.apple_provisioning.ensure_idle()?; self.inner.bridge.local_store_prepare.ensure_idle()?; self.inner.bridge.local_store_reconcile.ensure_idle()?; self.inner.bridge.local_store_execute.ensure_idle()?; self.inner.bridge.local_history.ensure_idle()?;
+         self.inner.bridge.android_build.ensure_idle()?;
+@@ -3669,3 +3681,3 @@
+             state.stopping = true; version_allocation::stop(&state); self.inner.bridge.diagnostics.request_shutdown();
+-            self.inner.bridge.preflight.request_shutdown(); self.inner.bridge.local_store.request_shutdown(); self.inner.bridge.local_store_prepare.request_shutdown(); self.inner.bridge.local_store_reconcile.request_shutdown(); self.inner.bridge.local_store_execute.request_shutdown(); self.inner.bridge.local_history.request_shutdown(); self.inner.bridge.android_build.request_shutdown_published(publisher.as_ref().filter(|publisher| publisher.accepted())); self.inner.bridge.project_recovery.request_shutdown(); self.inner.bridge.ios_archive.request_shutdown(); self.inner.bridge.artifact_inspection.request_shutdown(); self.inner.bridge.tool_acquisition.request_shutdown(); self.inner.bridge.upload_key.request_shutdown();
++            self.inner.bridge.preflight.request_shutdown(); self.inner.bridge.local_store.request_shutdown(); self.inner.bridge.apple_provisioning.request_shutdown(); self.inner.bridge.local_store_prepare.request_shutdown(); self.inner.bridge.local_store_reconcile.request_shutdown(); self.inner.bridge.local_store_execute.request_shutdown(); self.inner.bridge.local_history.request_shutdown(); self.inner.bridge.android_build.request_shutdown_published(publisher.as_ref().filter(|publisher| publisher.accepted())); self.inner.bridge.project_recovery.request_shutdown(); self.inner.bridge.ios_archive.request_shutdown(); self.inner.bridge.artifact_inspection.request_shutdown(); self.inner.bridge.tool_acquisition.request_shutdown(); self.inner.bridge.upload_key.request_shutdown();
+         }
+@@ -3687,8 +3699,8 @@
+             if self.inner.bridge.diagnostics.disabled() { return Err(AssetError::new(Reason::CleanupUnknown)); }
+-            if (self.inner.bridge.preflight.disabled() || ((self.inner.bridge.local_store.disabled() || ((self.inner.bridge.local_store_prepare.disabled() || self.inner.bridge.local_store_reconcile.disabled()) || self.inner.bridge.local_store_execute.disabled())) || self.inner.bridge.local_history.disabled())) { return Err(AssetError::new(Reason::CleanupUnknown)); }
++            if (self.inner.bridge.preflight.disabled() || (((self.inner.bridge.local_store.disabled() || self.inner.bridge.apple_provisioning.disabled()) || ((self.inner.bridge.local_store_prepare.disabled() || self.inner.bridge.local_store_reconcile.disabled()) || self.inner.bridge.local_store_execute.disabled())) || self.inner.bridge.local_history.disabled())) { return Err(AssetError::new(Reason::CleanupUnknown)); }
+             if (self.inner.bridge.android_build.disabled() || (self.inner.bridge.project_recovery.disabled() || (self.inner.bridge.ios_archive.disabled() || (self.inner.bridge.artifact_inspection.disabled() || (self.inner.bridge.tool_acquisition.disabled() || self.inner.bridge.upload_key.disabled()))))) { return Err(AssetError::new(Reason::CleanupUnknown)); }
+             if self.inner.bridge.diagnostics.stopping() { return Err(AssetError::new(Reason::Shutdown)); }
+-            if (self.inner.bridge.preflight.stopping() || ((self.inner.bridge.local_store.stopping() || ((self.inner.bridge.local_store_prepare.stopping() || self.inner.bridge.local_store_reconcile.stopping()) || self.inner.bridge.local_store_execute.stopping())) || self.inner.bridge.local_history.stopping())) { return Err(AssetError::new(Reason::Shutdown)); }
++            if (self.inner.bridge.preflight.stopping() || (((self.inner.bridge.local_store.stopping() || self.inner.bridge.apple_provisioning.stopping()) || ((self.inner.bridge.local_store_prepare.stopping() || self.inner.bridge.local_store_reconcile.stopping()) || self.inner.bridge.local_store_execute.stopping())) || self.inner.bridge.local_history.stopping())) { return Err(AssetError::new(Reason::Shutdown)); }
+             if (self.inner.bridge.android_build.stopping() || (self.inner.bridge.project_recovery.stopping() || (self.inner.bridge.ios_archive.stopping() || (self.inner.bridge.artifact_inspection.stopping() || (self.inner.bridge.tool_acquisition.stopping() || self.inner.bridge.upload_key.stopping()))))) { return Err(AssetError::new(Reason::Shutdown)); }
+-            if self.inner.bridge.diagnostics.busy() || (self.inner.bridge.preflight.busy() || ((self.inner.bridge.local_store.busy() || ((self.inner.bridge.local_store_prepare.busy() || self.inner.bridge.local_store_reconcile.busy()) || self.inner.bridge.local_store_execute.busy())) || self.inner.bridge.local_history.busy())) || (self.inner.bridge.android_build.busy() || (self.inner.bridge.project_recovery.busy() || (self.inner.bridge.ios_archive.busy() || (self.inner.bridge.artifact_inspection.busy() || (self.inner.bridge.tool_acquisition.busy() || preparation.is_none() && self.inner.bridge.upload_key.busy()))))) {
++            if self.inner.bridge.diagnostics.busy() || (self.inner.bridge.preflight.busy() || (((self.inner.bridge.local_store.busy() || self.inner.bridge.apple_provisioning.busy()) || ((self.inner.bridge.local_store_prepare.busy() || self.inner.bridge.local_store_reconcile.busy()) || self.inner.bridge.local_store_execute.busy())) || self.inner.bridge.local_history.busy())) || (self.inner.bridge.android_build.busy() || (self.inner.bridge.project_recovery.busy() || (self.inner.bridge.ios_archive.busy() || (self.inner.bridge.artifact_inspection.busy() || (self.inner.bridge.tool_acquisition.busy() || preparation.is_none() && self.inner.bridge.upload_key.busy()))))) {
+                 return Err(AssetError::new(Reason::Busy));
+@@ -3799,3 +3811,3 @@
+         if state.unknown || state.exhausted || self.inner.bridge.supervisor.disabled() || self.inner.bridge.edits.disabled()
+-            || self.inner.bridge.diagnostics.disabled() || (self.inner.bridge.preflight.disabled() || ((self.inner.bridge.local_store.disabled() || ((self.inner.bridge.local_store_prepare.disabled() || self.inner.bridge.local_store_reconcile.disabled()) || self.inner.bridge.local_store_execute.disabled())) || self.inner.bridge.local_history.disabled()))
++            || self.inner.bridge.diagnostics.disabled() || (self.inner.bridge.preflight.disabled() || (((self.inner.bridge.local_store.disabled() || self.inner.bridge.apple_provisioning.disabled()) || ((self.inner.bridge.local_store_prepare.disabled() || self.inner.bridge.local_store_reconcile.disabled()) || self.inner.bridge.local_store_execute.disabled())) || self.inner.bridge.local_history.disabled()))
+             || (self.inner.bridge.android_build.disabled() || (self.inner.bridge.project_recovery.disabled() || (self.inner.bridge.ios_archive.disabled() || (self.inner.bridge.artifact_inspection.disabled() || (self.inner.bridge.tool_acquisition.disabled() || self.inner.bridge.upload_key.disabled()))))) { return GitHubReason::CleanupUnknown; }
+@@ -3804,4 +3816,4 @@
+             || self.inner.bridge.supervisor.stopping() || self.inner.bridge.edits.stopping() || self.inner.bridge.diagnostics.stopping()
+-            || (self.inner.bridge.preflight.stopping() || ((self.inner.bridge.local_store.stopping() || ((self.inner.bridge.local_store_prepare.stopping() || self.inner.bridge.local_store_reconcile.stopping()) || self.inner.bridge.local_store_execute.stopping())) || self.inner.bridge.local_history.stopping())) || (self.inner.bridge.android_build.stopping() || (self.inner.bridge.project_recovery.stopping() || (self.inner.bridge.ios_archive.stopping() || (self.inner.bridge.artifact_inspection.stopping() || (self.inner.bridge.tool_acquisition.stopping() || self.inner.bridge.upload_key.stopping()))))) { return GitHubReason::Cancelled; }
+-        if self.inner.bridge.diagnostics.busy() || (self.inner.bridge.preflight.busy() || ((self.inner.bridge.local_store.busy() || ((self.inner.bridge.local_store_prepare.busy() || self.inner.bridge.local_store_reconcile.busy()) || self.inner.bridge.local_store_execute.busy())) || self.inner.bridge.local_history.busy())) || (self.inner.bridge.android_build.busy() || (self.inner.bridge.project_recovery.busy() || (self.inner.bridge.ios_archive.busy() || (self.inner.bridge.artifact_inspection.busy() || (self.inner.bridge.tool_acquisition.busy() || self.inner.bridge.upload_key.busy())))))
++            || (self.inner.bridge.preflight.stopping() || (((self.inner.bridge.local_store.stopping() || self.inner.bridge.apple_provisioning.stopping()) || ((self.inner.bridge.local_store_prepare.stopping() || self.inner.bridge.local_store_reconcile.stopping()) || self.inner.bridge.local_store_execute.stopping())) || self.inner.bridge.local_history.stopping())) || (self.inner.bridge.android_build.stopping() || (self.inner.bridge.project_recovery.stopping() || (self.inner.bridge.ios_archive.stopping() || (self.inner.bridge.artifact_inspection.stopping() || (self.inner.bridge.tool_acquisition.stopping() || self.inner.bridge.upload_key.stopping()))))) { return GitHubReason::Cancelled; }
++        if self.inner.bridge.diagnostics.busy() || (self.inner.bridge.preflight.busy() || (((self.inner.bridge.local_store.busy() || self.inner.bridge.apple_provisioning.busy()) || ((self.inner.bridge.local_store_prepare.busy() || self.inner.bridge.local_store_reconcile.busy()) || self.inner.bridge.local_store_execute.busy())) || self.inner.bridge.local_history.busy())) || (self.inner.bridge.android_build.busy() || (self.inner.bridge.project_recovery.busy() || (self.inner.bridge.ios_archive.busy() || (self.inner.bridge.artifact_inspection.busy() || (self.inner.bridge.tool_acquisition.busy() || self.inner.bridge.upload_key.busy())))))
+             || state.compatibility_picker_pending { return GitHubReason::Busy; }
+@@ -4259,5 +4271,5 @@
+         state.saved_input = None;
+-        self.inner.bridge.preflight.context_changed(); self.inner.bridge.local_store.context_changed(); self.inner.bridge.local_store_prepare.context_changed(); self.inner.bridge.local_store_reconcile.context_changed(); self.inner.bridge.local_store_execute.context_changed(); self.inner.bridge.local_history.context_changed();
++        self.inner.bridge.preflight.context_changed(); self.inner.bridge.local_store.context_changed(); self.inner.bridge.apple_provisioning.context_changed(); self.inner.bridge.local_store_prepare.context_changed(); self.inner.bridge.local_store_reconcile.context_changed(); self.inner.bridge.local_store_execute.context_changed(); self.inner.bridge.local_history.context_changed();
+         self.inner.bridge.android_build.context_changed_published(Some(&*publisher)); self.inner.bridge.project_recovery.context_changed(); self.inner.bridge.ios_archive.context_changed(); self.inner.bridge.artifact_inspection.context_changed(); self.inner.bridge.tool_acquisition.context_changed(); self.inner.bridge.upload_key.context_changed();
+-        self.inner.bridge.preflight.ensure_idle()?; self.inner.bridge.local_store.ensure_idle()?; self.inner.bridge.local_store_prepare.ensure_idle()?; self.inner.bridge.local_store_reconcile.ensure_idle()?; self.inner.bridge.local_store_execute.ensure_idle()?; self.inner.bridge.local_history.ensure_idle()?;
++        self.inner.bridge.preflight.ensure_idle()?; self.inner.bridge.local_store.ensure_idle()?; self.inner.bridge.apple_provisioning.ensure_idle()?; self.inner.bridge.local_store_prepare.ensure_idle()?; self.inner.bridge.local_store_reconcile.ensure_idle()?; self.inner.bridge.local_store_execute.ensure_idle()?; self.inner.bridge.local_history.ensure_idle()?;
+         self.inner.bridge.android_build.ensure_idle()?;
+@@ -4503,3 +4515,3 @@
+         state.saved_input=None;
+-        self.inner.bridge.diagnostics.context_changed(); self.inner.bridge.preflight.context_changed(); self.inner.bridge.local_store.context_changed(); self.inner.bridge.local_store_prepare.context_changed(); self.inner.bridge.local_store_reconcile.context_changed(); self.inner.bridge.local_store_execute.context_changed(); self.inner.bridge.local_history.context_changed();
++        self.inner.bridge.diagnostics.context_changed(); self.inner.bridge.preflight.context_changed(); self.inner.bridge.local_store.context_changed(); self.inner.bridge.apple_provisioning.context_changed(); self.inner.bridge.local_store_prepare.context_changed(); self.inner.bridge.local_store_reconcile.context_changed(); self.inner.bridge.local_store_execute.context_changed(); self.inner.bridge.local_history.context_changed();
+         self.inner.bridge.android_build.context_changed_published(Some(&publisher)); self.inner.bridge.project_recovery.context_changed(); self.inner.bridge.ios_archive.context_changed(); self.inner.bridge.artifact_inspection.context_changed(); self.inner.bridge.tool_acquisition.context_changed(); self.inner.bridge.upload_key.context_changed(); self.gate(&state, true)?;
+@@ -4553,3 +4565,3 @@
+         // owner's resources settled or turn vault lock into GitHub Disconnect.
+-        self.inner.bridge.preflight.context_changed(); self.inner.bridge.local_store.context_changed(); self.inner.bridge.local_store_prepare.context_changed(); self.inner.bridge.local_store_reconcile.context_changed(); self.inner.bridge.local_store_execute.context_changed(); self.inner.bridge.local_history.context_changed(); self.inner.bridge.android_build.context_changed_published(Some(&publisher)); self.inner.bridge.project_recovery.context_changed(); self.inner.bridge.ios_archive.context_changed(); self.inner.bridge.artifact_inspection.context_changed(); self.inner.bridge.tool_acquisition.context_changed(); self.inner.bridge.upload_key.context_changed();
++        self.inner.bridge.preflight.context_changed(); self.inner.bridge.local_store.context_changed(); self.inner.bridge.apple_provisioning.context_changed(); self.inner.bridge.local_store_prepare.context_changed(); self.inner.bridge.local_store_reconcile.context_changed(); self.inner.bridge.local_store_execute.context_changed(); self.inner.bridge.local_history.context_changed(); self.inner.bridge.android_build.context_changed_published(Some(&publisher)); self.inner.bridge.project_recovery.context_changed(); self.inner.bridge.ios_archive.context_changed(); self.inner.bridge.artifact_inspection.context_changed(); self.inner.bridge.tool_acquisition.context_changed(); self.inner.bridge.upload_key.context_changed();
+         invalidate_all(&mut state); state.lock_pending = true;
+@@ -5025,3 +5037,3 @@
+                 self.inner.bridge.diagnostics.request_shutdown();
+-                self.inner.bridge.preflight.request_shutdown(); self.inner.bridge.local_store.request_shutdown(); self.inner.bridge.local_store_prepare.request_shutdown(); self.inner.bridge.local_store_reconcile.request_shutdown(); self.inner.bridge.local_store_execute.request_shutdown(); self.inner.bridge.local_history.request_shutdown();
++                self.inner.bridge.preflight.request_shutdown(); self.inner.bridge.local_store.request_shutdown(); self.inner.bridge.apple_provisioning.request_shutdown(); self.inner.bridge.local_store_prepare.request_shutdown(); self.inner.bridge.local_store_reconcile.request_shutdown(); self.inner.bridge.local_store_execute.request_shutdown(); self.inner.bridge.local_history.request_shutdown();
+                 self.inner.bridge.android_build.request_shutdown_published(publisher.as_ref()); self.inner.bridge.project_recovery.request_shutdown(); self.inner.bridge.ios_archive.request_shutdown(); self.inner.bridge.artifact_inspection.request_shutdown(); self.inner.bridge.tool_acquisition.request_shutdown(); self.inner.bridge.upload_key.request_shutdown();
+@@ -6244,3 +6256,3 @@
+         state.saved_input=None;
+-        self.inner.bridge.diagnostics.context_changed(); self.inner.bridge.preflight.context_changed(); self.inner.bridge.local_store.context_changed(); self.inner.bridge.local_store_prepare.context_changed(); self.inner.bridge.local_store_reconcile.context_changed(); self.inner.bridge.local_store_execute.context_changed(); self.inner.bridge.local_history.context_changed();
++        self.inner.bridge.diagnostics.context_changed(); self.inner.bridge.preflight.context_changed(); self.inner.bridge.local_store.context_changed(); self.inner.bridge.apple_provisioning.context_changed(); self.inner.bridge.local_store_prepare.context_changed(); self.inner.bridge.local_store_reconcile.context_changed(); self.inner.bridge.local_store_execute.context_changed(); self.inner.bridge.local_history.context_changed();
+         self.inner.bridge.android_build.context_changed_published(Some(&publisher)); self.inner.bridge.project_recovery.context_changed(); self.inner.bridge.ios_archive.context_changed(); self.inner.bridge.artifact_inspection.context_changed(); self.inner.bridge.tool_acquisition.context_changed(); self.inner.bridge.upload_key.context_changed(); self.common_gate(&state, false)?;
+@@ -6436,3 +6448,3 @@
+         if state.quit_pending { return Err(BridgeError::new("quit_pending", "Finish or cancel the quit confirmation before starting another action.")); }
+-        self.inner.bridge.preflight.ensure_idle()?; self.inner.bridge.local_store.ensure_idle()?; self.inner.bridge.local_store_prepare.ensure_idle()?; self.inner.bridge.local_store_reconcile.ensure_idle()?; self.inner.bridge.local_store_execute.ensure_idle()?; self.inner.bridge.local_history.ensure_idle()?;
++        self.inner.bridge.preflight.ensure_idle()?; self.inner.bridge.local_store.ensure_idle()?; self.inner.bridge.apple_provisioning.ensure_idle()?; self.inner.bridge.local_store_prepare.ensure_idle()?; self.inner.bridge.local_store_reconcile.ensure_idle()?; self.inner.bridge.local_store_execute.ensure_idle()?; self.inner.bridge.local_history.ensure_idle()?;
+         self.inner.bridge.android_build.ensure_idle()?;
+@@ -6475,3 +6487,3 @@
+             && self.inner.bridge.supervisor.can_exit() && self.inner.bridge.edits.can_exit() && self.inner.bridge.diagnostics.can_exit()
+-            && (self.inner.bridge.preflight.can_exit() && ((self.inner.bridge.local_store.can_exit() && ((self.inner.bridge.local_store_prepare.can_exit() && self.inner.bridge.local_store_reconcile.can_exit()) && self.inner.bridge.local_store_execute.can_exit())) && self.inner.bridge.local_history.can_exit())) && (self.inner.bridge.android_build.can_exit() && (self.inner.bridge.project_recovery.can_exit() && self.inner.bridge.ios_archive.can_exit() && (self.inner.bridge.artifact_inspection.can_exit() && (self.inner.bridge.tool_acquisition.can_exit() && self.inner.bridge.upload_key.can_exit()))))
++            && (self.inner.bridge.preflight.can_exit() && (((self.inner.bridge.local_store.can_exit() && self.inner.bridge.apple_provisioning.can_exit()) && ((self.inner.bridge.local_store_prepare.can_exit() && self.inner.bridge.local_store_reconcile.can_exit()) && self.inner.bridge.local_store_execute.can_exit())) && self.inner.bridge.local_history.can_exit())) && (self.inner.bridge.android_build.can_exit() && (self.inner.bridge.project_recovery.can_exit() && self.inner.bridge.ios_archive.can_exit() && (self.inner.bridge.artifact_inspection.can_exit() && (self.inner.bridge.tool_acquisition.can_exit() && self.inner.bridge.upload_key.can_exit()))))
+     }
+@@ -6540,3 +6552,3 @@
+         let gui = async { if !dialog_ended { let _ = dialog.as_mut().await; } };
+-        let _ = tokio::join!(gui, document.shutdown_assets(), document.inner.bridge.supervisor.shutdown(), document.inner.bridge.edits.shutdown(), document.inner.bridge.diagnostics.shutdown(), document.inner.bridge.preflight.shutdown(), document.inner.bridge.local_store.shutdown(), document.inner.bridge.local_store_prepare.shutdown(), document.inner.bridge.local_store_reconcile.shutdown(), document.inner.bridge.local_store_execute.shutdown(), document.inner.bridge.local_history.shutdown(), document.inner.bridge.android_build.shutdown(), document.inner.bridge.project_recovery.shutdown(), document.inner.bridge.ios_archive.shutdown(), document.inner.bridge.artifact_inspection.shutdown(), document.inner.bridge.tool_acquisition.shutdown(), document.inner.bridge.upload_key.shutdown());
++        let _ = tokio::join!(gui, document.shutdown_assets(), document.inner.bridge.supervisor.shutdown(), document.inner.bridge.edits.shutdown(), document.inner.bridge.diagnostics.shutdown(), document.inner.bridge.preflight.shutdown(), document.inner.bridge.local_store.shutdown(), document.inner.bridge.apple_provisioning.shutdown(), document.inner.bridge.local_store_prepare.shutdown(), document.inner.bridge.local_store_reconcile.shutdown(), document.inner.bridge.local_store_execute.shutdown(), document.inner.bridge.local_history.shutdown(), document.inner.bridge.android_build.shutdown(), document.inner.bridge.project_recovery.shutdown(), document.inner.bridge.ios_archive.shutdown(), document.inner.bridge.artifact_inspection.shutdown(), document.inner.bridge.tool_acquisition.shutdown(), document.inner.bridge.upload_key.shutdown());
+     };
+@@ -6552,3 +6564,3 @@
+     // new owner, reassignment or reuse of this unknown session.
+-    while !(document.inner.bridge.upload_key.can_exit() && document.retained_material_can_exit() && document.inner.bridge.supervisor.can_exit() && document.inner.bridge.edits.can_exit() && document.inner.bridge.diagnostics.can_exit() && (document.inner.bridge.preflight.can_exit() && (document.inner.bridge.local_store.can_exit() && ((document.inner.bridge.local_store_prepare.can_exit() && document.inner.bridge.local_store_reconcile.can_exit()) && document.inner.bridge.local_store_execute.can_exit())) && document.inner.bridge.local_history.can_exit()) && (document.inner.bridge.android_build.can_exit() && (document.inner.bridge.project_recovery.can_exit() && document.inner.bridge.ios_archive.can_exit() && document.inner.bridge.artifact_inspection.can_exit()))) {
++    while !(document.inner.bridge.upload_key.can_exit() && document.retained_material_can_exit() && document.inner.bridge.supervisor.can_exit() && document.inner.bridge.edits.can_exit() && document.inner.bridge.diagnostics.can_exit() && (document.inner.bridge.preflight.can_exit() && ((document.inner.bridge.local_store.can_exit() && document.inner.bridge.apple_provisioning.can_exit()) && ((document.inner.bridge.local_store_prepare.can_exit() && document.inner.bridge.local_store_reconcile.can_exit()) && document.inner.bridge.local_store_execute.can_exit())) && document.inner.bridge.local_history.can_exit()) && (document.inner.bridge.android_build.can_exit() && (document.inner.bridge.project_recovery.can_exit() && document.inner.bridge.ios_archive.can_exit() && document.inner.bridge.artifact_inspection.can_exit()))) {
+         tokio::select! {
+@@ -7290,6 +7302,6 @@
+                 && !self.inner.bridge.supervisor.disabled() && !self.inner.bridge.edits.disabled()
+-                && !self.inner.bridge.diagnostics.disabled() && !(self.inner.bridge.preflight.disabled() || ((self.inner.bridge.local_store.disabled() || ((self.inner.bridge.local_store_prepare.disabled() || self.inner.bridge.local_store_reconcile.disabled()) || self.inner.bridge.local_store_execute.disabled())) || self.inner.bridge.local_history.disabled()))
++                && !self.inner.bridge.diagnostics.disabled() && !(self.inner.bridge.preflight.disabled() || (((self.inner.bridge.local_store.disabled() || self.inner.bridge.apple_provisioning.disabled()) || ((self.inner.bridge.local_store_prepare.disabled() || self.inner.bridge.local_store_reconcile.disabled()) || self.inner.bridge.local_store_execute.disabled())) || self.inner.bridge.local_history.disabled()))
+                 && !self.inner.bridge.android_build.disabled() && !self.inner.bridge.project_recovery.disabled() && !(self.inner.bridge.ios_archive.disabled() || (self.inner.bridge.artifact_inspection.disabled() || (self.inner.bridge.tool_acquisition.disabled() || self.inner.bridge.upload_key.disabled())))
+                 && self.inner.bridge.supervisor.can_exit() && self.inner.bridge.edits.can_exit() && self.inner.bridge.diagnostics.can_exit()
+-                && (self.inner.bridge.preflight.can_exit() && ((self.inner.bridge.local_store.can_exit() && ((self.inner.bridge.local_store_prepare.can_exit() && self.inner.bridge.local_store_reconcile.can_exit()) && self.inner.bridge.local_store_execute.can_exit())) && self.inner.bridge.local_history.can_exit())) && self.inner.bridge.android_build.can_exit()
++                && (self.inner.bridge.preflight.can_exit() && (((self.inner.bridge.local_store.can_exit() && self.inner.bridge.apple_provisioning.can_exit()) && ((self.inner.bridge.local_store_prepare.can_exit() && self.inner.bridge.local_store_reconcile.can_exit()) && self.inner.bridge.local_store_execute.can_exit())) && self.inner.bridge.local_history.can_exit())) && self.inner.bridge.android_build.can_exit()
+                 && self.inner.bridge.project_recovery.can_exit() && self.inner.bridge.ios_archive.can_exit() && (self.inner.bridge.artifact_inspection.can_exit() && (self.inner.bridge.tool_acquisition.can_exit() && self.inner.bridge.upload_key.can_exit()))
+@@ -7319,5 +7331,5 @@
+             original && !self.inner.bridge.supervisor.disabled() && !self.inner.bridge.edits.disabled()
+-                && !self.inner.bridge.diagnostics.disabled() && !(self.inner.bridge.preflight.disabled() || ((self.inner.bridge.local_store.disabled() || ((self.inner.bridge.local_store_prepare.disabled() || self.inner.bridge.local_store_reconcile.disabled()) || self.inner.bridge.local_store_execute.disabled())) || self.inner.bridge.local_history.disabled())) && !(self.inner.bridge.android_build.disabled() || (self.inner.bridge.project_recovery.disabled() || (self.inner.bridge.ios_archive.disabled() || (self.inner.bridge.artifact_inspection.disabled() || (self.inner.bridge.tool_acquisition.disabled() || self.inner.bridge.upload_key.disabled())))))
++                && !self.inner.bridge.diagnostics.disabled() && !(self.inner.bridge.preflight.disabled() || (((self.inner.bridge.local_store.disabled() || self.inner.bridge.apple_provisioning.disabled()) || ((self.inner.bridge.local_store_prepare.disabled() || self.inner.bridge.local_store_reconcile.disabled()) || self.inner.bridge.local_store_execute.disabled())) || self.inner.bridge.local_history.disabled())) && !(self.inner.bridge.android_build.disabled() || (self.inner.bridge.project_recovery.disabled() || (self.inner.bridge.ios_archive.disabled() || (self.inner.bridge.artifact_inspection.disabled() || (self.inner.bridge.tool_acquisition.disabled() || self.inner.bridge.upload_key.disabled())))))
+                 && self.inner.bridge.supervisor.can_exit() && self.inner.bridge.edits.can_exit() && self.inner.bridge.diagnostics.can_exit()
+-                && (self.inner.bridge.preflight.can_exit() && ((self.inner.bridge.local_store.can_exit() && ((self.inner.bridge.local_store_prepare.can_exit() && self.inner.bridge.local_store_reconcile.can_exit()) && self.inner.bridge.local_store_execute.can_exit())) && self.inner.bridge.local_history.can_exit())) && (self.inner.bridge.android_build.can_exit() && (self.inner.bridge.project_recovery.can_exit() && self.inner.bridge.ios_archive.can_exit() && (self.inner.bridge.artifact_inspection.can_exit() && (self.inner.bridge.tool_acquisition.can_exit() && self.inner.bridge.upload_key.can_exit()))))
++                && (self.inner.bridge.preflight.can_exit() && (((self.inner.bridge.local_store.can_exit() && self.inner.bridge.apple_provisioning.can_exit()) && ((self.inner.bridge.local_store_prepare.can_exit() && self.inner.bridge.local_store_reconcile.can_exit()) && self.inner.bridge.local_store_execute.can_exit())) && self.inner.bridge.local_history.can_exit())) && (self.inner.bridge.android_build.can_exit() && (self.inner.bridge.project_recovery.can_exit() && self.inner.bridge.ios_archive.can_exit() && (self.inner.bridge.artifact_inspection.can_exit() && (self.inner.bridge.tool_acquisition.can_exit() && self.inner.bridge.upload_key.can_exit()))))
+         }
+@@ -8031,3 +8043,3 @@
+             session: false, stopping: false, unknown: false, quit_pending: false, retiring: false, lock_pending: false,
+-            compatibility_picker_pending: false, maintenance: macos_maintenance::Closure::default(), saved_observation: None, saved_input: None, version_allocation_source: None, session_owner_reason: None, context: None, slot: None, records: Vec::new(), assignments: Vec::new(),
++            compatibility_picker_pending: false, maintenance: macos_maintenance::Closure::default(), saved_observation: None, saved_input: None, apple_provisioning_ready:None, version_allocation_source: None, session_owner_reason: None, context: None, slot: None, records: Vec::new(), assignments: Vec::new(),
+             quit: None, quit_accepted: false, quit_cleanup_end: None, github: ConnectionState::new(), gh_auth: None, git_read: None, evidence: EvidenceRegistry::new(), images: images::Registry::new(), installation: installation::Registry::new(),
+@@ -8164,3 +8176,3 @@
+             session: false, stopping: false, unknown: false, quit_pending: false, retiring: false, lock_pending: false,
+-            compatibility_picker_pending: false, maintenance: macos_maintenance::Closure::default(), saved_observation: None, saved_input: None, version_allocation_source: None, session_owner_reason: None, context: None, slot: None, records: Vec::new(), assignments: Vec::new(),
++            compatibility_picker_pending: false, maintenance: macos_maintenance::Closure::default(), saved_observation: None, saved_input: None, apple_provisioning_ready:None, version_allocation_source: None, session_owner_reason: None, context: None, slot: None, records: Vec::new(), assignments: Vec::new(),
+             quit: None, quit_accepted: false, quit_cleanup_end: None, github: ConnectionState::new(), gh_auth: None, git_read: None, evidence: EvidenceRegistry::new(), images: images::Registry::new(), installation: installation::Registry::new(),
+@@ -8260,3 +8272,3 @@
+             session: true, stopping: false, unknown: false, quit_pending: false, retiring: false, lock_pending: false,
+-            compatibility_picker_pending: false, maintenance: macos_maintenance::Closure::default(), saved_observation: None, saved_input: None, version_allocation_source: None, session_owner_reason: None,
++            compatibility_picker_pending: false, maintenance: macos_maintenance::Closure::default(), saved_observation: None, saved_input: None, apple_provisioning_ready:None, version_allocation_source: None, session_owner_reason: None,
+             context: None, slot: None, records: Vec::new(), assignments: Vec::new(), quit: None, quit_accepted: false, quit_cleanup_end: None,
+diff --git a/desktop/src-tauri/src/asset_session_installation_memory.rs b/desktop/src-tauri/src/asset_session_installation_memory.rs
+--- a/desktop/src-tauri/src/asset_session_installation_memory.rs
++++ b/desktop/src-tauri/src/asset_session_installation_memory.rs
+@@ -549,3 +549,3 @@
+             exhausted:false,lost_observed:false,session:false,stopping:false,unknown:false,quit_pending:false,
+-            retiring:false,lock_pending:false,compatibility_picker_pending:false,saved_observation:None,saved_input:None,version_allocation_source:None,
++            retiring:false,lock_pending:false,compatibility_picker_pending:false,saved_observation:None,saved_input:None,apple_provisioning_ready:None,version_allocation_source:None,
+             session_owner_reason:None,maintenance:macos_maintenance::Closure::default(),context:Some(context),slot:Some(slot),records,assignments,
+@@ -655,3 +655,3 @@
+                 exhausted: false, lost_observed: false, session: false, stopping: false, unknown: false,
+-                quit_pending: false, retiring: false, lock_pending: false, compatibility_picker_pending: false, saved_observation: None, saved_input: None, git_read: None, version_allocation_source: None,
++                quit_pending: false, retiring: false, lock_pending: false, compatibility_picker_pending: false, saved_observation: None, saved_input: None, apple_provisioning_ready:None, git_read: None, version_allocation_source: None,
+                 session_owner_reason: None, maintenance: macos_maintenance::Closure::default(), context: None, slot: None, records: Vec::new(), assignments: Vec::new(),
+diff --git a/desktop/src-tauri/src/asset_session_local_history.rs b/desktop/src-tauri/src/asset_session_local_history.rs
+--- a/desktop/src-tauri/src/asset_session_local_history.rs
++++ b/desktop/src-tauri/src/asset_session_local_history.rs
+@@ -73,3 +73,3 @@
+         if state.unknown || state.exhausted || self.inner.bridge.supervisor.disabled() || self.inner.bridge.edits.disabled()
+-            || self.inner.bridge.diagnostics.disabled() || self.inner.bridge.preflight.disabled() || (self.inner.bridge.local_store.disabled() || self.inner.bridge.local_store_prepare.disabled())
++            || self.inner.bridge.diagnostics.disabled() || self.inner.bridge.preflight.disabled() || self.inner.bridge.apple_provisioning.disabled() || (self.inner.bridge.local_store.disabled() || self.inner.bridge.local_store_prepare.disabled())
+             || self.inner.bridge.android_build.disabled() || self.inner.bridge.project_recovery.disabled()
+@@ -77,3 +77,3 @@
+         if state.stopping || self.inner.bridge.supervisor.stopping() || self.inner.bridge.edits.stopping()
+-            || self.inner.bridge.diagnostics.stopping() || self.inner.bridge.preflight.stopping() || (self.inner.bridge.local_store.stopping() || self.inner.bridge.local_store_prepare.stopping())
++            || self.inner.bridge.diagnostics.stopping() || self.inner.bridge.preflight.stopping() || self.inner.bridge.apple_provisioning.stopping() || (self.inner.bridge.local_store.stopping() || self.inner.bridge.local_store_prepare.stopping())
+             || self.inner.bridge.android_build.stopping() || self.inner.bridge.project_recovery.stopping()
+@@ -88,3 +88,3 @@
+             || !self.inner.bridge.supervisor.can_exit() || self.inner.bridge.diagnostics.busy() || self.inner.bridge.preflight.busy()
+-            || (self.inner.bridge.local_store.busy() || self.inner.bridge.local_store_prepare.busy()) || self.inner.bridge.android_build.busy() || self.inner.bridge.project_recovery.busy()
++            || self.inner.bridge.apple_provisioning.busy() || (self.inner.bridge.local_store.busy() || self.inner.bridge.local_store_prepare.busy()) || self.inner.bridge.android_build.busy() || self.inner.bridge.project_recovery.busy()
+             || self.inner.bridge.ios_archive.busy() || (self.inner.bridge.artifact_inspection.busy() || self.inner.bridge.tool_acquisition.busy()){return Availability::Busy;}
+diff --git a/desktop/src-tauri/src/asset_session_saved_observation.rs b/desktop/src-tauri/src/asset_session_saved_observation.rs
+--- a/desktop/src-tauri/src/asset_session_saved_observation.rs
++++ b/desktop/src-tauri/src/asset_session_saved_observation.rs
+@@ -370 +370,5 @@
+ }
++
++#[path="asset_session_apple_provisioning_saved.rs"]
++mod apple_provisioning;
++pub(crate) use apple_provisioning::AppleProvisioningSavedInput;
+diff --git a/desktop/src-tauri/src/asset_session_store_material.rs b/desktop/src-tauri/src/asset_session_store_material.rs
+--- a/desktop/src-tauri/src/asset_session_store_material.rs
++++ b/desktop/src-tauri/src/asset_session_store_material.rs
+@@ -5,2 +5,4 @@
+ use sha2::{Digest, Sha256};
++#[path="asset_session_apple_provisioning_material.rs"]
++mod apple_provisioning;
+
+@@ -16,3 +18,3 @@
+ #[derive(Clone,PartialEq,Eq)]
+-enum StoreCommand {Access(wire::Context),Prepare(crate::local_store_prepare_protocol::Context),Reconcile(crate::local_store_reconcile_protocol::Context),Execute(crate::local_store_execute_protocol::Context)}
++enum StoreCommand {Provisioning(crate::apple_provisioning_protocol::Context),Access(wire::Context),Prepare(crate::local_store_prepare_protocol::Context),Reconcile(crate::local_store_reconcile_protocol::Context),Execute(crate::local_store_execute_protocol::Context)}
+ impl StoreCommand {
+@@ -24,2 +26,3 @@
+     fn apple_material(&self)->bool {match self {
++        Self::Provisioning(_)=>true,
+         Self::Access(c)=>c.platform==wire::AccessPlatform::Ios,
+@@ -63,2 +66,3 @@
+             let (common,extra)=match command {
++                StoreCommand::Provisioning(c)=>([c.project_id.capacity(),c.saved_config.sha256.capacity(),c.saved_version.source.capacity(),c.saved_version.sha256.capacity(),c.saved_version.name.capacity(),c.record_id.capacity()],[c.display_name.capacity(),c.reference.as_ref().map_or(0,|r|r.operation_id.capacity()),c.reference.as_ref().map_or(0,|r|r.owner_generation.capacity())]),
+                 StoreCommand::Access(c)=>([c.project_id.capacity(),c.saved_config.sha256.capacity(),c.saved_version.source.capacity(),c.saved_version.sha256.capacity(),c.saved_version.name.capacity(),c.record_id.capacity()],[0;3]),
+diff --git a/desktop/src-tauri/src/asset_session_tool_acquisition.rs b/desktop/src-tauri/src/asset_session_tool_acquisition.rs
+--- a/desktop/src-tauri/src/asset_session_tool_acquisition.rs
++++ b/desktop/src-tauri/src/asset_session_tool_acquisition.rs
+@@ -232,2 +232,3 @@
+             || bridge.local_history.disabled()
++            || bridge.apple_provisioning.disabled()
+             || bridge.android_build.disabled()
+@@ -249,2 +250,3 @@
+             || bridge.local_history.stopping()
++            || bridge.apple_provisioning.stopping()
+             || bridge.android_build.stopping()
+@@ -299,2 +301,3 @@
+             || bridge.local_history.busy()
++            || bridge.apple_provisioning.busy()
+             || bridge.android_build.busy()
+diff --git a/desktop/src-tauri/src/bridge.rs b/desktop/src-tauri/src/bridge.rs
+--- a/desktop/src-tauri/src/bridge.rs
++++ b/desktop/src-tauri/src/bridge.rs
+@@ -213,2 +213,3 @@
+     pub(crate) local_history: crate::local_release_history_owner::LocalReleaseHistoryOwner,
++    pub(crate) apple_provisioning: crate::saved_command_owner::SavedCommandOwner,
+     pub(crate) local_store: crate::local_store_preflight_owner::LocalStorePreflightOwner,
+@@ -283,2 +284,3 @@
+             local_history: crate::local_release_history_owner::LocalReleaseHistoryOwner::new(runtime.clone()),
++            apple_provisioning: crate::saved_command_owner::SavedCommandOwner::apple_provisioning(runtime.clone()),
+             local_store: crate::local_store_preflight_owner::LocalStorePreflightOwner::new(runtime.clone()),
+@@ -461,3 +463,3 @@
+     pub fn open_config_edit(&self, window: &str, project_id: String) -> Result<ConfigEditStatus, BridgeError> {
+-        self.preflight.ensure_idle()?; self.local_store.ensure_idle()?; self.local_store_prepare.ensure_idle()?; self.local_store_execute.ensure_idle()?; self.local_store_reconcile.ensure_idle()?; self.local_history.ensure_idle()?;
++        self.preflight.ensure_idle()?; self.local_store.ensure_idle()?; self.apple_provisioning.ensure_idle()?; self.local_store_prepare.ensure_idle()?; self.local_store_execute.ensure_idle()?; self.local_store_reconcile.ensure_idle()?; self.local_history.ensure_idle()?;
+         self.android_build.ensure_idle()?;
+@@ -475,3 +477,3 @@
+     pub(crate) fn open_config_edit_published(&self, publisher: &crate::saved_command_owner::AndroidRegistrationPublisher, window: &str, project_id: String) -> Result<ConfigEditStatus, BridgeError> {
+-        self.preflight.ensure_idle()?; self.local_store.ensure_idle()?; self.local_store_prepare.ensure_idle()?; self.local_store_execute.ensure_idle()?; self.local_store_reconcile.ensure_idle()?; self.local_history.ensure_idle()?;
++        self.preflight.ensure_idle()?; self.local_store.ensure_idle()?; self.apple_provisioning.ensure_idle()?; self.local_store_prepare.ensure_idle()?; self.local_store_execute.ensure_idle()?; self.local_store_reconcile.ensure_idle()?; self.local_history.ensure_idle()?;
+         self.android_build.ensure_idle()?;
+@@ -756,3 +758,3 @@
+     pub(crate) fn register_picked_project(&self, path: PathBuf) -> Result<Project, BridgeError> {
+-        self.preflight.ensure_idle()?; self.local_store.ensure_idle()?; self.local_store_prepare.ensure_idle()?; self.local_store_execute.ensure_idle()?; self.local_store_reconcile.ensure_idle()?; self.local_history.ensure_idle()?;
++        self.preflight.ensure_idle()?; self.local_store.ensure_idle()?; self.apple_provisioning.ensure_idle()?; self.local_store_prepare.ensure_idle()?; self.local_store_execute.ensure_idle()?; self.local_store_reconcile.ensure_idle()?; self.local_history.ensure_idle()?;
+         self.android_build.ensure_idle()?;
+diff --git a/desktop/src-tauri/src/lib.rs b/desktop/src-tauri/src/lib.rs
+--- a/desktop/src-tauri/src/lib.rs
++++ b/desktop/src-tauri/src/lib.rs
+@@ -133,2 +133,3 @@
+ mod local_release_history_owner;
++mod apple_provisioning_protocol;
+ mod local_store_preflight_protocol;
+diff --git a/desktop/src-tauri/src/runtime.rs b/desktop/src-tauri/src/runtime.rs
+--- a/desktop/src-tauri/src/runtime.rs
++++ b/desktop/src-tauri/src/runtime.rs
+@@ -225,2 +225,12 @@
+         Ok(VerifiedRuntime {python:cwd.join("python/bin/python3"),bootstrap:cwd.join("tool_acquisition_bootstrap.py"),core:cwd.join("core.zip"),cwd})
++    }
++}
++#[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
++pub(crate) struct AppleProvisioningInstalledProfile { _private: () }
++#[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
++impl AppleProvisioningInstalledProfile {
++    pub(crate) fn selection(&self) -> Result<VerifiedRuntime, BridgeError> {
++        if !macos_bindings() { return Err(unavailable()); }
++        let cwd = crate::installed_runtime::runtime_root();
++        Ok(VerifiedRuntime { python: cwd.join("python/bin/python3"), bootstrap: cwd.join("apple_provisioning_bootstrap.py"), core: cwd.join("core.zip"), cwd })
+     }
+@@ -2166,2 +2176,8 @@
+     }
++    pub(crate) fn apple_provisioning_installed_profile_available(&self) -> bool {
++        #[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64")))]
++        { macos_bindings() }
++        #[cfg(not(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"))))]
++        { false }
++    }
+     pub(crate) fn local_store_preflight_installed_profile_available(&self) -> bool {
+@@ -2189,2 +2205,8 @@
+         { false }
++    }
++    #[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64")))]
++    pub(crate) fn resolve_apple_provisioning_installed(&self, originals: &mut crate::installed_runtime::StoreRuntimeSlots)
++        -> Result<VerifiedRuntime, BridgeError> {
++        if !self.apple_provisioning_installed_profile_available() { return Err(unavailable()); }
++        originals.inspect_apple_provisioning_once(AppleProvisioningInstalledProfile { _private: () })
+     }
+diff --git a/desktop/src-tauri/src/saved_command_owner.rs b/desktop/src-tauri/src/saved_command_owner.rs
+--- a/desktop/src-tauri/src/saved_command_owner.rs
++++ b/desktop/src-tauri/src/saved_command_owner.rs
+@@ -13,3 +13,3 @@
+ use {std::process::Stdio, tokio::process::Command};
+-use crate::{asset_source::RegisteredRoot, offline_preflight_protocol as wire, android_build_protocol as android_wire, project_recovery_protocol as recovery_wire, ios_archive_protocol as ios_wire, artifact_inspection_protocol as artifact_wire, local_store_preflight_protocol as store_wire, local_store_prepare_protocol as prepare_wire, local_store_reconcile_protocol as reconcile_wire, local_store_execute_protocol as execute_wire, local_release_history_protocol as history_wire, tool_acquisition_protocol as tools_wire,
++use crate::{asset_source::RegisteredRoot, offline_preflight_protocol as wire, android_build_protocol as android_wire, project_recovery_protocol as recovery_wire, ios_archive_protocol as ios_wire, artifact_inspection_protocol as artifact_wire, local_store_preflight_protocol as store_wire, local_store_prepare_protocol as prepare_wire, local_store_reconcile_protocol as reconcile_wire, local_store_execute_protocol as execute_wire, local_release_history_protocol as history_wire, tool_acquisition_protocol as tools_wire, apple_provisioning_protocol as apple_wire,
+     error::BridgeError, runtime::{RuntimeConfig, VerifiedRuntime}, android_toolchain::AndroidToolchainProfile, asset_session::{IOSSigningMaterial, AndroidSigningMaterial, SelectedStoreMaterial}};
+@@ -60,3 +60,5 @@
+ mod apple_provisioning;
+-pub(crate) use apple_provisioning::{AppleProvisioningNativeJoined, AppleProvisioningAllJobsJoined};
++pub(crate) use apple_provisioning::{AppleProvisioningNativeJoined, AppleProvisioningAllJobsJoined, APPLE_PROVISIONING_INPUT_LIMIT};
++pub(crate) use apple_provisioning::document_backing_bytes as apple_provisioning_document_backing_bytes;
++pub(crate) use apple_provisioning::retained_document_backing_bytes as apple_provisioning_retained_document_backing_bytes;
+
+@@ -179,3 +181,3 @@
+ #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+-enum SavedCommandDomain { GenerateUploadKey, ToolAcquisition, LocalReleaseHistory, LocalStoreExecute, LocalStoreReconcile, LocalStorePrepare, LocalStorePreflight, OfflinePreflight, AndroidBuild, ProjectRecovery, IOSArchive, ArtifactInspection }
++enum SavedCommandDomain { GenerateUploadKey, AppleProvisioning, ToolAcquisition, LocalReleaseHistory, LocalStoreExecute, LocalStoreReconcile, LocalStorePrepare, LocalStorePreflight, OfflinePreflight, AndroidBuild, ProjectRecovery, IOSArchive, ArtifactInspection }
+ impl SavedCommandDomain {
+@@ -183,2 +185,3 @@
+         Self::GenerateUploadKey => upload_wire::unavailable(),
++        Self::AppleProvisioning => BridgeError::new("apple_provisioning_unavailable", "Bundle-ID provisioning requires this original Mac document, selected API key and explicitly prepared local state."),
+         Self::ToolAcquisition => BridgeError::new("tool_acquisition_unavailable", "Check this computer and choose existing tools first; automatic downloads require the supported native owner."),
+@@ -197,2 +200,3 @@
+         Self::GenerateUploadKey => BridgeError::new("android_upload_key_busy", "Finish or cancel the current key operation first."),
++        Self::AppleProvisioning => BridgeError::new("apple_provisioning_busy", "Finish or cancel the current operation before Bundle-ID provisioning."),
+         Self::ToolAcquisition => BridgeError::new("tool_acquisition_busy", "Finish or cancel the current build-tool operation first."),
+@@ -211,2 +215,3 @@
+         Self::GenerateUploadKey => upload_wire::invalid(),
++        Self::AppleProvisioning => apple_wire::invalid(),
+         Self::ToolAcquisition => tools_wire::invalid(),
+@@ -225,2 +230,3 @@
+         Self::GenerateUploadKey => upload_wire::REQUEST_LIMIT,
++        Self::AppleProvisioning => apple_wire::REQUEST_LIMIT,
+         Self::ToolAcquisition => tools_wire::REQUEST_LIMIT,
+@@ -230,2 +236,3 @@
+         Self::GenerateUploadKey => upload_wire::RESPONSE_LIMIT,
++        Self::AppleProvisioning => apple_wire::RESPONSE_LIMIT,
+         Self::ToolAcquisition => tools_wire::RESPONSE_LIMIT,
+@@ -233,9 +240,9 @@
+     } }
+-    fn frame_limit(self) -> usize { match self { Self::GenerateUploadKey => 2, Self::ToolAcquisition => 2, Self::LocalReleaseHistory => 8, Self::LocalStoreExecute => 6, Self::LocalStorePrepare => 6, Self::LocalStoreReconcile => 4, Self::LocalStorePreflight => 2, Self::OfflinePreflight => 2, Self::AndroidBuild => 8, Self::ProjectRecovery => 2, Self::IOSArchive => ios_wire::MAX_FRAMES, Self::ArtifactInspection => 2 } }
++    fn frame_limit(self) -> usize { match self { Self::GenerateUploadKey => 2, Self::AppleProvisioning => apple_wire::MAX_EVENTS as usize + 2, Self::ToolAcquisition => 2, Self::LocalReleaseHistory => 8, Self::LocalStoreExecute => 6, Self::LocalStorePrepare => 6, Self::LocalStoreReconcile => 4, Self::LocalStorePreflight => 2, Self::OfflinePreflight => 2, Self::AndroidBuild => 8, Self::ProjectRecovery => 2, Self::IOSArchive => ios_wire::MAX_FRAMES, Self::ArtifactInspection => 2 } }
+ }
+ #[derive(Clone, Debug, PartialEq, Eq)]
+-enum Context { GenerateUploadKey(upload_wire::UploadKeyContext), ToolAcquisition(tools_wire::Context), LocalReleaseHistory(history_wire::Context), LocalStoreExecute(execute_wire::Context), LocalStoreReconcile(reconcile_wire::Context), LocalStorePrepare(prepare_wire::Context), LocalStorePreflight(store_wire::Context), OfflinePreflight(wire::Context), AndroidBuild(android_wire::Context), ProjectRecovery(recovery_wire::Context), IOSArchive(ios_wire::Context), ArtifactInspection(artifact_wire::Context) }
++enum Context { GenerateUploadKey(upload_wire::UploadKeyContext), AppleProvisioning(apple_wire::Context), ToolAcquisition(tools_wire::Context), LocalReleaseHistory(history_wire::Context), LocalStoreExecute(execute_wire::Context), LocalStoreReconcile(reconcile_wire::Context), LocalStorePrepare(prepare_wire::Context), LocalStorePreflight(store_wire::Context), OfflinePreflight(wire::Context), AndroidBuild(android_wire::Context), ProjectRecovery(recovery_wire::Context), IOSArchive(ios_wire::Context), ArtifactInspection(artifact_wire::Context) }
+ impl Context {
+     fn signed_ios(&self) -> bool { matches!(self, Self::IOSArchive(context) if context.signed()) }
+-    fn requires_private_material(&self) -> bool { self.signed_ios() || matches!(self, Self::AndroidBuild(c) if c.signed()) || matches!(self, Self::LocalStorePreflight(_) | Self::LocalStoreExecute(_) | Self::LocalStorePrepare(_) | Self::LocalStoreReconcile(_)) }
++    fn requires_private_material(&self) -> bool { self.signed_ios() || matches!(self, Self::AndroidBuild(c) if c.signed()) || matches!(self, Self::AppleProvisioning(_) | Self::LocalStorePreflight(_) | Self::LocalStoreExecute(_) | Self::LocalStorePrepare(_) | Self::LocalStoreReconcile(_)) }
+     fn recovery_ios(&self) -> bool { matches!(self, Self::IOSArchive(context) if context.recovery()) }
+@@ -244,2 +251,3 @@
+         Self::GenerateUploadKey(_) => SavedCommandDomain::GenerateUploadKey,
++        Self::AppleProvisioning(_) => SavedCommandDomain::AppleProvisioning,
+         Self::ToolAcquisition(_) => SavedCommandDomain::ToolAcquisition,
+@@ -249,2 +257,3 @@
+         Self::GenerateUploadKey(c) => &c.runtime_project_id,
++        Self::AppleProvisioning(c) => &c.project_id,
+         Self::ToolAcquisition(c) => &c.project_id,
+@@ -259,2 +268,3 @@
+     fn matches(&self, context: &Context, registration: u32, project: &RegisteredRoot) -> bool { match (self, context) {
++        (Self::Store(value), Context::AppleProvisioning(c)) => value.provisioning_matches(c, registration, project),
+         (Self::Store(value), Context::LocalStoreExecute(c)) => value.execute_matches(c, registration, project),
+@@ -282,3 +292,3 @@
+ #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+-enum Profile { GenerateUploadKey(upload_wire::Profile), ToolAcquisition(tools_wire::Profile), LocalReleaseHistory(history_wire::Profile), LocalStoreExecute(execute_wire::Profile), LocalStoreReconcile(reconcile_wire::Profile), LocalStorePrepare(prepare_wire::Profile), LocalStorePreflight(store_wire::Profile), OfflinePreflight(wire::Profile), AndroidBuild(android_wire::Profile), ProjectRecovery(recovery_wire::Profile), IOSArchive(ios_wire::Profile), ArtifactInspection(artifact_wire::Profile) }
++enum Profile { GenerateUploadKey(upload_wire::Profile), AppleProvisioning(apple_wire::Profile), ToolAcquisition(tools_wire::Profile), LocalReleaseHistory(history_wire::Profile), LocalStoreExecute(execute_wire::Profile), LocalStoreReconcile(reconcile_wire::Profile), LocalStorePrepare(prepare_wire::Profile), LocalStorePreflight(store_wire::Profile), OfflinePreflight(wire::Profile), AndroidBuild(android_wire::Profile), ProjectRecovery(recovery_wire::Profile), IOSArchive(ios_wire::Profile), ArtifactInspection(artifact_wire::Profile) }
+ impl Profile {
+@@ -286,2 +296,3 @@
+         SavedCommandDomain::GenerateUploadKey => upload_wire::Profile::current().map(Self::GenerateUploadKey),
++        SavedCommandDomain::AppleProvisioning => apple_wire::Profile::current().map(Self::AppleProvisioning),
+         SavedCommandDomain::ToolAcquisition => tools_wire::Profile::current().map(Self::ToolAcquisition),
+@@ -1080,3 +1091,3 @@
+ #[derive(Clone)]
+-enum Terminal { GenerateUploadKey(upload_wire::Terminal), ToolAcquisition(tools_wire::Terminal), LocalReleaseHistory(history_wire::Terminal), LocalStoreExecute(execute_wire::Terminal), LocalStoreReconcile(reconcile_wire::Terminal), LocalStorePrepare(prepare_wire::Terminal), LocalStorePreflight(store_wire::Terminal), OfflinePreflight(wire::Terminal), AndroidBuild(android_wire::Terminal), ProjectRecovery(recovery_wire::Terminal), IOSArchive(ios_wire::Terminal), ArtifactInspection(artifact_wire::Terminal) }
++enum Terminal { GenerateUploadKey(upload_wire::Terminal), AppleProvisioning(apple_wire::Terminal), ToolAcquisition(tools_wire::Terminal), LocalReleaseHistory(history_wire::Terminal), LocalStoreExecute(execute_wire::Terminal), LocalStoreReconcile(reconcile_wire::Terminal), LocalStorePrepare(prepare_wire::Terminal), LocalStorePreflight(store_wire::Terminal), OfflinePreflight(wire::Terminal), AndroidBuild(android_wire::Terminal), ProjectRecovery(recovery_wire::Terminal), IOSArchive(ios_wire::Terminal), ArtifactInspection(artifact_wire::Terminal) }
+ impl Terminal {
+@@ -1084,2 +1095,3 @@
+         Self::GenerateUploadKey(t) => upload_key::core_outcome(t.status),
++        Self::AppleProvisioning(t) => Outcome::from_store(t.outcome),
+         Self::ToolAcquisition(t) => Outcome::from_tools(t.outcome),
+@@ -1090,2 +1102,3 @@
+         Self::GenerateUploadKey(t) => upload_key::core_reason(t.status),
++        Self::AppleProvisioning(t) => Reason::from_apple(t.reason),
+         Self::ToolAcquisition(t) => Reason::from_tools(t.reason),
+@@ -1096,2 +1109,3 @@
+         Self::GenerateUploadKey(t) => t.settled(),
++        Self::AppleProvisioning(t) => t.lifetime.settled(),
+         Self::ToolAcquisition(t) => t.lifetime.settled(),
+@@ -1101,5 +1115,5 @@
+ }
+-enum Frame { GenerateUploadKey(upload_wire::Frame), ToolAcquisition(tools_wire::Frame), LocalReleaseHistory(history_wire::Frame), LocalStoreExecute(execute_wire::Frame), LocalStoreReconcile(reconcile_wire::Frame), LocalStorePrepare(prepare_wire::Frame), LocalStorePreflight(store_wire::Frame), OfflinePreflight(wire::Frame), AndroidBuild(android_wire::Frame), ProjectRecovery(recovery_wire::Frame), IOSArchive(ios_wire::Frame), ArtifactInspection(artifact_wire::Frame) }
++enum Frame { GenerateUploadKey(upload_wire::Frame), AppleProvisioning(apple_wire::Frame), ToolAcquisition(tools_wire::Frame), LocalReleaseHistory(history_wire::Frame), LocalStoreExecute(execute_wire::Frame), LocalStoreReconcile(reconcile_wire::Frame), LocalStorePrepare(prepare_wire::Frame), LocalStorePreflight(store_wire::Frame), OfflinePreflight(wire::Frame), AndroidBuild(android_wire::Frame), ProjectRecovery(recovery_wire::Frame), IOSArchive(ios_wire::Frame), ArtifactInspection(artifact_wire::Frame) }
+ struct Start { operation_id: String, owner_generation: String }
+-enum Status { GenerateUploadKey(upload_wire::Status), ToolAcquisition(tools_wire::Status), LocalReleaseHistory(history_wire::Status), LocalStoreExecute(execute_wire::Status), LocalStoreReconcile(reconcile_wire::Status), LocalStorePrepare(prepare_wire::Status), LocalStorePreflight(store_wire::Status), OfflinePreflight(wire::Status), AndroidBuild(android_wire::Status), ProjectRecovery(recovery_wire::Status), IOSArchive(ios_wire::Status), ArtifactInspection(artifact_wire::Status) }
++enum Status { GenerateUploadKey(upload_wire::Status), AppleProvisioning(apple_wire::Status), ToolAcquisition(tools_wire::Status), LocalReleaseHistory(history_wire::Status), LocalStoreExecute(execute_wire::Status), LocalStoreReconcile(reconcile_wire::Status), LocalStorePrepare(prepare_wire::Status), LocalStorePreflight(store_wire::Status), OfflinePreflight(wire::Status), AndroidBuild(android_wire::Status), ProjectRecovery(recovery_wire::Status), IOSArchive(ios_wire::Status), ArtifactInspection(artifact_wire::Status) }
+ impl Status {
+@@ -1115,9 +1129,9 @@
+     fn offline(self) -> Result<wire::Status, BridgeError> { match self {
+-        Self::OfflinePreflight(status) => Ok(status), Self::AndroidBuild(_) | Self::ProjectRecovery(_) | Self::IOSArchive(_) | Self::ArtifactInspection(_) | Self::LocalStoreExecute(_) | Self::LocalStorePrepare(_) | Self::LocalStoreReconcile(_) | Self::LocalStorePreflight(_) | Self::LocalReleaseHistory(_) | Self::ToolAcquisition(_) | Self::GenerateUploadKey(_) => Err(BridgeError::protocol()),
++        Self::OfflinePreflight(status) => Ok(status), Self::AndroidBuild(_) | Self::ProjectRecovery(_) | Self::IOSArchive(_) | Self::ArtifactInspection(_) | Self::LocalStoreExecute(_) | Self::LocalStorePrepare(_) | Self::LocalStoreReconcile(_) | Self::LocalStorePreflight(_) | Self::LocalReleaseHistory(_) | Self::ToolAcquisition(_) | Self::GenerateUploadKey(_) | Self::AppleProvisioning(_) => Err(BridgeError::protocol()),
+     } }
+     fn android(self) -> Result<android_wire::Status, BridgeError> { match self {
+-        Self::AndroidBuild(status) => Ok(status), Self::OfflinePreflight(_) | Self::ProjectRecovery(_) | Self::IOSArchive(_) | Self::ArtifactInspection(_) | Self::LocalStoreExecute(_) | Self::LocalStorePrepare(_) | Self::LocalStoreReconcile(_) | Self::LocalStorePreflight(_) | Self::LocalReleaseHistory(_) | Self::ToolAcquisition(_) | Self::GenerateUploadKey(_) => Err(BridgeError::protocol()),
++        Self::AndroidBuild(status) => Ok(status), Self::OfflinePreflight(_) | Self::ProjectRecovery(_) | Self::IOSArchive(_) | Self::ArtifactInspection(_) | Self::LocalStoreExecute(_) | Self::LocalStorePrepare(_) | Self::LocalStoreReconcile(_) | Self::LocalStorePreflight(_) | Self::LocalReleaseHistory(_) | Self::ToolAcquisition(_) | Self::GenerateUploadKey(_) | Self::AppleProvisioning(_) => Err(BridgeError::protocol()),
+     } }
+     fn ios(self) -> Result<ios_wire::Status, BridgeError> { match self {
+-        Self::IOSArchive(status) => Ok(status), Self::OfflinePreflight(_) | Self::AndroidBuild(_) | Self::ProjectRecovery(_) | Self::ArtifactInspection(_) | Self::LocalStoreExecute(_) | Self::LocalStorePrepare(_) | Self::LocalStoreReconcile(_) | Self::LocalStorePreflight(_) | Self::LocalReleaseHistory(_) | Self::ToolAcquisition(_) | Self::GenerateUploadKey(_) => Err(BridgeError::protocol()),
++        Self::IOSArchive(status) => Ok(status), Self::OfflinePreflight(_) | Self::AndroidBuild(_) | Self::ProjectRecovery(_) | Self::ArtifactInspection(_) | Self::LocalStoreExecute(_) | Self::LocalStorePrepare(_) | Self::LocalStoreReconcile(_) | Self::LocalStorePreflight(_) | Self::LocalReleaseHistory(_) | Self::ToolAcquisition(_) | Self::GenerateUploadKey(_) | Self::AppleProvisioning(_) => Err(BridgeError::protocol()),
+     } }
+@@ -1129,3 +1143,3 @@
+     fn new(domain: SavedCommandDomain, admitted: Instant) -> Self {
+-        let (work, hard) = match domain { SavedCommandDomain::GenerateUploadKey => (Duration::from_secs(upload_wire::WORK_SECONDS),Duration::from_secs(upload_wire::FINALITY_SECONDS)), SavedCommandDomain::ToolAcquisition => (Duration::from_secs(1200),Duration::from_secs(1210)), SavedCommandDomain::LocalReleaseHistory => (Duration::from_secs(60),Duration::from_secs(62)), SavedCommandDomain::LocalStorePreflight | SavedCommandDomain::LocalStorePrepare | SavedCommandDomain::LocalStoreReconcile | SavedCommandDomain::LocalStoreExecute => (Duration::from_secs(1200),Duration::from_secs(1210)), SavedCommandDomain::OfflinePreflight => (OFFLINE_WORK, OFFLINE_HARD),
++        let (work, hard) = match domain { SavedCommandDomain::GenerateUploadKey => (Duration::from_secs(upload_wire::WORK_SECONDS),Duration::from_secs(upload_wire::FINALITY_SECONDS)), SavedCommandDomain::ToolAcquisition => (Duration::from_secs(1200),Duration::from_secs(1210)), SavedCommandDomain::LocalReleaseHistory => (Duration::from_secs(60),Duration::from_secs(62)), SavedCommandDomain::AppleProvisioning | SavedCommandDomain::LocalStorePreflight | SavedCommandDomain::LocalStorePrepare | SavedCommandDomain::LocalStoreReconcile | SavedCommandDomain::LocalStoreExecute => (Duration::from_secs(1200),Duration::from_secs(1210)), SavedCommandDomain::OfflinePreflight => (OFFLINE_WORK, OFFLINE_HARD),
+             SavedCommandDomain::AndroidBuild => (ANDROID_WORK, ANDROID_HARD), SavedCommandDomain::IOSArchive => (IOS_WORK, IOS_HARD), SavedCommandDomain::ProjectRecovery => (RECOVERY_WORK, RECOVERY_HARD), SavedCommandDomain::ArtifactInspection => (Duration::from_secs(900),Duration::from_secs(910)) };
+@@ -1214,2 +1228,3 @@
+ struct Registry {
++    apple: apple_provisioning::Registry,
+     tool_acquisition: tool_acquisition::Registry,
+@@ -1222,3 +1237,3 @@
+ }
+-struct Prepared { upload_key_preparation:Option<Arc<UploadKeyPreparation>>, upload_key:Option<Arc<upload_key::Intent>>, tools:Option<Arc<tool_acquisition::Intent>>, local_history:Option<Arc<crate::asset_session::LocalHistoryConsent>>, projection: RunProjection, expires: Instant, registration: u32, project: RegisteredRoot, recovery_stamp: Option<String>,
++struct Prepared { upload_key_preparation:Option<Arc<UploadKeyPreparation>>, upload_key:Option<Arc<upload_key::Intent>>, apple:Option<Arc<apple_provisioning::Intent>>, tools:Option<Arc<tool_acquisition::Intent>>, local_history:Option<Arc<crate::asset_session::LocalHistoryConsent>>, projection: RunProjection, expires: Instant, registration: u32, project: RegisteredRoot, recovery_stamp: Option<String>,
+     material: Option<PrivateSigningMaterial>, recovery: Option<Arc<IOSRecoveryObservation>>,
+@@ -1403,2 +1418,3 @@
+     upload_key: upload_key::State,
++    apple: apple_provisioning::State,
+     tools: tool_acquisition::State,
+@@ -1864,3 +1880,3 @@
+     #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+-    if matches!(owner.domain,SavedCommandDomain::LocalStorePreflight|SavedCommandDomain::LocalStorePrepare | SavedCommandDomain::LocalStoreReconcile) {
++    if matches!(owner.domain,SavedCommandDomain::AppleProvisioning|SavedCommandDomain::LocalStorePreflight|SavedCommandDomain::LocalStorePrepare | SavedCommandDomain::LocalStoreReconcile) {
+         if let Some(native)=&book.store_installed {match native.lock(){Ok(mut slots)=>slots.mark_interrupted(),Err(error)=>error.into_inner().mark_interrupted()}}
+@@ -1918,2 +1934,3 @@
+     if matches!(domain,SavedCommandDomain::LocalStorePrepare|SavedCommandDomain::LocalStoreReconcile){return store::installed_final(book)&&local_history::sources_final(owner);}
++    if domain==SavedCommandDomain::AppleProvisioning{return store::installed_final(book)&&apple_provisioning::pre_final_jobs(owner);}
+     if domain==SavedCommandDomain::LocalStorePreflight{return store::installed_final(book);}
+@@ -2196,3 +2213,3 @@
+             android_service_dispatcher:std::sync::OnceLock::new(),
+-            domain, runtime, toolchain, registry: Mutex::new(Registry { tool_acquisition:tool_acquisition::Registry::default(), revision: 0, exhausted: false,
++            domain, runtime, toolchain, registry: Mutex::new(Registry { apple:apple_provisioning::Registry::default(), tool_acquisition:tool_acquisition::Registry::default(), revision: 0, exhausted: false,
+             disabled: false, stopping: false, document_lost: false, capability: Availability::RuntimeUnqualified, ios_mode_capabilities: None,
+@@ -2265,3 +2282,3 @@
+                 SavedCommandDomain::AndroidBuild => crate::shell::installed_observation::commands::Domain::Android,
+-                SavedCommandDomain::ProjectRecovery | SavedCommandDomain::IOSArchive | SavedCommandDomain::ArtifactInspection | SavedCommandDomain::LocalStoreExecute | SavedCommandDomain::LocalStorePrepare | SavedCommandDomain::LocalStoreReconcile | SavedCommandDomain::LocalStorePreflight | SavedCommandDomain::LocalReleaseHistory | SavedCommandDomain::ToolAcquisition | SavedCommandDomain::GenerateUploadKey => return Err(self.inner.domain.unavailable()),
++                SavedCommandDomain::ProjectRecovery | SavedCommandDomain::IOSArchive | SavedCommandDomain::ArtifactInspection | SavedCommandDomain::LocalStoreExecute | SavedCommandDomain::LocalStorePrepare | SavedCommandDomain::LocalStoreReconcile | SavedCommandDomain::LocalStorePreflight | SavedCommandDomain::LocalReleaseHistory | SavedCommandDomain::ToolAcquisition | SavedCommandDomain::GenerateUploadKey | SavedCommandDomain::AppleProvisioning => return Err(self.inner.domain.unavailable()),
+             })?;
+@@ -2313,3 +2330,3 @@
+         let android_selection = r.android_catalog.selection().cloned();
+-        r.prepared = Some(Prepared { upload_key_preparation:None, upload_key:None, tools:None, local_history:None, projection, expires, registration, project, recovery_stamp, material, recovery, android_selection, artifact_selection, artifact_tools });
++        r.prepared = Some(Prepared { upload_key_preparation:None, upload_key:None, apple:None, tools:None, local_history:None, projection, expires, registration, project, recovery_stamp, material, recovery, android_selection, artifact_selection, artifact_tools });
+         self.inner.bump(&mut r);
+@@ -2440,3 +2457,3 @@
+         let requires_private_material = context.requires_private_material();
+-        let owner = Arc::new(Session { upload_key:upload_key::State::new(prepared.upload_key), tools:tool_acquisition::State::new(prepared.tools), local_history_consent:prepared.local_history, history:local_history::State::new(), domain: self.inner.domain, id: input.operation_id, generation: input.owner_generation, context, profile, clocks,
++        let owner = Arc::new(Session { upload_key:upload_key::State::new(prepared.upload_key), apple:apple_provisioning::State::new(prepared.apple), tools:tool_acquisition::State::new(prepared.tools), local_history_consent:prepared.local_history, history:local_history::State::new(), domain: self.inner.domain, id: input.operation_id, generation: input.owner_generation, context, profile, clocks,
+             registration: prepared.registration, project: prepared.project, recovery_stamp: prepared.recovery_stamp, request: AsyncMutex::new(None), stop, pipes, frames, wake: Notify::new(), native_audit_cutoff, native_cleanup_cutoff,
+@@ -2584,3 +2601,3 @@
+         let at = self.lifecycle_time(publisher);
+-        let mut r = self.inner.lock(); if r.document_lost { return; } r.document_lost = true; r.recovery_review = None;
++        let mut r = self.inner.lock(); apple_provisioning::invalidate_review(&mut r.apple); if r.document_lost { return; } r.document_lost = true; r.recovery_review = None;
+         r.android_catalog.stop(crate::android_toolchain_catalog::Reason::DocumentLost,at);
+@@ -2602,3 +2619,3 @@
+         let at = self.lifecycle_time(publisher);
+-        let mut r = self.inner.lock(); r.recovery_review = None; self.inner.retire_prepared(&mut r, Reason::ContextChanged);
++        let mut r = self.inner.lock(); apple_provisioning::invalidate_review(&mut r.apple); r.recovery_review = None; self.inner.retire_prepared(&mut r, Reason::ContextChanged);
+         if r.android_catalog.stop(crate::android_toolchain_catalog::Reason::CatalogChanged,at)
+@@ -2626,3 +2643,3 @@
+         let at = self.lifecycle_time(publisher);
+-        let mut r = self.inner.lock(); r.stopping = true; r.recovery_review = None; self.inner.retire_prepared(&mut r, Reason::Shutdown);
++        let mut r = self.inner.lock(); apple_provisioning::invalidate_review(&mut r.apple); r.stopping = true; r.recovery_review = None; self.inner.retire_prepared(&mut r, Reason::Shutdown);
+         r.android_catalog.stop(crate::android_toolchain_catalog::Reason::Shutdown,at);
+@@ -2713,2 +2730,3 @@
+                 if !Arc::ptr_eq(&active.owner, &owner) { r.active = Some(active); return; }
++                if owner.domain==SavedCommandDomain::AppleProvisioning{apple_provisioning::retire_review(&mut r.apple,&active,&owner);}
+                 active.projection.phase = if active.unknown { Phase::Unknown } else { Phase::Terminal };
+@@ -2851,3 +2869,3 @@
+     if p.reason == Reason::None {
+-        p.reason = match p.context.domain() { SavedCommandDomain::OfflinePreflight | SavedCommandDomain::LocalStoreExecute | SavedCommandDomain::LocalStorePrepare | SavedCommandDomain::LocalStoreReconcile | SavedCommandDomain::LocalStorePreflight | SavedCommandDomain::LocalReleaseHistory | SavedCommandDomain::ToolAcquisition | SavedCommandDomain::GenerateUploadKey => Reason::CommandIncomplete,
++        p.reason = match p.context.domain() { SavedCommandDomain::OfflinePreflight | SavedCommandDomain::LocalStoreExecute | SavedCommandDomain::LocalStorePrepare | SavedCommandDomain::LocalStoreReconcile | SavedCommandDomain::LocalStorePreflight | SavedCommandDomain::LocalReleaseHistory | SavedCommandDomain::ToolAcquisition | SavedCommandDomain::GenerateUploadKey | SavedCommandDomain::AppleProvisioning => Reason::CommandIncomplete,
+             SavedCommandDomain::AndroidBuild | SavedCommandDomain::IOSArchive | SavedCommandDomain::ArtifactInspection => Reason::ProtocolError, SavedCommandDomain::ProjectRecovery => Reason::RecoveryIncomplete };
+@@ -2998,3 +3016,3 @@
+             SavedCommandDomain::LocalStoreExecute => self.execute_installed_selected(),
+-            SavedCommandDomain::LocalStorePreflight | SavedCommandDomain::LocalStorePrepare | SavedCommandDomain::LocalStoreReconcile => self.store_installed_selected(),
++            SavedCommandDomain::AppleProvisioning | SavedCommandDomain::LocalStorePreflight | SavedCommandDomain::LocalStorePrepare | SavedCommandDomain::LocalStoreReconcile => self.store_installed_selected(),
+             SavedCommandDomain::OfflinePreflight => self.offline_installed_selected(),
+@@ -3056,3 +3074,3 @@
+             match self.domain {
+-                SavedCommandDomain::GenerateUploadKey | SavedCommandDomain::OfflinePreflight | SavedCommandDomain::IOSArchive | SavedCommandDomain::ArtifactInspection | SavedCommandDomain::LocalStoreExecute | SavedCommandDomain::LocalStorePrepare | SavedCommandDomain::LocalStoreReconcile | SavedCommandDomain::LocalStorePreflight | SavedCommandDomain::LocalReleaseHistory | SavedCommandDomain::ToolAcquisition => Availability::RuntimeUnqualified,
++                SavedCommandDomain::GenerateUploadKey | SavedCommandDomain::OfflinePreflight | SavedCommandDomain::IOSArchive | SavedCommandDomain::ArtifactInspection | SavedCommandDomain::LocalStoreExecute | SavedCommandDomain::LocalStorePrepare | SavedCommandDomain::LocalStoreReconcile | SavedCommandDomain::LocalStorePreflight | SavedCommandDomain::LocalReleaseHistory | SavedCommandDomain::ToolAcquisition | SavedCommandDomain::AppleProvisioning => Availability::RuntimeUnqualified,
+                 SavedCommandDomain::AndroidBuild if !self.android_runtime_selected(None) => Availability::RuntimeUnqualified,
+@@ -3082,2 +3100,7 @@
+             SavedCommandDomain::GenerateUploadKey => Ok(Status::GenerateUploadKey(upload_key::snapshot(r.revision,reason,operation))),
++            SavedCommandDomain::AppleProvisioning => {
++                let status=apple_wire::Status{schema_version:1,status_revision:r.revision,availability:reason.store()?,
++                    operation:operation.map(RunProjection::apple).transpose()?};
++                crate::edit_protocol::bounded(&status,apple_wire::STATUS_LIMIT)?;Ok(Status::AppleProvisioning(status))
++            },
+             SavedCommandDomain::ToolAcquisition => {
+@@ -3148,3 +3171,3 @@
+         owner.native_cleanup_cutoff.send_if_modified(|current| if cleanup < *current { *current = cleanup; true } else { false });
+-        if matches!(owner.domain, SavedCommandDomain::AndroidBuild | SavedCommandDomain::IOSArchive | SavedCommandDomain::LocalStoreExecute | SavedCommandDomain::GenerateUploadKey) {
++        if matches!(owner.domain, SavedCommandDomain::AndroidBuild | SavedCommandDomain::IOSArchive | SavedCommandDomain::LocalStoreExecute | SavedCommandDomain::GenerateUploadKey | SavedCommandDomain::AppleProvisioning) {
+             let end = owner.audit_end(active.first_stop);
+@@ -3223,3 +3246,3 @@
+         // failure, never a reinterpretation of an Offline terminal as Android.
+-        enum Incoming { IOSCandidate(ios_wire::CandidateEvent), Accepted(Option<Stage>), Progress(Stage), History(history_wire::Event), Candidate(android_wire::CandidateEvent), Prepare(prepare_wire::Event), Reconcile(reconcile_wire::Event), Execute(execute_wire::Event), Terminal(Terminal) }
++        enum Incoming { Apple(apple_wire::EventDataFrame), IOSCandidate(ios_wire::CandidateEvent), Accepted(Option<Stage>), Progress(Stage), History(history_wire::Event), Candidate(android_wire::CandidateEvent), Prepare(prepare_wire::Event), Reconcile(reconcile_wire::Event), Execute(execute_wire::Event), Terminal(Terminal) }
+         let incoming = match (owner.domain, frame) {
+@@ -3227,2 +3250,5 @@
+             (SavedCommandDomain::GenerateUploadKey,Frame::GenerateUploadKey(upload_wire::Frame::Terminal(t)))=>Incoming::Terminal(Terminal::GenerateUploadKey(t)),
++            (SavedCommandDomain::AppleProvisioning,Frame::AppleProvisioning(apple_wire::Frame::Accepted))=>Incoming::Accepted(None),
++            (SavedCommandDomain::AppleProvisioning,Frame::AppleProvisioning(apple_wire::Frame::Event(event)))=>Incoming::Apple(event),
++            (SavedCommandDomain::AppleProvisioning,Frame::AppleProvisioning(apple_wire::Frame::Terminal(terminal)))=>Incoming::Terminal(Terminal::AppleProvisioning(terminal)),
+             (SavedCommandDomain::ToolAcquisition,Frame::ToolAcquisition(tools_wire::Frame::Accepted))=>Incoming::Accepted(None),
+@@ -3266,2 +3292,6 @@
+         match incoming {
++            Incoming::Apple(event) if owner.domain==SavedCommandDomain::AppleProvisioning && a.accepted && !a.terminal && !a.unknown
++                && (a.first_stop.is_none() || (now < *owner.native_audit_cutoff.borrow() && owner.apple.accepts_audit(&event))) => {
++                if owner.apple.receive(event,now).is_err(){self.stop_locked(&mut r,owner,Reason::ProtocolError,now);}
++            },
+             Incoming::Prepare(event) if owner.domain==SavedCommandDomain::LocalStorePrepare&&a.accepted&&!a.terminal&&!a.unknown&&a.first_stop.is_none()=>{
+@@ -3300,3 +3330,3 @@
+                     Terminal::IOSArchive(t) => Some(Stage::IOSArchive(t.activity.stage)),
+-                    Terminal::OfflinePreflight(_) | Terminal::ProjectRecovery(_) | Terminal::ArtifactInspection(_) | Terminal::LocalStoreExecute(_) | Terminal::LocalStorePrepare(_) | Terminal::LocalStoreReconcile(_) | Terminal::LocalStorePreflight(_) | Terminal::LocalReleaseHistory(_) | Terminal::ToolAcquisition(_) | Terminal::GenerateUploadKey(_) => None };
++                    Terminal::OfflinePreflight(_) | Terminal::ProjectRecovery(_) | Terminal::ArtifactInspection(_) | Terminal::LocalStoreExecute(_) | Terminal::LocalStorePrepare(_) | Terminal::LocalStoreReconcile(_) | Terminal::LocalStorePreflight(_) | Terminal::LocalReleaseHistory(_) | Terminal::ToolAcquisition(_) | Terminal::GenerateUploadKey(_) | Terminal::AppleProvisioning(_) => None };
+                 if let Some(stage) = stage {
+@@ -3408,2 +3438,7 @@
+     request.take(); drop(request); // Retire only this original bounded input.
++    if sent && !failed && owner.domain==SavedCommandDomain::AppleProvisioning {
++        // Phase futures own original blocking journal handles: never put them
++        // under the broad STOP select or drop them to implement a timeout.
++        failed=match input.io.as_mut(){Some(writer)=>apple_provisioning::write_phases(&inner,&owner,writer).await.is_err(),None=>true};
++    }
+     if failed { inner.stop(&owner, Reason::ProtocolError); }
+@@ -3464,2 +3499,3 @@
+ enum OutputDecoder {
++    AppleProvisioning(apple_wire::Decoder),
+     ToolAcquisition {frames:usize,failed:bool},
+@@ -3477,2 +3513,3 @@
+         match (owner.domain, &owner.context) {
++            (SavedCommandDomain::AppleProvisioning,Context::AppleProvisioning(_))=>apple_provisioning::decoder(owner).map(Self::AppleProvisioning),
+             (SavedCommandDomain::ToolAcquisition,Context::ToolAcquisition(_))=>Ok(Self::ToolAcquisition{frames:0,failed:false}),
+@@ -3593,2 +3630,3 @@
+             }
++            Self::AppleProvisioning(decoder) => decoder.push(bytes).map(Frame::AppleProvisioning),
+             Self::AndroidBuild(decoder) => decoder.push(bytes).map(Frame::AndroidBuild),
+@@ -3598,2 +3636,3 @@
+     fn finish(&mut self) -> bool { match self {
++        Self::AppleProvisioning(decoder)=>decoder.settled(),
+         Self::LocalReleaseHistory(decoder)=>decoder.finish(),
+@@ -3610,3 +3649,3 @@
+         SavedCommandDomain::LocalStoreExecute | SavedCommandDomain::LocalStorePrepare | SavedCommandDomain::LocalStoreReconcile | SavedCommandDomain::LocalStorePreflight | SavedCommandDomain::OfflinePreflight | SavedCommandDomain::ProjectRecovery | SavedCommandDomain::ArtifactInspection | SavedCommandDomain::ToolAcquisition | SavedCommandDomain::GenerateUploadKey => owner.frames.try_send(frame).is_ok(),
+-        SavedCommandDomain::LocalReleaseHistory | SavedCommandDomain::AndroidBuild | SavedCommandDomain::IOSArchive => {
++        SavedCommandDomain::AppleProvisioning | SavedCommandDomain::LocalReleaseHistory | SavedCommandDomain::AndroidBuild | SavedCommandDomain::IOSArchive => {
+             // A valid finite activity stream must not overflow a two-slot
+@@ -4431,2 +4470,7 @@
+ async fn start_original(inner: &Arc<Inner>, owner: &Arc<Session>) {
++    // Original finite NativeUse/read job, before runtime/child effects. It is
++    // retained in this SAME Session and cannot be dropped by a STOP select.
++    if owner.domain==SavedCommandDomain::AppleProvisioning && apple_provisioning::initialize(inner,owner).await.is_err(){
++        if !owner.resource_unknown.load(Ordering::SeqCst){inner.stop(owner,Reason::JournalUnavailable);}return;
++    }
+     if owner.domain == SavedCommandDomain::AndroidBuild && !inner.qualified(owner.android_selection.as_ref()) {
+@@ -4441,3 +4485,4 @@
+     if *owner.stop.borrow() || Instant::now() >= owner.clocks.work { return; }
+-    let runtime = inner.runtime.clone(); let end = owner.clocks.work; let domain = owner.domain;
++    let runtime = inner.runtime.clone(); let domain = owner.domain;
++    let end=if domain==SavedCommandDomain::AppleProvisioning {Instant::now().checked_add(Duration::from_secs(60)).unwrap_or(owner.clocks.work).min(owner.clocks.work)}else{owner.clocks.work};
+     let tools_original=book.tools.original();let tools_inspection_owner=owner.clone();let tools_inspection_inner=inner.clone();
+@@ -4537,3 +4582,3 @@
+             },
+-            SavedCommandDomain::LocalStorePreflight => {
++            SavedCommandDomain::AppleProvisioning | SavedCommandDomain::LocalStorePreflight => {
+                 #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+@@ -4545,3 +4590,3 @@
+                     armed.map_err(|_|domain.unavailable())?;
+-                    let result=runtime.resolve_local_store_preflight_installed(&mut slots);
++                    let result=if domain==SavedCommandDomain::AppleProvisioning{runtime.resolve_apple_provisioning_installed(&mut slots)}else{runtime.resolve_local_store_preflight_installed(&mut slots)};
+                     publish_macos_returned_failure(result.as_ref().err().map(|_|AdmissionFailure::Native),||slots.first_failure(),&mut|first|inspection_owner.publish_native_failure(first));
+@@ -4660,3 +4705,11 @@
+     let _ = inspect_start.send(()); // Original handle AND books registered before the first effect.
+-    let runtime = match join_with_clock(&mut book.inspection, inner, owner).await {
++    let inspected=if owner.domain==SavedCommandDomain::AppleProvisioning {
++        let joining=join_with_clock(&mut book.inspection,inner,owner);tokio::pin!(joining);
++        let mut expired=false;
++        loop {tokio::select! {biased;
++            _=tokio::time::sleep_until(end.into()),if !expired=>{expired=true;owner.observe_failure_at(Reason::TimedOut,end,true);inner.unknown(owner);},
++            result=&mut joining=>break result,
++        }}
++    }else{join_with_clock(&mut book.inspection,inner,owner).await};
++    let runtime = match inspected {
+         Ok(result) => { book.inspection_joined = true; book.inspection.take(); match result {
+@@ -4697,2 +4750,3 @@
+         (Context::LocalStoreReconcile(_),Profile::LocalStoreReconcile(_))=>local_history::reconcile_request(owner,&runtime),
++        (Context::AppleProvisioning(_), Profile::AppleProvisioning(profile)) => apple_provisioning::request(owner,profile,&runtime),
+         (Context::LocalStorePreflight(context), Profile::LocalStorePreflight(profile)) => {
+@@ -4797,3 +4851,3 @@
+     #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+-    if matches!(owner.domain,SavedCommandDomain::LocalStorePrepare | SavedCommandDomain::LocalStoreReconcile|SavedCommandDomain::LocalStorePreflight) && store::transfer_installed(&book,inner,owner).is_err(){inner.stop(owner,Reason::RuntimeUnavailable);return;}
++    if matches!(owner.domain,SavedCommandDomain::AppleProvisioning|SavedCommandDomain::LocalStorePrepare | SavedCommandDomain::LocalStoreReconcile|SavedCommandDomain::LocalStorePreflight) && store::transfer_installed(&book,inner,owner).is_err(){inner.stop(owner,Reason::RuntimeUnavailable);return;}
+     #[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64")))]
+@@ -4830,3 +4884,3 @@
+                 },
+-                SavedCommandDomain::LocalStorePrepare | SavedCommandDomain::LocalStoreReconcile | SavedCommandDomain::LocalStorePreflight => {
++                SavedCommandDomain::AppleProvisioning | SavedCommandDomain::LocalStorePrepare | SavedCommandDomain::LocalStoreReconcile | SavedCommandDomain::LocalStorePreflight => {
+                     #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+@@ -5066,3 +5120,4 @@
+                     &&(owner.domain!=SavedCommandDomain::LocalStoreReconcile||terminal.outcome()!=Outcome::Complete||local_history::reconcile_complete(&owner))
+-                    &&(owner.domain!=SavedCommandDomain::LocalStoreExecute||terminal.outcome()!=Outcome::Complete||local_history::execute_complete(&owner))))
++                    &&(owner.domain!=SavedCommandDomain::LocalStoreExecute||terminal.outcome()!=Outcome::Complete||local_history::execute_complete(&owner))
++                    &&(owner.domain!=SavedCommandDomain::AppleProvisioning||terminal.outcome()!=Outcome::Complete||apple_provisioning::complete(&owner))))
+                 && book.out_end.as_ref().is_some_and(|r| r.protocol_settled_for(&owner.context))
+@@ -5113,2 +5168,9 @@
+         settled && closed && candidate_closed && inner.endpoint(&owner).is_some()
++    }else{settled};
++    // The final journal CAS starts only AFTER genuine provider/child/IO/driver
++    // and manager originals. Its later all-jobs receipt excludes the separate
++    // token-retire syscall, which this SAME observer also joins before Ready.
++    let settled=if owner.domain==SavedCommandDomain::AppleProvisioning {
++        let native=apple_provisioning::finish_after_manager(&inner,&owner).await;
++        settled && native && inner.endpoint(&owner).is_some()
+     }else{settled};
+@@ -5307,3 +5369,3 @@
+             identity: crate::asset_source::ProjectIdentity::Posix(crate::asset_source::DirectoryIdentity::synthetic_evidence_identity()) };
+-        let owner = Arc::new(Session { upload_key:upload_key::State::new(None), tools:tool_acquisition::State::new(None), local_history_consent:None, history:local_history::State::new(), domain, id: "a".repeat(32), generation: "b".repeat(32),
++        let owner = Arc::new(Session { upload_key:upload_key::State::new(None), apple:apple_provisioning::State::new(None), tools:tool_acquisition::State::new(None), local_history_consent:None, history:local_history::State::new(), domain, id: "a".repeat(32), generation: "b".repeat(32),
+             context: context.clone(), profile: Profile::current(domain).unwrap(), clocks, registration: 1, project,
+@@ -5502,3 +5564,3 @@
+         let mut r = expiry.inner.lock(); let expires = t + INTENT;
+-        r.prepared = Some(Prepared { upload_key_preparation:None, upload_key:None, tools:None, local_history:None, projection: RunProjection { operation_id: original.id.clone(), owner_generation: original.generation.clone(),
++        r.prepared = Some(Prepared { upload_key_preparation:None, upload_key:None, apple:None, tools:None, local_history:None, projection: RunProjection { operation_id: original.id.clone(), owner_generation: original.generation.clone(),
+             context: original.context.clone(), phase: Phase::AwaitingConsent, intent_usable: true, outcome: None,
+diff --git a/desktop/src-tauri/src/saved_command_owner_tests.rs b/desktop/src-tauri/src/saved_command_owner_tests.rs
+--- a/desktop/src-tauri/src/saved_command_owner_tests.rs
++++ b/desktop/src-tauri/src/saved_command_owner_tests.rs
+@@ -12,3 +12,3 @@
+ }
+-fn context(domain: SavedCommandDomain) -> Context { match domain { SavedCommandDomain::GenerateUploadKey | SavedCommandDomain::ToolAcquisition | SavedCommandDomain::LocalReleaseHistory | SavedCommandDomain::LocalStoreExecute | SavedCommandDomain::LocalStorePrepare | SavedCommandDomain::LocalStoreReconcile => panic!("local history, preparation and tool acquisition have their own closed consent fixtures"),
++fn context(domain: SavedCommandDomain) -> Context { match domain { SavedCommandDomain::GenerateUploadKey | SavedCommandDomain::AppleProvisioning | SavedCommandDomain::ToolAcquisition | SavedCommandDomain::LocalReleaseHistory | SavedCommandDomain::LocalStoreExecute | SavedCommandDomain::LocalStorePrepare | SavedCommandDomain::LocalStoreReconcile => panic!("local history, preparation and tool acquisition have their own closed consent fixtures"),
+     SavedCommandDomain::OfflinePreflight => Context::OfflinePreflight(wire::tests::context()),
+@@ -94,3 +94,3 @@
+         prepared.context = Context::OfflinePreflight(expected.clone());
+-        owner.inner.lock().prepared = Some(Prepared { upload_key_preparation:None, upload_key:None, tools: None, local_history: None, projection: prepared,
++        owner.inner.lock().prepared = Some(Prepared { upload_key_preparation:None, upload_key:None, apple:None, tools: None, local_history: None, projection: prepared,
+             expires: Instant::now() + INTENT, registration: 1, project: project(), recovery_stamp: None,
+@@ -140,3 +140,3 @@
+     let (native_cleanup_cutoff, _) = watch::channel(clocks.cleanup_end(None));
+-    let profile = match domain { SavedCommandDomain::GenerateUploadKey => panic!("generation has its own closed private fixtures"), SavedCommandDomain::ToolAcquisition => Profile::ToolAcquisition(tools_wire::Profile::MacArm64), SavedCommandDomain::LocalReleaseHistory | SavedCommandDomain::LocalStoreExecute | SavedCommandDomain::LocalStorePrepare | SavedCommandDomain::LocalStoreReconcile => panic!("local history, preparation and tool acquisition have their own closed consent fixtures"), SavedCommandDomain::OfflinePreflight => Profile::OfflinePreflight(wire::Profile::LinuxX64),
++    let profile = match domain { SavedCommandDomain::GenerateUploadKey => panic!("generation has its own closed private fixtures"), SavedCommandDomain::AppleProvisioning => Profile::AppleProvisioning(apple_wire::Profile::MacosArm64), SavedCommandDomain::ToolAcquisition => Profile::ToolAcquisition(tools_wire::Profile::MacArm64), SavedCommandDomain::LocalReleaseHistory | SavedCommandDomain::LocalStoreExecute | SavedCommandDomain::LocalStorePrepare | SavedCommandDomain::LocalStoreReconcile => panic!("local history, preparation and tool acquisition have their own closed consent fixtures"), SavedCommandDomain::OfflinePreflight => Profile::OfflinePreflight(wire::Profile::LinuxX64),
+         SavedCommandDomain::AndroidBuild => Profile::AndroidBuild(android_wire::Profile::LinuxX64),
+@@ -146,3 +146,3 @@
+         SavedCommandDomain::LocalStorePreflight => Profile::LocalStorePreflight(store_wire::Profile::MacosArm64) };
+-    let owner = Arc::new(Session { upload_key:upload_key::State::new(None), tools:tool_acquisition::State::new(None), local_history_consent:None, history:local_history::State::new(), domain, id: p.operation_id.clone(), generation: p.owner_generation.clone(), context: p.context.clone(),
++    let owner = Arc::new(Session { upload_key:upload_key::State::new(None), apple:apple_provisioning::State::new(None), tools:tool_acquisition::State::new(None), local_history_consent:None, history:local_history::State::new(), domain, id: p.operation_id.clone(), generation: p.owner_generation.clone(), context: p.context.clone(),
+         profile, clocks, registration: 1, project: project(), recovery_stamp: None, request: AsyncMutex::new(None),
+@@ -171,3 +171,3 @@
+ #[cfg(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+-fn bound_document_model() -> (Arc<crate::bridge::DesktopBridge>, crate::asset_session::DocumentBinding) {
++pub(super) fn bound_document_model() -> (Arc<crate::bridge::DesktopBridge>, crate::asset_session::DocumentBinding) {
+     // The normal bridge constructor creates an EditOwner nonce, not a runtime
+@@ -188,3 +188,3 @@
+         let (bridge, document) = bound_document_model();
+-        let original = match domain { SavedCommandDomain::GenerateUploadKey | SavedCommandDomain::ToolAcquisition | SavedCommandDomain::LocalReleaseHistory | SavedCommandDomain::LocalStoreExecute | SavedCommandDomain::LocalStorePrepare | SavedCommandDomain::LocalStoreReconcile => panic!("local history, preparation and tool acquisition have their own closed consent fixtures"),
++        let original = match domain { SavedCommandDomain::GenerateUploadKey | SavedCommandDomain::AppleProvisioning | SavedCommandDomain::ToolAcquisition | SavedCommandDomain::LocalReleaseHistory | SavedCommandDomain::LocalStoreExecute | SavedCommandDomain::LocalStorePrepare | SavedCommandDomain::LocalStoreReconcile => panic!("local history, preparation and tool acquisition have their own closed consent fixtures"),
+             SavedCommandDomain::OfflinePreflight => bridge.preflight.original_for_test(),
+@@ -196,3 +196,3 @@
+         };
+-        original.inner.lock().prepared = Some(Prepared { upload_key_preparation:None, upload_key:None, tools:None, local_history:None, projection: projection(domain),
++        original.inner.lock().prepared = Some(Prepared { upload_key_preparation:None, upload_key:None, apple:None, tools:None, local_history:None, projection: projection(domain),
+             expires: Instant::now() + INTENT, registration: bridge.registry_generation(), project: project(), recovery_stamp: None, material: None, recovery: None, android_selection: None, artifact_selection: None, artifact_tools: None });
+@@ -238,3 +238,3 @@
+         let (bridge, document) = bound_document_model();
+-        let original = match domain { SavedCommandDomain::GenerateUploadKey | SavedCommandDomain::ToolAcquisition | SavedCommandDomain::LocalReleaseHistory | SavedCommandDomain::LocalStoreExecute | SavedCommandDomain::LocalStorePrepare | SavedCommandDomain::LocalStoreReconcile => panic!("local history, preparation and tool acquisition have their own closed consent fixtures"),
++        let original = match domain { SavedCommandDomain::GenerateUploadKey | SavedCommandDomain::AppleProvisioning | SavedCommandDomain::ToolAcquisition | SavedCommandDomain::LocalReleaseHistory | SavedCommandDomain::LocalStoreExecute | SavedCommandDomain::LocalStorePrepare | SavedCommandDomain::LocalStoreReconcile => panic!("local history, preparation and tool acquisition have their own closed consent fixtures"),
+             SavedCommandDomain::OfflinePreflight => bridge.preflight.original_for_test(),
+@@ -286,3 +286,3 @@
+         document.lost(); application.request_shutdown();
+-        match domain { SavedCommandDomain::GenerateUploadKey | SavedCommandDomain::ToolAcquisition | SavedCommandDomain::LocalReleaseHistory | SavedCommandDomain::LocalStoreExecute | SavedCommandDomain::LocalStorePrepare | SavedCommandDomain::LocalStoreReconcile => panic!("local history, preparation and tool acquisition have their own closed consent fixtures"),
++        match domain { SavedCommandDomain::GenerateUploadKey | SavedCommandDomain::AppleProvisioning | SavedCommandDomain::ToolAcquisition | SavedCommandDomain::LocalReleaseHistory | SavedCommandDomain::LocalStoreExecute | SavedCommandDomain::LocalStorePrepare | SavedCommandDomain::LocalStoreReconcile => panic!("local history, preparation and tool acquisition have their own closed consent fixtures"),
+             SavedCommandDomain::OfflinePreflight => {
+@@ -330,3 +330,3 @@
+ fn frame(domain: SavedCommandDomain, sequence: u32, kind: &str, payload: Value) -> Vec<u8> {
+-    let protocol = match domain { SavedCommandDomain::GenerateUploadKey | SavedCommandDomain::ToolAcquisition | SavedCommandDomain::LocalReleaseHistory | SavedCommandDomain::LocalStoreExecute | SavedCommandDomain::LocalStorePrepare | SavedCommandDomain::LocalStoreReconcile => panic!("local history, preparation and tool acquisition have their own closed consent fixtures"), SavedCommandDomain::OfflinePreflight => wire::PROTOCOL, SavedCommandDomain::AndroidBuild => android_wire::PROTOCOL,
++    let protocol = match domain { SavedCommandDomain::GenerateUploadKey | SavedCommandDomain::AppleProvisioning | SavedCommandDomain::ToolAcquisition | SavedCommandDomain::LocalReleaseHistory | SavedCommandDomain::LocalStoreExecute | SavedCommandDomain::LocalStorePrepare | SavedCommandDomain::LocalStoreReconcile => panic!("local history, preparation and tool acquisition have their own closed consent fixtures"), SavedCommandDomain::OfflinePreflight => wire::PROTOCOL, SavedCommandDomain::AndroidBuild => android_wire::PROTOCOL,
+         SavedCommandDomain::ProjectRecovery => recovery_wire::PROTOCOL, SavedCommandDomain::IOSArchive => ios_wire::PROTOCOL, SavedCommandDomain::ArtifactInspection => artifact_wire::PROTOCOL, SavedCommandDomain::LocalStorePreflight => store_wire::PROTOCOL };
+@@ -336,3 +336,3 @@
+ fn accepted(domain: SavedCommandDomain) -> Vec<u8> {
+-    let context = match context(domain) { Context::GenerateUploadKey(_) | Context::ToolAcquisition(_) | Context::LocalReleaseHistory(_) | Context::LocalStoreExecute(_) | Context::LocalStorePrepare(_) | Context::LocalStoreReconcile(_) => panic!("local history, preparation and tool acquisition have their own closed consent fixtures"), Context::OfflinePreflight(c) => serde_json::to_value(c).unwrap(),
++    let context = match context(domain) { Context::GenerateUploadKey(_) | Context::AppleProvisioning(_) | Context::ToolAcquisition(_) | Context::LocalReleaseHistory(_) | Context::LocalStoreExecute(_) | Context::LocalStorePrepare(_) | Context::LocalStoreReconcile(_) => panic!("local history, preparation and tool acquisition have their own closed consent fixtures"), Context::OfflinePreflight(c) => serde_json::to_value(c).unwrap(),
+         Context::AndroidBuild(c) => serde_json::to_value(c).unwrap(),
+@@ -343,3 +343,3 @@
+     let mut frames = vec![accepted(domain)];
+-    match domain { SavedCommandDomain::GenerateUploadKey | SavedCommandDomain::ToolAcquisition | SavedCommandDomain::LocalReleaseHistory | SavedCommandDomain::LocalStoreExecute | SavedCommandDomain::LocalStorePrepare | SavedCommandDomain::LocalStoreReconcile => panic!("local history, preparation and tool acquisition have their own closed consent fixtures"),
++    match domain { SavedCommandDomain::GenerateUploadKey | SavedCommandDomain::AppleProvisioning | SavedCommandDomain::ToolAcquisition | SavedCommandDomain::LocalReleaseHistory | SavedCommandDomain::LocalStoreExecute | SavedCommandDomain::LocalStorePrepare | SavedCommandDomain::LocalStoreReconcile => panic!("local history, preparation and tool acquisition have their own closed consent fixtures"),
+         SavedCommandDomain::ArtifactInspection => frames.push(frame(domain, 1, "terminal", artifact_wire::tests::terminal()["payload"].clone())),
+@@ -411,3 +411,3 @@
+         prepared.context = Context::AndroidBuild(context.clone());
+-        owner.inner.lock().prepared = Some(Prepared { upload_key_preparation:None, upload_key:None, tools:None, local_history:None, projection: prepared,
++        owner.inner.lock().prepared = Some(Prepared { upload_key_preparation:None, upload_key:None, apple:None, tools:None, local_history:None, projection: prepared,
+             expires: Instant::now() + INTENT, registration: 1, project: project(), recovery_stamp: None, material: None, recovery: None, android_selection: None, artifact_selection: None, artifact_tools: None });
+@@ -442,3 +442,3 @@
+     { let r = owner.inner.lock(); assert!(r.recovery_review.is_none() && r.prepared.is_none()); }
+-    owner.inner.lock().prepared = Some(Prepared { upload_key_preparation:None, upload_key:None, tools:None, local_history:None, projection: projection(SavedCommandDomain::ProjectRecovery),
++    owner.inner.lock().prepared = Some(Prepared { upload_key_preparation:None, upload_key:None, apple:None, tools:None, local_history:None, projection: projection(SavedCommandDomain::ProjectRecovery),
+         expires: Instant::now() + INTENT, registration: 1, project: project(), recovery_stamp: None, material: None, recovery: None, android_selection: None, artifact_selection: None, artifact_tools: None });
+@@ -590,3 +590,3 @@
+         { let mut r = app.inner.lock(); r.recovery = Some(observed);
+-            r.prepared = Some(Prepared { upload_key_preparation:None, upload_key:None, tools:None, local_history:None, projection:p, expires:Instant::now()+INTENT, registration:1,
++            r.prepared = Some(Prepared { upload_key_preparation:None, upload_key:None, apple:None, tools:None, local_history:None, projection:p, expires:Instant::now()+INTENT, registration:1,
+                 project:project(), recovery_stamp:None, material:None, recovery:Some(prepared), android_selection: None, artifact_selection: None, artifact_tools: None }); }
+@@ -728,3 +728,3 @@
+             assert!(r.active.is_none() && r.prepared.is_none());
+-            r.prepared = Some(Prepared { upload_key_preparation:None, upload_key:None, tools:None, local_history:None, projection: projection(SavedCommandDomain::AndroidBuild), expires: Instant::now() + INTENT,
++            r.prepared = Some(Prepared { upload_key_preparation:None, upload_key:None, apple:None, tools:None, local_history:None, projection: projection(SavedCommandDomain::AndroidBuild), expires: Instant::now() + INTENT,
+                 registration: 1, project: project(), recovery_stamp: None, material: None, recovery: None, android_selection: None, artifact_selection: None, artifact_tools: None }); }
+@@ -936,3 +936,3 @@
+         let (application, owner) = active(domain);
+-        let selected = match domain { SavedCommandDomain::GenerateUploadKey | SavedCommandDomain::ToolAcquisition | SavedCommandDomain::LocalReleaseHistory | SavedCommandDomain::LocalStoreExecute | SavedCommandDomain::LocalStorePrepare | SavedCommandDomain::LocalStoreReconcile => panic!("local history, preparation and tool acquisition have their own closed consent fixtures"),
++        let selected = match domain { SavedCommandDomain::GenerateUploadKey | SavedCommandDomain::AppleProvisioning | SavedCommandDomain::ToolAcquisition | SavedCommandDomain::LocalReleaseHistory | SavedCommandDomain::LocalStoreExecute | SavedCommandDomain::LocalStorePrepare | SavedCommandDomain::LocalStoreReconcile => panic!("local history, preparation and tool acquisition have their own closed consent fixtures"),
+             SavedCommandDomain::OfflinePreflight => application.inner.offline_installed_selected(),
+@@ -953,3 +953,3 @@
+             assert_eq!(r.active.as_ref().unwrap().first_stop, Some(owner.clocks.admitted));
+-            let expected = match domain { SavedCommandDomain::GenerateUploadKey | SavedCommandDomain::ToolAcquisition | SavedCommandDomain::LocalReleaseHistory | SavedCommandDomain::LocalStoreExecute | SavedCommandDomain::LocalStorePrepare | SavedCommandDomain::LocalStoreReconcile => panic!("local history, preparation and tool acquisition have their own closed consent fixtures"),
++            let expected = match domain { SavedCommandDomain::GenerateUploadKey | SavedCommandDomain::AppleProvisioning | SavedCommandDomain::ToolAcquisition | SavedCommandDomain::LocalReleaseHistory | SavedCommandDomain::LocalStoreExecute | SavedCommandDomain::LocalStorePrepare | SavedCommandDomain::LocalStoreReconcile => panic!("local history, preparation and tool acquisition have their own closed consent fixtures"),
+                 SavedCommandDomain::AndroidBuild | SavedCommandDomain::IOSArchive => owner.clocks.admitted + SETTLEMENT,
+@@ -995,3 +995,3 @@
+         let (application, owner) = active(domain);
+-        let foreign = match domain { SavedCommandDomain::GenerateUploadKey | SavedCommandDomain::ToolAcquisition | SavedCommandDomain::LocalReleaseHistory | SavedCommandDomain::LocalStoreExecute | SavedCommandDomain::LocalStorePrepare | SavedCommandDomain::LocalStoreReconcile => panic!("local history, preparation and tool acquisition have their own closed consent fixtures"), SavedCommandDomain::OfflinePreflight => Frame::AndroidBuild(android_wire::Frame::Accepted),
++        let foreign = match domain { SavedCommandDomain::GenerateUploadKey | SavedCommandDomain::AppleProvisioning | SavedCommandDomain::ToolAcquisition | SavedCommandDomain::LocalReleaseHistory | SavedCommandDomain::LocalStoreExecute | SavedCommandDomain::LocalStorePrepare | SavedCommandDomain::LocalStoreReconcile => panic!("local history, preparation and tool acquisition have their own closed consent fixtures"), SavedCommandDomain::OfflinePreflight => Frame::AndroidBuild(android_wire::Frame::Accepted),
+             SavedCommandDomain::AndroidBuild | SavedCommandDomain::ProjectRecovery | SavedCommandDomain::IOSArchive | SavedCommandDomain::ArtifactInspection | SavedCommandDomain::LocalStorePreflight => Frame::OfflinePreflight(wire::Frame::Accepted) };
+@@ -1170,3 +1170,3 @@
+     assert!(owner.inner.lock().prepared.is_none() && owner.inner.lock().active.is_none());
+-    owner.inner.lock().prepared = Some(Prepared { upload_key_preparation:None, upload_key:None, tools:None, local_history:None, projection: projection(SavedCommandDomain::IOSArchive),
++    owner.inner.lock().prepared = Some(Prepared { upload_key_preparation:None, upload_key:None, apple:None, tools:None, local_history:None, projection: projection(SavedCommandDomain::IOSArchive),
+         expires: Instant::now() + INTENT, registration: 1, project: project(), recovery_stamp: None, material: None, recovery: None, android_selection: None, artifact_selection: None, artifact_tools: None });
+@@ -1252,3 +1252,3 @@
+     let intent_generation = intent.owner_generation.clone();
+-    prepared.inner.lock().prepared = Some(Prepared { upload_key_preparation:None, upload_key:None, tools:None, local_history:None, projection: intent,
++    prepared.inner.lock().prepared = Some(Prepared { upload_key_preparation:None, upload_key:None, apple:None, tools:None, local_history:None, projection: intent,
+         expires: Instant::now() + INTENT, registration: 1, project: project(),
+diff --git a/desktop/src-tauri/src/saved_command_store.rs b/desktop/src-tauri/src/saved_command_store.rs
+--- a/desktop/src-tauri/src/saved_command_store.rs
++++ b/desktop/src-tauri/src/saved_command_store.rs
+@@ -5,5 +5,5 @@
+     pub(super) fn store_installed_selected(&self) -> bool {
+-        matches!(self.domain,SavedCommandDomain::LocalStorePreflight|SavedCommandDomain::LocalStorePrepare|SavedCommandDomain::LocalStoreReconcile) && cfg!(all(feature="desktop-shell",feature="custom-protocol",
++        matches!(self.domain,SavedCommandDomain::AppleProvisioning|SavedCommandDomain::LocalStorePreflight|SavedCommandDomain::LocalStorePrepare|SavedCommandDomain::LocalStoreReconcile) && cfg!(all(feature="desktop-shell",feature="custom-protocol",
+             not(feature="development-runtime"),not(feature="macos-installed-installer"),not(feature="macos-android-registration-helper"),target_os="macos"))
+-            && store_wire::Profile::current().is_some() && match self.domain {SavedCommandDomain::LocalStorePrepare=>self.runtime.local_store_prepare_installed_profile_available(),SavedCommandDomain::LocalStoreReconcile=>self.runtime.local_store_reconcile_installed_profile_available(),SavedCommandDomain::LocalStorePreflight=>self.runtime.local_store_preflight_installed_profile_available(),_=>false}
++            && store_wire::Profile::current().is_some() && match self.domain {SavedCommandDomain::AppleProvisioning=>self.runtime.apple_provisioning_installed_profile_available(),SavedCommandDomain::LocalStorePrepare=>self.runtime.local_store_prepare_installed_profile_available(),SavedCommandDomain::LocalStoreReconcile=>self.runtime.local_store_reconcile_installed_profile_available(),SavedCommandDomain::LocalStorePreflight=>self.runtime.local_store_preflight_installed_profile_available(),_=>false}
+     }
+@@ -64,5 +64,5 @@
+ pub(super) fn closure_ready(r: &Registry, owner: &Session, claimed: bool, direct_returned: bool) -> bool {
+-    direct_returned && matches!(owner.domain,SavedCommandDomain::LocalStorePreflight|SavedCommandDomain::LocalStorePrepare|SavedCommandDomain::LocalStoreReconcile) && original_session(r, owner)
++    direct_returned && matches!(owner.domain,SavedCommandDomain::AppleProvisioning|SavedCommandDomain::LocalStorePreflight|SavedCommandDomain::LocalStorePrepare|SavedCommandDomain::LocalStoreReconcile) && original_session(r, owner)
+         && (!claimed || r.active.as_ref().is_some_and(|a| a.accepted && a.terminal
+-            && match a.projection.result.as_ref(){Some(Terminal::LocalStorePreflight(t))=>owner.domain==SavedCommandDomain::LocalStorePreflight&&t.lifetime.settled(),Some(Terminal::LocalStorePrepare(t))=>owner.domain==SavedCommandDomain::LocalStorePrepare&&t.lifetime.settled(),Some(Terminal::LocalStoreReconcile(t))=>owner.domain==SavedCommandDomain::LocalStoreReconcile&&t.lifetime.settled(),_=>false}))
++            && match a.projection.result.as_ref(){Some(Terminal::AppleProvisioning(t))=>owner.domain==SavedCommandDomain::AppleProvisioning&&t.lifetime.settled(),Some(Terminal::LocalStorePreflight(t))=>owner.domain==SavedCommandDomain::LocalStorePreflight&&t.lifetime.settled(),Some(Terminal::LocalStorePrepare(t))=>owner.domain==SavedCommandDomain::LocalStorePrepare&&t.lifetime.settled(),Some(Terminal::LocalStoreReconcile(t))=>owner.domain==SavedCommandDomain::LocalStoreReconcile&&t.lifetime.settled(),_=>false}))
+ }
+@@ -71,3 +71,3 @@
+ pub(super) fn claim_clear(inner: &Inner, r: &Registry, owner: &Session, now: Instant) -> bool {
+-    matches!(owner.domain,SavedCommandDomain::LocalStorePreflight|SavedCommandDomain::LocalStorePrepare|SavedCommandDomain::LocalStoreReconcile) && inner.store_installed_selected()
++    matches!(owner.domain,SavedCommandDomain::AppleProvisioning|SavedCommandDomain::LocalStorePreflight|SavedCommandDomain::LocalStorePrepare|SavedCommandDomain::LocalStoreReconcile) && inner.store_installed_selected()
+         && inner.qualified(owner.android_selection.as_ref())
+@@ -93,3 +93,3 @@
+ pub(super) async fn settle_installed(book: &mut Resources, inner: &Arc<Inner>, owner: &Arc<Session>) {
+-    if !matches!(owner.domain,SavedCommandDomain::LocalStorePreflight|SavedCommandDomain::LocalStorePrepare|SavedCommandDomain::LocalStoreReconcile) { return; }
++    if !matches!(owner.domain,SavedCommandDomain::AppleProvisioning|SavedCommandDomain::LocalStorePreflight|SavedCommandDomain::LocalStorePrepare|SavedCommandDomain::LocalStoreReconcile) { return; }
+     #[cfg(not(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"))))]
+@@ -114,3 +114,3 @@
+                 closure_ready(&r, owner, startup.attempted,
+-                    offline_consumers_returned(book, &startup, slots.no_child_effect()))
++                    if owner.domain==SavedCommandDomain::AppleProvisioning{apple_provisioning::consumers_returned(book,&startup,owner,slots.no_child_effect())}else{offline_consumers_returned(book, &startup, slots.no_child_effect())})
+             })();
+@@ -153,4 +153,5 @@
+ pub(super) fn acquire_installed(inner:&Inner,owner:&Session,native:&Arc<Mutex<StoreRuntimeSlots>>){
+-    if !matches!(owner.domain,SavedCommandDomain::LocalStorePreflight|SavedCommandDomain::LocalStorePrepare|SavedCommandDomain::LocalStoreReconcile) || !inner.store_installed_selected(){inner.stop(owner,Reason::RuntimeUnavailable);return;}
++    if !matches!(owner.domain,SavedCommandDomain::AppleProvisioning|SavedCommandDomain::LocalStorePreflight|SavedCommandDomain::LocalStorePrepare|SavedCommandDomain::LocalStoreReconcile) || !inner.store_installed_selected(){inner.stop(owner,Reason::RuntimeUnavailable);return;}
+     if matches!(owner.domain,SavedCommandDomain::LocalStorePrepare|SavedCommandDomain::LocalStoreReconcile)&&local_history::prepare_source_post(owner).is_err(){inner.stop(owner,Reason::ContextChanged);return;}
++    if owner.domain==SavedCommandDomain::AppleProvisioning && apple_provisioning::work_current(owner).is_err(){inner.stop(owner,Reason::ContextChanged);return;}
+     let mut slots=match native.lock(){Ok(slots)=>slots,Err(_)=>{inner.unknown(owner);return;}};
+@@ -183,2 +184,6 @@
+     if matches!(owner.domain,SavedCommandDomain::LocalStorePrepare|SavedCommandDomain::LocalStoreReconcile)&&local_history::prepare_source_post(owner).is_err(){inner.stop(owner,Reason::ContextChanged);}
++    if owner.domain==SavedCommandDomain::AppleProvisioning {
++        drop(loan);drop(slots);
++        if apple_provisioning::work_current(owner).is_err(){inner.stop(owner,Reason::ContextChanged);}
++    }
+     // Lexical borrow ends, not ownership: the same claimed Book remains in
+diff --git a/desktop/src-tauri/src/shell.rs b/desktop/src-tauri/src/shell.rs
+--- a/desktop/src-tauri/src/shell.rs
++++ b/desktop/src-tauri/src/shell.rs
+@@ -335,2 +335,38 @@
+     state.document.cancel_local_release_history(args)
++}
++#[tauri::command]
++async fn prepare_apple_provisioning(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::apple_provisioning_protocol::Status, BridgeError> {
++    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
++    edit_window(&webview).map_err(|_| crate::apple_provisioning_protocol::invalid())?;
++    let tauri::ipc::InvokeBody::Raw(bytes) = request.body() else { return Err(crate::apple_provisioning_protocol::invalid()); };
++    let value = crate::apple_provisioning_protocol::raw_request(bytes)?;
++    let args = crate::apple_provisioning_protocol::prepare(&value)?;
++    state.document.prepare_apple_provisioning(args)
++}
++#[tauri::command]
++async fn start_apple_provisioning(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::apple_provisioning_protocol::Status, BridgeError> {
++    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
++    edit_window(&webview).map_err(|_| crate::apple_provisioning_protocol::invalid())?;
++    let tauri::ipc::InvokeBody::Raw(bytes) = request.body() else { return Err(crate::apple_provisioning_protocol::invalid()); };
++    let value = crate::apple_provisioning_protocol::raw_request(bytes)?;
++    let args = crate::apple_provisioning_protocol::start(&value)?;
++    state.document.start_apple_provisioning(args)
++}
++#[tauri::command]
++async fn apple_provisioning_status(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::apple_provisioning_protocol::Status, BridgeError> {
++    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
++    edit_window(&webview).map_err(|_| crate::apple_provisioning_protocol::invalid())?;
++    let tauri::ipc::InvokeBody::Raw(bytes) = request.body() else { return Err(crate::apple_provisioning_protocol::invalid()); };
++    let value = crate::apple_provisioning_protocol::raw_request(bytes)?;
++    crate::apple_provisioning_protocol::status_request(&value)?;
++    state.document.status_apple_provisioning()
++}
++#[tauri::command]
++async fn cancel_apple_provisioning(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::apple_provisioning_protocol::Status, BridgeError> {
++    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
++    edit_window(&webview).map_err(|_| crate::apple_provisioning_protocol::invalid())?;
++    let tauri::ipc::InvokeBody::Raw(bytes) = request.body() else { return Err(crate::apple_provisioning_protocol::invalid()); };
++    let value = crate::apple_provisioning_protocol::raw_request(bytes)?;
++    let args = crate::apple_provisioning_protocol::cancel(&value)?;
++    state.document.cancel_apple_provisioning(args)
+ }
+@@ -2359,2 +2395,6 @@
+ }
++struct AppleProvisioningRelayGuard { document: DocumentBinding, closed: bool }
++impl Drop for AppleProvisioningRelayGuard {
++    fn drop(&mut self) { if !self.closed { self.document.apple_provisioning_relay_lost(); } }
++}
+ struct StorePreflightRelayGuard { document: DocumentBinding, closed: bool }
+@@ -2406,2 +2446,4 @@
+     let local_history_guard = LocalHistoryRelayGuard { document: document.clone(), closed: false };
++    let mut apple_provisioning = document.apple_provisioning_subscribe();
++    let apple_provisioning_guard = AppleProvisioningRelayGuard { document: document.clone(), closed: false };
+     let mut local_store = document.local_store_preflight_subscribe();
+@@ -2433,2 +2475,5 @@
+         let mut local_history_relay_failed = false;
++        let mut apple_provisioning_guard = apple_provisioning_guard;
++        let mut apple_provisioning_revision = None;
++        let mut apple_provisioning_relay_failed = false;
+         let mut local_store_guard = local_store_guard;
+@@ -2485,3 +2530,3 @@
+         loop {
+-            if *stop.borrow() { preflight_guard.closed = true; local_store_guard.closed = true; local_store_prepare_guard.closed = true; local_store_execute_guard.closed = true; local_store_reconcile_guard.closed = true; local_history_guard.closed = true; android_build_guard.closed = true; project_recovery_guard.closed = true; ios_archive_guard.closed = true; artifact_inspection_guard.closed = true; tool_acquisition_guard.closed = true; return; }
++            if *stop.borrow() { preflight_guard.closed = true; apple_provisioning_guard.closed = true; local_store_guard.closed = true; local_store_prepare_guard.closed = true; local_store_execute_guard.closed = true; local_store_reconcile_guard.closed = true; local_history_guard.closed = true; android_build_guard.closed = true; project_recovery_guard.closed = true; ios_archive_guard.closed = true; artifact_inspection_guard.closed = true; tool_acquisition_guard.closed = true; return; }
+             #[cfg(all(target_os="macos",target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),feature="macos-installed-desktop-image"))]
+@@ -2608,2 +2653,13 @@
+                     Err(_) => {local_history_relay_failed=true;document.local_release_history_relay_lost();},
++                }
++            }
++            if !apple_provisioning_relay_failed {
++                match document.status_apple_provisioning() {
++                    Ok(status) => if apple_provisioning_revision != Some(status.status_revision) {
++                        apple_provisioning_revision = Some(status.status_revision);
++                        if app.emit_to(MAIN_WINDOW, crate::apple_provisioning_protocol::EVENT, &status).is_err() {
++                            apple_provisioning_relay_failed=true;document.apple_provisioning_relay_lost();
++                        }
++                    },
++                    Err(_) => {apple_provisioning_relay_failed=true;document.apple_provisioning_relay_lost();},
+                 }
+@@ -2795,3 +2851,3 @@
+                 biased;
+-                result = stop.changed() => { if result.is_err() { return; } if *stop.borrow() { preflight_guard.closed = true; local_store_guard.closed = true; local_store_prepare_guard.closed = true; local_store_execute_guard.closed = true; local_store_reconcile_guard.closed = true; local_history_guard.closed = true; android_build_guard.closed = true; project_recovery_guard.closed = true; ios_archive_guard.closed = true; artifact_inspection_guard.closed = true; tool_acquisition_guard.closed = true; return; } },
++                result = stop.changed() => { if result.is_err() { return; } if *stop.borrow() { preflight_guard.closed = true; apple_provisioning_guard.closed = true; local_store_guard.closed = true; local_store_prepare_guard.closed = true; local_store_execute_guard.closed = true; local_store_reconcile_guard.closed = true; local_history_guard.closed = true; android_build_guard.closed = true; project_recovery_guard.closed = true; ios_archive_guard.closed = true; artifact_inspection_guard.closed = true; tool_acquisition_guard.closed = true; return; } },
+                 result = revisions.changed() => { if result.is_err() { return; } },
+@@ -2800,2 +2856,3 @@
+                 result = local_history.changed() => { if result.is_err() { return; } },
++                result = apple_provisioning.changed() => { if result.is_err() { return; } },
+                 result = local_store.changed() => { if result.is_err() { return; } },
+@@ -4336,2 +4393,3 @@
+             prepare_local_release_history, start_local_release_history, local_release_history_status, cancel_local_release_history,
++            prepare_apple_provisioning, start_apple_provisioning, apple_provisioning_status, cancel_apple_provisioning,
+             prepare_local_store_preflight, start_local_store_preflight, local_store_preflight_status, cancel_local_store_preflight,
+diff --git a/desktop/src-tauri/src/store_runtime_macos.rs b/desktop/src-tauri/src/store_runtime_macos.rs
+--- a/desktop/src-tauri/src/store_runtime_macos.rs
++++ b/desktop/src-tauri/src/store_runtime_macos.rs
+@@ -71,2 +71,3 @@
+     }
++    pub(crate) fn inspect_apple_provisioning_once(&mut self,profile:runtime::AppleProvisioningInstalledProfile)->std::result::Result<VerifiedRuntime,BridgeError>{self.inspect_selected(profile.selection()?)}
+     pub(crate) fn inspect_preflight_once(&mut self,profile:runtime::LocalStorePreflightInstalledProfile)->std::result::Result<VerifiedRuntime,BridgeError>{self.inspect_selected(profile.selection()?)}
+diff --git a/desktop/tools/prepare_runtime.py b/desktop/tools/prepare_runtime.py
+--- a/desktop/tools/prepare_runtime.py
++++ b/desktop/tools/prepare_runtime.py
+@@ -49,2 +49,3 @@
+ )
++APPLE_PROVISIONING_BOOTSTRAP = "apple_provisioning_bootstrap.py"
+ STORE_BOOTSTRAP = "local_store_preflight_bootstrap.py"
+@@ -429,3 +430,3 @@
+     if store_component is not None:
+-        bootstrap_names = (*bootstrap_names, STORE_BOOTSTRAP, STORE_PREPARE_BOOTSTRAP, STORE_EXECUTE_BOOTSTRAP, STORE_RECONCILE_BOOTSTRAP)
++        bootstrap_names = (*bootstrap_names, STORE_BOOTSTRAP, STORE_PREPARE_BOOTSTRAP, STORE_EXECUTE_BOOTSTRAP, STORE_RECONCILE_BOOTSTRAP, APPLE_PROVISIONING_BOOTSTRAP)
+     source, runtime = _root(source), _root(runtime)
+diff --git a/desktop/tools/stage_macos_installed.py b/desktop/tools/stage_macos_installed.py
+--- a/desktop/tools/stage_macos_installed.py
++++ b/desktop/tools/stage_macos_installed.py
+@@ -1715,2 +1715,3 @@
+         fixed["desktop/local_store_preflight_bootstrap.py"] = 64 * 1024
++        fixed["desktop/apple_provisioning_bootstrap.py"] = 64 * 1024
+         fixed["desktop/local_store_prepare_bootstrap.py"] = 64 * 1024
+@@ -1872,3 +1873,3 @@
+          "current-store-input-collision")
+-    bootstraps = CURRENT_BOOTSTRAPS | ({"local_store_preflight_bootstrap.py", "local_store_prepare_bootstrap.py", "local_store_execute_bootstrap.py", "local_store_reconcile_bootstrap.py"} if store_rows else set())
++    bootstraps = CURRENT_BOOTSTRAPS | ({"local_store_preflight_bootstrap.py", "local_store_prepare_bootstrap.py", "local_store_execute_bootstrap.py", "local_store_reconcile_bootstrap.py", "apple_provisioning_bootstrap.py"} if store_rows else set())
+     required = set(preadmitted) | set(expected_store) | bootstraps | {"core.zip", "github-ca.pem", "manifest.json"}
+@@ -1956,3 +1957,3 @@
+             supplier_files=len(supplier), fixed_bytes=sum(len(projection["desktop/" + name][0])
+-                for name in CURRENT_BOOTSTRAPS | {"github-ca.pem"} | ({"local_store_preflight_bootstrap.py", "local_store_prepare_bootstrap.py", "local_store_execute_bootstrap.py", "local_store_reconcile_bootstrap.py"} if store_enabled else set())))
++                for name in CURRENT_BOOTSTRAPS | {"github-ca.pem"} | ({"local_store_preflight_bootstrap.py", "local_store_prepare_bootstrap.py", "local_store_execute_bootstrap.py", "local_store_reconcile_bootstrap.py", "apple_provisioning_bootstrap.py"} if store_enabled else set())))
+         provider_scope = history_provider_original(args.history_provider, provider_nomination, capacity, target=target)
+diff --git a/pyproject.toml b/pyproject.toml
+--- a/pyproject.toml
++++ b/pyproject.toml
+@@ -44,2 +44,3 @@
+   "fastlane/apple_provisioning.rb",
++  "fastlane/apple_provisioning_bundle_registration.rb",
+   "fastlane/apple_provisioning_bundle_read.rb",

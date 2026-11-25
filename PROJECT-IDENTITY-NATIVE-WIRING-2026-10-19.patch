@@ -1,0 +1,222 @@
+diff --git a/desktop/src-tauri/src/lib.rs b/desktop/src-tauri/src/lib.rs
+--- a/desktop/src-tauri/src/lib.rs
++++ b/desktop/src-tauri/src/lib.rs
+@@ -227,6 +227,8 @@
+ mod metadata_text_commands;
+ mod metadata_images_commands;
+ mod release_version_edit_commands;
++mod project_identity_commands;
++mod project_identity_edit_protocol;
+ mod github_commands;
+ mod credential_assessment;
+ mod credential_format;
+diff --git a/desktop/src-tauri/src/asset_session.rs b/desktop/src-tauri/src/asset_session.rs
+--- a/desktop/src-tauri/src/asset_session.rs
++++ b/desktop/src-tauri/src/asset_session.rs
+@@ -17,3 +17,5 @@
++#[path = "asset_session_project_identity.rs"]
++mod project_identity;
+ #[path = "asset_session_saved_observation.rs"]
+ mod saved_observation;
+ use saved_observation::{SavedObservationLane, SavedInputBinding};
+@@ -1850,6 +1852,8 @@
+         fn document(&mut self, state: &DocumentState) -> Result<(), Problem> {
+             if state.retiring { return Err(Problem::CleanupUnknown); }
+             self.add(std::mem::size_of::<DocumentState>())?;
++            // Both original Store owners retain continuity across idle/context replacement.
++            self.add(crate::saved_command_owner::identity_continuity_document_backing_bytes().ok_or(Problem::Capacity)?)?;
+             self.add(state.images.retained_bytes().ok_or(Problem::Capacity)?)?;
+             if let Some(vault) = &state.vault { self.vault_session(vault)?; }
+             self.records(&state.records)?; self.assignments(&state.assignments)?;
+@@ -4038,7 +4042,8 @@
+         selected_images: Option<&Arc<images::Binding>>, publisher: &mut RegistrationPublisher,
+     ) -> Result<crate::edit_owner::RegisteredEditRoot, BridgeError> {
+         if !matches!(domain, crate::edit_protocol::EditDomain::Configuration | crate::edit_protocol::EditDomain::GitHubWorkflows
+-            | crate::edit_protocol::EditDomain::MetadataText | crate::edit_protocol::EditDomain::ReleaseVersion | crate::edit_protocol::EditDomain::MetadataImages | crate::edit_protocol::EditDomain::ProjectInitialization)
++            | crate::edit_protocol::EditDomain::MetadataText | crate::edit_protocol::EditDomain::ReleaseVersion | crate::edit_protocol::EditDomain::MetadataImages | crate::edit_protocol::EditDomain::ProjectInitialization
++            | crate::edit_protocol::EditDomain::ProjectIdentity)
+             || selected_images.is_some() && domain != crate::edit_protocol::EditDomain::MetadataImages { return Err(BridgeError::invalid()); }
+         self.expire(state, Instant::now());
+         if state.maintenance.closed() { return Err(macos_maintenance::unavailable()); }
+@@ -4048,6 +4053,13 @@
+         }
+         if state.stopping || self.inner.bridge.supervisor.stopping() { return Err(BridgeError::shutdown()); }
+         if self.inner.bridge.supervisor.disabled() { return Err(BridgeError::cleanup_unknown()); }
++        if domain == crate::edit_protocol::EditDomain::ProjectIdentity {
++            // Retire an already-ready positive Store original BEFORE a context
++            // invalidation could downgrade it and hide its continuity veto.
++            // Active work/reviews refuse; they are never cancelled to admit ID edits.
++            self.inner.bridge.local_store_execute.ensure_idle()?;
++            self.inner.bridge.local_store_reconcile.ensure_idle()?;
++        }
+         if !publisher.accepted() { publisher.accept(crate::android_registration_app_protocol::Reason::ContextChanged)?; }
+         state.saved_input = None;
+         self.inner.bridge.preflight.context_changed(); self.inner.bridge.local_store.context_changed(); self.inner.bridge.local_store_prepare.context_changed(); self.inner.bridge.local_store_reconcile.context_changed(); self.inner.bridge.local_store_execute.context_changed(); self.inner.bridge.local_history.context_changed();
+diff --git a/desktop/src-tauri/src/bridge.rs b/desktop/src-tauri/src/bridge.rs
+--- a/desktop/src-tauri/src/bridge.rs
++++ b/desktop/src-tauri/src/bridge.rs
+@@ -569,6 +569,18 @@
+         document.metadata_text_edit_admit_published(|bridge| bridge.edits.metadata_text_project(window, session_id), |bridge, registration, publisher|
+             bridge.edits.apply_metadata_text_published(publisher, window, session_id, plan_token, registration))
+     }
++    pub(crate) fn open_project_identity(&self, document: &crate::asset_session::DocumentBinding, window: &str,
++        args: crate::project_identity_edit_protocol::Open) -> Result<crate::project_identity_edit_protocol::IdentityStatus, BridgeError> {
++        document.open_project_identity(window, args)
++    }
++    pub(crate) fn prepare_project_identity(&self, document: &crate::asset_session::DocumentBinding, window: &str,
++        args: crate::project_identity_edit_protocol::Prepare) -> Result<crate::project_identity_edit_protocol::IdentityStatus, BridgeError> {
++        document.prepare_project_identity(window, args)
++    }
++    pub(crate) fn apply_project_identity(&self, document: &crate::asset_session::DocumentBinding, window: &str,
++        args: crate::project_identity_edit_protocol::Apply) -> Result<crate::project_identity_edit_protocol::IdentityStatus, BridgeError> {
++        document.apply_project_identity(window, args)
++    }
+     pub(crate) fn open_release_version_edit(&self, document: &crate::asset_session::DocumentBinding, window: &str,
+         args: crate::release_version_edit_commands::Open) -> Result<crate::release_version_edit_protocol::ReleaseVersionEditStatus, BridgeError> {
+         let ticket = self.edits.release_version_open_ticket(window)?;
+diff --git a/desktop/src-tauri/src/shell.rs b/desktop/src-tauri/src/shell.rs
+--- a/desktop/src-tauri/src/shell.rs
++++ b/desktop/src-tauri/src/shell.rs
+@@ -931,6 +931,13 @@
+ fn edit_window(webview: &Webview) -> Result<&str, BridgeError> {
+     if webview.label() != MAIN_WINDOW { return Err(BridgeError::invalid()); }
+     Ok(webview.label())
++}
++fn project_identity_request_bytes<'a>(request: &'a tauri::ipc::Request<'_>) -> Result<&'a [u8], BridgeError> {
++    // Tauri Json has already discarded duplicate-key evidence. No fallback.
++    match request.body() {
++        tauri::ipc::InvokeBody::Raw(bytes) if bytes.len() <= crate::project_identity_edit_protocol::REQUEST_LIMIT => Ok(bytes),
++        _ => Err(BridgeError::invalid()),
++    }
+ }
+ fn request_body<'a>(request: &'a tauri::ipc::Request<'_>) -> Result<&'a Value, BridgeError> {
+     match request.body() {
+@@ -1400,6 +1407,46 @@
+     edit_window(&webview)?;
+     edit_commands::status(request_body(&request)?)?;
+     state.bridge.edits.metadata_images_status()
++}
++#[tauri::command]
++async fn project_identity_open(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::project_identity_edit_protocol::IdentityStatus, BridgeError> {
++    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
++    let window = edit_window(&webview)?;
++    let args = crate::project_identity_commands::open(project_identity_request_bytes(&request)?)?;
++    state.bridge.open_project_identity(&state.document, window, args)
++}
++#[tauri::command]
++async fn project_identity_prepare(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::project_identity_edit_protocol::IdentityStatus, BridgeError> {
++    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
++    let window = edit_window(&webview)?;
++    let result = project_identity_request_bytes(&request).and_then(crate::project_identity_commands::prepare)
++        .and_then(|args| state.bridge.prepare_project_identity(&state.document, window, args));
++    if result.is_err() { state.bridge.edits.retire_identity_request(window); }
++    result
++}
++#[tauri::command]
++async fn project_identity_apply(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::project_identity_edit_protocol::IdentityStatus, BridgeError> {
++    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
++    let window = edit_window(&webview)?;
++    let result = project_identity_request_bytes(&request).and_then(crate::project_identity_commands::apply)
++        .and_then(|args| state.bridge.apply_project_identity(&state.document, window, args));
++    if result.is_err() { state.bridge.edits.retire_identity_request(window); }
++    result
++}
++#[tauri::command]
++async fn project_identity_close(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::project_identity_edit_protocol::IdentityStatus, BridgeError> {
++    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
++    let window = edit_window(&webview)?;
++    let args = crate::project_identity_commands::close(project_identity_request_bytes(&request)?)?;
++    // Original STOP remains available during Quit; no new root/history lookup.
++    state.bridge.edits.close_identity(window, &args.session_id)
++}
++#[tauri::command]
++async fn project_identity_status(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<crate::project_identity_edit_protocol::IdentityStatus, BridgeError> {
++    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
++    edit_window(&webview)?;
++    crate::project_identity_commands::status(project_identity_request_bytes(&request)?)?;
++    state.bridge.edits.identity_status()
+ }
+ #[tauri::command]
+ async fn release_version_edit_open(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<ReleaseVersionEditStatus, BridgeError> {
+@@ -2116,6 +2163,7 @@
+         let mut images_edit_revision = None;
+         let mut images_selection_revision = None;
+         let mut release_version_revision = None;
++        let mut project_identity_revision = None;
+         let mut diagnostics_revision = None;
+         let mut github_preflight_revision = None;
+         let mut github_release_revision = None;
+@@ -2174,6 +2222,12 @@
+                     if let Some(q) = app.try_state::<Arc<installed_observation::Observation>>() { q.metadata_edit_status(&status, &edits); }
+                     metadata_revision = Some(status.status_revision);
+                     let _ = app.emit_to(MAIN_WINDOW, metadata_text_wire::EVENT, &status);
++                }
++            }
++            if project_identity_revision != Some(revision) {
++                if let Ok(status) = edits.identity_status() {
++                    project_identity_revision = Some(status.status_revision);
++                    let _ = app.emit_to(MAIN_WINDOW, crate::project_identity_edit_protocol::EVENT, &status);
+                 }
+             }
+             if release_version_revision != Some(revision) {
+@@ -3968,6 +4022,8 @@
+             metadata_images_edit_apply, metadata_images_edit_close, metadata_images_edit_status,
+             release_version_edit_open, release_version_edit_prepare, release_version_edit_apply,
+             release_version_edit_close, release_version_edit_status,
++            project_identity_open, project_identity_prepare, project_identity_apply,
++            project_identity_close, project_identity_status,
+             github_connection_status, github_connection_connect_token, github_connection_refresh, github_connection_disconnect,
+             github_preflight_status, github_preflight_prepare, github_preflight_dispatch, github_preflight_track,
+             github_preflight_reconcile, github_preflight_pending, github_preflight_cancel,
+diff --git a/desktop/src-tauri/build.rs b/desktop/src-tauri/build.rs
+--- a/desktop/src-tauri/build.rs
++++ b/desktop/src-tauri/build.rs
+@@ -314,6 +314,8 @@
+             "metadata_images_edit_apply", "metadata_images_edit_close", "metadata_images_edit_status",
+             "release_version_edit_open", "release_version_edit_prepare", "release_version_edit_apply",
+             "release_version_edit_close", "release_version_edit_status",
++            "project_identity_open", "project_identity_prepare", "project_identity_apply",
++            "project_identity_close", "project_identity_status",
+             "github_connection_status", "github_connection_connect_token", "github_connection_refresh", "github_connection_disconnect",
+             "github_preflight_status", "github_preflight_prepare", "github_preflight_dispatch", "github_preflight_track",
+             "github_preflight_reconcile", "github_preflight_pending", "github_preflight_cancel",
+diff --git a/desktop/src-tauri/capabilities/main.json b/desktop/src-tauri/capabilities/main.json
+--- a/desktop/src-tauri/capabilities/main.json
++++ b/desktop/src-tauri/capabilities/main.json
+@@ -41,6 +41,8 @@
+     "allow-metadata-images-edit-apply", "allow-metadata-images-edit-close", "allow-metadata-images-edit-status",
+     "allow-release-version-edit-open", "allow-release-version-edit-prepare", "allow-release-version-edit-apply",
+     "allow-release-version-edit-close", "allow-release-version-edit-status",
++    "allow-project-identity-open", "allow-project-identity-prepare", "allow-project-identity-apply",
++    "allow-project-identity-close", "allow-project-identity-status",
+     "allow-github-connection-status", "allow-github-connection-connect-token", "allow-github-connection-refresh", "allow-github-connection-disconnect",
+     "allow-github-preflight-status", "allow-github-preflight-prepare", "allow-github-preflight-dispatch", "allow-github-preflight-track",
+     "allow-github-preflight-reconcile", "allow-github-preflight-pending", "allow-github-preflight-cancel",
+diff --git a/desktop/src-tauri/src/edit_hosted_tests.rs b/desktop/src-tauri/src/edit_hosted_tests.rs
+--- a/desktop/src-tauri/src/edit_hosted_tests.rs
++++ b/desktop/src-tauri/src/edit_hosted_tests.rs
+@@ -306,6 +306,7 @@
+                 EditDomain::ReleaseVersion => { let _ = self.owner.close_release_version("main", &id); },
+                 EditDomain::MetadataImages => { let _ = self.owner.close_metadata_images("main", &id); },
+                 EditDomain::ProjectInitialization => { let _ = self.owner.close_initialization("main", &id); },
++                EditDomain::ProjectIdentity => { let _ = self.owner.close_identity("main", &id); },
+             }
+         }
+         self.schedule.release();
+@@ -2949,6 +2950,7 @@
+                     EditDomain::ReleaseVersion => { let _=self.batch.owner.close_release_version("main",&id); let _=self.batch.owner.shutdown().await; },
+                     EditDomain::MetadataImages => { let _=self.batch.owner.close_metadata_images("main",&id); let _=self.batch.owner.shutdown().await; },
+                     EditDomain::ProjectInitialization => { let _=self.batch.owner.close_initialization("main",&id); let _=self.batch.owner.shutdown().await; },
++                    EditDomain::ProjectIdentity => { let _=self.batch.owner.close_identity("main",&id); let _=self.batch.owner.shutdown().await; },
+                     EditDomain::GitHubWorkflows => { let _=self.batch.owner.close_workflow("main",&id); let _=workflow_observed(&self.batch.owner,&id,Phase::Final).await; },
+                 }
+             }
+@@ -4433,7 +4435,7 @@
+             && matches!(core.reason,CoreReason::Cancelled|CoreReason::None),Failure::UnexpectedOutcome)?;
+         let mut value=serde_json::to_value(facts).map_err(|_| Failure::ReceiptIo)?;
+         value["domain"]=json!(match session.domain { EditDomain::Configuration=>"configuration",EditDomain::GitHubWorkflows=>"github_workflows",
+-            EditDomain::MetadataText=>"metadata_text",EditDomain::ReleaseVersion|EditDomain::MetadataImages|EditDomain::ProjectInitialization=>return Err(Failure::UnexpectedStatus) });
++            EditDomain::MetadataText=>"metadata_text",EditDomain::ReleaseVersion|EditDomain::MetadataImages|EditDomain::ProjectInitialization|EditDomain::ProjectIdentity=>return Err(Failure::UnexpectedStatus) });
+         value["nativePhase"]=json!(phase); value["nativeFinality"]=json!(finality); value["nativeReason"]=json!(native);
+         value["applySubmitted"]=json!(applied); value["lateSettled"]=json!(late); value["outcome"]=json!(core); value["terminalSeq"]=json!(0);
+         Ok(value)

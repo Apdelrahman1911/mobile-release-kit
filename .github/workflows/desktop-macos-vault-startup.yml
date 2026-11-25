@@ -1,0 +1,203 @@
+name: Desktop macOS actual helper startup diagnosis only
+
+on:
+  push:
+    branches:
+      - verify/desktop-macos-vault-startup
+
+permissions:
+  contents: read
+
+concurrency:
+  group: desktop-macos-vault-startup-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  startup:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-macos-vault-startup'
+    runs-on: macos-26
+    timeout-minutes: 15
+    env:
+      RUSTUP_TOOLCHAIN: '1.98.1'
+      MACOSX_DEPLOYMENT_TARGET: '26.0'
+      DEVELOPER_DIR: /Library/Developer/CommandLineTools
+    steps:
+      - name: Admit only the fixed disposable hosted source route
+        shell: bash
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: |
+          set -euo pipefail
+          [[ "$RUNNER_ENVIRONMENT" == github-hosted && "$RUNNER_OS" == macOS && "$RUNNER_ARCH" == ARM64 ]] || exit 1
+          [[ "$GITHUB_REPOSITORY" == Apdelrahman1911/mobile-release-kit && "$GITHUB_EVENT_NAME" == push && "$GITHUB_REF" == refs/heads/verify/desktop-macos-vault-startup ]] || exit 1
+          [[ "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ && "$GITHUB_WORKFLOW_SHA" == "$GITHUB_SHA" ]] || exit 1
+          [[ "$GITHUB_WORKFLOW_REF" == "$GITHUB_REPOSITORY/.github/workflows/desktop-macos-vault-startup.yml@$GITHUB_REF" ]] || exit 1
+          [[ "$(/usr/bin/uname -m)" == arm64 && "$(/usr/bin/sw_vers -productVersion)" == 26.* && "$(/usr/bin/id -u)" != 0 ]] || exit 1
+          [[ -z "${RUSTFLAGS+x}" && -z "${CARGO_ENCODED_RUSTFLAGS+x}" && -z "${RUSTC_WRAPPER+x}" && -z "${RUSTC_WORKSPACE_WRAPPER+x}" ]] || exit 1
+      - name: Check out the exact reviewed source without retained credentials
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Select DATA-owner Python
+        id: python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.14.7'
+      - name: Prepare the pinned native helper compiler
+        timeout-minutes: 4
+        shell: bash
+        run: |
+          set -euo pipefail
+          rustup toolchain install 1.98.1 --profile minimal --target aarch64-apple-darwin --no-self-update
+          rustc --version --verbose
+      - name: Reserve private work and bind the complete exact source
+        id: work
+        shell: bash
+        env:
+          MRK_PYTHON: ${{ steps.python.outputs.python-path }}
+        run: |
+          set -euo pipefail
+          umask 077
+          [[ "$RUNNER_TEMP" == /Users/runner/work/_temp && "$GITHUB_WORKSPACE" == /Users/runner/work/mobile-release-kit/mobile-release-kit ]] || exit 1
+          [[ "$(git -c core.fsmonitor=false -c core.hooksPath=/dev/null rev-parse HEAD)" == "$GITHUB_SHA" ]] || exit 1
+          [[ -z "$(git -c core.fsmonitor=false -c core.hooksPath=/dev/null status --porcelain=v1 --untracked-files=all)" ]] || exit 1
+          root=$(/usr/bin/mktemp -d "$RUNNER_TEMP/mrk-macos-vault-startup.XXXXXXXX")
+          /bin/mkdir -m 700 "$root/case-cwd" "$root/cargo-home" "$root/home"
+          printf 'root=%s\n' "$root" >> "$GITHUB_OUTPUT"
+          printf 'MRK_MACOS_WORK=%s\nMRK_PYTHON=%s\nCARGO_HOME=%s/cargo-home\nCARGO_TARGET_DIR=%s/vault-helper-target\n' "$root" "$MRK_PYTHON" "$root" "$root" >> "$GITHUB_ENV"
+          "$MRK_PYTHON" -I -S -B - "$root" <<'PY_SOURCE'
+          import hashlib, json, os, pathlib, stat, subprocess, sys
+          root = pathlib.Path(sys.argv[1])
+          def git(*args):
+              return subprocess.run(["git", "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null", *args],
+                  check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=15).stdout
+          def sig(s):
+              return (s.st_dev,s.st_ino,s.st_mode,s.st_uid,s.st_gid,s.st_nlink,s.st_size,s.st_mtime_ns,s.st_ctime_ns)
+          rows = git("ls-tree", "-r", "-z", "--full-tree", "HEAD").split(b"\0")
+          if rows[-1] or len(rows) > 4096: raise ValueError("tracked inventory bound")
+          files = []
+          for row in rows[:-1]:
+              header, raw_name = row.split(b"\t", 1)
+              mode, kind, blob = header.split(b" ")
+              name = raw_name.decode("utf-8", "strict")
+              if kind != b"blob" or mode not in (b"100644", b"100755") or any(p in ("", ".", "..") for p in name.split("/")): raise ValueError("tracked inventory path/type")
+              fd = os.open(name, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK)
+              try:
+                  before = os.fstat(fd)
+                  if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1 or before.st_size > 32 * 1024 * 1024: raise ValueError("tracked input refused")
+                  digest = hashlib.sha256()
+                  object_hash = hashlib.sha1(b"blob " + str(before.st_size).encode("ascii") + b"\0")
+                  size = 0
+                  while block := os.read(fd, 65536):
+                      size += len(block)
+                      if size > before.st_size: raise ValueError("tracked input grew")
+                      digest.update(block); object_hash.update(block)
+                  if size != before.st_size or sig(before) != sig(os.fstat(fd)) or sig(before) != sig(os.stat(name, follow_symlinks=False)): raise ValueError("tracked input changed")
+                  if object_hash.hexdigest().encode("ascii") != blob: raise ValueError("tracked blob mismatch")
+              finally:
+                  os.close(fd)
+              files.append({"path": name, "gitMode": mode.decode(), "blob": blob.decode(), "size": size, "sha256": digest.hexdigest()})
+          tree = git("rev-parse", "HEAD^{tree}").decode().strip()
+          binding = {"source": os.environ["GITHUB_SHA"], "workflowSource": os.environ["GITHUB_WORKFLOW_SHA"], "tree": tree,
+              "runId": os.environ["GITHUB_RUN_ID"], "runAttempt": os.environ["GITHUB_RUN_ATTEMPT"],
+              "workDirectory": list(sig(os.stat(root, follow_symlinks=False))[:5])}
+          for name, value in (("source-binding.json", binding), ("source-inventory.json", {"source": binding["source"], "tree": tree, "files": files})):
+              data = (json.dumps(value, sort_keys=True, separators=(",", ":")) + "\n").encode()
+              if len(data) > 2 * 1024 * 1024: raise ValueError("binding output bound")
+              fd = os.open(root / name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+              with os.fdopen(fd, "wb") as stream:
+                  stream.write(data); stream.flush(); os.fsync(stream.fileno())
+          PY_SOURCE
+      - name: Build and sign only the actual isolated release helper
+        timeout-minutes: 7
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          cargo fetch --manifest-path desktop/helpers/macos-vault-helper/Cargo.toml --locked --target aarch64-apple-darwin
+          cargo build --manifest-path desktop/helpers/macos-vault-helper/Cargo.toml --offline --locked --release --target aarch64-apple-darwin
+          helper="$MRK_MACOS_WORK/vault-helper-target/aarch64-apple-darwin/release/mrk-vault-keychain"
+          [[ -f "$helper" && ! -L "$helper" && -O "$helper" ]] || exit 1
+          /usr/bin/codesign --force --sign - --options runtime --entitlements desktop/packaging/macos-empty-entitlements.plist --timestamp=none "$helper"
+          /usr/bin/codesign --verify --strict "$helper"
+          [[ -z "$(git -c core.fsmonitor=false -c core.hooksPath=/dev/null status --porcelain=v1 --untracked-files=all)" ]] || exit 1
+      - name: Classify startup through the existing original command owner
+        id: native
+        timeout-minutes: 2
+        shell: /usr/bin/env -i /bin/bash --noprofile --norc -e -o pipefail {0}
+        run: |
+          cd /Users/runner/work/mobile-release-kit/mobile-release-kit
+          set -o noclobber
+          umask 077
+          exec /usr/bin/env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin LANG=C LC_ALL=C TZ=UTC \
+            HOME='${{ steps.work.outputs.root }}/home' \
+            RUNNER_ENVIRONMENT='${{ runner.environment }}' RUNNER_OS='${{ runner.os }}' RUNNER_ARCH='${{ runner.arch }}' \
+            RUNNER_TEMP='${{ runner.temp }}' GITHUB_REPOSITORY='${{ github.repository }}' \
+            GITHUB_EVENT_NAME='${{ github.event_name }}' GITHUB_REF='${{ github.ref }}' \
+            GITHUB_SHA='${{ github.sha }}' GITHUB_WORKFLOW_SHA='${{ github.workflow_sha }}' \
+            GITHUB_WORKFLOW_REF='${{ github.workflow_ref }}' GITHUB_RUN_ID='${{ github.run_id }}' \
+            GITHUB_RUN_ATTEMPT='${{ github.run_attempt }}' GITHUB_JOB=startup \
+            MRK_MACOS_WORK='${{ steps.work.outputs.root }}' \
+            '${{ steps.python.outputs.python-path }}' -I -S -B desktop/tools/macos_vault_helper_startup.py \
+            > '${{ steps.work.outputs.root }}/startup-summary.json'
+      - name: Immediately retire proven disposable helper build outputs
+        if: always() && steps.work.outcome == 'success'
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$MRK_PYTHON" -I -S -B - <<'PY_CLEANUP'
+          import json, os, pathlib, shutil, stat
+          root = pathlib.Path(os.environ["MRK_MACOS_WORK"])
+          if root.parent != pathlib.Path("/Users/runner/work/_temp") or not root.name.startswith("mrk-macos-vault-startup."):
+              raise ValueError("cleanup route")
+          def read(name):
+              fd = os.open(root / name, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC | os.O_NONBLOCK)
+              try:
+                  info = os.fstat(fd)
+                  if not stat.S_ISREG(info.st_mode) or info.st_uid != os.getuid() or info.st_nlink != 1 or info.st_size > 16384:
+                      raise ValueError("cleanup evidence")
+                  return json.loads(os.read(fd, 16385))
+              finally: os.close(fd)
+          try:
+              result = read("startup-summary.json")
+          except (OSError, ValueError):
+              print("No complete startup finality; retaining owned work for disposable-host teardown.")
+              raise SystemExit(0)
+          if result.get("cleanupAuthorized") is not True:
+              print("Startup finality/postconditions unavailable; retaining owned work for disposable-host teardown.")
+              raise SystemExit(0)
+          binding = read("source-binding.json")
+          info = os.stat(root, follow_symlinks=False)
+          if ([info.st_dev,info.st_ino,info.st_mode,info.st_uid,info.st_gid] != binding["workDirectory"]
+                  or result["source"] != binding["source"] or result["tree"] != binding["tree"]
+                  or result["workflowSource"] != binding["workflowSource"]
+                  or result["runId"] != binding["runId"] or result["runAttempt"] != binding["runAttempt"]
+                  or not shutil.rmtree.avoids_symlink_attacks):
+              raise ValueError("cleanup original binding")
+          root_fd = os.open(root, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+          try:
+              held = os.fstat(root_fd)
+              if (held.st_dev,held.st_ino,held.st_mode,held.st_uid,held.st_gid) != (info.st_dev,info.st_ino,info.st_mode,info.st_uid,info.st_gid):
+                  raise ValueError("cleanup root changed")
+              # These fixed children were exclusively produced in this fresh
+              # task directory. No shared Cargo/Rust/Python cache is touched.
+              for name in ("vault-helper-target", "cargo-home", "case-cwd", "home"):
+                  child = os.stat(name, dir_fd=root_fd, follow_symlinks=False)
+                  if not stat.S_ISDIR(child.st_mode) or child.st_uid != os.getuid() or child.st_mode & 0o022:
+                      raise ValueError("cleanup child custody")
+                  shutil.rmtree(name, dir_fd=root_fd)
+          finally: os.close(root_fd)
+          print("Settled task-owned build outputs retired; scalar evidence retained.")
+          PY_CLEANUP
+      - name: Preserve only source-bound startup diagnostics
+        if: always() && steps.work.outcome == 'success'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: macos-vault-startup-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ steps.work.outputs.root }}/source-binding.json
+            ${{ steps.work.outputs.root }}/source-inventory.json
+            ${{ steps.work.outputs.root }}/startup-summary.json
+          if-no-files-found: error
+          retention-days: 14

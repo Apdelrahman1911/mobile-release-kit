@@ -14,6 +14,7 @@ from typing import Any, Iterable, Mapping, Sequence
 from . import __version__
 from .android import validate_aab, validate_aab_structure
 from .config import ConfigurationError, default_config, load_config
+from .config_payloads import append_ignore_lines, serialize_config_data
 from .credentials import credential_findings
 from .build_inputs import finite_scratch, invocation_custody
 from .cancellation import CleanupScope
@@ -26,6 +27,7 @@ from .ios import (
 )
 from .ios_artifacts import inspect_ios_artifact_set, snapshot_ios_artifacts
 from .init_transaction import IGNORE_LINES, InitInterrupted, InitWorkspace, validate_paths
+from .initialization_payloads import metadata_skeleton as _metadata_skeleton
 from .metadata import build_metadata_archive, metadata_findings
 from .preflight import doctor, preflight
 from .provenance import (
@@ -63,12 +65,12 @@ from .stores import (
 )
 from .tooling import resolve_tooling_root
 from .workflow import authenticate_operation_intent
+from .workflow_payloads import (
+    TOOLING_REPOSITORY_RE, MissingWorkflowPlaceholder, normalize_tooling_reference, pinned_schema_reference,
+    render_workflow_caller,
+)
 
 DEFAULT_CONFIG = "release/mobile-release.json"
-TOOLING_REPOSITORY_RE = re.compile(
-    r"[A-Za-z0-9](?:[A-Za-z0-9-]{0,37}[A-Za-z0-9])?/"
-    r"[A-Za-z0-9](?:[A-Za-z0-9._-]{0,98}[A-Za-z0-9])?"
-)
 
 
 def _add_config_argument(parser: argparse.ArgumentParser, *, optional: bool = False) -> None:
@@ -146,6 +148,8 @@ def build_parser() -> argparse.ArgumentParser:
     preflight_parser.add_argument("--credentials-file", type=Path)
     preflight_parser.add_argument("--credentials-from-env", action="store_true")
     preflight_parser.add_argument("--require-tools", action="store_true")
+    preflight_parser.add_argument("--local-project-checks", action="store_true",
+        help="Run Android local prerequisites and configured project checks without Store setup; requires --offline --skip-builds and no credential/artifact options. Project commands may have file/network effects.")
     preflight_parser.add_argument(
         "--artifact",
         action="append",
@@ -305,40 +309,6 @@ def _validate_init_destination(
         raise ValidationError(f"{label} destination is not a regular file: {destination}")
 
 
-def _metadata_skeleton(configuration: Mapping[str, Any]) -> tuple[str, ...]:
-    metadata = configuration.get("metadata", {})
-    root = str(metadata.get("root", "release/store")).rstrip("/")
-    paths: list[str] = []
-    if configuration.get("android", {}).get("enabled"):
-        for locale in metadata.get("androidLocales", []):
-            paths.extend(
-                f"{root}/android/{locale}/{name}"
-                for name in (
-                    "title.txt", "short_description.txt", "full_description.txt", "changelogs/default.txt"
-                )
-            )
-    if configuration.get("ios", {}).get("enabled"):
-        for locale in metadata.get("iosLocales", []):
-            paths.extend(
-                f"{root}/ios/{locale}/{name}"
-                for name in (
-                    "description.txt",
-                    "keywords.txt",
-                    "privacy_url.txt",
-                    "support_url.txt",
-                    "release_notes.txt",
-                )
-            )
-        paths.extend(
-            (
-                f"{root}/review/ios-beta-notes.txt",
-                f"{root}/review/ios-notes.txt",
-                f"{root}/testflight/what-to-test.txt",
-            )
-        )
-    return tuple(sorted(paths))
-
-
 def _init_proposal(root: Path, *, include_git: bool = True) -> tuple[dict[str, Any], dict[str, Any]]:
     discovered = discover_project(root, include_git=include_git)
     proposed = default_config(root, discovered)
@@ -383,19 +353,13 @@ def _init_apply(args: argparse.Namespace, root: Path, proposed: dict[str, Any], 
     template_dir = _find_template_dir(root, args.template_dir)
     if template_dir is None:
         raise ValidationError("workflow caller templates are unavailable")
-    if not args.tooling_sha or not re.fullmatch(r"[0-9A-Fa-f]{40}", args.tooling_sha):
-        raise ValidationError("--tooling-sha full commit is required to install workflow callers")
-    if not args.tooling_repository or not TOOLING_REPOSITORY_RE.fullmatch(args.tooling_repository):
-        raise ValidationError("--tooling-repository must be a safe GitHub OWNER/REPO coordinate")
-    proposed["$schema"] = (
-        f"https://raw.githubusercontent.com/{args.tooling_repository}/"
-        f"{args.tooling_sha.lower()}/schemas/project.schema.json"
-    )
+    repository, tooling_sha = normalize_tooling_reference(args.tooling_repository, args.tooling_sha)
+    proposed["$schema"] = pinned_schema_reference(repository, tooling_sha)
     sources = sorted(template_dir.glob("*.yml"))
     if not 1 <= len(sources) <= 64:
         raise ValidationError("workflow caller template directory must contain 1–64 callers")
     prepared: list[tuple[Path, bytes, str]] = [
-        (config_path, (json.dumps(proposed, indent=2, ensure_ascii=False) + "\n").encode("utf-8"), "configuration")
+        (config_path, serialize_config_data(proposed), "configuration")
     ]
     for source in sources:
         if source.is_symlink() or not source.is_file():
@@ -408,19 +372,11 @@ def _init_apply(args: argparse.Namespace, root: Path, proposed: dict[str, Any], 
         if len(data) > 1024 * 1024:
             raise ValidationError("workflow caller template exceeds 1 MiB")
         try:
-            rendered = data.decode("utf-8")
-        except UnicodeDecodeError as error:
-            raise ValidationError("workflow caller template must be UTF-8") from error
-        placeholders = {
-            "__MOBILE_RELEASE_KIT_SHA__": args.tooling_sha.lower(),
-            "__MOBILE_RELEASE_KIT_REPOSITORY__": args.tooling_repository,
-        }
-        if any(name not in rendered for name in placeholders):
-            raise ValidationError(f"workflow caller template lacks required placeholder(s): {source}")
-        for placeholder, replacement in placeholders.items():
-            rendered = rendered.replace(placeholder, replacement)
+            rendered = render_workflow_caller(data, repository, tooling_sha)
+        except MissingWorkflowPlaceholder as error:
+            raise ValidationError(f"workflow caller template lacks required placeholder(s): {source}") from error
         destination = _lexical_project_path(root, root / ".github/workflows" / source.name)
-        prepared.append((destination, rendered.encode("utf-8"), "workflow caller"))
+        prepared.append((destination, rendered, "workflow caller"))
     metadata_paths = [_lexical_project_path(root, path) for path in _metadata_skeleton(proposed)]
     gitignore = root / ".gitignore"
     paths = [path for path, _, _ in prepared] + metadata_paths + [gitignore]
@@ -435,18 +391,7 @@ def _init_apply(args: argparse.Namespace, root: Path, proposed: dict[str, Any], 
         if observed[path].before is not None and not args.force:
             raise ValidationError(f"refusing to overwrite {label} observed during planning; use --force only after review")
     before_ignore = observed[gitignore].data or b""
-    try:
-        before_ignore.decode("utf-8")
-    except UnicodeDecodeError as error:
-        raise ValidationError("root .gitignore must be UTF-8") from error
-    ignore_text = before_ignore
-    for line in IGNORE_LINES:
-        if line.encode() not in ignore_text.splitlines():
-            if ignore_text and not ignore_text.endswith(b"\n"):
-                ignore_text += b"\n"
-            ignore_text += line.encode() + b"\n"
-    if len(ignore_text) > 1024 * 1024:
-        raise ValidationError("root .gitignore including required ignore lines must fit within 1 MiB")
+    ignore_text = append_ignore_lines(before_ignore, IGNORE_LINES)
     desired = [(path, payload) for path, payload, _ in prepared]
     desired += [(path, None if observed[path].before is not None else b"") for path in metadata_paths]
     desired.append((gitignore, ignore_text))
@@ -486,8 +431,12 @@ def _credentials(args: argparse.Namespace) -> int:
 
 
 def _preflight(args: argparse.Namespace) -> int:
-    config = load_config(args.config)
     mode = "signing" if args.signing else "online" if args.online else "offline"
+    local_checks = bool(getattr(args, "local_project_checks", False))
+    if local_checks and (mode != "offline" or not args.offline or args.run_builds or args.artifact
+            or args.credentials_file is not None or args.credentials_from_env or args.require_tools):
+        raise ValidationError("--local-project-checks requires --offline --skip-builds and no artifact or credential options")
+    config = load_config(args.config)
     artifacts = _parse_artifacts(args.artifact, config.root)
     for name, path in tuple(artifacts.items()):
         artifacts[name] = _repository_path(
@@ -498,10 +447,11 @@ def _preflight(args: argparse.Namespace) -> int:
         mode=mode,
         platforms=_platforms(args.platform, config.enabled_platforms),
         run_builds=args.run_builds and mode != "online",
-        artifacts=artifacts,
+        artifacts=None if local_checks and not args.artifact else artifacts,
         credentials_file=args.credentials_file,
         credentials_from_env=args.credentials_from_env,
         require_tools=args.require_tools,
+        scope="local-project" if local_checks else "release",
     )
     return _emit(result, args, config)
 

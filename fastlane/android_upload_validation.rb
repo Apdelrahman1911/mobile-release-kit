@@ -17,31 +17,40 @@ module MobileReleaseKit
     module_function
 
     def current!(python:, module_root:, app_root:, config_path:, intent_path:, aab_path:, intent_sha256:, environment:, tooling_directory:)
+      current_input!(python: python, module_root: module_root, app_root: app_root,
+        config_path: config_path, intent_path: intent_path, aab_path: aab_path,
+        intent_sha256: intent_sha256, environment: environment, tooling_directory: tooling_directory,
+        intent_argument: "--operation-intent")
+    end
+
+    def current_local!(python:, module_root:, app_root:, config_path:, intent_path:, aab_path:, intent_sha256:, environment:, tooling_directory:)
+      current_input!(python: python, module_root: module_root, app_root: app_root,
+        config_path: config_path, intent_path: intent_path, aab_path: aab_path,
+        intent_sha256: intent_sha256, environment: environment, tooling_directory: tooling_directory,
+        intent_argument: "--local-operation-intent")
+    end
+
+    def current_input!(python:, module_root:, app_root:, config_path:, intent_path:, aab_path:, intent_sha256:, environment:, tooling_directory:, intent_argument:)
       unless python.is_a?(String) && python.start_with?(File::SEPARATOR) && !python.match?(/[\x00-\x1f\x7f]/) && File.file?(python) && File.executable?(python)
         raise ContractError, "Current AAB validation requires the toolkit's absolute Python interpreter"
       end
       unless intent_sha256.is_a?(String) && intent_sha256.match?(/\A[0-9a-f]{64}\z/)
         raise ContractError, "Current AAB validation requires the authenticated intent digest"
       end
-      unless module_root.is_a?(String) && module_root.start_with?(File::SEPARATOR) &&
-             !module_root.match?(/[\x00-\x1f\x7f]/) && !File.symlink?(module_root) && File.directory?(module_root)
-        raise ContractError, "Current AAB validation requires the pinned toolkit module root"
-      end
-      trusted_module_root = File.realpath(module_root)
-      source_root = File.expand_path("../src", tooling_directory)
-      if File.directory?(File.join(source_root, "mobile_release")) && trusted_module_root != File.realpath(source_root)
-        raise ContractError, "Current AAB validation module differs from the pinned source checkout"
-      end
-      module_file = MobileReleaseKit.safe_path(trusted_module_root, "mobile_release/android_upload_validation.py")
-      raise ContractError, "Pinned current-upload validator module is missing" unless File.file?(module_file)
+      trusted_module_root = NativeUploadValidation.module_origin!(python: python, module_root: module_root,
+        tooling_directory: tooling_directory, adapter_directory: __dir__, platform: "android")
       config = MobileReleaseKit.safe_path(app_root, config_path)
       intent = MobileReleaseKit.safe_path(app_root, intent_path)
       aab = MobileReleaseKit.safe_path(app_root, aab_path)
       argv = [
         python, "-I", "-S", "-c", BOOTSTRAP, trusted_module_root,
         "--app-root", File.realpath(app_root), "--config-path", config,
-        "--operation-intent", intent, "--aab", aab, "--intent-sha256", intent_sha256,
+        intent_argument, intent, "--aab", aab, "--intent-sha256", intent_sha256,
       ]
+      if intent_argument == "--local-operation-intent" && (invocation = StoreLaneLifetime.current_invocation)
+        request = invocation.local_current_validation_request(adapter: self)
+        argv.concat(["--local-registered-tools-json", request])
+      end
       clean = environment.to_h.select { |name, value| ENVIRONMENT_NAMES.include?(name) && !value.to_s.empty? }
       clean.merge!("LANG" => "C", "LC_ALL" => "C")
       binding = StoreLaneLifetime.reserve_current_validation!(role: "current-android", adapter: self,
@@ -56,6 +65,8 @@ module MobileReleaseKit
     ensure
       binding&.finish_call!
     end
+
+    private_class_method :current_input!
 
     def validated_result(output, intent_sha256:, artifact:)
       value = MobileReleaseKit.strict_json(output, label: "current AAB validation result")

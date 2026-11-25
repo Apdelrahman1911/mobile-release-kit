@@ -1,6 +1,7 @@
 """Cleanup dispatch and actual profile resources, without credentials/Store work."""
 from __future__ import annotations
 
+import builtins
 import os
 import gc
 import signal
@@ -98,6 +99,19 @@ class DefaultCancellationTests(unittest.TestCase):
     def guard(self):
         assert_fixture_idle()
         return DefaultCancellation(CredentialError, "fixed restoration failure")
+
+    def test_absent_saved_command_does_not_load_desktop_controls(self):
+        guard = self.guard()
+        original_import = builtins.__import__
+
+        def import_dependency(name, globals=None, locals=None, fromlist=(), level=0):
+            if name.removeprefix("mobile_release.") == "_desktop_saved_command_control":
+                self.fail("empty saved-command lookup imported Desktop controls")
+            return original_import(name, globals, locals, fromlist, level)
+
+        with patch.object(builtins, "__import__", import_dependency):
+            self.assertIsNone(guard._local_store_source)
+            self.assertIsNone(guard._local_history_source)
 
     def test_scope_acquires_nothing_and_claimed_cleanup_never_replays_even_after_failure(self):
         for fail in (False, True):

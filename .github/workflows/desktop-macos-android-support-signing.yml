@@ -1,0 +1,111 @@
+name: Once-signed macOS Android support supplier
+
+on:
+  push:
+    branches: [verify/desktop-macos-android-support-signing]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: desktop-macos-android-support-signing
+  cancel-in-progress: false
+
+jobs:
+  signed-support:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-macos-android-support-signing'
+    environment: macos-developer-id
+    runs-on: macos-26
+    timeout-minutes: 25
+    env:
+      MRK_EXPECTED_SHA: ${{ github.sha }}
+      MRK_MACOS_INSTALL_SOURCE_COMMIT: ${{ github.sha }}
+      DEVELOPER_DIR: /Library/Developer/CommandLineTools
+      MACOSX_DEPLOYMENT_TARGET: '26.0'
+    steps:
+      - name: Check out the exact producer source without retained credentials
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        env:
+          GIT_CONFIG_COUNT: '1'
+          GIT_CONFIG_KEY_0: core.autocrlf
+          GIT_CONFIG_VALUE_0: 'false'
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Select the owner interpreter, not an upstream payload
+        id: python
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.14.7'
+      - name: Admit the disposable host and reserve one private supplier workspace
+        id: work
+        shell: bash
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: |
+          set -euo pipefail
+          umask 077
+          [[ "$RUNNER_ENVIRONMENT" == github-hosted && "$RUNNER_OS" == macOS && "$RUNNER_ARCH" == ARM64 ]] || exit 1
+          [[ "$GITHUB_REPOSITORY" == Apdelrahman1911/mobile-release-kit && "$GITHUB_EVENT_NAME" == push ]] || exit 1
+          [[ "$GITHUB_REF" == refs/heads/verify/desktop-macos-android-support-signing ]] || exit 1
+          [[ "$GITHUB_SHA" =~ ^[0-9a-f]{40}$ && "$GITHUB_SHA" == "$GITHUB_WORKFLOW_SHA" ]] || exit 1
+          [[ "$GITHUB_WORKFLOW_REF" == "$GITHUB_REPOSITORY/.github/workflows/desktop-macos-android-support-signing.yml@$GITHUB_REF" ]] || exit 1
+          [[ "$GITHUB_WORKSPACE" == /Users/runner/work/mobile-release-kit/mobile-release-kit && "$RUNNER_TEMP" == /Users/runner/work/_temp ]] || exit 1
+          [[ "$(/usr/bin/uname -m)" == arm64 && "$(/usr/bin/sw_vers -productVersion)" == 26.* ]] || exit 1
+          [[ "$(/usr/bin/id -u)" != 0 && "$(/usr/bin/git rev-parse HEAD)" == "$GITHUB_SHA" ]] || exit 1
+          tree=$(/usr/bin/git rev-parse HEAD^{tree})
+          [[ "$tree" =~ ^[0-9a-f]{40}$ ]] || exit 1
+          root=$(/usr/bin/mktemp -d "$RUNNER_TEMP/mrk-macos-android-support-signing.XXXXXXXX")
+          printf 'root=%s\n' "$root" >> "$GITHUB_OUTPUT"
+          printf 'MRK_MACOS_WORK=%s\nMRK_ANDROID_SUPPORT_SOURCE_TREE=%s\n' "$root" "$tree" >> "$GITHUB_ENV"
+      - name: Acquire only the two pinned public original JARs without credentials
+        timeout-minutes: 3
+        shell: bash
+        env:
+          MRK_PYTHON: ${{ steps.python.outputs.python-path }}
+        run: |
+          set -euo pipefail
+          umask 077
+          ulimit -c 0
+          "$MRK_PYTHON" -I -S -B desktop/tools/macos_android_support_signing.py download
+      - name: Sign three native members and verify the final repacked originals
+        id: sign
+        timeout-minutes: 18
+        shell: bash
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          MRK_PYTHON: ${{ steps.python.outputs.python-path }}
+          MRK_MACOS_DEVELOPER_ID_P12_BASE64: ${{ secrets.MRK_MACOS_DEVELOPER_ID_P12_BASE64 }}
+          MRK_MACOS_DEVELOPER_ID_P12_PASSWORD: ${{ secrets.MRK_MACOS_DEVELOPER_ID_P12_PASSWORD }}
+        run: |
+          set +x
+          set +a
+          export -n MRK_MACOS_DEVELOPER_ID_P12_BASE64 MRK_MACOS_DEVELOPER_ID_P12_PASSWORD
+          set -euo pipefail
+          umask 077
+          ulimit -c 0
+          ulimit -n 1024
+          MRK_MACOS_DEVELOPER_ID_P12_BASE64="$MRK_MACOS_DEVELOPER_ID_P12_BASE64" \
+          MRK_MACOS_DEVELOPER_ID_P12_PASSWORD="$MRK_MACOS_DEVELOPER_ID_P12_PASSWORD" \
+            "$MRK_PYTHON" -I -S -B desktop/tools/macos_android_helper_package.py android-support-shipping --target aarch64-apple-darwin
+          unset MRK_MACOS_DEVELOPER_ID_P12_BASE64 MRK_MACOS_DEVELOPER_ID_P12_PASSWORD
+      - name: Retain only bounded owner facts, never credentials or raw output
+        if: always() && (steps.sign.outcome == 'success' || steps.sign.outcome == 'failure')
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: android-support-signing-facts-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ steps.work.outputs.root }}/android-helper-android-support-shipping.json
+          if-no-files-found: warn
+          retention-days: 7
+      - name: Retain the immutable supplier only after the original zero exit
+        if: success() && steps.sign.outcome == 'success'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: mrk-macos-android-signed-support
+          path: |
+            ${{ steps.work.outputs.root }}/bundletool-all-1.18.3.jar
+            ${{ steps.work.outputs.root }}/aapt2-8.9.2-12782657-osx.jar
+            ${{ steps.work.outputs.root }}/android-support-signed-receipt.json
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 30

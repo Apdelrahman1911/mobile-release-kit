@@ -1,0 +1,1110 @@
+//! Closed LOCAL phases, executed by the original Saved stdin writer. Every
+//! blocking helper is retained before entry and joined before its reply/credit.
+use super::*;
+use crate::{asset_source::LocalHistorySources,vault_keyring_macos as keyring};
+use mrk_macos_installed_native::{local_keychain_wire as keywire,local_project_lease::ProjectLease,vault_helper_wire::ClockBridge};
+use zeroize::{Zeroize,Zeroizing};
+use sha2::{Digest,Sha256};
+use hmac::{Hmac,KeyInit,Mac};
+use std::path::Path;
+
+pub(super) struct State {
+    source:Option<Box<LocalHistorySources>>,runtime:Option<RuntimeSource>,
+    attempts:Vec<Arc<Attempt>>,key:Option<Zeroizing<[u8;32]>>,locator:[u8;32],
+    enrollment:Option<serde_json::Value>,finished:bool,failed:bool,acquire_refused:bool,closure_ok:bool,
+}
+enum RuntimeSource {#[cfg(not(feature="macos-android-registration-helper"))]IOS(Arc<Mutex<IOSNativeBooks>>),#[cfg(not(feature="macos-android-registration-helper"))]Execute(Arc<Mutex<ExecuteNativeBooks>>),#[cfg(not(feature="macos-android-registration-helper"))]Store(Arc<Mutex<StoreRuntimeSlots>>),History(Arc<Mutex<LocalHistoryRuntimeSlots>>),
+    #[cfg(not(feature="macos-android-registration-helper"))]Android(Arc<Mutex<AndroidNativeBooks>>)}
+#[derive(Clone)]
+enum Consent {#[cfg(not(feature="macos-android-registration-helper"))]IOSCandidate(Arc<crate::asset_session::IOSSigningMaterial>),#[cfg(not(feature="macos-android-registration-helper"))]Reconcile(Arc<crate::asset_session::SelectedStoreMaterial>),#[cfg(not(feature="macos-android-registration-helper"))]Execute(Arc<crate::asset_session::SelectedStoreMaterial>),#[cfg(not(feature="macos-android-registration-helper"))]Prepare(Arc<crate::asset_session::SelectedStoreMaterial>),History(Arc<crate::asset_session::LocalHistoryConsent>),
+    #[cfg(not(feature="macos-android-registration-helper"))]Candidate(Arc<crate::asset_session::AndroidSigningMaterial>)}
+impl Consent {
+    fn admit(&self,claim:Claim)->Result<(keyring::LocalInput,crate::asset_session::KeyringMemoryAdmission),BridgeError>{match self{
+        #[cfg(not(feature="macos-android-registration-helper"))]Self::IOSCandidate(c)=>c.admit_candidate(claim),#[cfg(not(feature="macos-android-registration-helper"))]Self::Execute(c)=>c.admit_execute(claim),#[cfg(not(feature="macos-android-registration-helper"))]Self::Prepare(c)=>c.admit_prepare(claim),#[cfg(not(feature="macos-android-registration-helper"))]Self::Reconcile(c)=>c.admit_reconcile(claim),Self::History(c)=>c.admit_history(claim),#[cfg(not(feature="macos-android-registration-helper"))]Self::Candidate(c)=>c.admit_candidate(claim),
+    }}
+    fn helper(&self,claim:&HelperClaim,go:bool)->Result<(),keyring::Problem>{match self{
+        #[cfg(not(feature="macos-android-registration-helper"))]Self::IOSCandidate(c)=>c.claim_candidate_helper(claim,go),#[cfg(not(feature="macos-android-registration-helper"))]Self::Execute(c)=>c.claim_execute_helper(claim,go),#[cfg(not(feature="macos-android-registration-helper"))]Self::Prepare(c)=>c.claim_prepare_helper(claim,go),#[cfg(not(feature="macos-android-registration-helper"))]Self::Reconcile(c)=>c.claim_reconcile_helper(claim,go),Self::History(c)=>c.claim_helper(claim,go),#[cfg(not(feature="macos-android-registration-helper"))]Self::Candidate(c)=>c.claim_candidate_helper(claim,go),
+    }}
+    fn same_material(&self,owner:&Session)->bool{match self{
+        #[cfg(not(feature="macos-android-registration-helper"))]Self::IOSCandidate(c)=>owner.material.try_lock().is_ok_and(|saved|
+            matches!(saved.as_ref(),Some(PrivateSigningMaterial::IOS(m)) if Arc::ptr_eq(c,m))),
+        #[cfg(not(feature="macos-android-registration-helper"))]Self::Prepare(c)=>owner.material.try_lock().is_ok_and(|saved|matches!(saved.as_ref(),Some(PrivateSigningMaterial::Store(m)) if Arc::ptr_eq(c,m))),
+        #[cfg(not(feature="macos-android-registration-helper"))]Self::Reconcile(c)=>owner.material.try_lock().is_ok_and(|saved|matches!(saved.as_ref(),Some(PrivateSigningMaterial::Store(m)) if Arc::ptr_eq(c,m))),
+        #[cfg(not(feature="macos-android-registration-helper"))]Self::Execute(c)=>owner.material.try_lock().is_ok_and(|saved|matches!(saved.as_ref(),Some(PrivateSigningMaterial::Store(m)) if Arc::ptr_eq(c,m))),
+        Self::History(c)=>owner.local_history_consent.as_ref().is_some_and(|saved|Arc::ptr_eq(c,saved)),
+        #[cfg(not(feature="macos-android-registration-helper"))]Self::Candidate(c)=>owner.material.try_lock().is_ok_and(|saved|
+            matches!(saved.as_ref(),Some(PrivateSigningMaterial::Android(material)) if Arc::ptr_eq(c,material))),
+    }}
+}
+struct Attempt {book:Mutex<keyring::LookupBook>,handle:AsyncMutex<Option<JoinHandle<Result<(),keyring::Problem>>>>,
+    joined:AtomicBool,failed:AtomicBool,step:Step}
+#[derive(Clone,Copy,Debug,PartialEq,Eq)]
+enum Step {KeyAbsent,GenesisAbsent,KeyRead,KeyAdd,AnchorAdd,AnchorRead,NextAbsent}
+impl State {pub(super) fn new()->Self{Self{source:None,runtime:None,attempts:Vec::new(),key:None,locator:[0;32],enrollment:None,finished:false,failed:false,acquire_refused:false,closure_ok:false}}}
+fn consent(owner:&Session)->Result<Consent,BridgeError>{
+    if *owner.stop.borrow()||Instant::now()>=owner.clocks.work||owner.resource_unknown.load(Ordering::SeqCst){return Err(owner.domain.unavailable());}
+    match &owner.context {
+        Context::LocalReleaseHistory(context)=>{
+            let c=owner.local_history_consent.as_ref().ok_or_else(BridgeError::protocol)?;
+            if !c.current(context,owner.registration,&owner.project){return Err(owner.domain.unavailable());}
+            Ok(Consent::History(c.clone()))
+        },
+        #[cfg(not(feature="macos-android-registration-helper"))]
+        Context::LocalStorePrepare(context)=>{
+            let c={let saved=owner.material.lock().map_err(|_|BridgeError::cleanup_unknown())?;
+                let Some(PrivateSigningMaterial::Store(c))=saved.as_ref()else{return Err(BridgeError::protocol());};c.clone()};
+            if !c.prepare_current(context,owner.registration,&owner.project){return Err(owner.domain.unavailable());}
+            Ok(Consent::Prepare(c))
+        },
+        #[cfg(not(feature="macos-android-registration-helper"))]
+        Context::LocalStoreReconcile(context)=>{
+            let c={let saved=owner.material.lock().map_err(|_|BridgeError::cleanup_unknown())?;
+                let Some(PrivateSigningMaterial::Store(c))=saved.as_ref()else{return Err(BridgeError::protocol());};c.clone()};
+            if !c.reconcile_current(context,owner.registration,&owner.project){return Err(owner.domain.unavailable());}
+            Ok(Consent::Reconcile(c))
+        },
+        #[cfg(not(feature="macos-android-registration-helper"))]
+        Context::LocalStoreExecute(context)=>{
+            let c={let saved=owner.material.lock().map_err(|_|BridgeError::cleanup_unknown())?;
+                let Some(PrivateSigningMaterial::Store(c))=saved.as_ref()else{return Err(BridgeError::protocol());};c.clone()};
+            if !c.execute_current(context,owner.registration,&owner.project){return Err(owner.domain.unavailable());}
+            Ok(Consent::Execute(c))
+        },
+        #[cfg(not(feature="macos-android-registration-helper"))]
+        Context::IOSArchive(context) if context.candidate()=>{
+            let c={let saved=owner.material.lock().map_err(|_|BridgeError::cleanup_unknown())?;
+                let Some(PrivateSigningMaterial::IOS(c))=saved.as_ref()else{return Err(BridgeError::protocol());};c.clone()};
+            if !c.candidate_current(context,owner.registration,&owner.project){return Err(owner.domain.unavailable());}
+            Ok(Consent::IOSCandidate(c))
+        },
+        #[cfg(not(feature="macos-android-registration-helper"))]
+        Context::AndroidBuild(context) if context.candidate()=>{
+            let c={let saved=owner.material.lock().map_err(|_|BridgeError::cleanup_unknown())?;
+                let Some(PrivateSigningMaterial::Android(c))=saved.as_ref() else{return Err(BridgeError::protocol());};c.clone()};
+            if !c.candidate_current(context,owner.registration,&owner.project){return Err(owner.domain.unavailable());}
+            Ok(Consent::Candidate(c))
+        },_=>Err(BridgeError::protocol()),
+    }
+}
+pub(super) fn acquire_sources(owner:&Session,runtime:&Arc<Mutex<LocalHistoryRuntimeSlots>>)->Result<(),BridgeError>{
+    consent(owner)?;
+    let live=runtime.lock().map_err(|_|BridgeError::cleanup_unknown())?.retained_original_count().ok_or_else(BridgeError::cleanup_unknown)?;
+    acquire_source(owner,RuntimeSource::History(runtime.clone()),live)
+}
+fn acquire_source(owner:&Session,runtime:RuntimeSource,live:usize)->Result<(),BridgeError>{
+    let mut n=owner.history.native.lock().map_err(|_|BridgeError::cleanup_unknown())?;
+    if n.source.is_some()||n.runtime.is_some()||n.finished||n.failed{return Err(BridgeError::protocol());}
+    n.runtime=Some(runtime);n.source=Some(Box::new(LocalHistorySources::new()));
+    let result=n.source.as_mut().unwrap().acquire(&owner.project,live,&mut||*owner.stop.borrow()||Instant::now()>=owner.clocks.work);
+    if result.is_err(){n.failed=true;n.acquire_refused=true;return Err(owner.domain.unavailable());}
+    let source=n.source.as_ref().unwrap();let lease=source.lease().map_err(|_|owner.domain.unavailable())?;
+    let(_,root)=lease.checked().map_err(|_|owner.domain.unavailable())?;
+    let path=owner.project.path.to_str().ok_or_else(BridgeError::protocol)?;
+    let mut hash=Sha256::new();hash.update(b"MRK-LOCAL-PROJECT-LOCATOR/1\0");hash.update(root.uid.to_be_bytes());
+    hash.update((path.len() as u32).to_be_bytes());hash.update(path.as_bytes());n.locator=hash.finalize().into();Ok(())
+}
+#[cfg(not(feature="macos-android-registration-helper"))]
+pub(super) fn acquire_candidate_sources(owner:&Session,runtime:&Arc<Mutex<AndroidNativeBooks>>)->Result<(),BridgeError>{
+    if !owner.candidate_android(){return Err(BridgeError::protocol());}consent(owner)?;
+    let quote=runtime.lock().map_err(|_|BridgeError::cleanup_unknown())?.candidate_source_quote().ok_or_else(BridgeError::cleanup_unknown)?;
+    acquire_source(owner,RuntimeSource::Android(runtime.clone()),quote)
+}
+#[cfg(not(feature="macos-android-registration-helper"))]
+pub(super) fn candidate_request(owner:&Session,context:&android_wire::Context,profile:android_wire::Profile,runtime:&VerifiedRuntime,
+    binding:&android_wire::ToolchainBinding,signing:&android_wire::Content)->Result<Vec<u8>,BridgeError>{
+    consent(owner)?;
+    let n=owner.history.native.lock().map_err(|_|BridgeError::cleanup_unknown())?;
+    if !matches!(n.runtime,Some(RuntimeSource::Android(_))){return Err(BridgeError::protocol());}
+    let source=n.source.as_ref().ok_or_else(BridgeError::protocol)?;
+    let lease=source.lease().map_err(|_|owner.domain.unavailable())?;
+    let(_,root)=lease.checked().map_err(|_|owner.domain.unavailable())?;
+    let clock=ClockBridge::capture().ok_or_else(BridgeError::protocol)?;
+    let mut nonce=[0;16];getrandom::fill(&mut nonce).map_err(|_|BridgeError::protocol())?;
+    let candidate=android_wire::CandidateNative{home:source.home().map_err(|_|owner.domain.unavailable())?.into(),lease_fd:root.descriptor,
+        nonce:hex(&nonce),clock:android_wire::CandidateClock{work_end_ns:clock.endpoint(owner.clocks.work).ok_or_else(BridgeError::protocol)?.to_string(),
+            hard_end_ns:clock.endpoint(owner.clocks.finality).ok_or_else(BridgeError::protocol)?.to_string()}};
+    let bytes=android_wire::request_candidate(&owner.id,&owner.generation,context,profile,&owner.project,&runtime.cwd,binding,signing,&candidate)?;
+    let mut route=owner.history.route.lock().map_err(|_|BridgeError::cleanup_unknown())?;
+    if route.original.is_some()||route.failed{return Err(BridgeError::protocol());}
+    route.original=Some((candidate.nonce,hex(&Sha256::digest(&bytes))));Ok(bytes)
+}
+#[cfg(not(feature="macos-android-registration-helper"))]
+pub(super) fn acquire_ios_candidate_sources(owner:&Session,runtime:&Arc<Mutex<IOSNativeBooks>>)->Result<(),BridgeError>{
+    if !owner.candidate_ios(){return Err(BridgeError::protocol());}consent(owner)?;
+    let quote=runtime.lock().map_err(|_|BridgeError::cleanup_unknown())?.candidate_source_quote().ok_or_else(BridgeError::cleanup_unknown)?;
+    acquire_source(owner,RuntimeSource::IOS(runtime.clone()),quote)
+}
+#[cfg(not(feature="macos-android-registration-helper"))]
+pub(super) fn ios_candidate_request(owner:&Session,context:&ios_wire::Context,profile:ios_wire::Profile,runtime:&VerifiedRuntime,
+    binding:&ios_wire::ToolchainBinding,tools:&ios_wire::SigningToolBindings,signing:&ios_wire::Content)->Result<Vec<u8>,BridgeError>{
+    consent(owner)?;let n=owner.history.native.lock().map_err(|_|BridgeError::cleanup_unknown())?;
+    if !matches!(n.runtime,Some(RuntimeSource::IOS(_))){return Err(BridgeError::protocol());}
+    let source=n.source.as_ref().ok_or_else(BridgeError::protocol)?;
+    let lease=source.lease().map_err(|_|owner.domain.unavailable())?;let(_,root)=lease.checked().map_err(|_|owner.domain.unavailable())?;
+    let clock=ClockBridge::capture().ok_or_else(BridgeError::protocol)?;
+    let mut nonce=[0;16];getrandom::fill(&mut nonce).map_err(|_|BridgeError::protocol())?;
+    let candidate=ios_wire::CandidateNative{home:source.home().map_err(|_|owner.domain.unavailable())?.into(),lease_fd:root.descriptor,nonce:hex(&nonce),
+        clock:ios_wire::CandidateClock{work_end_ns:clock.endpoint(owner.clocks.work).ok_or_else(BridgeError::protocol)?.to_string(),
+            cleanup_end_ns:clock.endpoint(owner.clocks.cleanup).ok_or_else(BridgeError::protocol)?.to_string(),
+            hard_end_ns:clock.endpoint(owner.clocks.finality).ok_or_else(BridgeError::protocol)?.to_string()}};
+    let bytes=ios_wire::request_candidate(&owner.id,&owner.generation,context,profile,&owner.project,&runtime.cwd,binding,tools,signing,&candidate)?;
+    let mut route=owner.history.route.lock().map_err(|_|BridgeError::cleanup_unknown())?;
+    if route.original.is_some()||route.failed{return Err(BridgeError::protocol());}
+    route.original=Some((candidate.nonce,hex(&Sha256::digest(&bytes))));Ok(bytes)
+}
+pub(super) fn request(owner:&Session,context:&history_wire::Context,profile:history_wire::Profile,runtime:&VerifiedRuntime)->Result<Vec<u8>,BridgeError>{
+    consent(owner)?;
+    let n=owner.history.native.lock().map_err(|_|BridgeError::cleanup_unknown())?;
+    let source=n.source.as_ref().ok_or_else(BridgeError::protocol)?;
+    let lease=source.lease().map_err(|_|owner.domain.unavailable())?;
+    let(_,root)=lease.checked().map_err(|_|owner.domain.unavailable())?;
+    let clock=ClockBridge::capture().ok_or_else(BridgeError::protocol)?;
+    let mut nonce=[0;16];getrandom::fill(&mut nonce).map_err(|_|BridgeError::protocol())?;
+    let original=history_wire::request(&owner.id,&owner.generation,context,profile,&owner.project,&runtime.cwd,
+        Path::new(source.home().map_err(|_|owner.domain.unavailable())?),root.descriptor,nonce,
+        clock.endpoint(owner.clocks.work).ok_or_else(BridgeError::protocol)?,
+        clock.endpoint(owner.clocks.finality).ok_or_else(BridgeError::protocol)?)?;
+    let mut r=owner.history.route.lock().map_err(|_|BridgeError::cleanup_unknown())?;
+    if r.original.is_some()||r.failed{return Err(BridgeError::protocol());}
+    r.original=Some((original.nonce,original.sha256));Ok(original.bytes)
+}
+fn lease(owner:&Session)->Result<Arc<ProjectLease>,BridgeError>{
+    owner.history.native.lock().map_err(|_|BridgeError::cleanup_unknown())?.source.as_ref().ok_or_else(BridgeError::protocol)?
+        .lease().map_err(|_|owner.domain.unavailable())
+}
+pub(super) fn child_command(owner:&Session,command:&mut Command)->Result<(),BridgeError>{
+    consent(owner)?;mrk_macos_installed_native::local_project_lease::inherit_command(command.as_std_mut(),lease(owner)?)
+        .map_err(|_|owner.domain.unavailable())
+}
+pub(super) fn check_source(owner:&Session)->Result<(),BridgeError>{
+    consent(owner)?;
+    owner.history.native.lock().map_err(|_|BridgeError::cleanup_unknown())?.source.as_mut().ok_or_else(BridgeError::protocol)?
+        .post(&mut||*owner.stop.borrow()||Instant::now()>=owner.clocks.work).map_err(|_|owner.domain.unavailable())
+}
+/// Private actual-original claim. Document alone turns this into key admission;
+/// no renderer value, journal row, bool or test-only DATA constructor can do so.
+pub(crate) struct Claim {owner:Arc<Session>,attempt:Arc<Attempt>,consent:Consent,context:keywire::Context,
+    operation:keywire::Operation,value:Zeroizing<[u8;32]>,lease:Arc<ProjectLease>}
+impl Claim {
+    pub(crate) fn consent(&self)->Option<&Arc<crate::asset_session::LocalHistoryConsent>>{match &self.consent{Consent::History(c)=>Some(c),#[cfg(not(feature="macos-android-registration-helper"))]_=>None}}
+    pub(crate) fn context(&self)->Option<(&history_wire::Context,u32,&RegisteredRoot)>{
+        match &self.owner.context{Context::LocalReleaseHistory(c)=>Some((c,self.owner.registration,&self.owner.project)),_=>None}
+    }
+    #[cfg(not(feature="macos-android-registration-helper"))]
+    pub(crate) fn prepare_context(&self)->Option<(&Arc<crate::asset_session::SelectedStoreMaterial>,&prepare_wire::Context,u32,&RegisteredRoot)>{
+        match(&self.consent,&self.owner.context){(Consent::Prepare(c),Context::LocalStorePrepare(context))=>Some((c,context,self.owner.registration,&self.owner.project)),_=>None}
+    }
+    #[cfg(not(feature="macos-android-registration-helper"))]
+    pub(crate) fn reconcile_context(&self)->Option<(&Arc<crate::asset_session::SelectedStoreMaterial>,&reconcile_wire::Context,u32,&RegisteredRoot)>{
+        match(&self.consent,&self.owner.context){(Consent::Reconcile(c),Context::LocalStoreReconcile(context))=>Some((c,context,self.owner.registration,&self.owner.project)),_=>None}
+    }
+    #[cfg(not(feature="macos-android-registration-helper"))]
+    pub(crate) fn execute_context(&self)->Option<(&Arc<crate::asset_session::SelectedStoreMaterial>,&execute_wire::Context,u32,&RegisteredRoot)>{
+        match(&self.consent,&self.owner.context){(Consent::Execute(c),Context::LocalStoreExecute(context))=>Some((c,context,self.owner.registration,&self.owner.project)),_=>None}
+    }
+    #[cfg(not(feature="macos-android-registration-helper"))]
+    pub(crate) fn ios_candidate_context(&self)->Option<(&Arc<crate::asset_session::IOSSigningMaterial>,&ios_wire::Context,u32,&RegisteredRoot)>{
+        match(&self.consent,&self.owner.context){(Consent::IOSCandidate(c),Context::IOSArchive(context)) if context.candidate()=>Some((c,context,self.owner.registration,&self.owner.project)),_=>None}
+    }
+    #[cfg(not(feature="macos-android-registration-helper"))]
+    pub(crate) fn candidate_context(&self)->Option<(&Arc<crate::asset_session::AndroidSigningMaterial>,&android_wire::Context,u32,&RegisteredRoot)>{
+        match (&self.consent,&self.owner.context){(Consent::Candidate(c),Context::AndroidBuild(context)) if context.candidate()=>Some((c,context,self.owner.registration,&self.owner.project)),_=>None}
+    }
+    pub(crate) fn current(&self)->bool{
+        if !self.consent.same_material(&self.owner){return false;}
+        let r=match self.owner.history.route.lock(){Ok(r)=>r,Err(_)=>return false};
+        if r.failed||r.original.is_none()||r.received!=r.completed+1||r.pending.is_some()||r.reply_writing{return false;}
+        let n=match self.owner.history.native.lock(){Ok(n)=>n,Err(_)=>return false};
+        !n.failed&&!n.finished&&n.attempts.last().is_some_and(|a|Arc::ptr_eq(a,&self.attempt))
+            && self.lease.checked().is_ok_and(|(_,root)|root==self.context.project())
+            && !*self.owner.stop.borrow()&&Instant::now()<self.owner.clocks.work&&!self.owner.resource_unknown.load(Ordering::SeqCst)
+    }
+    pub(crate) fn own_backing(&self)->Option<usize>{
+        let n=self.owner.history.native.try_lock().ok()?;
+        let runtime=match n.runtime.as_ref()?{#[cfg(not(feature="macos-android-registration-helper"))]RuntimeSource::IOS(value)=>value.try_lock().ok()?.candidate_backing()?,#[cfg(not(feature="macos-android-registration-helper"))]RuntimeSource::Execute(value)=>value.try_lock().ok()?.execute_backing()?,#[cfg(not(feature="macos-android-registration-helper"))]RuntimeSource::Store(value)=>value.try_lock().ok()?.retained_bytes()?,RuntimeSource::History(value)=>value.try_lock().ok()?.retained_bytes()?,
+            #[cfg(not(feature="macos-android-registration-helper"))]RuntimeSource::Android(value)=>value.try_lock().ok()?.candidate_backing()?};
+        let mut bytes=runtime.checked_add(n.source.as_ref()?.retained_bytes()?)?
+            .checked_add(n.attempts.capacity().checked_mul(std::mem::size_of::<Arc<Attempt>>())?)?;
+        for attempt in &n.attempts {bytes=bytes.checked_add(attempt.book.try_lock().ok()?.retained_bytes()?)?;}
+        // Explicit simultaneous closed control allocations: 8 frames (32KiB
+        // aggregate) + decoding/public projections, request/private reply, and
+        // original Session/Registry/async task cells. No native frame hidden.
+        for size in [std::mem::size_of::<Session>(),std::mem::size_of::<Registry>(),std::mem::size_of::<Resources>(),
+            std::mem::size_of::<State>(),8*self.owner.domain.response_limit(),
+            4*if self.owner.domain==SavedCommandDomain::LocalStoreExecute{execute_wire::STATUS_LIMIT}else if self.owner.domain==SavedCommandDomain::LocalStoreReconcile{reconcile_wire::STATUS_LIMIT}else if self.owner.domain==SavedCommandDomain::LocalStorePrepare{prepare_wire::STATUS_LIMIT}else if self.owner.candidate_ios(){ios_wire::STATUS_LIMIT}else if self.owner.candidate_android(){android_wire::STATUS_LIMIT}else{history_wire::STATUS_LIMIT},
+            2*history_wire::REQUEST_LIMIT,4*history_wire::IPC_LIMIT,64*1024] {bytes=bytes.checked_add(size)?;}
+        let route=self.owner.history.route.try_lock().ok()?;
+        if let Some(auth)=&route.authorization{bytes=bytes.checked_add(auth.capacity())?;}
+        Some(bytes)
+    }
+    pub(crate) fn into_input(self)->(keywire::Context,keywire::Operation,Zeroizing<[u8;32]>,Arc<ProjectLease>){
+        (self.context,self.operation,self.value,self.lease)
+    }
+}
+fn cleanup(owner:&Session,failure:Option<(keyring::Problem,Instant)>)->Result<Option<Instant>,keyring::Problem>{
+    if let Some((p,at))=failure{owner.observe_failure_at(if p==keyring::Problem::CleanupUnknown{Reason::CleanupUnknown}else if owner.candidate_android()||owner.candidate_ios(){Reason::JournalUnavailable}else{Reason::CredentialsUnavailable},at,p==keyring::Problem::CleanupUnknown);}
+    let end=*owner.native_cleanup_cutoff.borrow();
+    if owner.resource_unknown.load(Ordering::SeqCst){return Err(keyring::Problem::CleanupUnknown);}
+    // Some is a real F contraction in LookupBook, NOT a nominal deadline.
+    // Returning H on a healthy owner would manufacture F=H-2 and erase every
+    // otherwise successful native result in finish_driver.
+    history_wire::helper_cleanup_projection(Instant::now(),owner.clocks.finality,end,
+        failure.is_some() || *owner.stop.borrow() || end<owner.clocks.finality)
+        .map_err(|_|keyring::Problem::CleanupUnknown)
+}
+fn execute(owner:&Arc<Session>,attempt:&Arc<Attempt>)->Result<(),keyring::Problem>{
+    let mut b=attempt.book.lock().map_err(|_|keyring::Problem::CleanupUnknown)?;
+    b.enter_driver()?;let _=b.prepare(&mut||*owner.stop.borrow()||Instant::now()>=owner.clocks.work);drop(b);
+    // Admission can be revoked while original preparation runs. It denies
+    // launch/GO, never the mandatory pump/finish of the already entered book.
+    if let Ok(c)=consent(owner){
+        let claim=HelperClaim{owner:owner.clone(),attempt:attempt.clone(),consent:c.clone()};
+        if check_source(owner).is_ok() && c.helper(&claim,false).is_ok(){
+            let spawned=attempt.book.lock().map_err(|_|keyring::Problem::CleanupUnknown)?.spawn_original();
+            if spawned.is_ok(){
+                if check_source(owner).is_err(){attempt.book.lock().map_err(|_|keyring::Problem::CleanupUnknown)?.interrupt();}
+                else if let Err(p)=c.helper(&claim,true){attempt.book.lock().map_err(|_|keyring::Problem::CleanupUnknown)?.fail(p);}
+            }
+        }else{attempt.book.lock().map_err(|_|keyring::Problem::CleanupUnknown)?.interrupt();}
+    }else{attempt.book.lock().map_err(|_|keyring::Problem::CleanupUnknown)?.interrupt();}
+    loop{
+        let current=consent(owner).is_ok();
+        let mut b=attempt.book.lock().map_err(|_|keyring::Problem::CleanupUnknown)?;
+        if !current{b.interrupt();}
+        if let Err(p)=cleanup(owner,b.problem().zip(b.problem_at())){b.fail(p);}
+        let done=b.pump();let delay=b.turn_delay();drop(b);if done{break;}std::thread::sleep(delay);
+    }
+    attempt.book.lock().map_err(|_|keyring::Problem::CleanupUnknown)?.finish_driver(
+        &mut||*owner.stop.borrow(),&mut|failure|cleanup(owner,failure))
+}
+
+pub(crate) struct HelperClaim {owner:Arc<Session>,attempt:Arc<Attempt>,consent:Consent}
+impl HelperClaim {
+    pub(crate) fn consent(&self)->Option<&Arc<crate::asset_session::LocalHistoryConsent>>{match &self.consent{Consent::History(c)=>Some(c),#[cfg(not(feature="macos-android-registration-helper"))]_=>None}}
+    pub(crate) fn context(&self)->Option<(&history_wire::Context,u32,&RegisteredRoot)>{match &self.owner.context{Context::LocalReleaseHistory(c)=>Some((c,self.owner.registration,&self.owner.project)),_=>None}}
+    #[cfg(not(feature="macos-android-registration-helper"))]
+    pub(crate) fn prepare_context(&self)->Option<(&Arc<crate::asset_session::SelectedStoreMaterial>,&prepare_wire::Context,u32,&RegisteredRoot)>{
+        match(&self.consent,&self.owner.context){(Consent::Prepare(c),Context::LocalStorePrepare(context))=>Some((c,context,self.owner.registration,&self.owner.project)),_=>None}
+    }
+    #[cfg(not(feature="macos-android-registration-helper"))]
+    pub(crate) fn reconcile_context(&self)->Option<(&Arc<crate::asset_session::SelectedStoreMaterial>,&reconcile_wire::Context,u32,&RegisteredRoot)>{
+        match(&self.consent,&self.owner.context){(Consent::Reconcile(c),Context::LocalStoreReconcile(context))=>Some((c,context,self.owner.registration,&self.owner.project)),_=>None}
+    }
+    #[cfg(not(feature="macos-android-registration-helper"))]
+    pub(crate) fn execute_context(&self)->Option<(&Arc<crate::asset_session::SelectedStoreMaterial>,&execute_wire::Context,u32,&RegisteredRoot)>{
+        match(&self.consent,&self.owner.context){(Consent::Execute(c),Context::LocalStoreExecute(context))=>Some((c,context,self.owner.registration,&self.owner.project)),_=>None}
+    }
+    #[cfg(not(feature="macos-android-registration-helper"))]
+    pub(crate) fn ios_candidate_context(&self)->Option<(&Arc<crate::asset_session::IOSSigningMaterial>,&ios_wire::Context,u32,&RegisteredRoot)>{
+        match(&self.consent,&self.owner.context){(Consent::IOSCandidate(c),Context::IOSArchive(context)) if context.candidate()=>Some((c,context,self.owner.registration,&self.owner.project)),_=>None}
+    }
+    #[cfg(not(feature="macos-android-registration-helper"))]
+    pub(crate) fn candidate_context(&self)->Option<(&Arc<crate::asset_session::AndroidSigningMaterial>,&android_wire::Context,u32,&RegisteredRoot)>{
+        match (&self.consent,&self.owner.context){(Consent::Candidate(c),Context::AndroidBuild(context)) if context.candidate()=>Some((c,context,self.owner.registration,&self.owner.project)),_=>None}
+    }
+    pub(crate) fn matches_owner(&self,saved:&SavedCommandOwner)->bool{
+        let r=saved.inner.lock();original_session(&r,&self.owner)&&!r.disabled&&!r.stopping&&!r.document_lost
+            && r.active.as_ref().is_some_and(|a|a.accepted&&!a.terminal&&!a.unknown&&a.first_stop.is_none())
+    }
+    pub(crate) fn claim(&self,go:bool)->Result<(),keyring::Problem>{
+        if !self.consent.same_material(&self.owner){return Err(keyring::Problem::Interrupted);}
+        if *self.owner.stop.borrow()||Instant::now()>=self.owner.clocks.work||self.owner.resource_unknown.load(Ordering::SeqCst){return Err(keyring::Problem::Interrupted);}
+        let r=self.owner.history.route.try_lock().map_err(|_|keyring::Problem::CleanupUnknown)?;
+        if r.failed||r.original.is_none()||r.pending.is_some()||r.received!=r.completed+1||r.reply_writing{return Err(keyring::Problem::Protocol);}
+        let n=self.owner.history.native.try_lock().map_err(|_|keyring::Problem::CleanupUnknown)?;
+        if n.failed||n.finished||!n.attempts.last().is_some_and(|a|Arc::ptr_eq(a,&self.attempt)){return Err(keyring::Problem::Protocol);}
+        n.source.as_ref().ok_or(keyring::Problem::Unavailable)?.lease().map_err(|_|keyring::Problem::Unavailable)?;
+        let mut b=self.attempt.book.try_lock().map_err(|_|keyring::Problem::CleanupUnknown)?;
+        if go{b.claim_go()}else{b.claim_launch()}
+    }
+}
+impl Claim {pub(crate) fn matches_owner(&self,saved:&SavedCommandOwner)->bool{HelperClaim{owner:self.owner.clone(),attempt:self.attempt.clone(),consent:self.consent.clone()}.matches_owner(saved)}}
+
+// Closed action-specific actual helper roster; no phase may select an arbitrary
+// operation or enroll/replace a key while reviewing or abandoning inputs.
+fn helper_step(action:history_wire::Action,index:usize)->Option<Step>{
+    use history_wire::Action;
+    match(action,index){
+        (Action::Enroll,0)=>Some(Step::KeyAbsent),(Action::Enroll,1)=>Some(Step::GenesisAbsent),
+        (Action::Enroll,2)=>Some(Step::KeyAdd),(Action::Enroll,3)=>Some(Step::AnchorAdd),
+        (Action::Verify|Action::ReviewInputs|Action::AbandonInputs|Action::ReviewPrepared|Action::ReviewExecution|Action::ReviewReconcile|Action::ReviewRecovery|Action::ReviewStagePrepared|Action::ReviewStageExecution|Action::ReviewExternalReadiness,0)=>Some(Step::KeyRead),
+        (Action::Verify|Action::ReviewInputs|Action::AbandonInputs|Action::ReviewPrepared|Action::ReviewExecution|Action::ReviewReconcile|Action::ReviewRecovery|Action::ReviewStagePrepared|Action::ReviewStageExecution|Action::ReviewExternalReadiness,1)=>Some(Step::AnchorRead),
+        (Action::Verify|Action::ReviewInputs|Action::AbandonInputs|Action::ReviewPrepared|Action::ReviewExecution|Action::ReviewReconcile|Action::ReviewRecovery|Action::ReviewStagePrepared|Action::ReviewStageExecution|Action::ReviewExternalReadiness,2)=>Some(Step::NextAbsent),
+        (Action::AbandonInputs,3)=>Some(Step::AnchorAdd),_=>None,
+    }
+}
+
+fn candidate_helper_step(index:usize)->Option<Step>{
+    [Step::KeyRead,Step::AnchorRead,Step::NextAbsent,Step::AnchorAdd,Step::AnchorAdd].get(index).copied()
+}
+async fn helper(owner:&Arc<Session>,step:Step,sequence:u32,digest:Option<[u8;32]>)->Result<keyring::LocalResult,BridgeError>{
+    check_source(owner)?;let original_consent=consent(owner)?;
+    let (context,operation,value,loan,attempt)={
+        let mut n=owner.history.native.lock().map_err(|_|BridgeError::cleanup_unknown())?;
+        let expected=match &owner.context {
+            Context::LocalReleaseHistory(context)=>helper_step(context.action,n.attempts.len()),
+            Context::IOSArchive(context) if context.candidate()=>candidate_helper_step(n.attempts.len()),
+            Context::AndroidBuild(context) if context.candidate()=>candidate_helper_step(n.attempts.len()),Context::LocalStoreExecute(_)=>prepare_helper_step(n.attempts.len()),Context::LocalStorePrepare(_)=>prepare_helper_step(n.attempts.len()),Context::LocalStoreReconcile(context)=>reconcile_helper_step(n.attempts.len(),context.checkpointing()),_=>None,
+        }.ok_or_else(BridgeError::protocol)?;
+        if expected!=step||n.failed||n.finished||n.attempts.iter().any(|a|!a.joined.load(Ordering::SeqCst)||a.failed.load(Ordering::SeqCst)){
+            return Err(BridgeError::protocol());
+        }
+        let loan=n.source.as_ref().ok_or_else(BridgeError::protocol)?.lease().map_err(|_|owner.domain.unavailable())?;
+        let(_,root)=loan.checked().map_err(|_|owner.domain.unavailable())?;
+        let purpose=if matches!(step,Step::KeyAbsent|Step::KeyRead|Step::KeyAdd){keywire::Purpose::LocalJournalKey}else{keywire::Purpose::LocalCheckpoint};
+        let context=keywire::Context::new(n.locator,purpose,sequence,root).ok_or_else(BridgeError::protocol)?;
+        let operation=match step{Step::KeyAbsent|Step::GenesisAbsent|Step::NextAbsent=>keywire::Operation::ProbeAbsent,
+            Step::KeyRead|Step::AnchorRead=>keywire::Operation::ReadRequired,Step::KeyAdd|Step::AnchorAdd=>keywire::Operation::AddRead};
+        let mut value=Zeroizing::new([0;32]);
+        if step==Step::KeyAdd{value.copy_from_slice(n.key.as_ref().ok_or_else(BridgeError::protocol)?.as_ref());}
+        else if step==Step::AnchorAdd{value.copy_from_slice(&digest.ok_or_else(BridgeError::protocol)?);}
+        let attempt=Arc::new(Attempt{book:Mutex::new(keyring::LookupBook::new()),handle:AsyncMutex::new(None),joined:AtomicBool::new(false),failed:AtomicBool::new(false),step});
+        n.attempts.push(attempt.clone());(context,operation,value,loan,attempt)
+    };
+    let claim=Claim{owner:owner.clone(),attempt:attempt.clone(),consent:original_consent.clone(),context,operation,value,lease:loan};
+    let (input,admission)=original_consent.admit(claim)?;
+    let end=owner.clocks.work.min(Instant::now()+Duration::from_secs(10));
+    attempt.book.lock().map_err(|_|BridgeError::cleanup_unknown())?.begin_local(input,end,admission).map_err(|_|owner.domain.unavailable())?;
+    let original=owner.clone();let worker=attempt.clone();let (release,enter)=oneshot::channel();
+    let mut handle=attempt.handle.lock().await;
+    *handle=Some(tokio::task::spawn_blocking(move||{
+        if enter.blocking_recv().is_err(){return Err(keyring::Problem::CleanupUnknown);}
+        execute(&original,&worker)
+    }));let _=release.send(());
+    let mut cutoff=owner.native_cleanup_cutoff.subscribe();
+    let result=loop {
+        let end=*cutoff.borrow_and_update();
+        tokio::select!{biased;
+            _=tokio::time::sleep_until(tokio::time::Instant::from_std(end))=>break Err(()),
+            value=handle.as_mut().unwrap()=>break Ok(value),
+            changed=cutoff.changed()=>if changed.is_err(){break Err(());},
+        }
+    };
+    let actual=match result{Ok(Ok(actual))=>actual,_=>{attempt.failed.store(true,Ordering::SeqCst);owner.resource_unknown.store(true,Ordering::SeqCst);return Err(BridgeError::cleanup_unknown());}};
+    handle.take();drop(handle);
+    let mut b=attempt.book.lock().map_err(|_|BridgeError::cleanup_unknown())?;b.child_joined(actual);
+    attempt.joined.store(true,Ordering::SeqCst);
+    let result=b.consume_settled_local(|r|r);let closed=b.dispose_settled_storage();
+    if !closed||!b.resources_settled(){attempt.failed.store(true,Ordering::SeqCst);owner.resource_unknown.store(true,Ordering::SeqCst);return Err(BridgeError::cleanup_unknown());}
+    if result.is_err(){attempt.failed.store(true,Ordering::SeqCst);}
+    let value=result.map_err(|_|owner.domain.unavailable())?;
+    match &value {
+        keyring::LocalResult::Absent(absent) if operation==keywire::Operation::ProbeAbsent && absent.matches(context)=>{},
+        keyring::LocalResult::Checkpoint(v) if matches!(step,Step::AnchorAdd|Step::AnchorRead)&&v.matches(context,&digest.ok_or_else(BridgeError::protocol)?)=>{},
+        keyring::LocalResult::Key(_) if matches!(step,Step::KeyRead|Step::KeyAdd)=>{},
+        _=>return Err(owner.domain.unavailable()),
+    }
+    drop(b);if attempt_is_last_checkpoint(owner,&attempt){check_source_cleanup(owner)?;}else{check_source(owner)?;}Ok(value)
+}
+fn fixed_uuid(key:&[u8;32],domain:&[u8],locator:&[u8;32])->Result<String,BridgeError>{
+    let mut mac=Hmac::<sha2_11::Sha256>::new_from_slice(key).map_err(|_|BridgeError::protocol())?;mac.update(domain);mac.update(locator);
+    let mut bytes:[u8;16]=mac.finalize().into_bytes()[..16].try_into().unwrap();bytes[6]=(bytes[6]&15)|64;bytes[8]=(bytes[8]&63)|128;
+    Ok(format!("{}-{}-{}-{}-{}",hex(&bytes[..4]),hex(&bytes[4..6]),hex(&bytes[6..8]),hex(&bytes[8..10]),hex(&bytes[10..])))
+}
+fn hex(bytes:&[u8])->String{bytes.iter().map(|v|format!("{v:02x}")).collect()}
+fn digest(value:&str)->Result<[u8;32],BridgeError>{
+    if value.len()!=64{return Err(BridgeError::protocol());}let mut result=[0;32];
+    for(i,byte)in result.iter_mut().enumerate(){*byte=u8::from_str_radix(&value[i*2..i*2+2],16).map_err(|_|BridgeError::protocol())?;}Ok(result)
+}
+fn enrollment(owner:&Session)->Result<serde_json::Value,BridgeError>{
+    let mut n=owner.history.native.lock().map_err(|_|BridgeError::cleanup_unknown())?;
+    let key=n.key.as_ref().ok_or_else(BridgeError::protocol)?;let root=n.source.as_ref().ok_or_else(BridgeError::protocol)?.lease().map_err(|_|owner.domain.unavailable())?;
+    let(_,root)=root.checked().map_err(|_|owner.domain.unavailable())?;
+    let mut hash=Sha256::new();hash.update(b"MRK-LOCAL-PROJECT-BINDING/1\0");hash.update(n.locator);
+    hash.update(root.device.to_be_bytes());hash.update(root.inode.to_be_bytes());hash.update(root.mode.to_be_bytes());hash.update(root.uid.to_be_bytes());hash.update(root.gid.to_be_bytes());
+    let value=serde_json::json!({"projectLocator":hex(&n.locator),"projectBinding":hex(&hash.finalize()),
+        "projectId":fixed_uuid(key,b"MRK-LOCAL-PROJECT-ID/1\0",&n.locator)?,
+        "keyId":fixed_uuid(key,b"MRK-LOCAL-JOURNAL-KEY-ID/1\0",&n.locator)?,"keyRevision":1});
+    n.enrollment=Some(value.clone());Ok(value)
+}
+async fn write_reply(owner:&Session,writer:&mut ChildStdin,kind:&str,step:u8,payload:serde_json::Value,key:bool)->Result<(),BridgeError>{
+    let final_execute=owner.domain==SavedCommandDomain::LocalStoreExecute&&step==4;
+    let final_recovery=owner.reconcile_checkpointing()&&step==3;
+    let final_ios=owner.candidate_ios()&&step==4;
+    if final_execute||final_recovery||final_ios{
+        #[cfg(not(feature="macos-android-registration-helper"))]
+        if key||kind!="checkpoint-settled"||if final_execute{!execute_helpers_complete(owner)}else if final_ios{!candidate_helpers_complete(owner)}else{!reconcile_native_helpers_complete(owner,true)}{return Err(BridgeError::protocol());}
+        #[cfg(feature="macos-android-registration-helper")]
+        return Err(BridgeError::protocol());
+        // The final original helper has returned AND joined. Only its already
+        // committed checkpoint acknowledgment may use original cleanup F/H.
+        check_source_cleanup(owner)?;
+    }else{check_source(owner)?;}
+    let mut bytes={let r=owner.history.route.lock().map_err(|_|BridgeError::cleanup_unknown())?;
+        let(nonce,hash)=r.original.as_ref().ok_or_else(BridgeError::protocol)?;
+        if r.received!=step||r.completed+1!=step||r.pending.is_some()||r.failed{return Err(BridgeError::protocol());}
+        let value=serde_json::json!({"protocol":if owner.domain==SavedCommandDomain::LocalStoreExecute{execute_wire::PROTOCOL}else if owner.domain==SavedCommandDomain::LocalStoreReconcile{reconcile_wire::PROTOCOL}else if owner.domain==SavedCommandDomain::LocalStorePrepare{prepare_wire::PROTOCOL}else if owner.candidate_ios(){ios_wire::CANDIDATE_PROTOCOL}else if owner.candidate_android(){android_wire::CANDIDATE_PROTOCOL}else{history_wire::PROTOCOL},"operationId":owner.id,"ownerGeneration":owner.generation,
+            "nonce":nonce,"requestSha256":hash,"kind":kind,"step":step,"payload":payload});
+        let mut bytes=Zeroizing::new(crate::edit_protocol::bounded(&value,if key{1900}else{1023})?);bytes.push(b'\n');bytes};
+    if key{let n=owner.history.native.lock().map_err(|_|BridgeError::cleanup_unknown())?;
+        bytes.extend_from_slice(b"MRK-LOCAL-KEY/1\n");bytes.extend_from_slice(n.key.as_ref().ok_or_else(BridgeError::protocol)?.as_ref());bytes.extend_from_slice(b"\nMRK-LOCAL-KEY-END\n");}
+    if bytes.len()>2048{return Err(BridgeError::protocol());}
+    owner.history.route.lock().map_err(|_|BridgeError::cleanup_unknown())?.reply_writing=true;
+    let result=if final_execute||final_recovery||final_ios{
+        let mut cutoff=owner.native_cleanup_cutoff.subscribe();
+        let write=writer.write_all(&bytes);tokio::pin!(write);
+        loop{
+            let end=(*cutoff.borrow_and_update()).min(owner.clocks.finality);
+            if owner.native_cleanup_expired(None){break Err(BridgeError::cleanup_unknown());}
+            tokio::select!{biased;
+                result=&mut write=>break result.map_err(|_|BridgeError::protocol()),
+                changed=cutoff.changed()=>if changed.is_err(){break Err(BridgeError::cleanup_unknown());},
+                _=tokio::time::sleep_until(tokio::time::Instant::from_std(end))=>break Err(BridgeError::cleanup_unknown()),
+            }
+        }
+    }else{
+        let mut stop=owner.stop.subscribe();
+        if *stop.borrow_and_update(){Err(BridgeError::protocol())}else{
+            tokio::select!{biased;_=stop.changed()=>Err(BridgeError::protocol()),
+                result=tokio::time::timeout_at(tokio::time::Instant::from_std(owner.clocks.work),writer.write_all(&bytes))=>
+                    match result{Ok(Ok(()))=>Ok(()),_=>Err(BridgeError::protocol())}}
+        }
+    };
+    bytes.zeroize();result?;
+    if owner.candidate_android()||owner.candidate_ios()||matches!(owner.domain,SavedCommandDomain::LocalStorePrepare|SavedCommandDomain::LocalStoreExecute)||final_recovery{
+        // The write has actually returned; its peer may now publish terminal
+        // and STOP. This is observation-only POST, not another forward grant.
+        // Subsequent material/helper work still repeats original W/consent.
+        let mut n=owner.history.native.lock().map_err(|_|BridgeError::cleanup_unknown())?;
+        if n.failed||n.finished{return Err(BridgeError::protocol());}
+        n.source.as_mut().ok_or_else(BridgeError::protocol)?.post(&mut||owner.native_cleanup_expired(None))
+            .map_err(|_|BridgeError::cleanup_unknown())?;
+    }else{check_source(owner)?;}
+    let mut r=owner.history.route.lock().map_err(|_|BridgeError::cleanup_unknown())?;r.completed=step;r.reply_writing=false;Ok(())
+}
+pub(super) async fn write_phases(_inner:&Arc<Inner>,owner:&Arc<Session>,writer:&mut ChildStdin)->Result<(),BridgeError>{
+    let Context::LocalReleaseHistory(context)=&owner.context else{return Err(BridgeError::protocol());};
+    let total=if matches!(context.action,history_wire::Action::Enroll|history_wire::Action::AbandonInputs){3}else{2};let mut stop=owner.stop.subscribe();
+    let mut verified_head:Option<history_wire::Head>=None;
+    for step in 1..=total{
+        let event=loop{
+            let notified=owner.history.changed.notified();
+            if let Some(event)=owner.history.route.lock().map_err(|_|BridgeError::cleanup_unknown())?.pending.take(){break event;}
+            tokio::select!{biased;_=stop.changed()=>return Err(owner.domain.unavailable()),
+                _=tokio::time::sleep_until(tokio::time::Instant::from_std(owner.clocks.work))=>return Err(owner.domain.unavailable()),_=notified=>{}}
+        };
+        let PhaseEvent::History(event)=event else{return Err(BridgeError::protocol());};
+        match (context.action,step,event){
+            (action,1,history_wire::Event::LeaseReady)=>{
+                if action==history_wire::Action::Enroll{
+                    helper(owner,Step::KeyAbsent,0,None).await?;helper(owner,Step::GenesisAbsent,1,None).await?;
+                    let mut key=Zeroizing::new([0;32]);getrandom::fill(key.as_mut()).map_err(|_|BridgeError::protocol())?;
+                    if *key==[0;32]{return Err(BridgeError::protocol());}owner.history.native.lock().map_err(|_|BridgeError::cleanup_unknown())?.key=Some(key);
+                }else{
+                    let keyring::LocalResult::Key(key)=helper(owner,Step::KeyRead,0,None).await? else{return Err(owner.domain.unavailable());};
+                    let value=key.consume(|_,bytes|Zeroizing::new(*bytes));owner.history.native.lock().map_err(|_|BridgeError::cleanup_unknown())?.key=Some(value);
+                }
+                let data=enrollment(owner)?;write_reply(owner,writer,"key-material",step,data,true).await?;
+            },
+            (history_wire::Action::Enroll,2,history_wire::Event::EmptyJournalReady)=>{
+                let keyring::LocalResult::Key(key)=helper(owner,Step::KeyAdd,0,None).await? else{return Err(owner.domain.unavailable());};
+                let same={let n=owner.history.native.lock().map_err(|_|BridgeError::cleanup_unknown())?;
+                    let expected=n.key.as_ref().ok_or_else(BridgeError::protocol)?;
+                    key.consume(|_,bytes|bytes.iter().zip(expected.iter()).fold(0u8,|n,(a,b)|n|(a^b))==0)};
+                if !same{return Err(owner.domain.unavailable());}write_reply(owner,writer,"key-enrolled",step,serde_json::json!({}),false).await?;
+            },
+            (history_wire::Action::Enroll,3,history_wire::Event::DurableGenesis(head))=>{
+                helper(owner,Step::AnchorAdd,1,Some(digest(&head.sha256)?)).await?;
+                write_reply(owner,writer,"checkpoint-settled",step,serde_json::json!({}),false).await?;
+            },
+            (history_wire::Action::Verify|history_wire::Action::ReviewInputs|history_wire::Action::AbandonInputs|history_wire::Action::ReviewPrepared|history_wire::Action::ReviewExecution|history_wire::Action::ReviewReconcile|history_wire::Action::ReviewRecovery|history_wire::Action::ReviewStagePrepared|history_wire::Action::ReviewStageExecution|history_wire::Action::ReviewExternalReadiness,2,history_wire::Event::HistoryHead(head))=>{
+                if context.action==history_wire::Action::AbandonInputs&&head.sequence==513{return Err(BridgeError::protocol());}
+                helper(owner,Step::AnchorRead,head.sequence,Some(digest(&head.sha256)?)).await?;
+                if head.sequence<513{helper(owner,Step::NextAbsent,head.sequence+1,None).await?;}
+                if context.action==history_wire::Action::AbandonInputs{verified_head=Some(head);}
+                write_reply(owner,writer,"checkpoint-settled",step,serde_json::json!({}),false).await?;
+            },
+            (history_wire::Action::AbandonInputs,3,history_wire::Event::AbandonedHead(head))=>{
+                let previous=verified_head.take().ok_or_else(BridgeError::protocol)?;
+                if previous.sequence>=513||head.sequence!=previous.sequence+1{return Err(BridgeError::protocol());}
+                helper(owner,Step::AnchorAdd,head.sequence,Some(digest(&head.sha256)?)).await?;
+                write_reply(owner,writer,"checkpoint-settled",step,serde_json::json!({}),false).await?;
+            },_=>return Err(BridgeError::protocol()),
+        }
+    }
+    owner.history.native.lock().map_err(|_|BridgeError::cleanup_unknown())?.key.take();Ok(())
+}
+
+#[cfg(not(feature="macos-android-registration-helper"))]
+pub(super) async fn write_candidate(owner:&Arc<Session>,writer:&mut ChildStdin,material:&PrivateSigningMaterial,header:&[u8])->Result<CandidateWrite,BridgeError>{
+    if !owner.candidate_android()||!matches!(material,PrivateSigningMaterial::Android(_)){return Err(BridgeError::protocol());}
+    write_inputs(owner,writer,material,header).await
+}
+#[cfg(not(feature="macos-android-registration-helper"))]
+pub(super) async fn write_ios_candidate(owner:&Arc<Session>,writer:&mut ChildStdin,material:&PrivateSigningMaterial,header:&[u8])->Result<CandidateWrite,BridgeError>{
+    if !owner.candidate_ios()||!matches!(material,PrivateSigningMaterial::IOS(_)){return Err(BridgeError::protocol());}
+    write_inputs(owner,writer,material,header).await
+}
+#[cfg(not(feature="macos-android-registration-helper"))]
+struct InputsHead{sequence:u32,sha256:String}
+#[cfg(not(feature="macos-android-registration-helper"))]
+enum InputsEvent{LeaseReady,HistoryHead(InputsHead),InputsPending(InputsHead),InputsReady(InputsHead)}
+#[cfg(not(feature="macos-android-registration-helper"))]
+async fn write_inputs(owner:&Arc<Session>,writer:&mut ChildStdin,material:&PrivateSigningMaterial,header:&[u8])->Result<CandidateWrite,BridgeError>{
+    if !owner.candidate_android()&&!owner.candidate_ios(){return Err(BridgeError::protocol());}
+    let mut previous:Option<InputsHead>=None;let mut stop=owner.stop.subscribe();
+    for step in 1..=4{
+        let event=loop{
+            let notified=owner.history.changed.notified();
+            // subscribe may occur after the terminal/STOP was already latched.
+            // No helper or private write is in flight at this loop boundary.
+            if *stop.borrow_and_update(){
+                let r=owner.history.route.lock().map_err(|_|BridgeError::cleanup_unknown())?;
+                if r.failed||r.reply_writing{return Err(BridgeError::protocol());}
+                let n=owner.history.native.lock().map_err(|_|BridgeError::cleanup_unknown())?;
+                if n.attempts.iter().any(|a|!a.close_ready())||owner.resource_unknown.load(Ordering::SeqCst){return Err(BridgeError::cleanup_unknown());}
+                return Ok(CandidateWrite::Stopped);
+            }
+            if let Some(event)=owner.history.route.lock().map_err(|_|BridgeError::cleanup_unknown())?.pending.take(){break event;}
+            tokio::select!{biased;changed=stop.changed()=>{if changed.is_err(){return Err(owner.domain.unavailable());}},
+                _=tokio::time::sleep_until(tokio::time::Instant::from_std(owner.clocks.work))=>return Err(owner.domain.unavailable()),_=notified=>{}}
+        };
+        let event=match event {
+            PhaseEvent::Candidate(e) if owner.candidate_android()=>match e{
+                android_wire::CandidateEvent::LeaseReady=>InputsEvent::LeaseReady,
+                android_wire::CandidateEvent::HistoryHead(h)=>InputsEvent::HistoryHead(InputsHead{sequence:h.sequence,sha256:h.sha256}),
+                android_wire::CandidateEvent::InputsPending(h)=>InputsEvent::InputsPending(InputsHead{sequence:h.sequence,sha256:h.sha256}),
+                android_wire::CandidateEvent::InputsReady(h)=>InputsEvent::InputsReady(InputsHead{sequence:h.sequence,sha256:h.sha256}),
+            },
+            PhaseEvent::IOSCandidate(e) if owner.candidate_ios()=>match e{
+                ios_wire::CandidateEvent::LeaseReady=>InputsEvent::LeaseReady,
+                ios_wire::CandidateEvent::HistoryHead(h)=>InputsEvent::HistoryHead(InputsHead{sequence:h.sequence,sha256:h.sha256}),
+                ios_wire::CandidateEvent::InputsPending(h)=>InputsEvent::InputsPending(InputsHead{sequence:h.sequence,sha256:h.sha256}),
+                ios_wire::CandidateEvent::InputsReady(h)=>InputsEvent::InputsReady(InputsHead{sequence:h.sequence,sha256:h.sha256}),
+            },_=>return Err(BridgeError::protocol()),
+        };
+        match (step,event){
+            (1,InputsEvent::LeaseReady)=>{
+                let keyring::LocalResult::Key(key)=helper(owner,Step::KeyRead,0,None).await? else{return Err(owner.domain.unavailable());};
+                let value=key.consume(|_,bytes|Zeroizing::new(*bytes));owner.history.native.lock().map_err(|_|BridgeError::cleanup_unknown())?.key=Some(value);
+                let data=enrollment(owner)?;write_reply(owner,writer,"key-material",1,data,true).await?;
+            },
+            (2,InputsEvent::HistoryHead(head))=>{
+                if head.sequence>511{return Err(BridgeError::protocol());}
+                helper(owner,Step::AnchorRead,head.sequence,Some(digest(&head.sha256)?)).await?;
+                helper(owner,Step::NextAbsent,head.sequence+1,None).await?;previous=Some(head);
+                write_reply(owner,writer,"checkpoint-settled",2,serde_json::json!({}),false).await?;
+            },
+            (3,InputsEvent::InputsPending(head))|(4,InputsEvent::InputsReady(head))=>{
+                let before=previous.take().ok_or_else(BridgeError::protocol)?;
+                if before.sequence>=513||head.sequence!=before.sequence+1{return Err(BridgeError::protocol());}
+                helper(owner,Step::AnchorAdd,head.sequence,Some(digest(&head.sha256)?)).await?;previous=Some(head);
+                write_reply(owner,writer,"checkpoint-settled",step,serde_json::json!({}),false).await?;
+                if step==3{
+                    check_source(owner)?;
+                    // This select owns only a write, never a native helper.
+                    if *stop.borrow_and_update(){return Err(BridgeError::protocol());}
+                    tokio::select!{biased;
+                        _=stop.changed()=>return Err(BridgeError::protocol()),
+                        value=tokio::time::timeout_at(tokio::time::Instant::from_std(owner.clocks.work),
+                            super::super::write_material(writer,material,header))=>{
+                            if !matches!(value,Ok(Ok(()))){return Err(BridgeError::protocol());}
+                        }
+                    }
+                    check_source(owner)?;
+                }
+            },_=>return Err(BridgeError::protocol()),
+        }
+    }
+    owner.history.native.lock().map_err(|_|BridgeError::cleanup_unknown())?.key.take();Ok(CandidateWrite::Complete)
+}
+
+#[cfg(not(feature="macos-android-registration-helper"))]
+pub(super) fn candidate_helpers_complete(owner:&Session)->bool{
+    owner.history.native.try_lock().is_ok_and(|n|!n.failed&&!n.acquire_refused&&n.attempts.len()==5
+        &&n.attempts.iter().enumerate().all(|(index,a)|candidate_helper_step(index)==Some(a.step)
+            &&a.joined.load(Ordering::SeqCst)&&!a.failed.load(Ordering::SeqCst)&&a.close_ready()))
+}
+
+pub(super) fn finish_sources(owner:&Session)->bool{
+    let mut n=match owner.history.native.lock(){Ok(n)=>n,Err(_)=>return false};
+    if n.finished{return false;}
+    n.key.take();n.enrollment.take(); // Secret erasure does not refund an FD/native loan.
+    // There is no credit for a pending/unknown blocking join, even if a helper
+    // terminal or PID wait was already observed. Keep every lease loan intact.
+    for a in &n.attempts{if !a.close_ready(){return false;}}
+    let result=n.source.as_mut().map_or(Ok(()),|source|source.close(&mut||owner.native_cleanup_expired(None)));
+    n.finished=true;if result.is_err(){n.failed=true;}
+    // A policy/busy refusal during original source acquire happened before
+    // Python/helper use. Preserve that refusal, but do not turn its positively
+    // closed unused originals into permanent application cleanup-unknown.
+    // Any later POST/close failure still requires exact success here.
+    n.closure_ok=n.source.as_ref().is_none_or(|s|s.settled()) && (result.is_ok() || n.acquire_refused && matches!(result,Err(crate::asset_commands::Reason::SourceChanged)));
+    n.closure_ok
+}
+pub(super) fn sources_final(owner:&Session)->bool{
+    owner.history.native.try_lock().is_ok_and(|n|n.untouched() || n.finished&&n.closure_ok&&n.source.as_ref().is_none_or(|s|s.settled())
+        &&n.attempts.iter().all(|a|a.close_ready()))
+}
+
+impl State {
+    fn untouched(&self)->bool{
+        !self.finished && !self.failed && !self.acquire_refused && !self.closure_ok && self.source.is_none()
+            && self.runtime.is_none() && self.attempts.is_empty() && self.key.is_none() && self.enrollment.is_none()
+            && self.locator==[0;32]
+    }
+}
+impl Attempt {
+    fn close_ready(&self)->bool{
+        let Ok(handle)=self.handle.try_lock() else{return false;};
+        let Ok(book)=self.book.try_lock() else{return false;};
+        // Registration precedes Document admission. A refused admission can
+        // leave a genuinely untouched book; no worker ever existed to join.
+        // Do not fabricate child_joined or accept a begun/pending/unknown book.
+        handle.is_none() && book.resources_settled() && book.allocations_released()
+            && (self.joined.load(Ordering::SeqCst) || !self.failed.load(Ordering::SeqCst) && book.can_begin())
+    }
+}
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn local_candidate_create_helpers_cannot_enroll_or_skip_checkpoint(){
+        assert_eq!((0..6).map(candidate_helper_step).collect::<Vec<_>>(),vec![Some(Step::KeyRead),Some(Step::AnchorRead),Some(Step::NextAbsent),Some(Step::AnchorAdd),Some(Step::AnchorAdd),None]);
+        assert_eq!(candidate_helper_step(usize::MAX),None);
+    }
+    #[test]
+    fn local_release_history_candidate_helper_rosters_never_enroll(){
+        use history_wire::Action;
+        for action in [Action::Verify,Action::ReviewInputs,Action::AbandonInputs,Action::ReviewPrepared,Action::ReviewExecution,Action::ReviewReconcile,Action::ReviewRecovery,Action::ReviewStagePrepared,Action::ReviewStageExecution]{
+            assert_eq!(helper_step(action,0),Some(Step::KeyRead));
+            assert_eq!(helper_step(action,1),Some(Step::AnchorRead));
+            assert_eq!(helper_step(action,2),Some(Step::NextAbsent));
+            assert_eq!(helper_step(action,3),if action==Action::AbandonInputs{Some(Step::AnchorAdd)}else{None});
+            assert_eq!(helper_step(action,4),None);
+        }
+        assert_eq!(helper_step(Action::Enroll,0),Some(Step::KeyAbsent));
+        assert_eq!(helper_step(Action::Enroll,1),Some(Step::GenesisAbsent));
+        assert_eq!(helper_step(Action::Enroll,2),Some(Step::KeyAdd));
+        assert_eq!(helper_step(Action::Enroll,3),Some(Step::AnchorAdd));
+        assert_eq!(helper_step(Action::Enroll,4),None);
+    }
+    #[test]
+    fn local_release_history_pre_admission_refusal_has_no_worker_to_join(){
+        let mut state=State::new();assert!(state.untouched());state.failed=true;assert!(!state.untouched());
+        let attempt=Attempt{book:Mutex::new(keyring::LookupBook::new()),handle:AsyncMutex::new(None),
+            joined:AtomicBool::new(false),failed:AtomicBool::new(false),step:Step::KeyAbsent};
+        assert!(attempt.close_ready());assert!(!attempt.joined.load(Ordering::SeqCst));
+        attempt.failed.store(true,Ordering::SeqCst);assert!(!attempt.close_ready());
+        attempt.failed.store(false,Ordering::SeqCst);attempt.book.lock().unwrap().interrupt();assert!(!attempt.close_ready());
+    }
+}
+
+#[cfg(not(feature="macos-android-registration-helper"))]
+pub(super) async fn write_prepare(owner:&Arc<Session>,writer:&mut ChildStdin,material:&PrivateSigningMaterial,header:&[u8])->Result<CandidateWrite,BridgeError>{
+    if owner.domain!=SavedCommandDomain::LocalStorePrepare{return Err(BridgeError::protocol());}
+    let mut previous:Option<prepare_wire::Head>=None;let mut stop=owner.stop.subscribe();
+    for step in 1..=4{
+        let event=loop{
+            let notified=owner.history.changed.notified();
+            // subscribe may occur after the terminal/STOP was already latched.
+            // No helper or private write is in flight at this loop boundary.
+            if *stop.borrow_and_update(){
+                let r=owner.history.route.lock().map_err(|_|BridgeError::cleanup_unknown())?;
+                if r.failed||r.reply_writing{return Err(BridgeError::protocol());}
+                let n=owner.history.native.lock().map_err(|_|BridgeError::cleanup_unknown())?;
+                if n.attempts.iter().any(|a|!a.close_ready())||owner.resource_unknown.load(Ordering::SeqCst){return Err(BridgeError::cleanup_unknown());}
+                return Ok(CandidateWrite::Stopped);
+            }
+            if let Some(event)=owner.history.route.lock().map_err(|_|BridgeError::cleanup_unknown())?.pending.take(){break event;}
+            tokio::select!{biased;changed=stop.changed()=>{if changed.is_err(){return Err(owner.domain.unavailable());}},
+                _=tokio::time::sleep_until(tokio::time::Instant::from_std(owner.clocks.work))=>return Err(owner.domain.unavailable()),_=notified=>{}}
+        };
+        let PhaseEvent::Prepare(event)=event else{return Err(BridgeError::protocol());};
+        match (step,event){
+            (1,prepare_wire::Event::LeaseReady)=>{
+                let keyring::LocalResult::Key(key)=helper(owner,Step::KeyRead,0,None).await? else{return Err(owner.domain.unavailable());};
+                let value=key.consume(|_,bytes|Zeroizing::new(*bytes));owner.history.native.lock().map_err(|_|BridgeError::cleanup_unknown())?.key=Some(value);
+                let data=enrollment(owner)?;write_reply(owner,writer,"key-material",1,data,true).await?;
+            },
+            (2,prepare_wire::Event::HistoryHead(head))=>{
+                if head.sequence>511{return Err(BridgeError::protocol());}
+                helper(owner,Step::AnchorRead,head.sequence,Some(digest(&head.sha256)?)).await?;
+                helper(owner,Step::NextAbsent,head.sequence+1,None).await?;previous=Some(head);
+                write_reply(owner,writer,"checkpoint-settled",2,serde_json::json!({}),false).await?;
+            },
+            (3,prepare_wire::Event::PreparePending(head))|(4,prepare_wire::Event::PrepareSettled(head))=>{
+                let before=previous.take().ok_or_else(BridgeError::protocol)?;
+                if before.sequence>=513||head.sequence!=before.sequence+1{return Err(BridgeError::protocol());}
+                helper(owner,Step::AnchorAdd,head.sequence,Some(digest(&head.sha256)?)).await?;previous=Some(head);
+                write_reply(owner,writer,"checkpoint-settled",step,serde_json::json!({}),false).await?;
+                if step==3{
+                    check_source(owner)?;
+                    // This select owns only a write, never a native helper.
+                    if *stop.borrow_and_update(){return Err(BridgeError::protocol());}
+                    tokio::select!{biased;
+                        _=stop.changed()=>return Err(BridgeError::protocol()),
+                        value=tokio::time::timeout_at(tokio::time::Instant::from_std(owner.clocks.work),
+                            super::super::write_material(writer,material,header))=>{
+                            if !matches!(value,Ok(Ok(()))){return Err(BridgeError::protocol());}
+                        }
+                    }
+                    check_source(owner)?;
+                }
+            },_=>return Err(BridgeError::protocol()),
+        }
+    }
+    owner.history.native.lock().map_err(|_|BridgeError::cleanup_unknown())?.key.take();Ok(CandidateWrite::Complete)
+}
+
+#[cfg(not(feature="macos-android-registration-helper"))]
+pub(super) fn prepare_helpers_complete(owner:&Session)->bool{
+    owner.history.native.try_lock().is_ok_and(|n|!n.failed&&!n.acquire_refused&&n.attempts.len()==5
+        &&n.attempts.iter().enumerate().all(|(index,a)|prepare_helper_step(index)==Some(a.step)
+            &&a.joined.load(Ordering::SeqCst)&&!a.failed.load(Ordering::SeqCst)&&a.close_ready()))
+}
+
+// Same closed five native roles, a distinct domain discriminator at admission.
+fn prepare_helper_step(index:usize)->Option<Step>{
+    [Step::KeyRead,Step::AnchorRead,Step::NextAbsent,Step::AnchorAdd,Step::AnchorAdd].get(index).copied()
+}
+#[cfg(not(feature="macos-android-registration-helper"))]
+pub(super) fn acquire_prepare_sources(owner:&Session,runtime:&Arc<Mutex<StoreRuntimeSlots>>)->Result<(),BridgeError>{
+    if owner.domain!=SavedCommandDomain::LocalStorePrepare{return Err(BridgeError::protocol());}consent(owner)?;
+    // Actual held Store Book slots, before Account/path opens. The existing
+    // source owner adds each original path/lease/helper envelope and refuses
+    // >256; neither a constant quote nor future unknown closes grant credit.
+    let live=runtime.lock().map_err(|_|BridgeError::cleanup_unknown())?.retained_original_count().ok_or_else(BridgeError::cleanup_unknown)?;
+    acquire_source(owner,RuntimeSource::Store(runtime.clone()),live)
+}
+#[cfg(not(feature="macos-android-registration-helper"))]
+pub(super) fn prepare_request(owner:&Session,runtime:&VerifiedRuntime)->Result<Vec<u8>,BridgeError>{
+    let Consent::Prepare(material)=consent(owner)?else{return Err(BridgeError::protocol());};
+    let(Context::LocalStorePrepare(context),Profile::LocalStorePrepare(profile))=(&owner.context,owner.profile)else{return Err(BridgeError::protocol());};
+    let n=owner.history.native.lock().map_err(|_|BridgeError::cleanup_unknown())?;
+    if !matches!(n.runtime,Some(RuntimeSource::Store(_)))||n.failed||n.finished{return Err(BridgeError::protocol());}
+    let source=n.source.as_ref().ok_or_else(BridgeError::protocol)?;
+    let lease=source.lease().map_err(|_|owner.domain.unavailable())?;
+    let(_,root)=lease.checked().map_err(|_|owner.domain.unavailable())?;
+    let clock=ClockBridge::capture().ok_or_else(BridgeError::protocol)?;
+    let mut nonce=[0;16];getrandom::fill(&mut nonce).map_err(|_|BridgeError::protocol())?;
+    let native=prepare_wire::Native{home:source.home().map_err(|_|owner.domain.unavailable())?.into(),lease_fd:root.descriptor,
+        nonce:hex(&nonce),work_end_ns:clock.endpoint(owner.clocks.work).ok_or_else(BridgeError::protocol)?,
+        hard_end_ns:clock.endpoint(owner.clocks.finality).ok_or_else(BridgeError::protocol)?,authorization_id:android_wire::candidate_uuid(&super::super::nonce_selected(owner.domain,true)?).ok_or_else(BridgeError::protocol)?,
+        // These values were required by this actual Book's signed manifest
+        // and protected-app admission, before source acquisition above.
+        tooling_version:crate::runtime::CORE_VERSION,tooling_commit:option_env!("MRK_MACOS_INSTALL_SOURCE_COMMIT").ok_or_else(BridgeError::protocol)?};
+    let bytes=prepare_wire::request(&owner.id,&owner.generation,context,profile,&owner.project,&runtime.cwd,&material.prepare_context_data()?,&native)?;
+    let mut route=owner.history.route.lock().map_err(|_|BridgeError::cleanup_unknown())?;
+    if route.original.is_some()||route.failed{return Err(BridgeError::protocol());}
+    route.original=Some((native.nonce,hex(&Sha256::digest(&bytes))));Ok(bytes)
+}
+
+#[cfg(test)]
+mod prepare_tests{
+    use super::*;
+    #[test]
+    fn local_prepare_helper_plan_never_enrolls_or_omits_a_checkpoint(){
+        assert_eq!((0..6).map(prepare_helper_step).collect::<Vec<_>>(),vec![Some(Step::KeyRead),Some(Step::AnchorRead),Some(Step::NextAbsent),Some(Step::AnchorAdd),Some(Step::AnchorAdd),None]);
+        assert_eq!(prepare_helper_step(usize::MAX),None);
+        let state=State::new();assert!(state.untouched());
+        let first=super::super::super::nonce_selected(SavedCommandDomain::LocalStorePrepare,true).unwrap();
+        let second=super::super::super::nonce_selected(SavedCommandDomain::LocalStorePrepare,true).unwrap();
+        assert_ne!(first,second);
+        for fresh in [first,second]{assert!(crate::local_release_history_protocol::journal_uuid(&android_wire::candidate_uuid(&fresh).unwrap()));}
+        // Untouched closure is not a five-helper completion witness.
+        assert!(state.attempts.is_empty());
+    }
+}
+
+#[cfg(not(feature="macos-android-registration-helper"))]
+pub(super) async fn write_execute(owner:&Arc<Session>,writer:&mut ChildStdin,material:&PrivateSigningMaterial,header:&[u8])->Result<CandidateWrite,BridgeError>{
+    if owner.domain!=SavedCommandDomain::LocalStoreExecute{return Err(BridgeError::protocol());}
+    let mut previous:Option<execute_wire::Head>=None;let mut stop=owner.stop.subscribe();
+    for step in 1..=4{
+        let event=loop{
+            let notified=owner.history.changed.notified();
+            // subscribe may occur after the terminal/STOP was already latched.
+            // No helper or private write is in flight at this loop boundary.
+            if *stop.borrow_and_update(){
+                let r=owner.history.route.lock().map_err(|_|BridgeError::cleanup_unknown())?;
+                if r.failed||r.reply_writing{return Err(BridgeError::protocol());}
+                let n=owner.history.native.lock().map_err(|_|BridgeError::cleanup_unknown())?;
+                if n.attempts.iter().any(|a|!a.close_ready())||owner.resource_unknown.load(Ordering::SeqCst){return Err(BridgeError::cleanup_unknown());}
+                return Ok(CandidateWrite::Stopped);
+            }
+            if let Some(event)=owner.history.route.lock().map_err(|_|BridgeError::cleanup_unknown())?.pending.take(){break event;}
+            tokio::select!{biased;changed=stop.changed()=>{if changed.is_err(){return Err(owner.domain.unavailable());}},
+                _=tokio::time::sleep_until(tokio::time::Instant::from_std(owner.clocks.work))=>return Err(owner.domain.unavailable()),_=notified=>{}}
+        };
+        let PhaseEvent::Execute(event)=event else{return Err(BridgeError::protocol());};
+        match (step,event){
+            (1,execute_wire::Event::LeaseReady)=>{
+                let keyring::LocalResult::Key(key)=helper(owner,Step::KeyRead,0,None).await? else{return Err(owner.domain.unavailable());};
+                let value=key.consume(|_,bytes|Zeroizing::new(*bytes));owner.history.native.lock().map_err(|_|BridgeError::cleanup_unknown())?.key=Some(value);
+                let data=enrollment(owner)?;write_reply(owner,writer,"key-material",1,data,true).await?;
+            },
+            (2,execute_wire::Event::HistoryHead(head))=>{
+                if !(5..=511).contains(&head.sequence){return Err(BridgeError::protocol());}
+                helper(owner,Step::AnchorRead,head.sequence,Some(digest(&head.sha256)?)).await?;
+                helper(owner,Step::NextAbsent,head.sequence+1,None).await?;previous=Some(head);
+                write_reply(owner,writer,"checkpoint-settled",2,serde_json::json!({}),false).await?;
+            },
+            (3,execute_wire::Event::ExecutePending(head))|(4,execute_wire::Event::ExecuteSettled(head))=>{
+                let before=previous.take().ok_or_else(BridgeError::protocol)?;
+                if before.sequence>=513||head.sequence!=before.sequence+1{return Err(BridgeError::protocol());}
+                helper(owner,Step::AnchorAdd,head.sequence,Some(digest(&head.sha256)?)).await?;previous=Some(head);
+                write_reply(owner,writer,"checkpoint-settled",step,serde_json::json!({}),false).await?;
+                if step==3{
+                    check_source(owner)?;
+                    // This select owns only a write, never a native helper.
+                    if *stop.borrow_and_update(){return Err(BridgeError::protocol());}
+                    tokio::select!{biased;
+                        _=stop.changed()=>return Err(BridgeError::protocol()),
+                        value=tokio::time::timeout_at(tokio::time::Instant::from_std(owner.clocks.work),
+                            super::super::write_material(writer,material,header))=>{
+                            if !matches!(value,Ok(Ok(()))){return Err(BridgeError::protocol());}
+                        }
+                    }
+                    check_source(owner)?;
+                }
+            },_=>return Err(BridgeError::protocol()),
+        }
+    }
+    owner.history.native.lock().map_err(|_|BridgeError::cleanup_unknown())?.key.take();Ok(CandidateWrite::Complete)
+}
+
+#[cfg(not(feature="macos-android-registration-helper"))]
+pub(super) fn execute_helpers_complete(owner:&Session)->bool{
+    owner.history.native.try_lock().is_ok_and(|n|!n.failed&&!n.acquire_refused&&n.attempts.len()==5
+        &&n.attempts.iter().enumerate().all(|(index,a)|prepare_helper_step(index)==Some(a.step)
+            &&a.joined.load(Ordering::SeqCst)&&!a.failed.load(Ordering::SeqCst)&&a.close_ready()))
+}
+
+#[cfg(not(feature="macos-android-registration-helper"))]
+pub(super) fn execute_request(owner:&Session,runtime:&VerifiedRuntime,binding:&execute_wire::NativeTools)->Result<Vec<u8>,BridgeError>{
+    let Consent::Execute(material)=consent(owner)?else{return Err(BridgeError::protocol());};
+    let(Context::LocalStoreExecute(context),Profile::LocalStoreExecute(profile))=(&owner.context,owner.profile)else{return Err(BridgeError::protocol());};
+    let n=owner.history.native.lock().map_err(|_|BridgeError::cleanup_unknown())?;
+    if !matches!(n.runtime,Some(RuntimeSource::Execute(_)))||n.failed||n.finished{return Err(BridgeError::protocol());}
+    let source=n.source.as_ref().ok_or_else(BridgeError::protocol)?;
+    let lease=source.lease().map_err(|_|owner.domain.unavailable())?;
+    let(_,root)=lease.checked().map_err(|_|owner.domain.unavailable())?;
+    let clock=ClockBridge::capture().ok_or_else(BridgeError::protocol)?;
+    let mut nonce=[0;16];getrandom::fill(&mut nonce).map_err(|_|BridgeError::protocol())?;
+    let native=execute_wire::Native{home:source.home().map_err(|_|owner.domain.unavailable())?.into(),lease_fd:root.descriptor,
+        nonce:hex(&nonce),work_end_ns:clock.endpoint(owner.clocks.work).ok_or_else(BridgeError::protocol)?,
+        hard_end_ns:clock.endpoint(owner.clocks.finality).ok_or_else(BridgeError::protocol)?,authorization_id:android_wire::candidate_uuid(&super::super::nonce_selected(owner.domain,true)?).ok_or_else(BridgeError::protocol)?,
+        // These values were required by this actual Book's signed manifest
+        // and protected-app admission, before source acquisition above.
+        tools:binding.clone(),tooling_version:crate::runtime::CORE_VERSION,tooling_commit:option_env!("MRK_MACOS_INSTALL_SOURCE_COMMIT").ok_or_else(BridgeError::protocol)?};
+    let bytes=execute_wire::request(&owner.id,&owner.generation,context,profile,&owner.project,&runtime.cwd,&material.execute_context_data()?,&native)?;
+    let mut route=owner.history.route.lock().map_err(|_|BridgeError::cleanup_unknown())?;
+    if route.original.is_some()||route.failed{return Err(BridgeError::protocol());}
+    route.authorization=Some(native.authorization_id);route.original=Some((native.nonce,hex(&Sha256::digest(&bytes))));Ok(bytes)
+}
+
+#[cfg(not(feature="macos-android-registration-helper"))]
+pub(super) fn acquire_execute_sources(owner:&Session,runtime:&Arc<Mutex<ExecuteNativeBooks>>)->Result<(),BridgeError>{
+    if owner.domain!=SavedCommandDomain::LocalStoreExecute{return Err(BridgeError::protocol());}consent(owner)?;
+    let live=runtime.lock().map_err(|_|BridgeError::cleanup_unknown())?.execute_source_quote().ok_or_else(BridgeError::cleanup_unknown)?;
+    acquire_source(owner,RuntimeSource::Execute(runtime.clone()),live)
+}
+
+fn check_source_cleanup(owner:&Session)->Result<(),BridgeError>{
+    let mut n=owner.history.native.lock().map_err(|_|BridgeError::cleanup_unknown())?;
+    if n.failed||n.finished{return Err(BridgeError::protocol());}
+    n.source.as_mut().ok_or_else(BridgeError::protocol)?.post(&mut||owner.native_cleanup_expired(None)).map_err(|_|BridgeError::cleanup_unknown())
+}
+// Observation-only tail selection AFTER the helper has returned, joined and
+// consumed its settled original storage. This never grants launch/GO after W.
+fn final_checkpoint_original(domain:SavedCommandDomain,settlement:bool,attempts:&[Arc<Attempt>],attempt:&Arc<Attempt>)->bool{
+    let count=match(domain,settlement){(SavedCommandDomain::LocalStoreExecute,_)=>5,(SavedCommandDomain::IOSArchive,true)=>5,(SavedCommandDomain::LocalStoreReconcile,true)=>4,_=>return false};
+    attempts.len()==count&&attempt.step==Step::AnchorAdd&&attempts.last().is_some_and(|last|Arc::ptr_eq(last,attempt))
+        &&attempt.joined.load(Ordering::SeqCst)&&!attempt.failed.load(Ordering::SeqCst)&&attempt.close_ready()
+}
+fn attempt_is_last_checkpoint(owner:&Session,attempt:&Arc<Attempt>)->bool{
+    owner.history.native.try_lock().is_ok_and(|n|!n.failed&&!n.finished&&final_checkpoint_original(owner.domain,owner.reconcile_checkpointing()||owner.candidate_ios(),&n.attempts,attempt))
+}
+
+#[cfg(not(feature="macos-android-registration-helper"))]
+pub(super) fn acquire_reconcile_sources(owner:&Session,runtime:&Arc<Mutex<StoreRuntimeSlots>>)->Result<(),BridgeError>{
+    if owner.domain!=SavedCommandDomain::LocalStoreReconcile{return Err(BridgeError::protocol());}consent(owner)?;
+    // Actual held Store Book slots, before Account/path opens. The existing
+    // source owner adds each original path/lease/helper envelope and refuses
+    // >256; neither a constant quote nor future unknown closes grant credit.
+    let live=runtime.lock().map_err(|_|BridgeError::cleanup_unknown())?.retained_original_count().ok_or_else(BridgeError::cleanup_unknown)?;
+    acquire_source(owner,RuntimeSource::Store(runtime.clone()),live)
+}
+
+#[cfg(not(feature="macos-android-registration-helper"))]
+pub(super) fn reconcile_request(owner:&Session,runtime:&VerifiedRuntime)->Result<Vec<u8>,BridgeError>{
+    let Consent::Reconcile(material)=consent(owner)?else{return Err(BridgeError::protocol());};
+    let(Context::LocalStoreReconcile(context),Profile::LocalStoreReconcile(profile))=(&owner.context,owner.profile)else{return Err(BridgeError::protocol());};
+    let n=owner.history.native.lock().map_err(|_|BridgeError::cleanup_unknown())?;
+    if !matches!(n.runtime,Some(RuntimeSource::Store(_)))||n.failed||n.finished{return Err(BridgeError::protocol());}
+    let source=n.source.as_ref().ok_or_else(BridgeError::protocol)?;
+    let lease=source.lease().map_err(|_|owner.domain.unavailable())?;
+    let(_,root)=lease.checked().map_err(|_|owner.domain.unavailable())?;
+    let clock=ClockBridge::capture().ok_or_else(BridgeError::protocol)?;
+    let mut nonce=[0;16];getrandom::fill(&mut nonce).map_err(|_|BridgeError::protocol())?;
+    let native=reconcile_wire::Native{home:source.home().map_err(|_|owner.domain.unavailable())?.into(),lease_fd:root.descriptor,
+        nonce:hex(&nonce),work_end_ns:clock.endpoint(owner.clocks.work).ok_or_else(BridgeError::protocol)?,
+        hard_end_ns:clock.endpoint(owner.clocks.finality).ok_or_else(BridgeError::protocol)?,authorization_id:android_wire::candidate_uuid(&super::super::nonce_selected(owner.domain,true)?).ok_or_else(BridgeError::protocol)?,
+        // These values were required by this actual Book's signed manifest
+        // and protected-app admission, before source acquisition above.
+        tooling_version:crate::runtime::CORE_VERSION,tooling_commit:option_env!("MRK_MACOS_INSTALL_SOURCE_COMMIT").ok_or_else(BridgeError::protocol)?};
+    let bytes=reconcile_wire::request(&owner.id,&owner.generation,context,profile,&owner.project,&runtime.cwd,&material.reconcile_context_data()?,&native)?;
+    let mut route=owner.history.route.lock().map_err(|_|BridgeError::cleanup_unknown())?;
+    if route.original.is_some()||route.failed{return Err(BridgeError::protocol());}
+    route.authorization=Some(native.authorization_id);route.original=Some((native.nonce,hex(&Sha256::digest(&bytes))));Ok(bytes)
+}
+
+fn reconcile_helper_step(index:usize,settlement:bool)->Option<Step>{
+    if index==3&&settlement{Some(Step::AnchorAdd)}else{[Step::KeyRead,Step::AnchorRead,Step::NextAbsent].get(index).copied()}
+}
+#[cfg(not(feature="macos-android-registration-helper"))]
+pub(super) fn reconcile_helpers_complete(owner:&Session)->bool{
+    // Copy before taking the native book: Claim paths lock native then route.
+    let head={let Ok(r)=owner.history.route.try_lock() else{return false;};
+        if !r.reconcile_replies_complete(owner.reconcile_checkpointing()){return false;}r.reconcile_head.unwrap()};
+    reconcile_native_helpers_complete(owner,owner.reconcile_checkpointing())&& (head<513||!owner.reconcile_checkpointing())
+}
+#[cfg(not(feature="macos-android-registration-helper"))]
+fn reconcile_native_helpers_complete(owner:&Session,settlement:bool)->bool{
+    // Before final ACK, completed=2. Do not use route completion as a proxy
+    // for the fourth original helper actually returning and joining.
+    let head={let Ok(r)=owner.history.route.try_lock()else{return false;};let Some(head)=r.reconcile_head else{return false;};head};
+    if !matches!(&owner.context,Context::LocalStoreReconcile(c) if c.head_valid(head))||settlement!=owner.reconcile_checkpointing(){return false;}
+    let count=if settlement{4}else if head==513{2}else{3};
+    owner.history.native.try_lock().is_ok_and(|n|!n.failed&&!n.acquire_refused&&n.attempts.len()==count
+        &&n.attempts.iter().enumerate().all(|(index,a)|reconcile_helper_step(index,settlement)==Some(a.step)
+            &&a.joined.load(Ordering::SeqCst)&&!a.failed.load(Ordering::SeqCst)&&a.close_ready()))
+}
+#[cfg(not(feature="macos-android-registration-helper"))]
+pub(super) async fn write_reconcile(owner:&Arc<Session>,writer:&mut ChildStdin,material:&PrivateSigningMaterial,header:&[u8])->Result<CandidateWrite,BridgeError>{
+    if owner.domain!=SavedCommandDomain::LocalStoreReconcile{return Err(BridgeError::protocol());}
+    let settlement=owner.reconcile_checkpointing();
+    let mut stop=owner.stop.subscribe();
+    for step in 1..=if settlement{3}else{2}{
+        let event=loop{
+            let notified=owner.history.changed.notified();
+            if *stop.borrow_and_update(){
+                let r=owner.history.route.lock().map_err(|_|BridgeError::cleanup_unknown())?;
+                if r.failed||r.reply_writing{return Err(BridgeError::protocol());}
+                drop(r);let n=owner.history.native.lock().map_err(|_|BridgeError::cleanup_unknown())?;
+                if n.attempts.iter().any(|a|!a.close_ready())||owner.resource_unknown.load(Ordering::SeqCst){return Err(BridgeError::cleanup_unknown());}
+                return Ok(CandidateWrite::Stopped);
+            }
+            if let Some(event)=owner.history.route.lock().map_err(|_|BridgeError::cleanup_unknown())?.pending.take(){break event;}
+            tokio::select!{biased;changed=stop.changed()=>{if changed.is_err(){return Err(owner.domain.unavailable());}},
+                _=tokio::time::sleep_until(tokio::time::Instant::from_std(owner.clocks.work))=>return Err(owner.domain.unavailable()),_=notified=>{}}
+        };
+        let PhaseEvent::Reconcile(event)=event else{return Err(BridgeError::protocol());};
+        match (step,event){
+            (1,reconcile_wire::Event::LeaseReady)=>{
+                let keyring::LocalResult::Key(key)=helper(owner,Step::KeyRead,0,None).await? else{return Err(owner.domain.unavailable());};
+                let value=key.consume(|_,bytes|Zeroizing::new(*bytes));owner.history.native.lock().map_err(|_|BridgeError::cleanup_unknown())?.key=Some(value);
+                let data=enrollment(owner)?;write_reply(owner,writer,"key-material",1,data,true).await?;
+            },
+            (2,reconcile_wire::Event::HistoryHead(head))=>{
+                if !matches!(&owner.context,Context::LocalStoreReconcile(c) if c.head_valid(head.sequence)){return Err(BridgeError::protocol());}
+                helper(owner,Step::AnchorRead,head.sequence,Some(digest(&head.sha256)?)).await?;
+                if head.sequence<513{helper(owner,Step::NextAbsent,head.sequence+1,None).await?;}
+                write_reply(owner,writer,"checkpoint-settled",2,serde_json::json!({}),false).await?;
+                {let mut r=owner.history.route.lock().map_err(|_|BridgeError::cleanup_unknown())?;
+                    if r.reconcile_head.is_some()||r.failed||r.completed!=2||r.reply_writing{return Err(BridgeError::protocol());}
+                    r.reconcile_head=Some(head.sequence);}
+                // ACK2 is not permission by itself: recheck the same Document,
+                // source lease and original W immediately before material IO.
+                check_source(owner)?;
+                if *stop.borrow_and_update(){return Err(BridgeError::protocol());}
+                tokio::select!{biased;
+                    _=stop.changed()=>return Err(BridgeError::protocol()),
+                    value=tokio::time::timeout_at(tokio::time::Instant::from_std(owner.clocks.work),
+                        super::super::write_material(writer,material,header))=>{
+                        if !matches!(value,Ok(Ok(()))){return Err(BridgeError::protocol());}
+                    }
+                }
+                check_source(owner)?;
+            },
+            (3,event) if settlement=>{
+                let head=match(event,&owner.context){
+                    (reconcile_wire::Event::RecoverySettled(h),Context::LocalStoreReconcile(c)) if c.settling()=>h,
+                    (reconcile_wire::Event::ExternalReady(h),Context::LocalStoreReconcile(c)) if c.refreshing()=>h,
+                    _=>return Err(BridgeError::protocol()),
+                };
+                let before=owner.history.route.lock().map_err(|_|BridgeError::cleanup_unknown())?.reconcile_head.ok_or_else(BridgeError::protocol)?;
+                if before>=513||head.sequence!=before+1{return Err(BridgeError::protocol());}
+                helper(owner,Step::AnchorAdd,head.sequence,Some(digest(&head.sha256)?)).await?;
+                write_reply(owner,writer,"checkpoint-settled",3,serde_json::json!({}),false).await?;
+            },_=>return Err(BridgeError::protocol()),
+        }
+    }
+    owner.history.native.lock().map_err(|_|BridgeError::cleanup_unknown())?.key.take();Ok(CandidateWrite::Complete)
+}
+
+#[cfg(test)]
+mod reconcile_tests {
+    use super::*;
+    #[test]
+    fn local_reconcile_read_helpers_never_add_or_credit_unjoined_work(){
+        assert_eq!((0..5).map(|index|reconcile_helper_step(index,false)).collect::<Vec<_>>(),vec![Some(Step::KeyRead),Some(Step::AnchorRead),Some(Step::NextAbsent),None,None]);
+        assert_eq!(reconcile_helper_step(usize::MAX,false),None);
+        for index in 0..4{assert_eq!(helper_step(history_wire::Action::ReviewReconcile,index),reconcile_helper_step(index,false));}
+        let attempt=Attempt{book:Mutex::new(keyring::LookupBook::new()),handle:AsyncMutex::new(None),joined:AtomicBool::new(false),failed:AtomicBool::new(false),step:Step::KeyRead};
+        assert!(attempt.close_ready()); // genuinely untouched, but NOT helper completion
+        assert!(!attempt.joined.load(Ordering::SeqCst));attempt.failed.store(true,Ordering::SeqCst);assert!(!attempt.close_ready());
+    }
+    #[test]
+    fn local_recovery_helpers_add_exactly_one_after_three_reads_not_for_offline_review(){
+        assert_eq!((0..6).map(|i|reconcile_helper_step(i,true)).collect::<Vec<_>>(),vec![Some(Step::KeyRead),Some(Step::AnchorRead),Some(Step::NextAbsent),Some(Step::AnchorAdd),None,None]);
+        assert_eq!(reconcile_helper_step(usize::MAX,true),None);
+        for i in 0..5{assert_eq!(helper_step(history_wire::Action::ReviewRecovery,i),reconcile_helper_step(i,false));}
+    }
+
+    #[test]
+    fn ios_candidate_cleanup_credit_needs_fifth_original_join_not_phase_data(){
+        let make=|step|Arc::new(Attempt{book:Mutex::new(keyring::LookupBook::new()),handle:AsyncMutex::new(None),joined:AtomicBool::new(false),failed:AtomicBool::new(false),step});
+        let rows=(0..5).map(|i|make(candidate_helper_step(i).unwrap())).collect::<Vec<_>>();let last=rows[4].clone();
+        assert_eq!(candidate_helper_step(5),None);assert_eq!(candidate_helper_step(usize::MAX),None);
+        assert!(last.close_ready());assert!(!final_checkpoint_original(SavedCommandDomain::IOSArchive,true,&rows,&last));
+        last.joined.store(true,Ordering::SeqCst);assert!(final_checkpoint_original(SavedCommandDomain::IOSArchive,true,&rows,&last));
+        assert!(!final_checkpoint_original(SavedCommandDomain::IOSArchive,false,&rows,&last));
+        assert!(!final_checkpoint_original(SavedCommandDomain::IOSArchive,true,&rows,&rows[3]));
+        let foreign=make(Step::AnchorAdd);foreign.joined.store(true,Ordering::SeqCst);
+        assert!(!final_checkpoint_original(SavedCommandDomain::IOSArchive,true,&rows,&foreign));
+        last.failed.store(true,Ordering::SeqCst);assert!(!final_checkpoint_original(SavedCommandDomain::IOSArchive,true,&rows,&last));
+        // This only audits the cleanup selector; final owner success separately
+        // requires all five original joined helpers and four written ACKs.
+    }
+    #[test]
+    fn local_recovery_joined_final_original_uses_cleanup_tail_not_a_new_forward_grant(){
+        let make=|step|Arc::new(Attempt{book:Mutex::new(keyring::LookupBook::new()),handle:AsyncMutex::new(None),joined:AtomicBool::new(false),failed:AtomicBool::new(false),step});
+        let mut rows=vec![make(Step::KeyRead),make(Step::AnchorRead),make(Step::NextAbsent),make(Step::AnchorAdd)];
+        let last=rows[3].clone();
+        // Untouched storage is closed-ready, but the original has not joined.
+        assert!(last.close_ready());assert!(!final_checkpoint_original(SavedCommandDomain::LocalStoreReconcile,true,&rows,&last));
+        last.joined.store(true,Ordering::SeqCst);
+        assert!(final_checkpoint_original(SavedCommandDomain::LocalStoreReconcile,true,&rows,&last));
+        assert!(!final_checkpoint_original(SavedCommandDomain::LocalStoreReconcile,false,&rows,&last));
+        assert!(!final_checkpoint_original(SavedCommandDomain::LocalStorePrepare,true,&rows,&last));
+        assert!(!final_checkpoint_original(SavedCommandDomain::LocalStoreExecute,false,&rows,&last));
+        let foreign=make(Step::AnchorAdd);foreign.joined.store(true,Ordering::SeqCst);
+        assert!(!final_checkpoint_original(SavedCommandDomain::LocalStoreReconcile,true,&rows,&foreign));
+        assert!(!final_checkpoint_original(SavedCommandDomain::LocalStoreReconcile,true,&rows,&rows[2]));
+        last.failed.store(true,Ordering::SeqCst);assert!(!final_checkpoint_original(SavedCommandDomain::LocalStoreReconcile,true,&rows,&last));last.failed.store(false,Ordering::SeqCst);
+        rows.push(foreign.clone());assert!(!final_checkpoint_original(SavedCommandDomain::LocalStoreReconcile,true,&rows,&last));
+        assert!(final_checkpoint_original(SavedCommandDomain::LocalStoreExecute,false,&rows,&foreign));
+        // Actual forward helper admission remains original W/consent. Only the
+        // already-joined final result chooses the existing F/H observation cut.
+    }
+
+    #[test]
+    fn local_external_readiness_final_original_join_alone_selects_cleanup_not_success(){
+        let c=reconcile_wire::tests::readiness_context();assert!(c.checkpointing()&&!c.settling());
+        let make=|step|Arc::new(Attempt{book:Mutex::new(keyring::LookupBook::new()),handle:AsyncMutex::new(None),joined:AtomicBool::new(false),failed:AtomicBool::new(false),step});
+        let rows=(0..4).map(|i|make(reconcile_helper_step(i,c.checkpointing()).unwrap())).collect::<Vec<_>>();let last=rows[3].clone();
+        assert_eq!(last.step,Step::AnchorAdd);assert!(!final_checkpoint_original(SavedCommandDomain::LocalStoreReconcile,c.checkpointing(),&rows,&last));
+        last.joined.store(true,Ordering::SeqCst);assert!(final_checkpoint_original(SavedCommandDomain::LocalStoreReconcile,c.checkpointing(),&rows,&last));
+        // Tail selection is deliberately NOT whole success: first originals
+        // remain unjoined here; native completion independently checks all four.
+        assert!(rows[..3].iter().all(|r|!r.joined.load(Ordering::SeqCst)));
+        let foreign=make(Step::AnchorAdd);foreign.joined.store(true,Ordering::SeqCst);
+        assert!(!final_checkpoint_original(SavedCommandDomain::LocalStoreReconcile,c.checkpointing(),&rows,&foreign));
+        last.failed.store(true,Ordering::SeqCst);assert!(!final_checkpoint_original(SavedCommandDomain::LocalStoreReconcile,c.checkpointing(),&rows,&last));
+        for i in 0..5{assert_eq!(helper_step(history_wire::Action::ReviewExternalReadiness,i),reconcile_helper_step(i,false));}
+        assert_eq!(helper_step(history_wire::Action::ReviewExternalReadiness,3),None);
+    }
+
+}

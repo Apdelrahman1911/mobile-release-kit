@@ -1,0 +1,961 @@
+diff --git a/desktop/src-tauri/src/tool_acquisition_protocol.rs b/desktop/src-tauri/src/tool_acquisition_protocol.rs
+--- a/desktop/src-tauri/src/tool_acquisition_protocol.rs
++++ b/desktop/src-tauri/src/tool_acquisition_protocol.rs
+@@ -29,6 +29,8 @@
+ pub(crate) mod components;
+ #[path = "tool_acquisition_sdk.rs"]
+ pub(crate) mod sdk;
++#[path = "tool_source_discovery.rs"]
++pub(crate) mod discovery;
+ use components::Partition;
+ pub(crate) const COMPONENTS: [&str; 4] = components::ALL;
+ pub(crate) const FIXED: [&str; 7] = [
+@@ -612,6 +614,8 @@
+     Unsupported,
+     Stale,
+     CensusIncomplete,
++    ExistingToolsIncompatible,
++    ExistingToolsUnreadable,
+     RecoveryRequired,
+     CacheConflict,
+     DiskSpace,
+@@ -683,9 +687,21 @@
+     protected_tools: Option<ProtectedTools>,
+     #[serde(skip)]
+     components: Option<Partition>,
++    #[serde(skip)]
++    discovered_sources: Option<discovery::Discovery>,
+ }
+ impl Terminal {
+     pub(crate) fn components(&self) -> Option<Partition> { self.components }
++    pub(crate) fn discovered_sources(&self) -> Option<discovery::Discovery> { self.discovered_sources }
++    pub(crate) fn observe_discovered_sources(&mut self, value: discovery::Discovery) {
++        if self.discovered_sources.is_none() && value.searched()
++            && self.context.action == Action::Inspect && self.outcome == Outcome::Complete
++            && self.reason == Reason::None && self.lifetime.settled() && self.lifetime.stop_observed == CoreStop::None
++            && self.protected_tools == Some(ProtectedTools::NoneInSupportedCatalogue)
++            && self.components.is_some_and(|parts| value.matches(parts)) {
++            self.discovered_sources = Some(value);
++        }
++    }
+     /// Added only by the original native owner after source/child/driver joins.
+     /// A child-supplied field is rejected by the closed wire decoder.
+     pub(crate) fn observe_components(&mut self, value: Partition) {
+@@ -758,7 +774,8 @@
+         self.result.as_ref().map(|v| match self.context.action {
+             Action::Inspect => {
+                 json!({"kind":"tool-requirements-observation","requirements":v["requirements"],
+-                    "protectedTools":self.protected_tools,"components":self.components.map(Partition::data)})
++                    "protectedTools":self.protected_tools,"components":self.components.map(Partition::data),
++                    "discoveredSources":self.discovered_sources.map(|value|value.data())})
+             }
+             Action::Acquire => v.clone(),
+         })
+@@ -1133,6 +1150,30 @@
+         forged["downloadedArchives"]=json!(["sdk-platform"]);
+         assert!(result_valid(&forged,&operation,&context).is_ok()); // Well-shaped DATA still cannot replace native Expected.
+         assert!(!staged_matches_partition(&forged,partition));
++    }
++    #[test]
++    fn discovered_sources_require_native_postjoin_component_projection_and_reject_child_forgery() {
++        let parts = Partition::observed([Some(true), Some(true), Some(false), Some(false)]).unwrap();
++        let found = discovery::Discovery::observed(7, 3, parts).unwrap();
++        for outer in [false, true] {
++            let mut value = terminal_value();
++            if outer { value["discoveredSources"] = found.data(); }
++            else { value["result"]["discoveredSources"] = found.data(); }
++            assert!(decode_terminal(value).is_err());
++        }
++        let Frame::Terminal(mut terminal) = decode_terminal(terminal_value()).unwrap() else { panic!() };
++        terminal.observe_discovered_sources(found);
++        assert_eq!(terminal.discovered_sources(), None);
++        terminal.observe_protected_tools(ProtectedTools::NoneInSupportedCatalogue);
++        terminal.observe_components(parts);
++        let mut stopped = terminal.clone(); stopped.lifetime.stop_observed = CoreStop::Cancelled;
++        stopped.observe_discovered_sources(found); assert_eq!(stopped.discovered_sources(), None);
++        let mut failed = terminal.clone(); failed.outcome = Outcome::Refused;
++        failed.observe_discovered_sources(found); assert_eq!(failed.discovered_sources(), None);
++        terminal.observe_discovered_sources(found);
++        assert_eq!(terminal.public_result().unwrap()["discoveredSources"], found.data());
++        assert!(!terminal.public_result().unwrap().to_string().contains(discovery::JDK));
++        // Setter/serialization DATA only, not a native join or path selection.
+     }
+     #[test]
+     fn closed_ipc_requires_current_review_and_explicit_exact_consent() {
+diff --git a/desktop/src-tauri/src/android_registration_source_acquisition_macos.rs b/desktop/src-tauri/src/android_registration_source_acquisition_macos.rs
+--- a/desktop/src-tauri/src/android_registration_source_acquisition_macos.rs
++++ b/desktop/src-tauri/src/android_registration_source_acquisition_macos.rs
+@@ -4,17 +4,24 @@
+ use crate::tool_acquisition_protocol::components::Partition;
+ #[path = "android_registration_source_acquisition_sdk_macos.rs"]
+ mod sdk_copy;
++#[path = "android_registration_source_discovery_macos.rs"]
++mod discovery;
+
+ // Present only inside acquisition_read / its bounded walk and XML validation.
+ // None of these buffers survive the returned read, unlike every source record,
+ // picked metadata byte and original close state, which remain retained.
+ const READ_WORKSPACE: usize =
+-    18 * BLOCK + 17 * 1024 + crate::android_sdk_metadata_macos::PARSER_WORK_BYTES;
++    18 * BLOCK + 17 * 1024 + crate::android_sdk_metadata_macos::PARSER_WORK_BYTES + discovery::PATH_WORK;
+
+ pub(super) struct Work {
+     pub(super) gate: crate::saved_command_owner::ToolAcquisitionSourceGate,
+     absent: [Option<(usize, &'static str)>; 2],
+     finding: Option<(Partition, [u8; 32])>,
++    discovery: discovery::DiscoveryWork,
++}
++impl Work {
++    pub(super) fn discovery_bytes(&self) -> Option<usize> { self.discovery.heap_bytes() }
++    pub(super) fn account_call_settled(&self) -> bool { self.discovery.call_settled() }
+ }
+
+ fn reservation(checked: supplier::acquisition::PickedRoster) -> Option<SourceReservation> {
+@@ -82,7 +89,8 @@
+         .checked_add(shape.alias_original_heap)?
+         .checked_add(3 * 4096 + 3 * ANCESTORS * size_of::<usize>())?
+         .checked_add(READ_WORKSPACE + 16384)? // Actual walk/read/XML workspace + retained ACL frame bound.
+-        .checked_add(2 * (SDK_METADATA_BYTES + 512 + 64))?;
++        .checked_add(2 * (SDK_METADATA_BYTES + 512 + 64))?
++        .checked_add(discovery::HEAP_BOUND)?;
+     Some(SourceReservation {
+         profile: checked.profile,
+         phase: SourcePhase::Inspection,
+@@ -120,6 +128,7 @@
+             gate,
+             absent: [None; 2],
+             finding: None,
++            discovery: discovery::DiscoveryWork::new(),
+         });
+         source
+     }
+@@ -156,7 +165,6 @@
+         let expected = reservation(checked).ok_or(AdmissionFailure::Bounds)?;
+         if self.gate.is_some()
+             || self.acquisition.is_none()
+-            || !roots.iter().any(Option::is_some)
+             || self.reservation.is_none_or(|r| {
+                 r.profile != expected.profile
+                     || r.phase != SourcePhase::Inspection
+@@ -186,6 +194,7 @@
+         }) {
+             return Err(AdmissionFailure::Bounds);
+         }
++        self.discovery_begin(roots, end, stop)?;
+         let mut jdk_home = None;
+         for (role, selected) in roots.iter().enumerate() {
+             let Some(root) = selected else {
+@@ -215,6 +224,12 @@
+                 }
+             }
+         }
++        if jdk_home.is_none() {
++            if let Some(bundle) = self.roots[0] {
++                let contents = self.child(bundle, "Contents", true, end, stop)?;
++                jdk_home = Some(self.child(contents, "Home", true, end, stop)?);
++            }
++        }
+         if let Some(home) = jdk_home {
+             let release = self.child(home, "release", false, end, stop)?;
+             let bytes = usize::try_from(self.identity(release)?.size).map_err(native_error)?;
+@@ -231,7 +246,7 @@
+         for _ in roster.members {
+             self.observed.push(None);
+         }
+-        let mut values = [Some(false); 4]; // Unchosen roles in this declared lookup set ONLY.
++        let mut values = [Some(false); 4]; // Only exact picked/fixed-location ENOENT can remain missing.
+         for (component, tree) in roster.trees.iter().enumerate() {
+             let role = group_index(tree.group).ok_or(AdmissionFailure::Inventory)?;
+             let Some(root) = self.roots[role] else {
+@@ -300,6 +315,7 @@
+             }
+         }
+         let partition = Partition::observed(values).ok_or(AdmissionFailure::Inventory)?;
++        self.discovery_finish(partition, end, stop)?;
+         let fingerprint = self.acquisition_fingerprint(partition, checked.reference_sha256)?;
+         self.point(end, stop)?;
+         self.acquisition
+@@ -372,6 +388,7 @@
+             hash.update(name.as_bytes());
+             hash.update([0]);
+         }
++        self.discovery_fingerprint(&mut hash)?;
+         Ok(hash.finalize().into())
+     }
+ }
+diff --git a/desktop/src-tauri/src/android_registration_source_macos.rs b/desktop/src-tauri/src/android_registration_source_macos.rs
+--- a/desktop/src-tauri/src/android_registration_source_macos.rs
++++ b/desktop/src-tauri/src/android_registration_source_macos.rs
+@@ -268,6 +268,7 @@
+         if let Some(closure) = &self.closure { bytes = bytes.checked_add(closure.retained_bytes()?.checked_sub(size_of::<Closure>())?)?; }
+         if let Some(proposal) = &self.proposal { bytes = bytes.checked_add(proposal.retained_bytes()?.checked_sub(size_of::<ProposalDocuments>())?)?; }
+         if let Some(instance) = &self.instance { bytes = bytes.checked_add(instance.capacity())?; }
++        if let Some(work) = &self.acquisition { bytes = bytes.checked_add(work.discovery_bytes()?)?; }
+         Some(bytes)
+     }
+     pub(crate) fn first_failure(&self) -> Option<(AdmissionFailure, Instant)> {
+@@ -1090,7 +1091,8 @@
+         });
+         self.first = first;
+         self.settled = true;
+-        self.unknown |= !self.frame_settled || support != CloseOutcome::Settled || self.live != 0
++        self.unknown |= self.acquisition.as_ref().is_some_and(|work| !work.account_call_settled())
++            || !self.frame_settled || support != CloseOutcome::Settled || self.live != 0
+             || self.originals.iter().any(|original| original.fd.is_some() || !matches!(original.state, State::Closed | State::NoHandle));
+         if self.unknown {
+             self.first = earliest_failure(self.first, Some((AdmissionFailure::Unknown, Instant::now())));
+diff --git a/desktop/src-tauri/src/saved_command_tool_acquisition_picked.rs b/desktop/src-tauri/src/saved_command_tool_acquisition_picked.rs
+--- a/desktop/src-tauri/src/saved_command_tool_acquisition_picked.rs
++++ b/desktop/src-tauri/src/saved_command_tool_acquisition_picked.rs
+@@ -38,7 +38,7 @@
+ }
+
+ pub(super) fn future_bytes(known: &Known) -> Option<usize> {
+-    if !known.sources.has_picks() || known.catalog.empty().is_none() {
++    if known.catalog.empty().is_none() {
+         return Some(FUTURE_PUBLIC_BYTES);
+     }
+     #[cfg(all(
+@@ -68,9 +68,45 @@
+     None
+ }
+
++// Classification only; the SAME original failure timestamp and unknown latch
++// stay with Session. Cleanup's generic normalization cannot replace first F.
++#[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),
++    not(feature = "macos-android-registration-helper")))]
++fn source_failure_reason(failure: AdmissionFailure) -> Option<wire::Reason> {
++    match failure {
++        AdmissionFailure::Inventory => Some(wire::Reason::ExistingToolsIncompatible),
++        AdmissionFailure::Ownership | AdmissionFailure::Native => Some(wire::Reason::ExistingToolsUnreadable),
++        AdmissionFailure::Identity => Some(wire::Reason::Stale),
++        _ => None,
++    }
++}
++
+ #[cfg(test)]
+ mod tests {
+     use super::*;
++    #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),
++        not(feature = "macos-android-registration-helper")))]
++    #[test]
++    fn source_diagnostic_keeps_original_first_failure_through_generic_cleanup_normalization() {
++        for (failure, reason) in [(AdmissionFailure::Inventory, wire::Reason::ExistingToolsIncompatible),
++            (AdmissionFailure::Ownership, wire::Reason::ExistingToolsUnreadable), (AdmissionFailure::Native, wire::Reason::ExistingToolsUnreadable),
++            (AdmissionFailure::Identity, wire::Reason::Stale)] {
++            assert_eq!(source_failure_reason(failure), Some(reason));
++            let context = wire::prepare(&json!({"projectId":"inert-source","draftRevision":0,"baselineGeneration":1,
++                "savedConfig":{"bytes":2,"sha256":"a".repeat(64)},"action":"inspect","review":null})).unwrap();
++            let application = SavedCommandOwner::tool_acquisition(RuntimeConfig::packaged("/unopened-source-diagnostic".into()));
++            let (_application, owner) = crate::saved_command_owner::tests::active_with_context(application, Context::ToolAcquisition(context));
++            let at = owner.clocks.admitted;
++            owner.observe_failure_at(Reason::from_tools(reason), at, false);
++            owner.publish_native_failure(Some((failure, at)));
++            assert_eq!(*owner.native_failure.lock().unwrap(), Some((Reason::from_tools(reason), at)));
++            assert!(*owner.stop.borrow());
++            assert!(!original_joined(&owner)); // Inert owner: no finality or native source was supplied.
++        }
++        for failure in [AdmissionFailure::Stopped, AdmissionFailure::Deadline, AdmissionFailure::Unknown] {
++            assert_eq!(source_failure_reason(failure), None);
++        }
++    }
+     #[test]
+     fn picker_census_keeps_current_and_replaced_originals_and_deduplicates_shared_arcs() {
+         // Existing genuinely unentered originals. No selected/closed/receipt
+@@ -172,6 +208,10 @@
+     }
+     pub(crate) fn source_note(&self, failure: AdmissionFailure, at: Instant) {
+         if let Some(owner) = self.owner.upgrade() {
++            // Preserve this SAME original source failure/F before generic
++            // cleanup normalizes it. A denied/wrong tree is never "missing".
++            let reason = source_failure_reason(failure);
++            if let Some(reason) = reason { owner.observe_failure_at(Reason::from_tools(reason), at, false); }
+             owner.publish_native_failure(Some((failure, at)));
+         }
+     }
+diff --git a/desktop/src-tauri/src/saved_command_tool_acquisition_macos.rs b/desktop/src-tauri/src/saved_command_tool_acquisition_macos.rs
+--- a/desktop/src-tauri/src/saved_command_tool_acquisition_macos.rs
++++ b/desktop/src-tauri/src/saved_command_tool_acquisition_macos.rs
+@@ -69,10 +69,6 @@
+             || !intent.known.sources.matches_project(&context.project_id, owner.registration, &owner.project)
+             || !intent.known.sources.originals_settled() || !context_current(inner, owner) { return Err(wire::invalid()); }
+         if intent.known.catalog.empty().is_none() { return Ok(()); } // Existing selected protected tuple wins.
+-        if !intent.known.sources.has_picks() {
+-            self.picked = Some((Partition::missing_all(), [0; 32]));
+-            return Ok(());
+-        }
+         let Profile::ToolAcquisition(profile) = owner.profile else { return Err(wire::invalid()); };
+         let reservation = AndroidRegistrationSourceSlots::acquisition_reservation(profile.android()).ok_or_else(wire::invalid)?;
+         let bound = reservation.acquisition_retained_bytes().ok_or_else(wire::invalid)?;
+@@ -100,6 +96,11 @@
+             || !intent.known.sources.originals_settled() || !context_current(inner, owner) { return Err(wire::invalid()); }
+         self.picked = Some(source.acquisition_finding().ok_or_else(wire::invalid)?);
+         if context.action == wire::Action::Acquire {
++            // A compatible unchosen conventional source must go through the
++            // ordinary picker first, never be duplicated or silently selected.
++            if source.acquisition_discovery().is_none_or(|finding| finding.needs_selection()) {
++                return Err(wire::invalid());
++            }
+             if let Some(root) = intent.known.sources.roots()[1].as_ref() {
+                 // Same actually closed original records; a child will open NEW
+                 // read-only originals. No renderer path or revived native loan.
+@@ -117,7 +118,6 @@
+         let finding = self.picked?;
+         match &self.sources {
+             Some(source) if source.acquisition_finding() == Some(finding) => Some(finding),
+-            None if finding == (Partition::missing_all(), [0; 32]) => Some(finding),
+             _ => None,
+         }
+     }
+@@ -177,6 +177,22 @@
+     let resources = owner.resources.try_lock().ok()?;
+     let original = resources.tools.original.as_ref()?.try_lock().ok()?;
+     original.picked_finding()
++}
++pub(super) fn discovery(owner: &Session) -> Option<wire::discovery::Discovery> {
++    if !original_joined(owner) { return None; }
++    let resources = owner.resources.try_lock().ok()?;
++    let original = resources.tools.original.as_ref()?.try_lock().ok()?;
++    if !original.settled() { return None; }
++    original.sources.as_ref()?.acquisition_discovery()
++}
++pub(super) fn discovered_directory(owner: &Session, role: usize) -> Option<PathBuf> {
++    if !original_joined(owner) { return None; }
++    let resources = owner.resources.try_lock().ok()?;
++    let original = resources.tools.original.as_ref()?.try_lock().ok()?;
++    if !original.settled() { return None; }
++    let path = original.sources.as_ref()?.acquisition_discovered_directory(role)?;
++    let mut copy = PathBuf::new(); copy.try_reserve_exact(path.as_os_str().len()).ok()?; copy.push(path);
++    (copy.capacity() <= 4096).then_some(copy)
+ }
+ fn copy_runtime(v: &VerifiedRuntime) -> VerifiedRuntime {
+     VerifiedRuntime {
+diff --git a/desktop/src-tauri/src/saved_command_tool_acquisition.rs b/desktop/src-tauri/src/saved_command_tool_acquisition.rs
+--- a/desktop/src-tauri/src/saved_command_tool_acquisition.rs
++++ b/desktop/src-tauri/src/saved_command_tool_acquisition.rs
+@@ -219,7 +219,8 @@
+     // A later known pre-effect refusal must not discard the earlier actual
+     // app-data nomination. This is a second original reference, not a receipt.
+     application_observation: Option<Arc<Session>>,
+-    // Only accepted Complete Acquire + positive original joins mint this.
++    // Only accepted Complete Acquire/Inspect + positive original joins mint
++    // locations. Discovery never supplies a cache-producer or source role.
+     completed_sources: Option<Arc<sources::CompletedSources>>,
+ }
+ pub(super) struct State {
+@@ -788,14 +789,13 @@
+     {
+         observe_protected_tools(owner, active);
+         if let Some(Terminal::ToolAcquisition(t)) = &active.projection.result {
+-            if t.context.action == wire::Action::Acquire {
+-                r.tool_acquisition.completed_sources = sources::CompletedSources::capture(owner, active);
+-            }
++            r.tool_acquisition.completed_sources = sources::CompletedSources::capture(owner, active);
+             if t.context.action == wire::Action::Inspect
+                 && t.outcome == wire::Outcome::Complete
+                 && t.lifetime.settled()
+                 && t.protected_tools() == Some(wire::ProtectedTools::NoneInSupportedCatalogue)
+                 && t.components().is_some_and(|parts| parts.needs_download())
++                && !t.discovered_sources().is_some_and(|found| found.needs_selection())
+             {
+                 r.tool_acquisition.review = Some(Arc::new(Inspection {
+                     original: owner.clone(), terminal: t.clone(),
+@@ -816,7 +816,10 @@
+         wire::ProtectedTools::ReuseSelected => terminal.observe_components(wire::components::Partition::compatible_all()),
+         wire::ProtectedTools::NoneInSupportedCatalogue => {
+             #[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"),not(feature="macos-android-registration-helper")))]
+-            if let Some((parts, _)) = native::picked_finding(owner) { terminal.observe_components(parts); }
++            if let Some((parts, _)) = native::picked_finding(owner) {
++                terminal.observe_components(parts);
++                if let Some(found) = native::discovery(owner) { terminal.observe_discovered_sources(found); }
++            }
+         },
+         wire::ProtectedTools::ManualCheckRequired => {},
+     }
+@@ -918,7 +921,7 @@
+     let mut seen = BTreeSet::new();
+     let mut queue = r.tool_acquisition.producers.clone();
+     if let Some(completed) = &r.tool_acquisition.completed_sources {
+-        queue.push(completed.original().clone()); // SAME producer, deduplicated below.
++        queue.push(completed.original().clone()); // SAME original Session, deduplicated below.
+         bytes = bytes.checked_add(completed.retained_bytes()?)?;
+     }
+     if let Some(application) = &r.tool_acquisition.application {
+@@ -1020,8 +1023,9 @@
+                 .checked_add(expected.projection_sha256.capacity())?;
+         }
+         if let Some(intent) = &owner.tools.intent {
+-            // Only missing-tool Inspect/Acquire Sessions are retained as cache
+-            // producers or download Reviews. No uncounted old selected loan.
++            // Only empty-catalogue Inspect/Acquire Sessions are retained as
++            // cache producers, discovery locations or download Reviews.
++            // No uncounted old selected loan.
+             if intent.known.catalog.empty().is_none() { return None; }
+             pickers.record(intent.known.sources.picker_originals())?;
+             bytes = bytes
+diff --git a/desktop/src-tauri/src/saved_command_tool_acquisition_sources.rs b/desktop/src-tauri/src/saved_command_tool_acquisition_sources.rs
+--- a/desktop/src-tauri/src/saved_command_tool_acquisition_sources.rs
++++ b/desktop/src-tauri/src/saved_command_tool_acquisition_sources.rs
+@@ -1,17 +1,21 @@
+-//! Completed-acquisition LOCATION nomination for the ordinary source picker.
++//! Completed acquisition/discovery LOCATION nomination for the ordinary source picker.
+ //! No source/copy/tool authority, new filesystem walk, task, or restart receipt.
+ use super::*;
+ use crate::{android_tool_sources as source_wire, asset_session::OriginalWork};
+ use std::{path::PathBuf, sync::OnceLock};
+
+ /// Minted only in the existing positive after_final branch. The original
+-/// Session remains in the bounded producer roster; its joins are rechecked.
++/// Session remains in the existing bounded retained-session census; its joins
++/// are rechecked. Discovery does not acquire a cache-producer role.
+ pub(super) struct CompletedSources {
+     original: Arc<Session>,
+-    root: PathBuf,
++    locations: [Option<PathBuf>; 3],
++    origin: Origin,
+     roles: u8,
+     progress: Mutex<Progress>,
+ }
++#[derive(Clone, Copy, PartialEq, Eq)]
++enum Origin { Acquired, Discovered }
+ struct Progress {
+     epoch: u64,
+     picker: Option<Weak<OriginalWork>>,
+@@ -29,6 +33,7 @@
+     work: OnceLock<Weak<OriginalWork>>,
+ }
+
++fn index(role: source_wire::Role) -> usize { match role { source_wire::Role::Jdk => 0, source_wire::Role::Sdk => 1, source_wire::Role::Gradle => 2 } }
+ fn bit(role: source_wire::Role) -> u8 {
+     match role { source_wire::Role::Jdk => 1, source_wire::Role::Sdk => 2, source_wire::Role::Gradle => 4 }
+ }
+@@ -81,39 +86,71 @@
+     not(feature = "macos-android-registration-helper"))))]
+ fn original_root(_: &Session) -> Option<PathBuf> { None }
+
++#[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),
++    not(feature = "macos-android-registration-helper")))]
++fn discovered_location(owner: &Session, role: usize) -> Option<PathBuf> { native::discovered_directory(owner, role) }
++#[cfg(not(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"),
++    not(feature = "macos-android-registration-helper"))))]
++fn discovered_location(_: &Session, _: usize) -> Option<PathBuf> { None }
++fn copy_location(path: &Path) -> Option<PathBuf> {
++    let text = path.to_str()?;
++    if text.len() > 4096 || !text.starts_with('/') || text == "/" || text.as_bytes().contains(&0)
++        || text[1..].split('/').any(|p|p.is_empty() || p == "." || p == ".." || p.len() > 255) { return None; }
++    let mut copy = PathBuf::new(); copy.try_reserve_exact(text.len()).ok()?; copy.push(path);
++    (copy.capacity() <= 4096).then_some(copy)
++}
+ // The original common Terminal handler sets stop=true even on success to close
+ // its already-finished input. Only the SAME Active's first failure/context and
+ // accepted terminal distinguish cancellation here. This is not native finality.
+-fn accepted_acquire_terminal<'a>(owner: &Arc<Session>, active: &'a Active) -> Option<&'a wire::Terminal> {
++fn accepted_terminal<'a>(owner: &Arc<Session>, active: &'a Active) -> Option<&'a wire::Terminal> {
+     if owner.domain != SavedCommandDomain::ToolAcquisition || !Arc::ptr_eq(&active.owner, owner)
+         || active.context_invalidated || active.unknown || !active.accepted || !active.terminal
+         || active.first_stop.is_some() || active.projection.reason != Reason::None
+         || active.projection.outcome != Some(Outcome::Complete) || active.projection.context != owner.context { return None; }
+     let Context::ToolAcquisition(context) = &owner.context else { return None; };
+     let Some(Terminal::ToolAcquisition(terminal)) = &active.projection.result else { return None; };
+-    (context.action == wire::Action::Acquire && terminal.context == *context
++    (terminal.context == *context
+         && terminal.outcome == wire::Outcome::Complete && terminal.reason == wire::Reason::None
+         && terminal.lifetime.settled()).then_some(terminal)
+ }
+
+ impl CompletedSources {
+     pub(super) fn capture(owner: &Arc<Session>, active: &Active) -> Option<Arc<Self>> {
+-        let terminal = accepted_acquire_terminal(owner, active)?;
+-        if !active.final_join_seen || !original_joined(owner) || !producer(owner) { return None; }
++        let terminal = accepted_terminal(owner, active)?;
++        if !active.final_join_seen || !original_joined(owner) { return None; }
+         let intent = owner.tools.intent.as_ref()?;
+         if !intent.current() { return None; }
+-        let roles = complete_roles(terminal.result.as_ref()?)?;
+-        let root = original_root(owner)?;
+-        // Validate all nominated locations BEFORE retaining any shortcut.
+-        for role in [source_wire::Role::Jdk, source_wire::Role::Sdk, source_wire::Role::Gradle] {
+-            if roles & bit(role) != 0 { bounded_initial(&root, role)?; }
+-        }
+-        Some(Arc::new(Self { original: owner.clone(), root, roles,
++        let mut locations = std::array::from_fn(|_| None);
++        let (roles, origin) = match terminal.context.action {
++            wire::Action::Acquire => {
++                if !producer(owner) { return None; }
++                let roles = complete_roles(terminal.result.as_ref()?)?;
++                let root = original_root(owner)?;
++                for role in [source_wire::Role::Jdk, source_wire::Role::Sdk, source_wire::Role::Gradle] {
++                    if roles & bit(role) != 0 { locations[index(role)] = Some(bounded_initial(&root, role)?); }
++                }
++                (roles, Origin::Acquired)
++            },
++            wire::Action::Inspect => {
++                // Native post-join finding exists only after exact PROJECT
++                // requirements admit the protected profile, not version DATA.
++                let found = terminal.discovered_sources()?;
++                if !found.needs_selection() || terminal.protected_tools() != Some(wire::ProtectedTools::NoneInSupportedCatalogue)
++                    || !terminal.components().is_some_and(|parts|found.matches(parts)) { return None; }
++                let roles = found.candidate_roles();
++                for (role, location) in locations.iter_mut().enumerate() {
++                    if roles & (1 << role) != 0 { *location = Some(discovered_location(owner, role)?); }
++                }
++                (roles, Origin::Discovered)
++            },
++        };
++        Some(Arc::new(Self { original: owner.clone(), locations, origin, roles,
+             progress: Mutex::new(Progress { epoch: intent.document.source_picker_epoch(), picker: None, published: false, retired: false }) }))
+     }
+     pub(super) fn original(&self) -> &Arc<Session> { &self.original }
+     pub(super) fn retained_bytes(&self) -> Option<usize> {
+-        std::mem::size_of::<Self>().checked_add(2 * std::mem::size_of::<usize>())?.checked_add(self.root.capacity())
++        self.locations.iter().flatten().try_fold(std::mem::size_of::<Self>().checked_add(2 * std::mem::size_of::<usize>())?,
++            |bytes, path| bytes.checked_add(path.capacity()))
+     }
+ }
+
+@@ -179,7 +216,11 @@
+         registration: u32, root: &RegisteredRoot, publisher: &android_registration::Publisher) -> Result<Arc<SourceNomination>, BridgeError> {
+         self.require_domain(SavedCommandDomain::ToolAcquisition)?;
+         if !NATIVE_QUALIFIED { return Err(source_wire::unavailable()); }
+-        let acquired = input.acquired.as_ref().ok_or_else(source_wire::invalid)?;
++        let (acquired, origin) = match (&input.acquired, &input.discovered) {
++            (Some(ids), None) => (ids, Origin::Acquired),
++            (None, Some(ids)) => (ids, Origin::Discovered),
++            _ => return Err(source_wire::invalid()),
++        };
+         let binding = self.inner.tool_acquisition.get().ok_or_else(source_wire::unavailable)?;
+         if binding.document.as_ptr() != Arc::as_ptr(document) || !publisher.same_slot(&binding.android.android_registration_control)
+             || publisher.accepted() || !binding.android.android_original_document_matches(Some(document)) { return Err(source_wire::invalid()); }
+@@ -193,9 +234,9 @@
+         let owner = &completed.original;
+         let Context::ToolAcquisition(context) = &owner.context else { return Err(source_wire::invalid()); };
+         let intent = owner.tools.intent.as_ref().ok_or_else(source_wire::invalid)?;
+-        if owner.id != acquired.operation_id || owner.generation != acquired.owner_generation || owner.registration != registration
++        if completed.origin != origin || owner.id != acquired.operation_id || owner.generation != acquired.owner_generation || owner.registration != registration
+             || owner.project != *root || context.project_id != input.project_id || completed.roles & bit(input.role) == 0
+-            || !original_joined(owner) || !producer(owner) || !intent.document.same_document(document)
++            || !original_joined(owner) || origin == Origin::Acquired && !producer(owner) || !intent.document.same_document(document)
+             || !intent.known.catalog.joined_for(&binding.android) {
+             return Err(source_wire::invalid());
+         }
+@@ -214,7 +255,7 @@
+             || r.disabled || r.document_lost || r.stopping || r.exhausted || r.active.is_some() || r.prepared.is_some()
+             || binding.android.poisoned.load(Ordering::SeqCst) { return Err(source_wire::invalid()); }
+         drop(r);
+-        let initial = bounded_initial(&completed.root, input.role).ok_or_else(source_wire::invalid)?;
++        let initial = copy_location(completed.locations[index(input.role)].as_deref().ok_or_else(source_wire::invalid)?).ok_or_else(source_wire::invalid)?;
+         Ok(Arc::new(SourceNomination { completed, role: input.role, initial, before: epoch, continuing, work: OnceLock::new() }))
+     }
+ }
+@@ -256,7 +297,7 @@
+                 let r = application.inner.lock(); let active = r.active.as_ref().unwrap();
+                 assert!(*owner.stop.borrow()); // SAME signal also closes successful terminal input.
+                 assert_eq!(active.first_stop, cancel_first.then_some(at));
+-                assert_eq!(accepted_acquire_terminal(&owner,active).is_some(), !cancel_first);
++                assert_eq!(accepted_terminal(&owner,active).is_some(), !cancel_first);
+                 assert!(!active.final_join_seen && !original_joined(&owner));
+                 assert!(CompletedSources::capture(&owner,active).is_none());
+                 assert!(r.tool_acquisition.completed_sources.is_none() && owner.watchdog_return.lock().unwrap().is_none());
+@@ -266,7 +307,7 @@
+             application.inner.stop_locked(&mut application.inner.lock(),&owner,Reason::Cancelled,at);
+             let r = application.inner.lock(); let active = r.active.as_ref().unwrap();
+             assert_eq!(active.first_stop,Some(at)); assert_eq!(active.projection.reason,Reason::Cancelled);
+-            assert!(accepted_acquire_terminal(&owner,active).is_none());
++            assert!(accepted_terminal(&owner,active).is_none());
+             assert!(CompletedSources::capture(&owner,active).is_none());
+         }
+     }
+diff --git a/desktop/src-tauri/src/android_tool_sources.rs b/desktop/src-tauri/src/android_tool_sources.rs
+--- a/desktop/src-tauri/src/android_tool_sources.rs
++++ b/desktop/src-tauri/src/android_tool_sources.rs
+@@ -36,6 +36,8 @@
+     // Omission preserves ordinary Browse. Explicit null/path/URL is refused.
+     #[serde(default, deserialize_with = "acquired")]
+     pub(crate) acquired: Option<Acquired>,
++    #[serde(default, deserialize_with = "acquired")]
++    pub(crate) discovered: Option<Acquired>,
+ }
+ #[derive(Deserialize)]
+ #[serde(rename_all = "camelCase", deny_unknown_fields)]
+@@ -74,7 +76,8 @@
+         if raw.len() > REQUEST_LIMIT { return Err(invalid()); }
+         let item: Self = serde_json::from_value(strict_json(raw).map_err(|_| invalid())?).map_err(|_| invalid())?;
+         if item.schema_version != 1 || item.source_generation == u32::MAX || !valid_id(&item.project_id)
+-            || item.acquired.as_ref().is_some_and(|a| !crate::edit_protocol::token(&a.operation_id)
++            || item.acquired.is_some() && item.discovered.is_some()
++            || item.acquired.iter().chain(item.discovered.iter()).any(|a| !crate::edit_protocol::token(&a.operation_id)
+                 || !crate::edit_protocol::token(&a.owner_generation)) { return Err(invalid()); }
+         Ok(item)
+     }
+@@ -130,6 +133,20 @@
+         assert!(Choose::parse(br#"{"schemaVersion":1,"sourceGeneration":0,"projectId":"p","role":"jdk","acquired":{},"acquired":{}}"#).is_err());
+     }
+     #[test]
++    fn discovered_location_ids_are_exclusive_and_cannot_borrow_an_acquired_or_arbitrary_path() {
++        let mut good = serde_json::json!({"schemaVersion":1,"sourceGeneration":2,"projectId":"project-a","role":"sdk",
++            "discovered":{"operationId":"a".repeat(32),"ownerGeneration":"b".repeat(32)}});
++        let parsed = Choose::parse(&serde_json::to_vec(&good).unwrap()).unwrap();
++        assert!(parsed.discovered.is_some() && parsed.acquired.is_none());
++        good["acquired"] = good["discovered"].clone();
++        assert!(Choose::parse(&serde_json::to_vec(&good).unwrap()).is_err());
++        good.as_object_mut().unwrap().remove("acquired");
++        for value in [serde_json::Value::Null, serde_json::json!({}), serde_json::json!("/Users/inert/sdk"),
++            serde_json::json!({"operationId":"a".repeat(32),"ownerGeneration":"b".repeat(32),"path":"/Users/inert/sdk"})] {
++            good["discovered"] = value; assert!(Choose::parse(&serde_json::to_vec(&good).unwrap()).is_err());
++        }
++    }
++    #[test]
+     fn status_selector_only_demotes_available_with_an_unqualified_source_picker() {
+         use Availability::*;
+         // Independent 8 x 2 oracle: all seven existing denials survive BOTH
+diff --git a/desktop/src-tauri/src/asset_session.rs b/desktop/src-tauri/src/asset_session.rs
+--- a/desktop/src-tauri/src/asset_session.rs
++++ b/desktop/src-tauri/src/asset_session.rs
+@@ -6480,7 +6480,7 @@
+                 || before.source_generation != input.source_generation { return Err(crate::android_tool_sources::invalid()); }
+             let (generation, root) = self.registry_result(&mut state, self.inner.bridge.native_project(&input.project_id), None)
+                 .map_err(|_| crate::android_tool_sources::unavailable())?;
+-            let acquired = if input.acquired.is_some() {
++            let acquired = if input.acquired.is_some() || input.discovered.is_some() {
+                 let nomination=self.inner.bridge.tool_acquisition.nominate_acquired_tool_source(
+                     &self.inner.session_identity,&input,generation,&root,&publisher)?;
+                 self.tool_source_nomination_current(&state,&nomination,generation,&root,None)?;
+diff --git a/desktop/src/toolAcquisitionProtocol.ts b/desktop/src/toolAcquisitionProtocol.ts
+--- a/desktop/src/toolAcquisitionProtocol.ts
++++ b/desktop/src/toolAcquisitionProtocol.ts
+@@ -6,6 +6,9 @@
+ import type { StagedToolSourcesData } from './toolAcquisitionGuidance.ts';
+ import { parseToolComponentPartition } from './toolAcquisitionComponents.ts';
+ import type { ToolComponentPartition } from './toolAcquisitionComponents.ts';
++
++import { parseToolSourceDiscovery } from './toolSourceDiscovery.ts';
++import type { ToolSourceDiscovery } from './toolSourceDiscovery.ts';
+
+ export const TOOL_ACQUISITION_EVENT = 'tool-acquisition-state-changed';
+ export const TOOL_ACQUISITION_CONSENT = 'pinned-public-tool-sources-v1';
+@@ -28,6 +31,7 @@
+   // lease or build-readiness claim; null never permits a download review.
+   protectedTools: ProtectedToolsFinding | null;
+   components: ToolComponentPartition | null;
++  discoveredSources?: ToolSourceDiscovery | null;
+   requirements: {
+     schemaVersion: 1; basis: 'unverified-static-source-hints'; sourcesSha256: string;
+     complete: true; platform: 'android'; projectCodeExecuted: false;
+@@ -43,7 +47,7 @@
+ const phases = ['awaiting-consent', 'starting', 'running', 'stopping', 'terminal', 'unknown'] as const;
+ const reasons = ['none', 'cancelled', 'timed-out', 'context-changed', 'document-lost', 'shutdown', 'runtime-unavailable',
+   'protocol-error', 'intent-expired', 'stale-intent', 'cleanup-unknown', 'input-limit', 'result-limit', 'input', 'unsupported',
+-  'stale', 'census-incomplete', 'recovery-required', 'cache-conflict', 'disk-space', 'network', 'redirect', 'framing',
++  'stale', 'census-incomplete', 'existing-tools-incompatible', 'existing-tools-unreadable', 'recovery-required', 'cache-conflict', 'disk-space', 'network', 'redirect', 'framing',
+   'archive-digest', 'archive-layout', 'archive-member', 'limit', 'already-used', 'unknown'] as const;
+ export interface ToolAcquisitionOperation extends ToolAcquisitionIdentity {
+   context: ToolAcquisitionContext; phase: typeof phases[number]; intentUsable: boolean;
+@@ -87,11 +91,14 @@
+ }
+ function requirements(v: unknown): v is ToolRequirementsObservation {
+   // The native public result deliberately omits its private source footprint.
+-  if (!keys(v, ['kind', 'requirements', 'protectedTools', 'components']) || v.kind !== 'tool-requirements-observation' ||
++  const withDiscovery = !!v && typeof v === 'object' && Object.hasOwn(v, 'discoveredSources');
++  if (!keys(v, ['kind', 'requirements', 'protectedTools', 'components', ...(withDiscovery ? ['discoveredSources'] : [])]) || v.kind !== 'tool-requirements-observation' ||
+       v.protectedTools !== null && !oneOf(v.protectedTools, ['reuse-selected', 'none-in-supported-catalogue', 'manual-check-required'])) return false;
+   const parts = v.components === null ? null : parseToolComponentPartition(v.components);
+   if (v.components !== null && (!parts || !['reuse-selected', 'none-in-supported-catalogue'].includes(v.protectedTools as string) ||
+       v.protectedTools === 'reuse-selected' && parts.missing.length !== 0)) return false;
++  if (withDiscovery && v.discoveredSources !== null && (!parts || v.protectedTools !== 'none-in-supported-catalogue' ||
++      !parseToolSourceDiscovery(v.discoveredSources, parts))) return false;
+   const r = v.requirements;
+   if (!keys(r, ['schemaVersion', 'basis', 'sourcesSha256', 'complete', 'platform', 'projectCodeExecuted', 'xcode', 'android']) ||
+       r.schemaVersion !== 1 || r.basis !== 'unverified-static-source-hints' || !sha(r.sourcesSha256) || r.complete !== true ||
+diff --git a/desktop/src/toolAcquisitionController.ts b/desktop/src/toolAcquisitionController.ts
+--- a/desktop/src/toolAcquisitionController.ts
++++ b/desktop/src/toolAcquisitionController.ts
+@@ -227,6 +227,8 @@
+     if (i.result.protectedTools !== 'none-in-supported-catalogue')
+       return 'A matching supported tool selection was not confirmed. Use the existing Recover or Choose tools controls; do not replace working tools.';
+     if (!i.result.components) return 'The selected folders have not been fully checked. Use the existing Choose and Inspect tools controls; nothing will be replaced.';
++    if (i.result.discoveredSources?.compatibleComponents.length)
++      return 'Found matching existing tools. Use the found folders or choose another installation, then check the remaining tools. No duplicate download will be offered.';
+     if (!i.result.components.missing.length)
+       return 'The chosen tool sources match. Nothing needs downloading. Inspect all selected tools and separately approve the protected copy.';
+     const a = i.result.requirements.android;
+diff --git a/desktop/src/toolAcquisitionSourcePicker.ts b/desktop/src/toolAcquisitionSourcePicker.ts
+--- a/desktop/src/toolAcquisitionSourcePicker.ts
++++ b/desktop/src/toolAcquisitionSourcePicker.ts
+@@ -5,6 +5,8 @@
+ import type { AndroidToolSourceRole, AndroidToolSourcesStatus } from './androidToolSources.ts';
+ import { parseAndroidToolchainCatalogStatus } from './androidToolchainCatalogProtocol.ts';
+ import { parseAndroidToolRegistrationStatus } from './androidToolRegistration.ts';
++import { foundToolRoles, parseToolSourceDiscovery } from './toolSourceDiscovery.ts';
++import { parseToolAcquisitionStatus } from './toolAcquisitionProtocol.ts';
+ import { parseStagedToolSources } from './toolAcquisitionGuidance.ts';
+ import type { StagedToolPresentation } from './toolAcquisitionGuidance.ts';
+ import { sameToolAcquisitionData } from './toolAcquisitionProtocol.ts';
+@@ -16,7 +18,7 @@
+   catalog: unknown; registration: unknown; sources: unknown;
+ }
+ export interface PreparedToolFolders {
+-  roles: readonly AndroidToolSourceRole[]; incompleteSdk: boolean; continuing: boolean; waiting: boolean;
++  roles: readonly AndroidToolSourceRole[]; incompleteSdk: boolean; continuing: boolean; waiting: boolean; existing?: true;
+ }
+ function sameSaved(a: ToolSourceFolderContext, b: ToolSourceFolderContext): boolean {
+   return a.connection === b.connection && a.observation === b.observation && a.draft === b.draft &&
+@@ -26,10 +28,22 @@
+ function eligible(operation: ToolAcquisitionOperation | null | undefined, presentation: StagedToolPresentation,
+   context: ToolSourceFolderContext): { identity: ToolAcquisitionIdentity; view: PreparedToolFolders } | null {
+   if (presentation !== 'current-staged' || operation?.phase !== 'terminal' || operation.outcome !== 'complete' ||
+-      operation.reason !== 'none' || operation.context.action !== 'acquire' ||
++      operation.reason !== 'none' ||
+       operation.context.projectId !== context.context.projectId || operation.context.draftRevision !== context.context.draftRevision ||
+       operation.context.baselineGeneration !== context.context.baselineGeneration ||
+       !sameToolAcquisitionData(operation.context.savedConfig, context.context.savedConfig)) return null;
++  if (operation.context.action === 'inspect') {
++    // Same strict native status/result coherence as the original controller;
++    // no acquisition-shaped result, paths or renderer-added role list.
++    const safe = parseToolAcquisitionStatus({schemaVersion:1,statusRevision:0,availability:'available',operation})?.operation;
++    const result = safe?.result;
++    if (result?.kind !== 'tool-requirements-observation' || result.protectedTools !== 'none-in-supported-catalogue' || !result.components) return null;
++    const found = parseToolSourceDiscovery(result.discoveredSources, result.components), roles = foundToolRoles(found);
++    if (!roles.length) return null;
++    return { identity: { operationId: operation.operationId, ownerGeneration: operation.ownerGeneration },
++      view: { roles, incompleteSdk: roles.includes('sdk') && result.components.missing.some((part) => part === 'sdk-platform' || part === 'sdk-build-tools'),
++        continuing: false, waiting: false, existing: true } };
++  }
+   const report = parseStagedToolSources(operation.result);
+   if (!report || !report.groups.length || report.operationId !== operation.operationId || !/^[0-9a-f]{32}$/.test(operation.operationId) ||
+       !/^[0-9a-f]{32}$/.test(operation.ownerGeneration)) return null;
+@@ -148,7 +162,7 @@
+     if (retained.pending || retained.peerRevision > retained.sources.statusRevision || retained.joinedPick && !peersSettled(retained) ||
+         !retained.view.roles.includes(role) || retained.sources.availability !== 'available' ||
+         !['idle', 'selected'].includes(retained.sources.phase) || retained.sources.sourceGeneration >= 0xffff_fffe) return null;
+-    const pick = new PreparedToolSourcePick(this, role, retained.sources.sourceGeneration, current);
++    const pick = new PreparedToolSourcePick(this, role, retained.sources.sourceGeneration, current, retained.view.existing === true);
+     retained.pending = { pick, claimed: false, returned: false };
+     return pick;
+   }
+@@ -180,10 +194,12 @@
+ export class PreparedToolSourcePick {
+   readonly role: AndroidToolSourceRole;
+   readonly before: number;
++  readonly origin: 'acquired' | 'discovered';
+   readonly #handoff: PreparedToolSourceHandoff;
+   readonly #current: () => ToolSourceFolderContext | null;
+   constructor(handoff: PreparedToolSourceHandoff, role: AndroidToolSourceRole, before: number,
+-    current: () => ToolSourceFolderContext | null) {
++    current: () => ToolSourceFolderContext | null, existing = false) {
++    this.origin = existing ? 'discovered' : 'acquired';
+     this.#handoff = handoff; this.role = role; this.before = before; this.#current = current; Object.freeze(this);
+   }
+   context(): ToolSourceFolderContext | null { try { return this.#current(); } catch { return null; } }
+diff --git a/desktop/src/toolAcquisitionGuidance.ts b/desktop/src/toolAcquisitionGuidance.ts
+--- a/desktop/src/toolAcquisitionGuidance.ts
++++ b/desktop/src/toolAcquisitionGuidance.ts
+@@ -117,6 +117,10 @@
+ export function toolAcquisitionFailureGuidance(reason: string): { title: string; body: string } {
+   if (['unknown', 'recovery-required', 'already-used'].includes(reason)) return { title: 'Review the previous download',
+     body: 'Preserve the existing files and read the original status. An absent folder or a late result does not authorize a retry.' };
++  if (reason === 'existing-tools-incompatible') return { title: 'An existing tool needs review',
++    body: 'A chosen or conventional tool folder does not match the exact supported profile. It has not been replaced or called missing. Choose a matching installation elsewhere, or review the supported manual setup versions.' };
++  if (reason === 'existing-tools-unreadable') return { title: 'An existing tool could not be checked safely',
++    body: 'The source or its parent directories could not be read with the required ownership, permissions and no-link checks. Nothing was replaced. Keep the installation and choose another supported folder or review its setup manually; do not weaken its permissions to force a download.' };
+   if (reason === 'disk-space') return { title: 'More free space is needed',
+     body: 'Allow room for missing archives, extracted sources and the download reserve. A later protected copy needs its own space. Keep working tools; no automatic cleanup is performed.' };
+   if (['stale', 'census-incomplete', 'unsupported'].includes(reason)) return { title: 'Check existing tools first',
+diff --git a/desktop/src/androidBuild.ts b/desktop/src/androidBuild.ts
+--- a/desktop/src/androidBuild.ts
++++ b/desktop/src/androidBuild.ts
+@@ -674,7 +674,7 @@
+     const acquired = prepared?.claim(this.state.project.projectId,role,previous.sourceGeneration);
+     if (prepared && !acquired) return;
+     const request = { schemaVersion: 1 as const, sourceGeneration: previous.sourceGeneration, projectId: this.state.project.projectId, role,
+-      ...(acquired ? { acquired } : {}) };
++      ...(acquired ? prepared?.origin === 'discovered' ? { discovered: acquired } : { acquired } : {}) };
+     this.retire(this.advance('contextGeneration'));
+     if (prepared && !prepared.stillCurrent()) return;
+     const attempt = { observer, before: previous.sourceGeneration, after: previous.statusRevision, role, projectId: request.projectId, retired: false,
+diff --git a/desktop/src/androidToolSources.ts b/desktop/src/androidToolSources.ts
+--- a/desktop/src/androidToolSources.ts
++++ b/desktop/src/androidToolSources.ts
+@@ -16,7 +16,7 @@
+   // Older/unqualified adapters can omit the entire surface. The controller
+   // never enables a picker when any member is unavailable.
+   androidToolSourcesStatus?(): Promise<AndroidToolSourcesStatus>;
+-  chooseAndroidToolSource?(request: { schemaVersion: 1; sourceGeneration: number; projectId: string; role: AndroidToolSourceRole; acquired?: AcquiredToolSource }): Promise<AndroidToolSourcesStatus>;
++  chooseAndroidToolSource?(request: { schemaVersion: 1; sourceGeneration: number; projectId: string; role: AndroidToolSourceRole; acquired?: AcquiredToolSource; discovered?: AcquiredToolSource }): Promise<AndroidToolSourcesStatus>;
+   cancelAndroidToolSource?(request: { schemaVersion: 1; sourceGeneration: number; operationId: number }): Promise<AndroidToolSourcesStatus>;
+   subscribeAndroidToolSources?(onStatus: (status: unknown) => void): Promise<() => void>;
+ }
+@@ -96,9 +96,12 @@
+       ? ['schemaVersion', 'sourceGeneration', 'operationId'] : null;
+     if (!keys) return null;
+     const withAcquired = command === 'choose_android_tool_source' && value !== null && typeof value === 'object' && Object.hasOwn(value,'acquired');
+-    const data = record(value, withAcquired ? [...keys,'acquired'] : keys);
+-    const acquired = withAcquired && data ? record(data.acquired,['operationId','ownerGeneration']) : null;
+-    if (withAcquired && (!acquired || ![acquired.operationId,acquired.ownerGeneration].every((id) => typeof id === 'string' && /^[0-9a-f]{32}$/.test(id)))) return null;
++    const withDiscovered = command === 'choose_android_tool_source' && value !== null && typeof value === 'object' && Object.hasOwn(value,'discovered');
++    if (withAcquired && withDiscovered) return null;
++    const field = withDiscovered ? 'discovered' : 'acquired', nominated = withAcquired || withDiscovered;
++    const data = record(value, nominated ? [...keys,field] : keys);
++    const acquired = nominated && data ? record(data[field],['operationId','ownerGeneration']) : null;
++    if (nominated && (!acquired || ![acquired.operationId,acquired.ownerGeneration].every((id) => typeof id === 'string' && /^[0-9a-f]{32}$/.test(id)))) return null;
+     if (!data || data.schemaVersion !== 1 || command !== 'android_tool_sources_status' && !count(data.sourceGeneration, command === 'cancel_android_tool_source')
+         || command === 'choose_android_tool_source' && (!project(data.projectId) || !role(data.role))
+         || command === 'cancel_android_tool_source' && !count(data.operationId, true)) return null;
+diff --git a/desktop/src/components/PrepareBuildEnvironment.tsx b/desktop/src/components/PrepareBuildEnvironment.tsx
+--- a/desktop/src/components/PrepareBuildEnvironment.tsx
++++ b/desktop/src/components/PrepareBuildEnvironment.tsx
+@@ -2,6 +2,8 @@
+ import type { ToolAcquisitionController, ToolAcquisitionState } from '../toolAcquisitionController.ts';
+ import { stagedToolSourceGuidance, toolAcquisitionFailureGuidance } from '../toolAcquisitionGuidance.ts';
+ import type { ToolRequirementHint } from '../toolAcquisitionProtocol.ts';
++import { DiscoveredToolSources } from './DiscoveredToolSources.tsx';
++import { foundToolRoles, TOOL_DISCOVERY_HELP } from '../toolSourceDiscovery.ts';
+ import { PreparedToolSourceFolders } from './PreparedToolSourceFolders.tsx';
+ import { hasIncompleteSdk, MANUAL_ANDROID_SDK_STEPS, toolComponentLabel } from '../toolAcquisitionComponents.ts';
+
+@@ -57,7 +59,8 @@
+   const requirements = state.inspection?.requirements.android;
+   const reuseSelected = state.inspection?.protectedTools === 'reuse-selected';
+   const parts = state.inspection?.components;
+-  const chosenComplete = !reuseSelected && !!parts && parts.missing.length === 0;
++  const foundExisting = foundToolRoles(state.inspection?.discoveredSources).length > 0;
++  const chosenComplete = !reuseSelected && !foundExisting && !!parts && parts.missing.length === 0;
+   const report = op?.result?.kind === 'staged-tool-sources' ? op.result : null;
+   const staged = report && stagedToolSourceGuidance(report, state.presentation);
+   const busy = toolsBusy || retained;
+@@ -73,14 +76,15 @@
+       {checkReason && <p className="save-note">{checkReason}</p>}
+     </>}
+     {requirements && !report && <>
+-      <h3>{reuseSelected || chosenComplete ? 'No tool download needed' : 'Required tool sources'}</h3>
++      <h3>{foundExisting ? 'Found existing tools' : reuseSelected || chosenComplete ? 'No tool download needed' : 'Required tool sources'}</h3>
++      {foundExisting && !state.preparedFolders && <p>Matching components were found at a conventional location. Choose the existing folders below and check the remaining tools. The native picker is still required; no duplicate download or automatic selection is allowed.</p>}
+       {reuseSelected && <p role="status">Your selected protected JDK, Android platform, build tools and Gradle match this project’s saved requirements. Keep using them unchanged. This check downloaded and installed nothing; builds still run their own checks.</p>}
+       {chosenComplete && <p role="status">Your chosen JDK, Android SDK packages and Gradle match the supported profile. Nothing was downloaded. Inspect the selected tools next, then review and approve any protected copy.</p>}
+       {!reuseSelected && parts && <dl className="environment-baseline">
+         <dt>Keep unchanged</dt><dd>{parts.compatible.map(toolComponentLabel).join(', ') || 'No matching chosen sources'}</dd>
+         <dt>Download only</dt><dd>{parts.missing.map(toolComponentLabel).join(', ') || 'Nothing'}</dd>
+       </dl>}
+-      {!reuseSelected && parts && hasIncompleteSdk(parts) && <p className="save-note">Only one SDK package is missing. The app will copy your checked matching package into a separate prepared SDK, then add only the missing package. Your existing SDK and other packages stay unchanged. You still inspect and approve the complete prepared folder.</p>}
++      {!reuseSelected && parts && !foundExisting && hasIncompleteSdk(parts) && <p className="save-note">Only one SDK package is missing. The app will copy your checked matching package into a separate prepared SDK, then add only the missing package. Your existing SDK and other packages stay unchanged. You still inspect and approve the complete prepared folder.</p>}
+       <p>The saved project’s source hints were checked without running its build scripts. This is not a build-readiness check.</p>
+       <dl className="environment-baseline"><dt>Java JDK</dt><dd>{hint(requirements.jdk)}</dd>
+         <dt>Android platform</dt><dd>{hint(requirements.sdkPlatform)}</dd>
+@@ -89,7 +93,7 @@
+       {!consent && !active && <>
+         {chosenComplete && <button type="button" className="button primary" disabled={toolsBusy} onClick={openRegistration}>Inspect selected tools</button>}
+         {!reuseSelected && !chosenComplete && <>
+-          <p>Already have these tools elsewhere? Choose them instead. This check covers the supported protected catalogue and your chosen folders, not every folder on this computer.</p>
++          <p>Already have these tools elsewhere? Choose them instead. This check covers the supported protected catalogue, your chosen folders and three fixed Mac locations, not every folder on this computer.</p>
+           <button type="button" className="button primary" disabled={reviewReason !== null} onClick={() => void controller.reviewDownload()}>Review download</button>
+           {reviewReason && <p className="save-note">{reviewReason}</p>}
+         </>}
+@@ -104,7 +108,9 @@
+         onClick={() => void controller.download(consent.operationId, consent.ownerGeneration)}>Download required tools</button></div>
+       {downloadReason && <p className="save-note">{downloadReason}</p>}
+     </div></div>}
+-    {state.preparedFolders ? <PreparedToolSourceFolders folders={state.preparedFolders} busy={busy}
++    {state.preparedFolders ? state.preparedFolders.existing ? <DiscoveredToolSources folders={state.preparedFolders} busy={busy}
++      checkReason={checkReason} chooseFound={choosePreparedSource} chooseExisting={chooseSource} checkAgain={() => controller.inspect()} /> :
++      <PreparedToolSourceFolders folders={state.preparedFolders} busy={busy}
+       choosePrepared={choosePreparedSource} chooseExisting={chooseSource} openRegistration={openRegistration} /> :
+       staged && <div className="notice notice-info" role="status"><div><strong>{staged.title}</strong><p>{staged.body}</p></div></div>}
+     {originalControls}
+@@ -116,6 +122,7 @@
+         <button type="button" className="button secondary" onClick={openRegistration}>Open tool inspection &amp; approval</button></div>
+       <p>For manual preparation, use the exact supported releases shown in the existing tool review. Do not upgrade a compatible installation, change global Java settings or run a project wrapper just to discover its version.</p>
+       <p>A current, verified protected tool selection is reused without a download. A saved catalogue entry may need the existing Recover and Choose steps first. Downloads require a supported, separately enabled Mac build and a complete check of the supported catalogue and chosen folders. Only confirmed missing pieces are downloaded; present but incompatible or unreadable tools need manual review. Incompatible or dynamic requirements and unfinished operations use the manual route. Do not delete selections or working tools to bypass these checks.</p>
++      <p>{TOOL_DISCOVERY_HELP}</p>
+       <h3>Complete an Android SDK manually</h3>
+       <ol>{MANUAL_ANDROID_SDK_STEPS.map((step) => <li key={step}>{step}</li>)}</ol>
+       <p>The supported downloaded SDK contains API 35 revision 2 and Build-Tools 35.0.0 only. NDK, CMake, emulator, platform-tools and other versions are not installed by this action. A complete prepared SDK contains both required packages, reusing your checked package when only one was missing. If that source changes or cannot be copied safely, review the operation and use manual setup; no license acceptance is automated.</p>
+diff --git a/desktop/tests/tool-acquisition-controller.test.mjs b/desktop/tests/tool-acquisition-controller.test.mjs
+--- a/desktop/tests/tool-acquisition-controller.test.mjs
++++ b/desktop/tests/tool-acquisition-controller.test.mjs
+@@ -414,3 +414,15 @@
+   assert.equal(other.state.issue, 'protocol'); assert.equal(other.state.canCancel, true);
+   assert.notEqual(other.state.presentation, 'current-staged');
+ });
++
++test('native source refusal keeps incompatible, unreadable and stale distinct without a download review', async (t) => {
++  for (const reason of ['existing-tools-incompatible','existing-tools-unreadable','stale']) {
++    const h=harness(t); await h.ready;
++    const flow=h.controller.inspect(), prepare=h.calls.at(-1), op=operation(prepare.request);
++    h.reply(prepare,status(2,op)); await flush();
++    h.reply(h.calls.at(-1),status(3,{...terminal(op,'refused'),reason})); await flow;
++    assert.equal(h.state.status.operation.reason,reason); assert.equal(h.state.inspection,null);
++    await h.controller.reviewDownload(); assert.equal(h.calls.filter((c)=>c.request.action==='acquire').length,0);
++    assert.equal(h.state.consent,null);
++  }
++});
+diff --git a/desktop/tests/tool-acquisition-source-picker.test.mjs b/desktop/tests/tool-acquisition-source-picker.test.mjs
+--- a/desktop/tests/tool-acquisition-source-picker.test.mjs
++++ b/desktop/tests/tool-acquisition-source-picker.test.mjs
+@@ -114,7 +114,7 @@
+   }
+ });
+
+-async function controllers(t, { initialSources = sourceIdle(), missing = ['jdk', 'sdk-platform', 'sdk-build-tools', 'gradle'], staged = report() } = {}) {
++async function controllers(t, { initialSources = sourceIdle(), missing = ['jdk', 'sdk-platform', 'sdk-build-tools', 'gradle'], staged = report(), discovered = null } = {}) {
+   let ws = workspaceReducer(initialWorkspace, { type: 'select', project: { id: 'p1', name: 'Inert', path: '/never-opened-tools' } });
+   ws = workspaceReducer(ws, { type: 'snapshot-start', projectId: 'p1', requestId: 1 });
+   ws = workspaceReducer(ws, { type: 'snapshot-done', projectId: 'p1', requestId: 1, observedAt: 1, snapshot: {
+@@ -150,7 +150,7 @@
+         context: clone(input), phase: 'awaiting-consent', intentUsable: true, reason: 'none', outcome: null, result: null } }; return clone(native);
+     }, start: async () => {
+       const op = native.operation;
+-      const requirements = { kind: 'tool-requirements-observation', protectedTools: 'none-in-supported-catalogue', components: { missing,
++      const requirements = { ...(discovered ? {discoveredSources:discovered} : {}), kind: 'tool-requirements-observation', protectedTools: 'none-in-supported-catalogue', components: { missing,
+         compatible: ['jdk', 'sdk-platform', 'sdk-build-tools', 'gradle'].filter((part) => !missing.includes(part)) }, requirements: { schemaVersion: 1, basis: 'unverified-static-source-hints', sourcesSha256: SHA,
+         complete: true, platform: 'android', projectCodeExecuted: false, xcode: { version: '26.3', build: '17C529' }, android: {
+           jdk: { state: 'literal', value: '17' }, agp: { state: 'literal', value: '8.9.2' }, sdkPlatform: { state: 'literal', value: 'android-35' },
+@@ -162,7 +162,8 @@
+   tools.setVisible(true); await tools.connect(toolApi);
+   const off = android.subscribe(() => tools.syncProject());
+   t.after(() => { off(); tools.dispose(); android.dispose(); });
+-  await tools.inspect(); await tools.reviewDownload(); tools.setAcknowledged(OP, GEN, true); await tools.download(OP, GEN);
++  await tools.inspect();
++  if (!discovered) { await tools.reviewDownload(); tools.setAcknowledged(OP, GEN, true); await tools.download(OP, GEN); }
+   assert.equal(tools.getSnapshot().presentation, 'current-staged');
+   const peer = (kind, value) => {
+     if (kind === 'catalog') catalogStatus = clone(value); else registrationStatus = clone(value);
+@@ -319,3 +320,40 @@
+     assert.equal(h.calls.length, 1); // No Inspect, approval, registration or build is automatic.
+   }
+ });
++
++const foundExisting = () => ({scope:'fixed-macos-locations-v1',searched:['jdk','sdk','gradle'],present:['jdk','sdk'],
++  compatibleComponents:['jdk','sdk-platform']});
++test('found conventional tools use the SAME explicit picker twice without an acquisition or automatic registration', async (t) => {
++  const h = await controllers(t, {missing:['sdk-build-tools','gradle'],discovered:foundExisting()});
++  assert.equal(h.tools.getSnapshot().preparedFolders.existing, true);
++  assert.deepEqual(h.tools.getSnapshot().preparedFolders.roles, ['jdk','sdk']);
++  assert.equal(h.tools.getSnapshot().preparedFolders.incompleteSdk, true);
++  assert.match(h.tools.reviewReason(), /Found matching existing tools/);
++  await h.tools.reviewDownload(); assert.equal(h.tools.getSnapshot().consent, null);
++  await h.choose('gradle'); assert.equal(h.calls.length, 0);
++  const first = h.choose('jdk'); assert.equal(h.calls.length, 1);
++  assert.deepEqual(h.calls[0].input, {schemaVersion:1,sourceGeneration:0,projectId:'p1',role:'jdk',
++    discovered:{operationId:INSPECT,ownerGeneration:INSPECT_GEN}});
++  assert.equal(h.calls[0].input.acquired, undefined);
++  h.reply(h.calls[0], source(1,'jdk')); await first;
++  const second = h.choose('sdk'); assert.equal(h.calls.length, 2);
++  assert.deepEqual(h.calls[1].input.discovered, {operationId:INSPECT,ownerGeneration:INSPECT_GEN});
++  h.reply(h.calls[1],source(2,'sdk')); await second;
++  assert.equal(h.tools.getSnapshot().presentation,'stale');
++  assert.equal(h.tools.getSnapshot().preparedFolders.continuing,true);
++  assert.equal(h.android.getSnapshot().toolSources.inspection,'not-run');
++  assert.equal(h.android.getSnapshot().toolSources.protectedCopy,'not-created');
++  assert.equal(h.calls.length,2);
++});
++test('found location survives only its own picker relay, not project switch or an unknown original', async (t) => {
++  for (const cut of ['project','unknown','lost']) {
++    const h=await controllers(t,{missing:['sdk-build-tools','gradle'],discovered:foundExisting()});
++    const picking=h.choose('jdk'); assert.equal(h.calls.length,1);
++    if(cut==='project') { h.switch(); h.reply(h.calls[0],source(1,'jdk')); }
++    else if(cut==='unknown') h.reply(h.calls[0],{...source(1,'jdk'),phase:'unknown',reason:'cleanup-unknown',availability:'cleanup-unknown',selections:[]},false);
++    else h.calls[0].reject(new Error('inert lost original picker reply'));
++    await picking; await h.choose('sdk'); assert.equal(h.calls.length,1);
++    assert.equal(h.tools.getSnapshot().preparedFolders,null);
++    if(cut==='lost') assert.equal(h.android.getSnapshot().sourcesUnconfirmed,true);
++  }
++});

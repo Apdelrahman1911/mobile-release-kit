@@ -6,10 +6,12 @@ require "tmpdir"
 require "fileutils"
 require "zlib"
 require_relative "apple_production_fixture"
+require_relative "local_stage_runtime_fixture"
 require_relative "../../fastlane/apple_production"
 require_relative "../../fastlane/apple_create_retry"
 
 class AppleProductionTest < Minitest::Test
+  include LocalStageRuntimeFixture
   def setup
     @environment = ENV.to_h
     ENV["MOBILE_RELEASE_STORE_MODE"] = "execute"
@@ -845,6 +847,49 @@ class AppleProductionTest < Minitest::Test
       assert_empty @service.deleted_screenshots
     end
   end
+  def local_production_adapter(runtime)
+    root=File.join(runtime.local_metadata_root!,'ios')
+    journal=->(phase,data) { @journals << [phase,copy(data)] }
+    guard=if ENV['MOBILE_RELEASE_STORE_MODE']=='execute'
+      MobileReleaseKit::AppleCreateRetry.local_first_send(runtime:runtime,stage:'production-submit',build_id:'build-1',journal:journal)
+    end
+    value=MobileReleaseKit::AppleProduction.new(client:@service.client,app_id:'12345',bundle_id:'test.example.release',version:'1.2.3',
+      build:@snapshot ? @snapshot.fetch('build') : build,metadata_root:root,locales:%w[en-US fr-FR de-DE],
+      private_target:@private,environment:@secret_environment,read_build:method(:build),journal:journal,
+      upload_part:@service.method(:upload),create_guard:guard)
+    test=self;value.define_singleton_method(:sleep) { |seconds| test.advance(seconds) };value.define_singleton_method(:now) { test.clock };value
+  end
+  def local_production_prepare
+    source=File.join(@root,'selected-metadata');Dir.mkdir(source,0700);Dir.mkdir(File.join(source,'ios'),0700)
+    %w[en-US fr-FR de-DE copyright.txt primary_category.txt].each { |name| FileUtils.cp_r(File.join(@root,name),File.join(source,'ios',name)) }
+    @stage_tree=stage_metadata_copy(source)
+    ENV.update(@secret_environment);ENV['MOBILE_RELEASE_APP_ROOT']=@root;ENV['MOBILE_RELEASE_OPERATION_INTENT_PATH']='intent.json'
+    File.write(File.join(@root,'en-US/description.txt'),'ambient unselected bytes')
+    with_original_stage_runtime(stage:'production-submit',tree:@stage_tree,mode:'prepare',output:'precondition.json') do |runtime|
+      @snapshot=local_production_adapter(runtime).prepare(server_time:Time.now.utc.iso8601)
+    end
+    precondition={'schemaVersion'=>1,'documentType'=>'store-precondition','operation'=>'ios_app_store_submit','platform'=>'ios',
+      'appIdentity'=>'test.example.release','marketingVersion'=>'1.2.3','buildNumber'=>123,'observedAt'=>Time.now.utc.iso8601,'snapshot'=>@snapshot}
+    value=stage_intent_for_fixture('production-submit',precondition)
+    File.binwrite(File.join(@root,'intent.json'),MobileReleaseKit.canonical_json(value));value
+  end
+  def test_local_production_original_runtime_and_sdk_consume_snapshot_without_binary_upload
+    value=local_production_prepare;before=copy(@service.resources.fetch('builds'))
+    with_original_stage_runtime(stage:'production-submit',tree:@stage_tree,mode:'execute',output:'receipt.json',intent:value) do |runtime|
+      result=local_production_adapter(runtime).execute(@snapshot,resuming:false)
+      assert_equal 'accepted',result.fetch(:result)
+    end
+    assert_final;assert_equal before,@service.resources.fetch('builds')
+    refute @service.writes.any? { |_method,path,_body| path.include?('buildUploads') }
+  end
+  def test_local_production_same_original_guard_rejects_retry_before_sdk_mutation
+    value=local_production_prepare;before=copy(@service.writes)
+    with_original_stage_runtime(stage:'production-submit',tree:@stage_tree,mode:'execute',output:'receipt.json',intent:value) do |runtime|
+      assert_raises(MobileReleaseKit::AppleCreateRetry::Denied) { local_production_adapter(runtime).execute(@snapshot,resuming:true) }
+    end
+    assert_equal before,@service.writes
+  end
+
 end
 
 class AppleCreateRetryContractTest < Minitest::Test
@@ -961,4 +1006,5 @@ class AppleCreateRetryContractTest < Minitest::Test
     assert_nil value.retry_evidence
     assert_raises(MobileReleaseKit::ContractError) { value.arm!(public_state: @public, nodes: nodes(value), resuming: false) }
   end
+
 end

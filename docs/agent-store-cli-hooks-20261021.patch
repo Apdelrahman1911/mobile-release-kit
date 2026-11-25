@@ -1,0 +1,1187 @@
+--- a/desktop/src-tauri/src/lib.rs
++++ b/desktop/src-tauri/src/lib.rs
+@@ -125,6 +125,10 @@
+ mod service_protocol;
+ #[path="service_version_reserve_protocol.rs"]
+ mod service_version_reserve_protocol;
++#[path="service_store_protocol.rs"]
++mod service_store_protocol;
++#[path="service_store_requests.rs"]
++mod service_store_requests;
+ #[path="service_version_reserve_requests.rs"]
+ mod service_version_reserve_requests;
+ mod service_git_protocol;
+--- a/desktop/src-tauri/src/installed_cli_main.rs
++++ b/desktop/src-tauri/src/installed_cli_main.rs
+@@ -6,6 +6,10 @@
+ mod service_protocol;
+ #[path="service_version_reserve_protocol.rs"]
+ mod service_version_reserve_protocol;
++#[path="service_store_protocol.rs"]
++mod service_store_protocol;
++#[path="service_store_requests.rs"]
++mod service_store_requests;
+ #[path="service_version_reserve_requests.rs"]
+ mod service_version_reserve_requests;
+ #[path="service_play_cleanup_protocol.rs"]
+--- a/desktop/src-tauri/tests/installed_shell_observation.rs
++++ b/desktop/src-tauri/tests/installed_shell_observation.rs
+@@ -34,6 +34,10 @@
+ #[path = "../src/service_protocol.rs"] mod service_protocol;
+ #[path="../src/service_version_reserve_protocol.rs"]
+ mod service_version_reserve_protocol;
++#[path="../src/service_store_protocol.rs"]
++mod service_store_protocol;
++#[path="../src/service_store_requests.rs"]
++mod service_store_requests;
+ #[path="../src/service_version_reserve_requests.rs"]
+ mod service_version_reserve_requests;
+ #[path = "../src/service_git_protocol.rs"] mod service_git_protocol;
+--- a/desktop/src-tauri/src/application_service.rs
++++ b/desktop/src-tauri/src/application_service.rs
+@@ -78,6 +78,8 @@
+ mod local_checks;
+ #[path = "application_service_agent_android_build.rs"]
+ mod agent_android_build;
++#[path="service_store_application.rs"]
++mod agent_store;
+ #[path = "application_service_agent_ios_archive.rs"]
+ mod agent_ios_archive;
+ #[path = "application_service_request_catalogue.rs"]
+@@ -93,6 +95,7 @@
+     history_lease: Option<Arc<HistoryLease>>,
+     git_index_requests: Arc<crate::service_git_requests::Inbox>,
+     version_reserve_requests: Arc<crate::service_version_reserve_requests::Inbox>,
++    store_requests: Arc<crate::service_store_requests::Inbox>,
+     play_cleanup_requests: Arc<crate::service_play_cleanup_requests::Inbox>,
+     android_tools: Arc<crate::service_android_tools::ObservationSlot>,
+     repository_summary: Arc<crate::service_repository_summary::ObservationSlot>,
+@@ -126,13 +129,14 @@
+         for project in &mut saved.projects { if let Some(observation) = &mut project.observation { observation.stale = true; } }
+         for operation in &mut saved.operations { operation.stale = true; }
+         let instance = Id::random()?;
++        let store_requests=Arc::new(crate::service_store_requests::Inbox::new(instance.clone()));
+         let version_reserve_requests = Arc::new(crate::service_version_reserve_requests::Inbox::new(instance.clone()));
+         let play_cleanup_requests=Arc::new(crate::service_play_cleanup_requests::Inbox::new(instance.clone()));
+         let git_index_requests = Arc::new(crate::service_git_requests::Inbox::new(instance.clone()));
+         let identity_requests = Arc::new(crate::agent_identity_requests::Inbox::new(instance.clone()));
+         let local_checks = Arc::new(crate::agent_local_checks::Inbox::new(instance.clone()));
+         let build_requests = Arc::new(crate::agent_build_requests::Inbox::new(instance.clone()));
+-        Ok(Self { store, instance, play_cleanup_requests, version_reserve_requests, git_index_requests, identity_requests, local_checks, build_requests, android_tools, repository_summary, native_history_fenced: AtomicBool::new(false), history_lease: None, state: Mutex::new(State { revision: snapshot.revision, saved,
++        Ok(Self { store, instance, store_requests, play_cleanup_requests, version_reserve_requests, git_index_requests, identity_requests, local_checks, build_requests, android_tools, repository_summary, native_history_fenced: AtomicBool::new(false), history_lease: None, state: Mutex::new(State { revision: snapshot.revision, saved,
+             runtime_aliases: BTreeMap::new(), grant: None, stopped: false }) })
+     }
+     pub(crate) fn instance(&self) -> &Id { &self.instance }
+@@ -185,7 +189,7 @@
+     /// Permanent original-service read fence. Native observation callbacks must
+     /// not wait for the state mutex, which real store IO can hold. No Allow or
+     /// later successful write clears this flag; original cleanup still runs.
+-    pub(crate) fn fence_native_history(&self) { self.native_history_fenced.store(true, Ordering::Release); self.play_cleanup_requests.fence(); self.version_reserve_requests.fence(); }
++    pub(crate) fn fence_native_history(&self) { self.native_history_fenced.store(true, Ordering::Release); self.play_cleanup_requests.fence(); self.store_requests.fence(); self.version_reserve_requests.fence(); }
+     pub(crate) fn native_history_current(&self) -> Result<(), Error> {
+         // Nonblocking: an old facet must not survive an unobserved state
+         // poison while another caller still has not attempted lock().
+@@ -373,6 +377,7 @@
+     pub(crate) fn revoke_agent_read(&self) -> Result<(), Error> {
+         let at = Instant::now();
+         self.version_reserve_requests.read_revoked(at); // Memory only, before possible store/IO wait.
++        let _=self.store_requests.revoke(crate::service_store_protocol::Reason::PermissionRevoked,at);
+         let mut state = self.lock()?;
+         if let Some(old) = &state.grant { old.reserve_read.revoke(at); }
+         state.grant = None; Ok(())
+@@ -415,6 +420,9 @@
+             // These two fixed routes touch only the bounded proposal inbox.
+             // No native callback, executor or GUI approval runs in a socket.
+             match &request.request {
++                p::RequestBody::StoreSubmit(v)=>return self.service_store_submit(client,v.clone()),
++                p::RequestBody::StoreStatus(q)=>return self.service_store_query(client,q,false),
++                p::RequestBody::StoreCancel(q)=>return self.service_store_query(client,q,true),
+                 p::RequestBody::VersionReserveSubmit(v) => return self.service_version_reserve_submit(client,v.clone()),
+                 p::RequestBody::PlayCleanupSubmit(v)=>return self.service_play_cleanup_submit(client,v.clone()),
+                 p::RequestBody::PlayCleanupStatus(q)=>return self.service_play_cleanup_query(client,q,false),
+@@ -467,6 +475,7 @@
+             let allowed = |id: &Id| if grant.projects.contains(id) { Ok(()) } else { Err(Error::AccessDenied) };
+             let project = |id: &Id| state.saved.projects.iter().find(|p| &p.binding.project_id == id).map(|p| view(&state, p)).ok_or(Error::Conflict);
+             Ok(match request.request {
++                p::RequestBody::StoreSubmit(_) | p::RequestBody::StoreStatus(_) | p::RequestBody::StoreCancel(_) |
+                 p::RequestBody::VersionReserveSubmit(_) | p::RequestBody::VersionReserveStatus(_) | p::RequestBody::VersionReserveCancel(_) |
+                 p::RequestBody::PlayCleanupSubmit(_) | p::RequestBody::PlayCleanupStatus(_) | p::RequestBody::PlayCleanupCancel(_) |
+                 p::RequestBody::GitIndexScope(_) | p::RequestBody::GitIndexPrepare(_) | p::RequestBody::GitIndexStart(_)
+@@ -516,7 +525,7 @@
+     }
+     /// The IPC owner must first stop accepting, notify and join all original
+     /// workers. This revokes admission but does not pretend to join them.
+-    pub(crate) fn stop(&self) -> Result<(), Error> { let at=Instant::now(); self.version_reserve_requests.read_revoked(at); self.version_reserve_requests.close(at); self.play_cleanup_requests.close(at); self.git_index_requests.close(); self.repository_summary.retire(); self.android_tools.unavailable(); self.build_requests.close(); self.local_checks.close(); self.identity_requests.close(); let mut state = self.lock()?; state.stopped = true; state.grant = None; Ok(()) }
++    pub(crate) fn stop(&self) -> Result<(), Error> { let at=Instant::now(); self.version_reserve_requests.read_revoked(at); self.version_reserve_requests.close(at); self.play_cleanup_requests.close(at); self.store_requests.close(at); self.git_index_requests.close(); self.repository_summary.retire(); self.android_tools.unavailable(); self.build_requests.close(); self.local_checks.close(); self.identity_requests.close(); let mut state = self.lock()?; state.stopped = true; state.grant = None; Ok(()) }
+ }
+ 
+ fn valid_root(path: &Path) -> Result<&str, Error> {
+--- a/desktop/src-tauri/src/service_protocol.rs
++++ b/desktop/src-tauri/src/service_protocol.rs
+@@ -209,6 +209,9 @@
+     #[serde(rename="play-cleanup.submit")] PlayCleanupSubmit(crate::service_play_cleanup_protocol::Submit),
+     #[serde(rename="play-cleanup.status")] PlayCleanupStatus(crate::service_play_cleanup_protocol::Query),
+     #[serde(rename="play-cleanup.cancel")] PlayCleanupCancel(crate::service_play_cleanup_protocol::Query),
++    #[serde(rename="store.submit")] StoreSubmit(crate::service_store_protocol::Submit),
++    #[serde(rename="store.status")] StoreStatus(crate::service_store_protocol::Query),
++    #[serde(rename="store.cancel")] StoreCancel(crate::service_store_protocol::Query),
+     #[serde(rename="version-reserve.submit")] VersionReserveSubmit(crate::service_version_reserve_protocol::Submit),
+     #[serde(rename="version-reserve.status")] VersionReserveStatus(crate::service_version_reserve_protocol::Query),
+     #[serde(rename="version-reserve.cancel")] VersionReserveCancel(crate::service_version_reserve_protocol::Query),
+@@ -277,6 +280,7 @@
+ pub enum ResponseBody {
+     PlayCleanupRequest(crate::service_play_cleanup_protocol::Status),
+     VersionReserveRequest(crate::service_version_reserve_protocol::Status),
++    StoreRequest(crate::service_store_protocol::Status),
+     GitIndexScope(crate::service_git_protocol::Scope),
+     GitIndexRequest(crate::service_git_protocol::Status),
+     GitCommitScope(crate::service_git_commit_protocol::Scope),
+@@ -331,6 +335,8 @@
+     if request.version != VERSION { return Err(Error::InvalidRequest); }
+     if matches!(&request.request,RequestBody::PlayCleanupSubmit(_)|RequestBody::PlayCleanupStatus(_)|RequestBody::PlayCleanupCancel(_))
+         && bytes.len()>crate::service_play_cleanup_protocol::RAW_LIMIT {return Err(Error::InvalidRequest);}
++    if matches!(&request.request,RequestBody::StoreSubmit(_)|RequestBody::StoreStatus(_)|RequestBody::StoreCancel(_))
++        &&bytes.len()>crate::service_store_protocol::RAW_LIMIT{return Err(Error::InvalidRequest);}
+     if matches!(&request.request, RequestBody::VersionReserveSubmit(_) | RequestBody::VersionReserveStatus(_) | RequestBody::VersionReserveCancel(_))
+         && bytes.len() > crate::service_version_reserve_protocol::RAW_LIMIT { return Err(Error::InvalidRequest); }
+     if let RequestBody::GitIndexStart(input) | RequestBody::GitCommitStart(input) | RequestBody::GitRepositoryStart(input) | RequestBody::GitRemoteStart(input) = &request.request { input.validate()?; }
+@@ -406,6 +412,10 @@
+             let mut seen = std::collections::BTreeSet::new();
+             for row in rows { project(row)?; if !seen.insert(&row.project_id) { return Err(Error::InvalidRequest); } }
+         }
++        ResponseBody::StoreRequest(row)=>{
++            row.validate()?;
++            if row.origin.service_instance!=response.service_instance||serde_json::to_vec(response).map_err(|_|Error::InvalidRequest)?.len()>crate::service_store_protocol::STATUS_LIMIT{return Err(Error::InvalidRequest);}
++        },
+         ResponseBody::VersionReserveRequest(row) => {
+             row.validate()?;
+             if row.origin.service_instance != response.service_instance
+--- a/desktop/src-tauri/src/service_request_catalogue.rs
++++ b/desktop/src-tauri/src/service_request_catalogue.rs
+@@ -10,7 +10,7 @@
+ pub(crate) const DETAIL_LIMIT: usize = local::LIMIT + build::LIMIT;
+ pub(crate) const ADDITIONAL_LIMIT: usize = crate::service_git_protocol::REQUEST_LIMIT
+     + crate::agent_identity_requests::LIMIT
+-    + crate::service_version_reserve_protocol::REQUEST_LIMIT;
++    + crate::service_version_reserve_protocol::REQUEST_LIMIT + crate::service_store_protocol::REQUEST_LIMIT;
+ pub const LIMIT: usize = DETAIL_LIMIT + ADDITIONAL_LIMIT;
+ pub const VIEW_BYTES: usize = 64 * 1024;
+ // Same eight IPC workers: one typed view, its encoded output, finite borrowed
+@@ -167,6 +167,7 @@
+     GitRemote,
+     Identity,
+     VersionReservation,
++    Store,
+ }
+ impl AdditionalFamily {
+     fn namespace(self) -> usize {
+@@ -174,6 +175,7 @@
+             Self::GitIndex | Self::GitCommit | Self::GitRepository | Self::GitRemote => 0,
+             Self::Identity => 1,
+             Self::VersionReservation => 2,
++            Self::Store => 3,
+         }
+     }
+     fn status_command(self) -> &'static str {
+@@ -184,6 +186,7 @@
+             Self::GitRemote => "git-remote-status",
+             Self::Identity => "identity-request-status",
+             Self::VersionReservation => "version-reserve-status",
++            Self::Store => "store-status",
+         }
+     }
+ }
+@@ -245,7 +248,7 @@
+         if local_count > local::LIMIT || self.requests.len() - local_count > build::LIMIT {
+             return Err(Error::InvalidRequest);
+         }
+-        let mut counts = [0usize; 3];
++        let mut counts = [0usize; 4];
+         for (index, row) in additional.iter().enumerate() {
+             let namespace = row.family.namespace();
+             counts[namespace] += 1;
+@@ -258,6 +261,7 @@
+         if counts[0] > crate::service_git_protocol::REQUEST_LIMIT
+             || counts[1] > crate::agent_identity_requests::LIMIT
+             || counts[2] > crate::service_version_reserve_protocol::REQUEST_LIMIT
++            || counts[3] > crate::service_store_protocol::REQUEST_LIMIT
+         {
+             return Err(Error::InvalidRequest);
+         }
+--- a/desktop/src-tauri/src/application_service_request_catalogue.rs
++++ b/desktop/src-tauri/src/application_service_request_catalogue.rs
+@@ -59,6 +59,7 @@
+         additional_requests.extend(self.git_index_requests.catalogue_requests(&self.instance, project)?);
+         additional_requests.extend(self.identity_requests.catalogue_requests(&self.instance, project)?);
+         additional_requests.extend(self.version_reserve_requests.catalogue_requests(&self.instance, project)?);
++        additional_requests.extend(self.store_requests.catalogue_requests(&self.instance, project)?);
+         let view = data::Catalogue {
+             schema_version: 2,
+             scope: data::Scope::CurrentHostRetainedRequests,
+--- a/desktop/src-tauri/src/saved_command_owner.rs
++++ b/desktop/src-tauri/src/saved_command_owner.rs
+@@ -1275,8 +1275,11 @@
+ mod agent_build;
+ pub(crate) use agent_ios_archive::Approval as AgentIOSArchiveApproval;
+ pub(crate) use agent_android_build::Approval as AgentAndroidBuildApproval;
++#[path="saved_command_agent_store.rs"]
++mod agent_store;
++pub(crate) use agent_store::{Approval as AgentStoreApproval,Binding as AgentStoreBinding};
+ 
+-struct Prepared { agent_build: Option<Arc<crate::agent_build_requests::NativeLink>>, agent_local_check: Option<Arc<crate::agent_local_checks::NativeLink>>, upload_key_preparation:Option<Arc<UploadKeyPreparation>>, upload_key:Option<Arc<upload_key::Intent>>, apple:Option<Arc<apple_provisioning::Intent>>, tools:Option<Arc<tool_acquisition::Intent>>, local_history:Option<Arc<crate::asset_session::LocalHistoryConsent>>, projection: RunProjection, expires: Instant, registration: u32, project: RegisteredRoot, recovery_stamp: Option<String>,
++struct Prepared { agent_store:Option<Arc<agent_store::Binding>>, store_witness:Option<Arc<()>>, agent_build: Option<Arc<crate::agent_build_requests::NativeLink>>, agent_local_check: Option<Arc<crate::agent_local_checks::NativeLink>>, upload_key_preparation:Option<Arc<UploadKeyPreparation>>, upload_key:Option<Arc<upload_key::Intent>>, apple:Option<Arc<apple_provisioning::Intent>>, tools:Option<Arc<tool_acquisition::Intent>>, local_history:Option<Arc<crate::asset_session::LocalHistoryConsent>>, projection: RunProjection, expires: Instant, registration: u32, project: RegisteredRoot, recovery_stamp: Option<String>,
+     material: Option<PrivateSigningMaterial>, recovery: Option<Arc<IOSRecoveryObservation>>,
+     android_selection: Option<Arc<android_catalog::Selection>>, artifact_selection: Option<Arc<artifact_inputs::Loan>>, artifact_tools: Option<Arc<ArtifactToolLoan>> }
+ struct RecoveryReview { context: recovery_wire::Context, observation: recovery_wire::Observation, stamp: String, expires: Instant, registration: u32, project: RegisteredRoot }
+@@ -1455,7 +1458,7 @@
+             reason: self.reason.ios()?, stage: match self.stage { None => None, Some(Stage::IOSArchive(stage)) => Some(stage), _ => return Err(BridgeError::protocol()) }, result, activity, disposition, report })
+     }
+ }
+-struct Session { agent_build: Option<Arc<crate::agent_build_requests::NativeLink>>, agent_local_check: Option<Arc<crate::agent_local_checks::NativeLink>>,
++struct Session { agent_store:Option<Arc<agent_store::Binding>>, agent_build: Option<Arc<crate::agent_build_requests::NativeLink>>, agent_local_check: Option<Arc<crate::agent_local_checks::NativeLink>>,
+     upload_key: upload_key::State,
+     apple: apple_provisioning::State,
+     apple_profile: apple_signing::State,
+@@ -1597,6 +1600,8 @@
+         end
+     }
+     async fn android_control_tick(&self) {
++        // Store shares this original control-select slot; no new watchdog or clock.
++        if let Some(delay)=agent_store::control_poll(self){tokio::time::sleep(delay).await;return;}
+         #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"), not(feature = "macos-android-registration-helper")))]
+         if self.android_control.is_some(){tokio::time::sleep(android_leased::CONTROL_POLL).await;return;}
+         pending::<()>().await
+@@ -2393,7 +2398,7 @@
+             phase: Phase::AwaitingConsent, intent_usable: true, outcome: None, reason: Reason::None, result: None, stage: None };
+         if self.inner.domain == SavedCommandDomain::ProjectRecovery { r.recovery_review = None; }
+         let android_selection = r.android_catalog.selection().cloned();
+-        r.prepared = Some(Prepared { agent_build, agent_local_check, upload_key_preparation:None, upload_key:None, apple:None, tools:None, local_history:None, projection, expires, registration, project, recovery_stamp, material, recovery, android_selection, artifact_selection, artifact_tools });
++        r.prepared = Some(Prepared { agent_store:None, store_witness:agent_store::witness(&projection.context), agent_build, agent_local_check, upload_key_preparation:None, upload_key:None, apple:None, tools:None, local_history:None, projection, expires, registration, project, recovery_stamp, material, recovery, android_selection, artifact_selection, artifact_tools });
+         self.inner.bump(&mut r);
+         // After commit, only typed status or unknown/lost reply, never the three
+         // fixed preallocation refusal codes used by the renderer controller.
+@@ -2427,6 +2432,13 @@
+         material:Option<PrivateSigningMaterial>,execute_budget:Option<&crate::asset_session::ExecuteMemoryAdmission<'_>>,
+         tools_admission:Option<(&ToolAcquisitionCensus,&crate::asset_session::ToolAcquisitionMemoryAdmission<'_>)>,
+         agent_entry:Option<&Arc<crate::agent_local_checks::Entry>>, agent_build:Option<&Arc<crate::agent_build_requests::Entry>>)->Result<Admitted,BridgeError>{
++        self.start_bound_requests_store(input,admitted_at,registered,gate,material,execute_budget,tools_admission,agent_entry,agent_build,None)
++    }
++    fn start_bound_requests_store(&self,input:Start,admitted_at:Instant,registered:Option<(u32,RegisteredRoot)>,gate:Availability,
++        material:Option<PrivateSigningMaterial>,execute_budget:Option<&crate::asset_session::ExecuteMemoryAdmission<'_>>,
++        tools_admission:Option<(&ToolAcquisitionCensus,&crate::asset_session::ToolAcquisitionMemoryAdmission<'_>)>,
++        agent_entry:Option<&Arc<crate::agent_local_checks::Entry>>,agent_build:Option<&Arc<crate::agent_build_requests::Entry>>,
++        agent_store:Option<&Arc<crate::service_store_requests::Entry>>)->Result<Admitted,BridgeError>{
+         if (self.inner.domain==SavedCommandDomain::ToolAcquisition)!=tools_admission.is_some(){return Err(self.inner.domain.unavailable());}
+         if (self.inner.domain==SavedCommandDomain::LocalStoreExecute)!=execute_budget.is_some(){return Err(self.inner.domain.unavailable());}
+         let mut r = self.inner.lock();
+@@ -2435,14 +2447,16 @@
+         }
+         // All Start routes share this guard BEFORE take. Ordinary GUI Start
+         // cannot adopt a CLI-authorized Prepared or replace its exact scope.
+-        if !r.prepared.as_ref().is_some_and(|p| agent_local_checks::start_matches(p,agent_entry) && agent_build::start_matches(p,agent_build)) {
++        if !r.prepared.as_ref().is_some_and(|p| agent_local_checks::start_matches(p,agent_entry) && agent_build::start_matches(p,agent_build) && agent_store::start_matches(p,agent_store)) {
+             return Err(self.inner.domain.invalid_owner());
+         }
+         agent_build::consume(r.prepared.as_ref().ok_or_else(|| self.inner.domain.invalid_owner())?)?;
++        agent_store::consume(r.prepared.as_ref().ok_or_else(||self.inner.domain.invalid_owner())?)?;
+         let prepared = r.prepared.take().ok_or_else(|| self.inner.domain.invalid_owner())?; // One use, before executor/runtime/effects.
+         if !tool_acquisition::start_admitted(&self.inner,&r,&prepared,tools_admission) {
+             agent_local_checks::retired_prepared(&prepared,Reason::StaleIntent,r.revision.saturating_add(1));
+             agent_build::retired_prepared(&prepared,Reason::StaleIntent,r.revision.saturating_add(1));
++            agent_store::retired_prepared(&prepared,Reason::StaleIntent,r.revision.saturating_add(1));
+             r.last=Some(retire(prepared.projection,Reason::StaleIntent));self.inner.bump(&mut r);
+             return Ok(Admitted{status:self.inner.snapshot_locked(&mut r,gate)?,release:None});
+         }
+@@ -2474,7 +2488,8 @@
+         // Starting any new work consumes the former inspected observation.
+         // It cannot license a second recovery after even a known refusal.
+         r.recovery = None;
+-        let mut refused = if Instant::now() >= prepared.expires { Some(Reason::IntentExpired) }
++        let mut refused = if let Some((reason,_))=prepared.agent_store.as_ref().and_then(|link|link.stop_at(Instant::now())) {Some(reason)}
++            else if Instant::now() >= prepared.expires { Some(Reason::IntentExpired) }
+             else if !upload_key::start_matches(&self.inner,&prepared,clocks) { Some(Reason::StaleIntent) }
+             else if prepared.artifact_tools.as_ref().is_some_and(|v|!v.current()) || !artifact_matches || !material_matches || !recovery_matches || !r.android_catalog.selection_matches(prepared.android_selection.as_ref(),&self.inner) || registered.as_ref().is_none_or(|(generation, project)| *generation != prepared.registration || project != &prepared.project) { Some(Reason::StaleIntent) }
+             else if !self.inner.ios_mode_qualified(&prepared.projection.context, None) { Some(Reason::RuntimeUnavailable) }
+@@ -2490,6 +2505,7 @@
+             if reason == Reason::CleanupUnknown { r.disabled = true; }
+             agent_local_checks::retired_prepared(&prepared,reason,r.revision.saturating_add(1));
+             agent_build::retired_prepared(&prepared,reason,r.revision.saturating_add(1));
++            agent_store::retired_prepared(&prepared,reason,r.revision.saturating_add(1));
+             r.last = Some(retire(prepared.projection, reason)); self.inner.bump(&mut r);
+             return Ok(Admitted { status: self.inner.snapshot_locked(&mut r, gate)?, release: None });
+         }
+@@ -2510,6 +2526,7 @@
+         #[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"),not(feature="macos-android-registration-helper")))]
+         let upload_key_native=upload_key::native_new(&prepared,audit_cutoff.clone(),cleanup_cutoff.clone(),clocks)?;
+         if let Some(link) = &prepared.agent_build { link.attach_stop(&stop).map_err(|_| self.inner.domain.unavailable())?; }
++        if let Some(link)=&prepared.agent_store{link.scope().control.attach(&stop).map_err(|_|self.inner.domain.unavailable())?;}
+         if let Some(link) = &prepared.agent_local_check {
+             link.attach_stop(&stop).map_err(|_| self.inner.domain.unavailable())?;
+         }
+@@ -2546,7 +2563,7 @@
+         #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"), not(feature = "macos-android-registration-helper")))]
+         let android_close=android_control.as_ref().map(|control|AndroidCloseSlot::reserved(executor.clone(),control.clone()));
+         let requires_private_material = context.requires_private_material();
+-        let owner = Arc::new(Session { agent_build: prepared.agent_build, agent_local_check: prepared.agent_local_check, upload_key:upload_key::State::new(prepared.upload_key), apple: apple_provisioning::State::new(prepared.apple), apple_profile: apple_signing::State::default(), apple_key:apple_key::State::default(), tools:tool_acquisition::State::new(prepared.tools), local_history_consent:prepared.local_history, history:local_history::State::new(), domain: self.inner.domain, id: input.operation_id, generation: input.owner_generation, context, profile, clocks,
++        let owner = Arc::new(Session { agent_store:prepared.agent_store, agent_build: prepared.agent_build, agent_local_check: prepared.agent_local_check, upload_key:upload_key::State::new(prepared.upload_key), apple: apple_provisioning::State::new(prepared.apple), apple_profile: apple_signing::State::default(), apple_key:apple_key::State::default(), tools:tool_acquisition::State::new(prepared.tools), local_history_consent:prepared.local_history, history:local_history::State::new(), domain: self.inner.domain, id: input.operation_id, generation: input.owner_generation, context, profile, clocks,
+             registration: prepared.registration, project: prepared.project, recovery_stamp: prepared.recovery_stamp, request: AsyncMutex::new(None), stop, pipes, frames, wake: Notify::new(), native_audit_cutoff, native_cleanup_cutoff,
+             material: Mutex::new(prepared.material), material_retired: AtomicBool::new(!requires_private_material),
+             recovery: prepared.recovery, android_selection: prepared.android_selection.clone(), artifact_selection: prepared.artifact_selection, artifact_tools:prepared.artifact_tools, artifact_binding:Mutex::new(None), native_failure: Mutex::new(None),
+@@ -2871,6 +2888,7 @@
+                 upload_key::after_final(&active,&owner);
+                 agent_local_checks::retired(&active,r.revision.saturating_add(1));
+                 agent_build::retired(&active,r.revision.saturating_add(1));
++                agent_store::retired(&active,r.revision.saturating_add(1));
+                 r.last = Some(active.projection.public()); self.inner.bump(&mut r);
+             }
+         } else {
+@@ -3145,6 +3163,7 @@
+                 if let Some(prepared) = r.prepared.take() {
+                     agent_local_checks::retired_prepared(&prepared,Reason::CleanupUnknown,r.revision);
+                     agent_build::retired_prepared(&prepared,Reason::CleanupUnknown,r.revision);
++                    agent_store::retired_prepared(&prepared,Reason::CleanupUnknown,r.revision);
+                     r.last = Some(retire(prepared.projection, Reason::CleanupUnknown));
+                 }
+                 if let Some(a) = &r.active { a.owner.stop.send_replace(true); a.owner.wake.notify_waiters(); }
+@@ -3152,6 +3171,7 @@
+         }
+         agent_local_checks::changed(r);
+         agent_build::changed(r);
++        agent_store::changed(r);
+         self.changes.send_replace(r.revision); self.changed.notify_waiters();
+     }
+     fn retire_prepared(&self, r: &mut Registry, reason: Reason) {
+@@ -3159,10 +3179,12 @@
+             if reason == Reason::CleanupUnknown { r.disabled = true; }
+             agent_local_checks::retired_prepared(&prepared,reason,r.revision.saturating_add(1));
+             agent_build::retired_prepared(&prepared,reason,r.revision.saturating_add(1));
++            agent_store::retired_prepared(&prepared,reason,r.revision.saturating_add(1));
+             r.last = Some(retire(prepared.projection, reason)); self.bump(r);
+         }
+     }
+     fn expire_prepared(&self, r: &mut Registry, now: Instant) {
++        if let Some((reason,_))=r.prepared.as_ref().and_then(|p|p.agent_store.as_ref()).and_then(|link|link.stop_at(now)){self.retire_prepared(r,reason);}
+         if r.prepared.as_ref().and_then(|p|p.agent_build.as_ref()).is_some_and(|link|link.entry().stop_at(now).is_some()) {
+             self.retire_prepared(r,Reason::Cancelled);
+         }
+@@ -3311,6 +3333,7 @@
+     }
+     fn advance_locked(&self, r: &mut Registry, owner: &Session, now: Instant) {
+         if !original_session(r,owner){return;}
++        if let Some((reason,at))=owner.agent_store.as_ref().and_then(|link|link.stop_at(now)){self.stop_locked(r,owner,reason,at);}
+         if let Some(at)=owner.agent_build.as_ref().and_then(|link|link.entry().stop_at(now)) { self.stop_locked(r,owner,Reason::Cancelled,at); }
+         if let Some(at)=owner.agent_local_check.as_ref().and_then(|link|link.entry().stop_at(now)) {
+             self.stop_locked(r,owner,Reason::Cancelled,at);
+@@ -3355,7 +3378,7 @@
+         if a.unknown {None} else if a.first_stop.is_some() || owner.android_control_stopped() {
+             Some(owner.finality_end(a.first_stop))
+         } else {Some(owner.clocks.work.min(owner.finality_end(None))
+-            .min(owner.agent_local_check.as_ref().map_or(owner.clocks.work,|link|link.expires())))}
++            .min(owner.agent_local_check.as_ref().map_or(owner.clocks.work,|link|link.expires())).min(owner.agent_store.as_ref().map_or(owner.clocks.work,|link|link.read_end())))}
+     }
+     fn accept(&self, owner: &Session, frame: Frame) { self.accept_at(owner, frame, Instant::now()); }
+     fn accept_at(&self, owner: &Session, frame: Frame, now: Instant) {
+@@ -3909,7 +3932,7 @@
+     // wake this existing watchdog independently of relay/store locks. There is
+     // no new observer and a true latch never spins a newly-created receiver.
+     let mut local_stop = owner.stop.subscribe();
+-    let mut listen_local_stop = (owner.agent_local_check.is_some() || owner.agent_build.is_some()) && !*local_stop.borrow_and_update();
++    let mut listen_local_stop = (owner.agent_local_check.is_some() || owner.agent_build.is_some() || owner.agent_store.is_some()) && !*local_stop.borrow_and_update();
+     loop {
+         let wake = owner.wake.notified(); let end = inner.endpoint(owner);
+         tokio::select! { result = join_slot(slot) => return result, _ = wake => {}, _ = clock_wait(end) => {},
+@@ -5567,7 +5590,7 @@
+         let (native_cleanup_cutoff, _) = watch::channel(clocks.cleanup_end(None));
+         let project = RegisteredRoot { path: std::path::PathBuf::from("/inert-mrk-recovery-project-not-opened"),
+             identity: crate::asset_source::ProjectIdentity::Posix(crate::asset_source::DirectoryIdentity::synthetic_evidence_identity()) };
+-        let owner = Arc::new(Session { agent_build: None, agent_local_check: None, upload_key:upload_key::State::new(None), apple:apple_provisioning::State::new(None), apple_profile:apple_signing::State::default(), apple_key:apple_key::State::default(), tools:tool_acquisition::State::new(None), local_history_consent:None, history:local_history::State::new(), domain, id: "a".repeat(32), generation: "b".repeat(32),
++        let owner = Arc::new(Session { agent_store:None, agent_build: None, agent_local_check: None, upload_key:upload_key::State::new(None), apple:apple_provisioning::State::new(None), apple_profile:apple_signing::State::default(), apple_key:apple_key::State::default(), tools:tool_acquisition::State::new(None), local_history_consent:None, history:local_history::State::new(), domain, id: "a".repeat(32), generation: "b".repeat(32),
+             context: context.clone(), profile: Profile::current(domain).unwrap(), clocks, registration: 1, project,
+             recovery_stamp: None, request: AsyncMutex::new(None), material: Mutex::new(None), material_retired: AtomicBool::new(true),
+             recovery: None, android_selection: None, artifact_selection: None, artifact_tools: None, artifact_binding: Mutex::new(None), native_failure: Mutex::new(None),
+@@ -5762,7 +5785,7 @@
+     let expiry = SavedCommandOwner::project_recovery(runtime);
+     {
+         let mut r = expiry.inner.lock(); let expires = t + INTENT;
+-        r.prepared = Some(Prepared { agent_build: None, agent_local_check: None, upload_key_preparation:None, upload_key:None, apple:None, tools:None, local_history:None, projection: RunProjection { agent_build: None, agent_local_check: None, operation_id: original.id.clone(), owner_generation: original.generation.clone(),
++        r.prepared = Some(Prepared { agent_store:None, store_witness:None, agent_build: None, agent_local_check: None, upload_key_preparation:None, upload_key:None, apple:None, tools:None, local_history:None, projection: RunProjection { agent_build: None, agent_local_check: None, operation_id: original.id.clone(), owner_generation: original.generation.clone(),
+             context: original.context.clone(), phase: Phase::AwaitingConsent, intent_usable: true, outcome: None,
+             reason: Reason::None, result: None, stage: None }, expires, registration: original.registration, project: original.project.clone(),
+             recovery_stamp: None, material: None, recovery: None, android_selection: None, artifact_selection: None, artifact_tools: None });
+--- a/desktop/src-tauri/src/saved_command_agent_android_build.rs
++++ b/desktop/src-tauri/src/saved_command_agent_android_build.rs
+@@ -542,7 +542,7 @@
+                 crate::asset_source::DirectoryIdentity::synthetic_evidence_identity(),
+             ),
+         };
+-        let prepared = Prepared {
++        let prepared = Prepared { agent_store:None, store_witness:None,
+             agent_build: Some(link.clone()),
+             agent_local_check: None,
+             upload_key_preparation: None,
+--- a/desktop/src-tauri/src/saved_command_agent_ios_archive.rs
++++ b/desktop/src-tauri/src/saved_command_agent_ios_archive.rs
+@@ -553,7 +553,7 @@
+                 crate::asset_source::DirectoryIdentity::synthetic_evidence_identity(),
+             ),
+         };
+-        let prepared = Prepared {
++        let prepared = Prepared { agent_store:None, store_witness:None,
+             agent_build: Some(link.clone()),
+             agent_local_check: None,
+             upload_key_preparation: None,
+--- a/desktop/src-tauri/src/saved_command_agent_local_checks.rs
++++ b/desktop/src-tauri/src/saved_command_agent_local_checks.rs
+@@ -403,7 +403,7 @@
+             operation: wire::Operation::LocalProjectChecks,
+             platform: wire::Platform::Android,
+         });
+-        let prepared = Prepared {
++        let prepared = Prepared { agent_store:None, store_witness:None,
+             agent_build: None, agent_local_check: Some(link.clone()),
+             upload_key_preparation: None,
+             upload_key: None,
+--- a/desktop/src-tauri/src/saved_command_owner_tests.rs
++++ b/desktop/src-tauri/src/saved_command_owner_tests.rs
+@@ -92,7 +92,7 @@
+         expected.operation = operation;
+         let mut prepared = projection(SavedCommandDomain::OfflinePreflight);
+         prepared.context = Context::OfflinePreflight(expected.clone());
+-        owner.inner.lock().prepared = Some(Prepared { agent_build: None, agent_local_check: None, upload_key_preparation:None, upload_key:None, apple:None, tools: None, local_history: None, projection: prepared,
++        owner.inner.lock().prepared = Some(Prepared { agent_store:None, store_witness:None, agent_build: None, agent_local_check: None, upload_key_preparation:None, upload_key:None, apple:None, tools: None, local_history: None, projection: prepared,
+             expires: Instant::now() + INTENT, registration: 1, project: project(), recovery_stamp: None,
+             material: None, recovery: None, android_selection: None, artifact_selection: None, artifact_tools: None });
+         let request = |consent, operation_id| wire::start(&json!({"operationId": operation_id,
+@@ -144,7 +144,7 @@
+         SavedCommandDomain::IOSArchive => Profile::IOSArchive(ios_wire::Profile::MacArm64),
+         SavedCommandDomain::ArtifactInspection => Profile::ArtifactInspection(artifact_wire::Profile::MacosArm64),
+         SavedCommandDomain::LocalStorePreflight => Profile::LocalStorePreflight(store_wire::Profile::MacosArm64) };
+-    let owner = Arc::new(Session { agent_build: None, agent_local_check: None, upload_key:upload_key::State::new(None), apple:apple_provisioning::State::new(None), apple_profile:apple_signing::State::default(), apple_key:apple_key::State::default(), tools:tool_acquisition::State::new(None), local_history_consent:None, history:local_history::State::new(), domain, id: p.operation_id.clone(), generation: p.owner_generation.clone(), context: p.context.clone(),
++    let owner = Arc::new(Session { agent_store:None, agent_build: None, agent_local_check: None, upload_key:upload_key::State::new(None), apple:apple_provisioning::State::new(None), apple_profile:apple_signing::State::default(), apple_key:apple_key::State::default(), tools:tool_acquisition::State::new(None), local_history_consent:None, history:local_history::State::new(), domain, id: p.operation_id.clone(), generation: p.owner_generation.clone(), context: p.context.clone(),
+         profile, clocks, registration: 1, project: project(), recovery_stamp: None, request: AsyncMutex::new(None),
+         material: Mutex::new(None), material_retired: AtomicBool::new(true), recovery: None, android_selection: None, artifact_selection: None, artifact_tools: None, artifact_binding: Mutex::new(None), native_failure: Mutex::new(None),
+         #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"), not(feature = "macos-android-registration-helper")))]
+@@ -194,7 +194,7 @@
+             SavedCommandDomain::ArtifactInspection => &bridge.artifact_inspection,
+             SavedCommandDomain::LocalStorePreflight => bridge.local_store.original_for_test(),
+         };
+-        original.inner.lock().prepared = Some(Prepared { agent_build: None, agent_local_check: None, upload_key_preparation:None, upload_key:None, apple:None, tools:None, local_history:None, projection: projection(domain),
++        original.inner.lock().prepared = Some(Prepared { agent_store:None, store_witness:None, agent_build: None, agent_local_check: None, upload_key_preparation:None, upload_key:None, apple:None, tools:None, local_history:None, projection: projection(domain),
+             expires: Instant::now() + INTENT, registration: bridge.registry_generation(), project: project(), recovery_stamp: None, material: None, recovery: None, android_selection: None, artifact_selection: None, artifact_tools: None });
+         assert_eq!(original.inner.qualified(None), domain == SavedCommandDomain::OfflinePreflight && cfg!(feature = "custom-protocol")
+             && original.inner.runtime.offline_preflight_installed_profile_available());
+@@ -409,7 +409,7 @@
+         let owner = application(SavedCommandDomain::AndroidBuild);
+         let mut prepared = projection(SavedCommandDomain::AndroidBuild);
+         prepared.context = Context::AndroidBuild(context.clone());
+-        owner.inner.lock().prepared = Some(Prepared { agent_build: None, agent_local_check: None, upload_key_preparation:None, upload_key:None, apple:None, tools:None, local_history:None, projection: prepared,
++        owner.inner.lock().prepared = Some(Prepared { agent_store:None, store_witness:None, agent_build: None, agent_local_check: None, upload_key_preparation:None, upload_key:None, apple:None, tools:None, local_history:None, projection: prepared,
+             expires: Instant::now() + INTENT, registration: 1, project: project(), recovery_stamp: None, material: None, recovery: None, android_selection: None, artifact_selection: None, artifact_tools: None });
+         assert!(owner.start_offline(wire::start(&wrong_consent).unwrap(), Instant::now(), Some((1, project())), wire::Availability::Available).is_err());
+         assert!(owner.inner.lock().prepared.is_some());
+@@ -440,7 +440,7 @@
+         "baselineGeneration":3,"action":"recover"})).unwrap();
+     assert!(owner.prepare_recovery(request, 1, project(), recovery_wire::Availability::Available).is_err());
+     { let r = owner.inner.lock(); assert!(r.recovery_review.is_none() && r.prepared.is_none()); }
+-    owner.inner.lock().prepared = Some(Prepared { agent_build: None, agent_local_check: None, upload_key_preparation:None, upload_key:None, apple:None, tools:None, local_history:None, projection: projection(SavedCommandDomain::ProjectRecovery),
++    owner.inner.lock().prepared = Some(Prepared { agent_store:None, store_witness:None, agent_build: None, agent_local_check: None, upload_key_preparation:None, upload_key:None, apple:None, tools:None, local_history:None, projection: projection(SavedCommandDomain::ProjectRecovery),
+         expires: Instant::now() + INTENT, registration: 1, project: project(), recovery_stamp: None, material: None, recovery: None, android_selection: None, artifact_selection: None, artifact_tools: None });
+     let input = json!({"operationId":"a".repeat(32),"ownerGeneration":"b".repeat(32),"consentVersion":recovery_wire::CONSENT});
+     // An unqualified runtime or this plain test's absent executor refuses the
+@@ -588,7 +588,7 @@
+         let app = application(SavedCommandDomain::IOSArchive);
+         let mut p = projection(SavedCommandDomain::IOSArchive); p.context = recovery_action();
+         { let mut r = app.inner.lock(); r.recovery = Some(observed);
+-            r.prepared = Some(Prepared { agent_build: None, agent_local_check: None, upload_key_preparation:None, upload_key:None, apple:None, tools:None, local_history:None, projection:p, expires:Instant::now()+INTENT, registration:1,
++            r.prepared = Some(Prepared { agent_store:None, store_witness:None, agent_build: None, agent_local_check: None, upload_key_preparation:None, upload_key:None, apple:None, tools:None, local_history:None, projection:p, expires:Instant::now()+INTENT, registration:1,
+                 project:project(), recovery_stamp:None, material:None, recovery:Some(prepared), android_selection: None, artifact_selection: None, artifact_tools: None }); }
+         let admitted = app.start(Start { operation_id:"a".repeat(32), owner_generation:"b".repeat(32) },
+             Instant::now(), Some((1, project())), Availability::Available).unwrap();
+@@ -726,7 +726,7 @@
+         // No positive runtime/toolchain/observer permission is manufactured.
+         { let mut r = owner.inner.lock();
+             assert!(r.active.is_none() && r.prepared.is_none());
+-            r.prepared = Some(Prepared { agent_build: None, agent_local_check: None, upload_key_preparation:None, upload_key:None, apple:None, tools:None, local_history:None, projection: projection(SavedCommandDomain::AndroidBuild), expires: Instant::now() + INTENT,
++            r.prepared = Some(Prepared { agent_store:None, store_witness:None, agent_build: None, agent_local_check: None, upload_key_preparation:None, upload_key:None, apple:None, tools:None, local_history:None, projection: projection(SavedCommandDomain::AndroidBuild), expires: Instant::now() + INTENT,
+                 registration: 1, project: project(), recovery_stamp: None, material: None, recovery: None, android_selection: None, artifact_selection: None, artifact_tools: None }); }
+         let request = json!({"operationId":"a".repeat(32),"ownerGeneration":"b".repeat(32),"consentVersion":android_wire::CONSENT});
+         let registration = if scenario == "stale-registration" { 2 } else { 1 };
+@@ -1168,7 +1168,7 @@
+     assert!(owner.prepare_android(android_wire::prepare(&android).unwrap(), 1, project(), android_wire::Availability::Available).is_err());
+     assert_eq!(owner.inner.lock().revision, 0);
+     assert!(owner.inner.lock().prepared.is_none() && owner.inner.lock().active.is_none());
+-    owner.inner.lock().prepared = Some(Prepared { agent_build: None, agent_local_check: None, upload_key_preparation:None, upload_key:None, apple:None, tools:None, local_history:None, projection: projection(SavedCommandDomain::IOSArchive),
++    owner.inner.lock().prepared = Some(Prepared { agent_store:None, store_witness:None, agent_build: None, agent_local_check: None, upload_key_preparation:None, upload_key:None, apple:None, tools:None, local_history:None, projection: projection(SavedCommandDomain::IOSArchive),
+         expires: Instant::now() + INTENT, registration: 1, project: project(), recovery_stamp: None, material: None, recovery: None, android_selection: None, artifact_selection: None, artifact_tools: None });
+     let request = json!({"operationId":"a".repeat(32),"ownerGeneration":"b".repeat(32),"consentVersion":ios_wire::CONSENT});
+     let status = owner.start_ios(ios_wire::start(&request).unwrap(), Instant::now(), Some((1,project())), ios_wire::Availability::Available).unwrap().release();
+@@ -1250,7 +1250,7 @@
+     let intent = projection(SavedCommandDomain::ArtifactInspection);
+     let intent_id = intent.operation_id.clone();
+     let intent_generation = intent.owner_generation.clone();
+-    prepared.inner.lock().prepared = Some(Prepared { agent_build: None, agent_local_check: None, upload_key_preparation:None, upload_key:None, apple:None, tools:None, local_history:None, projection: intent,
++    prepared.inner.lock().prepared = Some(Prepared { agent_store:None, store_witness:None, agent_build: None, agent_local_check: None, upload_key_preparation:None, upload_key:None, apple:None, tools:None, local_history:None, projection: intent,
+         expires: Instant::now() + INTENT, registration: 1, project: project(),
+         recovery_stamp: None, material: None, recovery: None, android_selection: None,
+         artifact_selection: None, artifact_tools: None });
+--- a/desktop/src-tauri/src/offline_preflight_owner_tests.rs
++++ b/desktop/src-tauri/src/offline_preflight_owner_tests.rs
+@@ -13,7 +13,7 @@
+     context: Context::OfflinePreflight(wire::tests::context()), phase: Phase::AwaitingConsent, intent_usable: true,
+     outcome: None, reason: Reason::None, result: None, stage: None } }
+ fn prepared(owner: &OfflinePreflightOwner, expires: Instant) {
+-    owner.original_for_test().inner.lock().prepared = Some(Prepared { agent_build: None, agent_local_check: None, apple:None, upload_key_preparation:None, upload_key:None, tools:None, local_history:None, projection: projection(), expires, registration: 1, project: project(), recovery_stamp: None, material: None, recovery: None, android_selection: None, artifact_selection: None, artifact_tools: None });
++    owner.original_for_test().inner.lock().prepared = Some(Prepared { agent_store:None, store_witness:None, agent_build: None, agent_local_check: None, apple:None, upload_key_preparation:None, upload_key:None, tools:None, local_history:None, projection: projection(), expires, registration: 1, project: project(), recovery_stamp: None, material: None, recovery: None, android_selection: None, artifact_selection: None, artifact_tools: None });
+ }
+ fn start_input(id: &str) -> wire::Start { wire::start(&json!({"operationId":id,"ownerGeneration":"b".repeat(32),"consentVersion":wire::CONSENT})).unwrap() }
+ fn active() -> (OfflinePreflightOwner, Arc<Session>) { active_with_agent(None) }
+@@ -32,7 +32,7 @@
+     let clocks = Clocks::new(SavedCommandDomain::OfflinePreflight, Instant::now());
+     let (native_audit_cutoff, _) = watch::channel(clocks.work);
+     let (native_cleanup_cutoff, _) = watch::channel(clocks.cleanup_end(None));
+-    let session = Arc::new(Session { agent_build: None, agent_local_check, apple:apple_provisioning::State::new(None), apple_profile:apple_signing::State::default(), apple_key:apple_key::State::default(), upload_key:upload_key::State::new(None), tools:tool_acquisition::State::new(None), local_history_consent:None, history:local_history::State::new(), domain: SavedCommandDomain::OfflinePreflight, id: p.operation_id.clone(), generation: p.owner_generation.clone(), context: p.context.clone(),
++    let session = Arc::new(Session { agent_store:None, agent_build: None, agent_local_check, apple:apple_provisioning::State::new(None), apple_profile:apple_signing::State::default(), apple_key:apple_key::State::default(), upload_key:upload_key::State::new(None), tools:tool_acquisition::State::new(None), local_history_consent:None, history:local_history::State::new(), domain: SavedCommandDomain::OfflinePreflight, id: p.operation_id.clone(), generation: p.owner_generation.clone(), context: p.context.clone(),
+         profile: Profile::OfflinePreflight(wire::Profile::LinuxX64), clocks, registration: 1, project: project(), recovery_stamp: None, request: AsyncMutex::new(None),
+         material: Mutex::new(None), material_retired: AtomicBool::new(true), recovery: None, android_selection: None, artifact_selection: None, artifact_tools: None,
+         artifact_binding: Mutex::new(None), native_failure: Mutex::new(None),
+--- a/desktop/src-tauri/src/local_store_preflight_owner.rs
++++ b/desktop/src-tauri/src/local_store_preflight_owner.rs
+@@ -17,6 +17,7 @@
+ }
+ impl LocalStorePreflightOwner {
+     pub(crate) fn new(runtime: RuntimeConfig) -> Self { Self { saved: SavedCommandOwner::local_store_preflight(runtime) } }
++    pub(crate) fn agent_store_original(&self)->&SavedCommandOwner{&self.saved}
+     pub(crate) fn subscribe(&self) -> watch::Receiver<u32> { self.saved.subscribe() }
+     pub(crate) fn stopping(&self) -> bool { self.saved.stopping() }
+     pub(crate) fn disabled(&self) -> bool { self.saved.disabled() }
+--- a/desktop/src-tauri/src/local_store_prepare_owner.rs
++++ b/desktop/src-tauri/src/local_store_prepare_owner.rs
+@@ -21,6 +21,7 @@
+     pub(crate) fn claim_matches(&self,c:&crate::saved_command_owner::LocalHistoryClaim)->bool{c.matches_owner(&self.saved)}
+     #[cfg(all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"),not(feature="macos-android-registration-helper")))]
+     pub(crate) fn helper_matches(&self,c:&crate::saved_command_owner::LocalHistoryHelperClaim)->bool{c.matches_owner(&self.saved)}
++    pub(crate) fn agent_store_original(&self)->&SavedCommandOwner{&self.saved}
+     pub(crate) fn subscribe(&self) -> watch::Receiver<u32> { self.saved.subscribe() }
+     pub(crate) fn stopping(&self) -> bool { self.saved.stopping() }
+     pub(crate) fn disabled(&self) -> bool { self.saved.disabled() }
+--- a/desktop/src-tauri/src/asset_session.rs
++++ b/desktop/src-tauri/src/asset_session.rs
+@@ -60,6 +60,9 @@
+ #[cfg(any(target_os="linux",target_os="macos"))]
+ #[path = "asset_session_agent_ios_archive.rs"]
+ pub(crate) mod agent_ios_archive;
++#[cfg(any(target_os="linux",target_os="macos"))]
++#[path="asset_session_agent_store.rs"]
++pub(crate) mod agent_store;
+ #[cfg(any(target_os="linux",target_os="macos"))]
+ #[path="service_git_document.rs"]
+ pub(crate) mod agent_git_index;
+@@ -865,6 +868,8 @@
+     agent_android_build_grant: Option<Arc<agent_android_build::Grant>>,
+     #[cfg(any(target_os="linux",target_os="macos"))]
+     agent_ios_archive_grant: Option<Arc<agent_ios_archive::Grant>>,
++    #[cfg(any(target_os="linux",target_os="macos"))]
++    agent_store_grant:Option<Arc<agent_store::Grant>>,
+     lifetime: DocumentLifetime, revision: u32, next_operation: u32, next_context: u32, exhausted: bool, lost_observed: bool,
+     session: bool, stopping: bool, unknown: bool, quit_pending: bool, retiring: bool, lock_pending: bool,
+     compatibility_picker_pending: bool,
+@@ -1159,6 +1164,10 @@
+     agent_android_build_revoke_epoch: std::sync::atomic::AtomicU64,
+     #[cfg(any(target_os="linux",target_os="macos"))]
+     agent_ios_archive_revoke_epoch: std::sync::atomic::AtomicU64,
++    #[cfg(any(target_os="linux",target_os="macos"))]
++    agent_store_service:std::sync::OnceLock<Weak<crate::application_service::ApplicationService>>,
++    #[cfg(any(target_os="linux",target_os="macos"))]
++    agent_store_revoke_epoch:std::sync::atomic::AtomicU64,
+     android_registration_control: Arc<crate::saved_command_owner::AndroidRegistrationControl>,
+     #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+     installed_session: Mutex<Option<installed_session_observation::Book>>,
+@@ -2172,6 +2181,8 @@
+             self.add(crate::service_version_reserve_requests::DOCUMENT_BACKING)?;
+             #[cfg(any(target_os="linux",target_os="macos"))]
+             self.add(crate::service_play_cleanup_requests::DOCUMENT_BACKING)?;
++            #[cfg(any(target_os="linux",target_os="macos"))]
++            self.add(crate::service_store_protocol::DOCUMENT_BACKING)?; // ONE complete fixed Store inbox+permission+8 replies inside existing Document allowance.
+             self.add(state.images.retained_bytes().ok_or(Problem::Capacity)?)?;
+             self.add(gh_auth::retained_bytes(state).ok_or(Problem::CleanupUnknown)?)?;
+             if let Some(owner)=gh_auth::device::census_original(state){self.owner(owner)?;}
+@@ -2956,6 +2967,10 @@
+             agent_android_build_revoke_epoch: std::sync::atomic::AtomicU64::new(0),
+             #[cfg(any(target_os="linux",target_os="macos"))]
+             agent_ios_archive_revoke_epoch: std::sync::atomic::AtomicU64::new(0),
++            #[cfg(any(target_os="linux",target_os="macos"))]
++            agent_store_service:std::sync::OnceLock::new(),
++            #[cfg(any(target_os="linux",target_os="macos"))]
++            agent_store_revoke_epoch:std::sync::atomic::AtomicU64::new(0),
+             #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+             installed_session: Mutex::new(None),
+             #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", feature = "macos-installed-observation", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), not(feature = "macos-installed-installer"), target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+@@ -2969,7 +2984,9 @@
+                 agent_local_check_grant: None,
+                 #[cfg(any(target_os = "linux", target_os = "macos"))]
+                 agent_android_build_grant: None,
+-                #[cfg(any(target_os="linux",target_os="macos"))] agent_ios_archive_grant: None, lifetime: DocumentLifetime::default(), revision: 0,
++                #[cfg(any(target_os="linux",target_os="macos"))] agent_ios_archive_grant: None,
++                #[cfg(any(target_os="linux",target_os="macos"))]
++                agent_store_grant:None, lifetime: DocumentLifetime::default(), revision: 0,
+             next_operation: 0, next_context: 0, exhausted: false, lost_observed: false, session: false, stopping: false, unknown: false, quit_pending: false, retiring: false, lock_pending: false,
+             compatibility_picker_pending: false, maintenance: macos_maintenance::Closure::default(), saved_observation: None, saved_input: None, apple_provisioning_ready:None, version_allocation_source: None, version_enrollment: version_enrollment::State::new(), #[cfg(any(target_os = "linux", target_os = "macos"))] version_reserve: version_reserve::State::new(), session_owner_reason: None,
+             context: None, slot: None, records: Vec::new(), assignments: Vec::new(), quit: None, quit_accepted: false, quit_cleanup_end: None,
+@@ -3648,6 +3665,8 @@
+         self.inner.bridge.application_service.android_tools_relay_lost(); // Memory-only before original STOP.
+         #[cfg(any(target_os = "linux", target_os = "macos"))]
+         self.agent_android_builds_relay_lost();
++        #[cfg(any(target_os="linux",target_os="macos"))]
++        self.agent_store_relay_lost();
+         #[cfg(any(target_os="linux",target_os="macos"))]
+         self.git_index_relay_lost();
+         // Loss retires consent/STOP under the same gate. It is not settlement,
+@@ -8508,7 +8527,9 @@
+                 agent_local_check_grant: None,
+                 #[cfg(any(target_os = "linux", target_os = "macos"))]
+                 agent_android_build_grant: None,
+-                #[cfg(any(target_os="linux",target_os="macos"))] agent_ios_archive_grant: None, lifetime, revision: 0, next_operation: 0, next_context: 0, exhausted: false, lost_observed: false,
++                #[cfg(any(target_os="linux",target_os="macos"))] agent_ios_archive_grant: None,
++                #[cfg(any(target_os="linux",target_os="macos"))]
++                agent_store_grant:None, lifetime, revision: 0, next_operation: 0, next_context: 0, exhausted: false, lost_observed: false,
+             session: false, stopping: false, unknown: false, quit_pending: false, retiring: false, lock_pending: false,
+             compatibility_picker_pending: false, maintenance: macos_maintenance::Closure::default(), saved_observation: None, saved_input: None, apple_provisioning_ready:None, version_allocation_source: None, version_enrollment: version_enrollment::State::new(), #[cfg(any(target_os = "linux", target_os = "macos"))] version_reserve: version_reserve::State::new(), session_owner_reason: None, context: None, slot: None, records: Vec::new(), assignments: Vec::new(),
+             quit: None, quit_accepted: false, quit_cleanup_end: None, github: ConnectionState::new(), gh_auth: None, git_read: None, git_local: None, git_local_review: None, evidence: EvidenceRegistry::new(), images: images::Registry::new(), installation: installation::Registry::new(),
+@@ -8646,7 +8667,9 @@
+                 agent_local_check_grant: None,
+                 #[cfg(any(target_os = "linux", target_os = "macos"))]
+                 agent_android_build_grant: None,
+-                #[cfg(any(target_os="linux",target_os="macos"))] agent_ios_archive_grant: None, lifetime, revision: 0, next_operation: 0, next_context: 0, exhausted: false, lost_observed: false,
++                #[cfg(any(target_os="linux",target_os="macos"))] agent_ios_archive_grant: None,
++                #[cfg(any(target_os="linux",target_os="macos"))]
++                agent_store_grant:None, lifetime, revision: 0, next_operation: 0, next_context: 0, exhausted: false, lost_observed: false,
+             session: false, stopping: false, unknown: false, quit_pending: false, retiring: false, lock_pending: false,
+             compatibility_picker_pending: false, maintenance: macos_maintenance::Closure::default(), saved_observation: None, saved_input: None, apple_provisioning_ready:None, version_allocation_source: None, version_enrollment: version_enrollment::State::new(), #[cfg(any(target_os = "linux", target_os = "macos"))] version_reserve: version_reserve::State::new(), session_owner_reason: None, context: None, slot: None, records: Vec::new(), assignments: Vec::new(),
+             quit: None, quit_accepted: false, quit_cleanup_end: None, github: ConnectionState::new(), gh_auth: None, git_read: None, git_local: None, git_local_review: None, evidence: EvidenceRegistry::new(), images: images::Registry::new(), installation: installation::Registry::new(),
+@@ -8747,7 +8770,9 @@
+                 agent_local_check_grant: None,
+                 #[cfg(any(target_os = "linux", target_os = "macos"))]
+                 agent_android_build_grant: None,
+-                #[cfg(any(target_os="linux",target_os="macos"))] agent_ios_archive_grant: None, lifetime: DocumentLifetime::default(), revision: 0, next_operation: 0, next_context: 0, exhausted: false, lost_observed: false,
++                #[cfg(any(target_os="linux",target_os="macos"))] agent_ios_archive_grant: None,
++                #[cfg(any(target_os="linux",target_os="macos"))]
++                agent_store_grant:None, lifetime: DocumentLifetime::default(), revision: 0, next_operation: 0, next_context: 0, exhausted: false, lost_observed: false,
+             session: true, stopping: false, unknown: false, quit_pending: false, retiring: false, lock_pending: false,
+             compatibility_picker_pending: false, maintenance: macos_maintenance::Closure::default(), saved_observation: None, saved_input: None, apple_provisioning_ready:None, version_allocation_source: None, version_enrollment: version_enrollment::State::new(), #[cfg(any(target_os = "linux", target_os = "macos"))] version_reserve: version_reserve::State::new(), session_owner_reason: None,
+             context: None, slot: None, records: Vec::new(), assignments: Vec::new(), quit: None, quit_accepted: false, quit_cleanup_end: None,
+--- a/desktop/src-tauri/src/android_build_wiring_tests.rs
++++ b/desktop/src-tauri/src/android_build_wiring_tests.rs
+@@ -9,6 +9,8 @@
+         agent_local_check_grant: None,
+         #[cfg(any(target_os = "linux", target_os = "macos"))]
+         agent_ios_archive_grant: None,
++        #[cfg(any(target_os="linux",target_os="macos"))]
++        agent_store_grant:None,
+         #[cfg(any(target_os = "linux", target_os = "macos"))]
+         agent_android_build_grant: None, lifetime: DocumentLifetime::default(), revision: 0, next_operation: 0, next_context: 0,
+         exhausted: false, lost_observed: false, session: false, stopping: false, unknown: false,
+--- a/desktop/src-tauri/src/asset_session_installation_memory.rs
++++ b/desktop/src-tauri/src/asset_session_installation_memory.rs
+@@ -562,6 +562,8 @@
+         agent_local_check_grant: None,
+         #[cfg(any(target_os = "linux", target_os = "macos"))]
+         agent_ios_archive_grant: None,
++        #[cfg(any(target_os="linux",target_os="macos"))]
++        agent_store_grant:None,
+         #[cfg(any(target_os = "linux", target_os = "macos"))]
+         agent_android_build_grant: None,lifetime:DocumentLifetime::default(),revision:1,next_operation:4,next_context:2,
+             exhausted:false,lost_observed:false,session:false,stopping:false,unknown:false,quit_pending:false,
+@@ -676,6 +678,8 @@
+         agent_local_check_grant: None,
+         #[cfg(any(target_os = "linux", target_os = "macos"))]
+         agent_ios_archive_grant: None,
++        #[cfg(any(target_os="linux",target_os="macos"))]
++        agent_store_grant:None,
+         #[cfg(any(target_os = "linux", target_os = "macos"))]
+         agent_android_build_grant: None, lifetime: DocumentLifetime::default(), revision: 0, next_operation: 7, next_context: 3,
+                 exhausted: false, lost_observed: false, session: false, stopping: false, unknown: false,
+--- a/desktop/src-tauri/src/asset_session_store_preflight.rs
++++ b/desktop/src-tauri/src/asset_session_store_preflight.rs
+@@ -39,7 +39,7 @@
+     pub(crate) fn cancel_local_store_preflight(&self,args:wire::Cancel)->Result<wire::Status,BridgeError>{
+         let state=self.lock();self.inner.bridge.local_store.cancel(&args.operation_id,&args.owner_generation,self.local_store_gate(&state))
+     }
+-    fn store_preflight_budget(&self,state:&DocumentState,loan:&Arc<SelectedStoreMaterial>)->Result<(),BridgeError>{
++    pub(super) fn store_preflight_budget(&self,state:&DocumentState,loan:&Arc<SelectedStoreMaterial>)->Result<(),BridgeError>{
+         #[cfg(any(all(target_os="linux",target_arch="x86_64",target_env="gnu"),all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"))))]
+         {
+             let future=crate::saved_command_owner::store_document_backing_bytes().ok_or_else(crate::local_store_preflight_owner::unavailable)?;
+--- a/desktop/src-tauri/src/asset_session_store_prepare.rs
++++ b/desktop/src-tauri/src/asset_session_store_prepare.rs
+@@ -39,7 +39,7 @@
+     pub(crate) fn cancel_local_store_prepare(&self,args:wire::Cancel)->Result<wire::Status,BridgeError>{
+         let state=self.lock();self.inner.bridge.local_store_prepare.cancel(&args.operation_id,&args.owner_generation,self.local_store_prepare_gate(&state))
+     }
+-    fn store_prepare_budget(&self,state:&DocumentState,loan:&Arc<SelectedStoreMaterial>)->Result<(),BridgeError>{
++    pub(super) fn store_prepare_budget(&self,state:&DocumentState,loan:&Arc<SelectedStoreMaterial>)->Result<(),BridgeError>{
+         #[cfg(any(all(target_os="linux",target_arch="x86_64",target_env="gnu"),all(target_os="macos",target_pointer_width="64",any(target_arch="aarch64",target_arch="x86_64"))))]
+         {
+             let future=crate::saved_command_owner::store_prepare_document_backing_bytes().ok_or_else(crate::local_store_prepare_owner::unavailable)?;
+--- a/desktop/src-tauri/src/shell.rs
++++ b/desktop/src-tauri/src/shell.rs
+@@ -1772,6 +1772,42 @@
+     }
+     #[cfg(not(any(target_os = "linux", target_os = "macos")))]
+     { let _ = (window, request, state); Err(BridgeError::unavailable("Agent remote Git actions are not supported on this platform.")) }
++}
++#[tauri::command]
++async fn agent_store_access(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<Value, BridgeError> {
++    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
++    let window = edit_window(&webview)?;
++    #[cfg(any(target_os = "linux", target_os = "macos"))]
++    {
++        let _args: crate::asset_session::agent_identity::Empty = crate::asset_session::agent_store::decode(project_identity_request_bytes(&request)?)?;
++        serde_json::to_value(state.document.agent_store_access(window)?).map_err(|_| BridgeError::protocol())
++    }
++    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
++    { let _ = (window, request, state); Err(BridgeError::unavailable("Agent Store delegation is not supported on this platform.")) }
++}
++#[tauri::command]
++async fn allow_agent_store(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<Value, BridgeError> {
++    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
++    let window = edit_window(&webview)?;
++    #[cfg(any(target_os = "linux", target_os = "macos"))]
++    {
++        let args: crate::asset_session::agent_store::Allow = crate::asset_session::agent_store::decode(project_identity_request_bytes(&request)?)?;
++        serde_json::to_value(state.document.allow_agent_store(window, args)?).map_err(|_| BridgeError::protocol())
++    }
++    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
++    { let _ = (window, request, state); Err(BridgeError::unavailable("Agent Store delegation is not supported on this platform.")) }
++}
++#[tauri::command]
++async fn revoke_agent_store(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<Value, BridgeError> {
++    fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
++    let window = edit_window(&webview)?;
++    #[cfg(any(target_os = "linux", target_os = "macos"))]
++    {
++        let _args: crate::asset_session::agent_identity::Empty = crate::asset_session::agent_store::decode(project_identity_request_bytes(&request)?)?;
++        serde_json::to_value(state.document.revoke_agent_store(window)?).map_err(|_| BridgeError::protocol())
++    }
++    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
++    { let _ = (window, request, state); Err(BridgeError::unavailable("Agent Store delegation is not supported on this platform.")) }
+ }
+ #[tauri::command]
+ async fn agent_android_build_access(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<Value, BridgeError> {
+@@ -3183,6 +3219,10 @@
+ impl Drop for ToolAcquisitionRelayGuard {
+     fn drop(&mut self) { if !self.closed { self.document.tool_acquisition_relay_lost(); } }
+ }
++#[cfg(any(target_os="linux",target_os="macos"))]
++struct AgentStoreRelayGuard {document:DocumentBinding,closed:bool}
++#[cfg(any(target_os="linux",target_os="macos"))]
++impl Drop for AgentStoreRelayGuard{fn drop(&mut self){if !self.closed{self.document.agent_store_relay_lost();}}}
+ struct AndroidBuildRelayGuard { document: DocumentBinding, closed: bool }
+ impl Drop for AndroidBuildRelayGuard {
+     fn drop(&mut self) { if !self.closed { self.document.android_build_relay_lost(); } }
+@@ -3249,6 +3289,8 @@
+     let mut project_recovery = document.project_recovery_subscribe();
+     let project_recovery_guard = ProjectRecoveryRelayGuard { document: document.clone(), closed: false };
+     let mut android_build = document.android_build_subscribe();
++    #[cfg(any(target_os="linux",target_os="macos"))]
++    let agent_store_guard=AgentStoreRelayGuard{document:document.clone(),closed:false};
+     let android_build_guard = AndroidBuildRelayGuard { document: document.clone(), closed: false }; // Before spawn/unpolled task loss.
+     let mut tool_acquisition = document.tool_acquisition_subscribe();
+     let tool_acquisition_guard = ToolAcquisitionRelayGuard { document: document.clone(), closed: false }; // Same retained relay, before spawn.
+@@ -3290,6 +3332,8 @@
+         let mut local_store_reconcile_relay_failed = false;
+         let mut preflight_guard = preflight_guard;
+         let mut android_build_guard = android_build_guard;
++        #[cfg(any(target_os="linux",target_os="macos"))]
++        let mut agent_store_guard=agent_store_guard;
+         let mut tool_acquisition_guard = tool_acquisition_guard;
+         let mut project_recovery_guard = project_recovery_guard;
+         let mut artifact_inspection_guard = artifact_inspection_guard;
+@@ -3335,7 +3379,7 @@
+         loop {
+             if *stop.borrow() {
+                 #[cfg(any(target_os="linux",target_os="macos"))] {
+-                    document.play_cleanup_agent_relay_closed(); play_cleanup_guard.closed=true;
++                    document.play_cleanup_agent_relay_closed(); play_cleanup_guard.closed=true; agent_store_guard.closed=true;
+                     reserve.close(&document); reserve.join_finished(&document).await; reserve_guard.closed=true;
+                 }
+                 #[cfg(any(target_os = "linux", target_os = "macos"))] { identity_actions_guard.closed = true; git_index_guard.closed = true; repository_summary_guard.closed = true; } preflight_guard.closed = true; apple_provisioning_guard.closed = true; local_store_guard.closed = true; local_store_prepare_guard.closed = true; local_store_execute_guard.closed = true; local_store_reconcile_guard.closed = true; local_history_guard.closed = true; android_build_guard.closed = true; project_recovery_guard.closed = true; ios_archive_guard.closed = true; artifact_inspection_guard.closed = true; tool_acquisition_guard.closed = true; return; }
+@@ -3366,6 +3410,8 @@
+             #[cfg(any(target_os = "linux", target_os = "macos"))]
+             if !android_build_relay_failed { document.service_android_builds_tick(); }
+             #[cfg(any(target_os="linux",target_os="macos"))]
++            document.service_store_tick();
++            #[cfg(any(target_os="linux",target_os="macos"))]
+             if !ios_archive_relay_failed { document.service_ios_archives_tick(); }
+             // status() releases its native locks before any renderer callback.
+             // Events are best effort: the UI subscribes then fetches status and
+@@ -3712,7 +3758,7 @@
+                 biased;
+                 result = stop.changed() => { if result.is_err() { return; } if *stop.borrow() {
+                 #[cfg(any(target_os="linux",target_os="macos"))] {
+-                    document.play_cleanup_agent_relay_closed(); play_cleanup_guard.closed=true;
++                    document.play_cleanup_agent_relay_closed(); play_cleanup_guard.closed=true; agent_store_guard.closed=true;
+                     reserve.close(&document); reserve.join_finished(&document).await; reserve_guard.closed=true;
+                 }
+                 #[cfg(any(target_os = "linux", target_os = "macos"))] { identity_actions_guard.closed = true; git_index_guard.closed = true; } preflight_guard.closed = true; apple_provisioning_guard.closed = true; local_store_guard.closed = true; local_store_prepare_guard.closed = true; local_store_execute_guard.closed = true; local_store_reconcile_guard.closed = true; local_history_guard.closed = true; android_build_guard.closed = true; project_recovery_guard.closed = true; ios_archive_guard.closed = true; artifact_inspection_guard.closed = true; tool_acquisition_guard.closed = true; return; } },
+@@ -3798,6 +3844,7 @@
+                     document.drain_identity_actions_for_exit();
+                     document.drain_local_checks_for_exit();
+                     document.drain_android_builds_for_exit();
++                    document.drain_agent_store_for_exit();
+                     #[cfg(any(target_os="linux",target_os="macos"))]
+                     document.drain_ios_archives_for_exit();
+                     app.state::<ShellState>().bridge.application_service.drain_identity_history_for_exit();
+@@ -5283,6 +5330,7 @@
+             agent_git_repository_access, allow_agent_git_repository, revoke_agent_git_repository,
+             agent_git_remote_access, allow_agent_git_remote, revoke_agent_git_remote,
+             agent_android_build_access, allow_agent_android_build, revoke_agent_android_build,
++            agent_store_access, allow_agent_store, revoke_agent_store,
+             agent_ios_archive_access, allow_agent_ios_archive, revoke_agent_ios_archive,
+             reveal_installation, installation_status, inspect_installation, cancel_installation,
+             installation_preparation_status, prepare_installation_quit,
+--- a/desktop/src-tauri/build.rs
++++ b/desktop/src-tauri/build.rs
+@@ -289,6 +289,7 @@
+     "agent_git_repository_access", "allow_agent_git_repository", "revoke_agent_git_repository",
+     "agent_git_remote_access", "allow_agent_git_remote", "revoke_agent_git_remote",
+     "agent_version_reserve_access", "allow_agent_version_reserve", "revoke_agent_version_reserve",
++    "agent_store_access", "allow_agent_store", "revoke_agent_store",
+     "agent_git_index_access", "allow_agent_git_index", "revoke_agent_git_index",
+     "agent_android_build_access", "allow_agent_android_build", "revoke_agent_android_build",
+     "agent_ios_archive_access", "allow_agent_ios_archive", "revoke_agent_ios_archive",
+--- a/desktop/src-tauri/capabilities/main.json
++++ b/desktop/src-tauri/capabilities/main.json
+@@ -13,6 +13,7 @@
+     "allow-agent-git-repository-access", "allow-allow-agent-git-repository", "allow-revoke-agent-git-repository",
+     "allow-agent-git-remote-access", "allow-allow-agent-git-remote", "allow-revoke-agent-git-remote",
+     "allow-agent-version-reserve-access", "allow-allow-agent-version-reserve", "allow-revoke-agent-version-reserve",
++    "allow-agent-store-access", "allow-allow-agent-store", "allow-revoke-agent-store",
+     "allow-agent-git-index-access",
+     "allow-allow-agent-git-index",
+     "allow-revoke-agent-git-index",
+--- a/desktop/src-tauri/src/installed_cli.rs
++++ b/desktop/src-tauri/src/installed_cli.rs
+@@ -27,6 +27,8 @@
+ mod git_remote;
+ #[path="installed_cli_version_reserve.rs"]
+ mod version_reserve;
++#[path="installed_cli_store.rs"]
++mod store;
+ #[path="installed_cli_play_cleanup.rs"]
+ mod play_cleanup;
+ 
+@@ -41,6 +43,9 @@
+   mrk play-cleanup-submit PROJECT_ID SERVICE_INSTANCE CONSENT_ID --reviewed [--json]\n\
+   mrk play-cleanup-status PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n\
+   mrk play-cleanup-cancel PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n\
++  mrk store-submit PROJECT_ID SERVICE_INSTANCE GRANT_ID REVIEW_ID --reviewed [--json]\n\
++  mrk store-status PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n\
++  mrk store-cancel PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n\
+   mrk version-reserve-submit PROJECT_ID SERVICE_INSTANCE GRANT_ID REVIEW_ID --reviewed [--json]\n\
+   mrk version-reserve-status PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n\
+   mrk version-reserve-cancel PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n\
+@@ -250,6 +255,11 @@
+                 "defaultEnabled":false,"oneUse":true,"requiresRunningDesktop":true,"requiresProjectReadGrant":true,
+                 "readGrantAuthorizesDispatch":false,"publishing":false,"mutating":true,"dispatchAcknowledgementIsCleanup":false,
+                 "privateEditIdInput":false,"automaticRetry":false,"nativeAvailabilityChecked":false},
++            "store": {"scope":"one-existing-desktop-prepared-nonpublishing-store-step","commands":store::COMMANDS,
++                "kinds":["access-check","candidate-prepare"],"defaultEnabled":false,"oneUse":true,"requiresRunningDesktop":true,
++                "requiresProjectReadGrant":true,"readGrantAuthorizesExecution":false,"maxIntentMs":crate::service_store_protocol::INTENT_MS,
++                "maxRetainedRequests":crate::service_store_protocol::REQUEST_LIMIT,"androidAccessUsesTemporaryEdit":true,"localJournalWrites":true,
++                "execute":false,"reconcile":false,"upload":false,"promotion":false,"queryVariants":false,"nativeAvailabilityChecked":false},
+             "versionReservation": {"scope":"one-desktop-native-review", "defaultEnabled":false,"oneUse":true,
+                 "maxReviewMs":crate::service_version_reserve_protocol::REVIEW_MS,"maxRetainedRequests":crate::service_version_reserve_protocol::REQUEST_LIMIT,
+                 "requiresProjectReadGrant":true,"requiresRunningDesktop":true,"readGrantAuthorizesReserve":false,
+@@ -298,6 +308,7 @@
+             for argument in command.arguments { text.push(' '); text.push_str(argument); }
+             text.push_str(" [--json]\n    "); text.push_str(command.description); text.push('\n');
+         }
++        text.push_str("\nStore steps: separate Desktop one-use approval of an existing prepared basic access check or candidate preparation. Android access uses a temporary uncommitted edit; candidate preparation writes the local journal. No Execute/upload/promotion/Reconcile.\n  mrk store-submit PROJECT_ID SERVICE_INSTANCE GRANT_ID REVIEW_ID --reviewed [--json]\n  mrk store-status PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n  mrk store-cancel PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n");
+         text.push_str("\nVersion reservation uses one already-reviewed native Desktop request; no source Apply or upload authority.\n");
+         text.push_str("Hosted Play cleanup: explicit Desktop review/one-use permission; mutating, not publishing. A dispatch ACK never confirms cleanup.\n  mrk play-cleanup-submit PROJECT_ID SERVICE_INSTANCE CONSENT_ID --reviewed [--json]\n  mrk play-cleanup-status PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n  mrk play-cleanup-cancel PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n");
+         text.push_str("  mrk version-reserve-submit PROJECT_ID SERVICE_INSTANCE GRANT_ID REVIEW_ID --reviewed [--json]\n  mrk version-reserve-status PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n  mrk version-reserve-cancel PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n");
+@@ -391,6 +402,7 @@
+         p::ResponseBody::AndroidTools(value) => crate::service_android_tools::human(value),
+         p::ResponseBody::Requests(value) => crate::service_request_catalogue::human(value),
+         p::ResponseBody::Repository(value) => crate::service_repository_summary::human(value),
++        p::ResponseBody::StoreRequest(_)=>"Use store-status with the same original request IDs.\n".into(),
+         p::ResponseBody::VersionReserveRequest(_) => "Use version-reserve-status with the same original request IDs.\n".into(),
+         p::ResponseBody::PlayCleanupRequest(_) => "Use play-cleanup-status with the same original request IDs; dispatch is not cleanup confirmation.\n".into(),
+         p::ResponseBody::GitRemoteScope(_) | p::ResponseBody::GitRemoteRequest(_) =>
+@@ -425,6 +437,7 @@
+     let json = args.iter().any(|a| a == "--json");
+     if identity::recognizes(&args) { return identity::run(args); }
+     if version_reserve::recognizes(&args) { return version_reserve::run(args); }
++    if store::recognizes(&args){return store::run(args);}
+     if play_cleanup::recognizes(&args) {return play_cleanup::run(args);}
+     if git_index::recognizes(&args) { return git_index::run(args); }
+     if git_commit::recognizes(&args) { return git_commit::run(args); }
+--- a/desktop/src/types.ts
++++ b/desktop/src/types.ts
+@@ -436,6 +436,7 @@
+   readonly gitRead?: import('./gitReadProtocol.ts').GitReadApi | null;
+   readonly versionReserve?: import('./versionReserve.ts').VersionReservePort | null;
+   readonly agentVersionReserveAccess?: import('./agentVersionReserveAccess.ts').AgentVersionReserveAccessPort | null;
++  readonly agentStoreAccess?: import('./agentStoreAccess.ts').AgentStoreAccessPort | null;
+   readonly versionEnrollment?: import('./versionEnrollment.ts').VersionEnrollmentPort | null;
+   readonly githubRepositoryCreate?: import('./githubRepositoryCreateProtocol.ts').RepositoryCreatePort | null;
+   readonly githubActivity?: import('./githubActivityProtocol.ts').GitHubActivityPort | null;
+--- a/desktop/src/bridge.ts
++++ b/desktop/src/bridge.ts
+@@ -95,6 +95,7 @@
+ import { createGitReadApi } from './gitReadProtocol.ts';
+ import { createVersionReservePort } from './versionReserve.ts';
+ import { createAgentVersionReserveAccessPort } from './agentVersionReserveAccess.ts';
++import { createAgentStoreAccessPort } from './agentStoreAccess.ts';
+ import { createVersionEnrollmentPort } from './versionEnrollment.ts';
+ import { createRepositoryCreatePort } from './githubRepositoryCreateNative.ts';
+ import { createGitHubActivityPort } from './githubActivityProtocol.ts';
+@@ -424,6 +425,7 @@
+     gitRead: createGitReadApi(mode, invoke),
+     versionReserve: mode === 'native' ? createVersionReservePort((command, bytes) => invoke<unknown>(command, bytes)) : null,
+     agentVersionReserveAccess: mode === 'native' ? createAgentVersionReserveAccessPort((command, bytes) => invoke<unknown>(command, bytes)) : null,
++    agentStoreAccess: mode === 'native' ? createAgentStoreAccessPort((command, bytes) => invoke<unknown>(command, bytes)) : null,
+     versionEnrollment: mode === 'native' ? createVersionEnrollmentPort((command, bytes) => invoke<unknown>(command, bytes)) : null,
+     githubRepositoryCreate: createRepositoryCreatePort(mode, (command, bytes) => invoke<unknown>(command, bytes), listen ?? null),
+     githubActivity: createGitHubActivityPort(mode, (command, bytes) => invoke<unknown>(command, bytes), listen ?? null),
+--- a/desktop/src/App.tsx
++++ b/desktop/src/App.tsx
+@@ -6,6 +6,9 @@
+ import { LocalStoreExecute } from './components/LocalStoreExecute.tsx';
+ import { LocalStorePrepareController, localStorePrepareOwnerReason } from './localStorePrepare.ts';
+ import { LocalStorePrepare } from './components/LocalStorePrepare.tsx';
++import { AgentStoreAccess } from './components/AgentStoreAccess.tsx';
++import { AgentStoreAccessController } from './agentStoreAccessController.ts';
++import { storeReviewFromState } from './agentStoreAccess.ts';
+ import { LocalReleaseHistoryController, localHistoryOwnerReason } from './localReleaseHistory.ts';
+ import { LocalReleaseHistory } from './components/LocalReleaseHistory.tsx';
+ import { ReleaseRehearsal } from './components/ReleaseRehearsal.tsx';
+@@ -245,6 +248,7 @@
+   const localHistoryControllerRef = useRef<LocalReleaseHistoryController | null>(null);
+   const localStoreControllerRef = useRef<LocalStorePreflightController | null>(null);
+   const localStorePrepareControllerRef = useRef<LocalStorePrepareController | null>(null);
++  const agentStoreControllerRef=useRef<AgentStoreAccessController|null>(null);
+   const localStoreExecuteControllerRef = useRef<LocalStoreExecuteController | null>(null);
+   const localStoreReconcileControllerRef = useRef<LocalStoreReconcileController | null>(null);
+   const appleProvisioningControllerRef = useRef<AppleProvisioningController | null>(null);
+@@ -369,7 +373,8 @@
+   const storePrepareBusy = useCallback(() => localStorePrepareControllerRef.current ? localStorePrepareOwnerReason(localStorePrepareControllerRef.current.getSnapshot()) : null, []);
+   const storeExecuteBusy = useCallback(() => localStoreExecuteControllerRef.current ? localStoreExecuteOwnerReason(localStoreExecuteControllerRef.current.getSnapshot()) : null, []);
+   const storeReconcileBusy = useCallback(() => localStoreReconcileControllerRef.current ? localStoreReconcileOwnerReason(localStoreReconcileControllerRef.current.getSnapshot()) : null, []);
+-  const storeWithoutAppleBusy = useCallback(() => storeReconcileBusy() ?? storeExecuteBusy() ?? storePrepareBusy() ?? (localStoreControllerRef.current ? localStoreOwnerReason(localStoreControllerRef.current.getSnapshot()) : null), [storeReconcileBusy, storeExecuteBusy, storePrepareBusy]);
++  const agentStoreBusy=useCallback(()=>agentStoreControllerRef.current?.ownerReason()??null,[]);
++  const storeWithoutAppleBusy = useCallback(() => agentStoreBusy() ?? storeReconcileBusy() ?? storeExecuteBusy() ?? storePrepareBusy() ?? (localStoreControllerRef.current ? localStoreOwnerReason(localStoreControllerRef.current.getSnapshot()) : null), [storeReconcileBusy, storeExecuteBusy, storePrepareBusy, agentStoreBusy]);
+   const appleProvisioningBusy = useCallback(() => appleProvisioningControllerRef.current?.ownerReason() ?? null, []);
+   const storeBusy = useCallback(() => appleProvisioningBusy() ?? storeWithoutAppleBusy(), [appleProvisioningBusy, storeWithoutAppleBusy]);
+   const toolPreparationBusy = useCallback(() => toolAcquisitionControllerRef.current?.ownerReason() ?? null, []);
+@@ -983,7 +988,7 @@
+   const appleProvisioningState = useSyncExternalStore(appleProvisioning.subscribe, appleProvisioning.getSnapshot, appleProvisioning.getSnapshot);
+   const [localStore] = useState(() => new LocalStorePreflightController({
+     project: () => {const current=workspaceRef.current;return current.selectedId&&Object.hasOwn(current.projects,current.selectedId)?localStoreProjectObservation(current.projects[current.selectedId]!,releaseVersion.getSnapshot()):null;}, assets: assetSession.getSnapshot,
+-    otherOperationReason: () => appleProvisioningBusy() ?? storeReconcileBusy() ?? storeExecuteBusy() ?? storePrepareBusy() ?? localHistoryBusy() ?? artifactBusy() ?? preflightBusy() ?? androidBusy() ?? recoveryBusy() ?? iosBusy() ?? savedCommandPrerequisiteReason(),
++    otherOperationReason: () => agentStoreBusy() ?? appleProvisioningBusy() ?? storeReconcileBusy() ?? storeExecuteBusy() ?? storePrepareBusy() ?? localHistoryBusy() ?? artifactBusy() ?? preflightBusy() ?? androidBusy() ?? recoveryBusy() ?? iosBusy() ?? savedCommandPrerequisiteReason(),
+   }));
+   localStoreControllerRef.current=localStore;
+   const localStoreState=useSyncExternalStore(localStore.subscribe,localStore.getSnapshot,localStore.getSnapshot);
+@@ -1000,10 +1005,29 @@
+     project: () => {const current=workspaceRef.current;return current.selectedId&&Object.hasOwn(current.projects,current.selectedId)?localStoreProjectObservation(current.projects[current.selectedId]!,releaseVersion.getSnapshot()):null;}, assets: assetSession.getSnapshot,
+     history: localHistory.getSnapshot,
+     // Exclude this controller's own intent from reciprocal admission.
+-    otherOperationReason: () => appleProvisioningBusy() ?? storeReconcileBusy() ?? storeExecuteBusy() ?? (localStoreControllerRef.current ? localStoreOwnerReason(localStoreControllerRef.current.getSnapshot()) : null) ?? localHistoryBusy() ?? artifactBusy() ?? preflightBusy() ?? androidBusy() ?? recoveryBusy() ?? iosBusy() ?? savedCommandPrerequisiteReason(),
++    otherOperationReason: () => agentStoreBusy() ?? appleProvisioningBusy() ?? storeReconcileBusy() ?? storeExecuteBusy() ?? (localStoreControllerRef.current ? localStoreOwnerReason(localStoreControllerRef.current.getSnapshot()) : null) ?? localHistoryBusy() ?? artifactBusy() ?? preflightBusy() ?? androidBusy() ?? recoveryBusy() ?? iosBusy() ?? savedCommandPrerequisiteReason(),
+   }));
+   localStorePrepareControllerRef.current=localStorePrepare;
+   const localStorePrepareState=useSyncExternalStore(localStorePrepare.subscribe,localStorePrepare.getSnapshot,localStorePrepare.getSnapshot);
++  // One permission, not one per platform/panel. Attach only the existing
++  // installed port; neither mounting nor context reconciliation sends work.
++  const [agentStoreAccess]=useState(()=>new AgentStoreAccessController({delegate:(r)=>(r.kind==='access-check'?localStore:localStorePrepare).delegatePrepared(r,r.statusRevision),current:()=>{
++    const service=cliService.current,current=workspaceRef.current;
++    const project=current.selectedId&&Object.hasOwn(current.projects,current.selectedId)?current.projects[current.selectedId]??null:null;
++    const id=project?.project.id??null;
++    const access=storeReviewFromState(localStore.getSnapshot(),'access-check',id);
++    const prepare=storeReviewFromState(localStorePrepare.getSnapshot(),'candidate-prepare',id);
++    return {port:service.api?.mode==='native'?service.api.agentStoreAccess??null:null,
++      nativeSession:service.api?.mode==='native'?service:null,projectId:id,epoch:project??service,
++      preview:service.api?.mode==='preview',reviews:[...(access?[access]:[]),...(prepare?[prepare]:[])],
++      blockedReason:appleProvisioningBusy()??storeReconcileBusy()??storeExecuteBusy()??localHistoryBusy()??artifactBusy()??preflightBusy()??androidBusy()??recoveryBusy()??iosBusy()??savedCommandPrerequisiteReason()};
++  }}));
++  agentStoreControllerRef.current=agentStoreAccess;
++  useSyncExternalStore(agentStoreAccess.subscribe,agentStoreAccess.getSnapshot,agentStoreAccess.getSnapshot);
++  useEffect(()=>{agentStoreAccess.syncContext();});
++  useEffect(()=>()=>agentStoreAccess.dispose(),[agentStoreAccess]);
++  const agentStoreReason=agentStoreAccess.ownerReason();
++
+   const [localStoreExecute] = useState(() => new LocalStoreExecuteController({
+     project: () => {
+       if(assetSession.getSnapshot().scope.platform!=='ios'&&assetSession.getSnapshot().scope.stage==='candidate')return androidBuild.getSnapshot().project;
+@@ -1012,7 +1036,7 @@
+     }, assets: assetSession.getSnapshot,
+     history: localHistory.getSnapshot, tools: androidBuild.getSnapshot,
+     // Same reciprocal admission, excluding only this original's own slot.
+-    otherOperationReason: () => appleProvisioningBusy() ?? storeReconcileBusy() ?? storePrepareBusy() ?? (localStoreControllerRef.current ? localStoreOwnerReason(localStoreControllerRef.current.getSnapshot()) : null) ?? localHistoryBusy() ?? artifactBusy() ?? preflightBusy() ?? androidBusy() ?? recoveryBusy() ?? iosBusy() ?? savedCommandPrerequisiteReason(),
++    otherOperationReason: () => agentStoreBusy() ?? appleProvisioningBusy() ?? storeReconcileBusy() ?? storePrepareBusy() ?? (localStoreControllerRef.current ? localStoreOwnerReason(localStoreControllerRef.current.getSnapshot()) : null) ?? localHistoryBusy() ?? artifactBusy() ?? preflightBusy() ?? androidBusy() ?? recoveryBusy() ?? iosBusy() ?? savedCommandPrerequisiteReason(),
+   }));
+   localStoreExecuteControllerRef.current=localStoreExecute;
+   const localStoreExecuteState=useSyncExternalStore(localStoreExecute.subscribe,localStoreExecute.getSnapshot,localStoreExecute.getSnapshot);
+@@ -1024,7 +1048,7 @@
+     }, assets: assetSession.getSnapshot,
+     history: localHistory.getSnapshot,
+     // Same reciprocal admission, excluding only this original's own slot.
+-    otherOperationReason: () => appleProvisioningBusy() ?? storeExecuteBusy() ?? storePrepareBusy() ?? (localStoreControllerRef.current ? localStoreOwnerReason(localStoreControllerRef.current.getSnapshot()) : null) ?? localHistoryBusy() ?? artifactBusy() ?? preflightBusy() ?? androidBusy() ?? recoveryBusy() ?? iosBusy() ?? savedCommandPrerequisiteReason(),
++    otherOperationReason: () => agentStoreBusy() ?? appleProvisioningBusy() ?? storeExecuteBusy() ?? storePrepareBusy() ?? (localStoreControllerRef.current ? localStoreOwnerReason(localStoreControllerRef.current.getSnapshot()) : null) ?? localHistoryBusy() ?? artifactBusy() ?? preflightBusy() ?? androidBusy() ?? recoveryBusy() ?? iosBusy() ?? savedCommandPrerequisiteReason(),
+   }));
+   localStoreReconcileControllerRef.current=localStoreReconcile;
+   const localStoreReconcileState=useSyncExternalStore(localStoreReconcile.subscribe,localStoreReconcile.getSnapshot,localStoreReconcile.getSnapshot);
+@@ -2059,6 +2083,7 @@
+       <header className="topbar"><div className="breadcrumbs"><Icon name="folder" size={16} /><span>{session?.project.name ?? 'Workspace'}</span><Icon name="chevron" size={13} /><strong>{currentNavigation?.label}</strong></div><div className="topbar-status"><span className="no-write-note"><Icon name="lock" size={13} />No automatic publishing</span><Badge tone={preview || appleProvisioningState.issue !== null || toolAcquisitionState.issue !== null || artifactInspectionState.nativeBlocked || initializationState.nativeBlocked || metadataImagesState.nativeBlocked || metadataImagesState.integrityFailed || metadataImagesState.generationLost || metadataImagesState.selectionIssue || metadataImagesState.editIssue || saveState.nativeBlocked || workflowState.nativeBlocked || metadataState.edit.nativeBlocked || versionEditState.edit.nativeBlocked || diagnosticsState.nativeBlocked || localHistoryState.blocked || localStoreState.blocked || localStorePrepareState.blocked || localStoreExecuteState.blocked || localStoreReconcileState.blocked || offlinePreflightState.nativeBlocked || androidBuildState.nativeBlocked || projectRecoveryState.nativeBlocked || iosArchiveState.nativeBlocked ? 'warning' : 'neutral'}>{preview ? 'Browser preview' : initializationState.status?.active ? 'Project setup · see status below' : recoveryBusy() ? 'Recovery · see status below' : androidBusy() ? 'Android build · see status below' : iosBusy() ? 'iOS build · see status below' : artifactBusy() ? 'Build files · see status below' : localHistoryBusy() ? 'Release history · see status below' : storeBusy() ? 'Store operation · see status below' : preflightBusy() ? 'Local checks · see status below' : toolPreparationBusy() ? 'Tool preparation · see status below' : diagnosticsState.status?.active ? 'Build tools · see status below' : saveState.status?.active ? 'Project settings task · see status below' : workflowState.status?.active ? 'GitHub files task · see status below' : metadataImagesOwnerReason(metadataImagesState) ? 'Store images · see status below' : metadataState.edit.status?.active ? 'Store listing task · see status below' : versionEditState.edit.status?.active ? 'Version task · see status below' : localEditingLabel}</Badge></div></header>
+       {preview && <div className="preview-banner" role="status"><Icon name="environment" size={19} /><div><strong>BROWSER PREVIEW — EXAMPLE DATA ONLY</strong><span>No native bridge, project files, core validation, credentials, or release operations. Never use this view as evidence.</span></div></div>}
+       <main id="main-content" tabIndex={-1} ref={main}>
++        <AgentStoreAccess controller={agentStoreAccess}/>
+         {loading && <div className="notice notice-info" role="status"><Icon name="refresh" className="spin" size={19} /><span>Connecting to the app and loading project settings…</span></div>}
+         {bootError && <><ErrorNotice error={bootError} title="The native service is unavailable" /><div className="bridge-retry"><button className="button small secondary" disabled={loading || savedCommandBusy() !== null} onClick={() => void bootstrap()}><Icon name="refresh" size={15} />Retry connection</button><span>No browser fallback or mock engine has been enabled.</span></div></>}
+         {identityBinding && identityState && identityBusy() && <div className={`notice ${identityBinding.rebindFailed || identityState.issue ? 'notice-warning' : 'notice-info'}`} role={identityBinding.rebindFailed || identityState.issue ? 'alert' : 'status'}>
+@@ -2122,8 +2147,8 @@
+           onShow={() => navigate('dashboard')} />}
+         {page !== 'releases' && <>
+           <LocalReleaseHistory state={localHistoryState} controller={localHistory} compact onShow={()=>navigate('releases')}/>
+-          <LocalStorePreflight state={localStoreState} controller={localStore} compact onCredentials={()=>navigate('credentials')} onShow={()=>navigate('releases')}/>
+-          <LocalStorePrepare state={localStorePrepareState} controller={localStorePrepare} compact onCredentials={()=>navigate('credentials')} onShow={()=>navigate('releases')}/>
++          <LocalStorePreflight agentReason={agentStoreReason} state={localStoreState} controller={localStore} compact onCredentials={()=>navigate('credentials')} onShow={()=>navigate('releases')}/>
++          <LocalStorePrepare agentReason={agentStoreReason} state={localStorePrepareState} controller={localStorePrepare} compact onCredentials={()=>navigate('credentials')} onShow={()=>navigate('releases')}/>
+           <LocalStoreExecute state={localStoreExecuteState} controller={localStoreExecute} compact onCredentials={()=>navigate('credentials')} onShow={()=>navigate('releases')}/>
+           <LocalStoreReconcile state={localStoreReconcileState} controller={localStoreReconcile} compact onCredentials={()=>navigate('credentials')} onShow={()=>navigate('releases')}/>
+         </>}
+@@ -2341,8 +2366,8 @@
+           workflowNeedsAttention={githubReleaseOwnerReason(githubReleaseState) !== null || githubReleaseState.error !== null || githubRelease.currentPrepared() !== null}
+           storeOperations={<>
+             <section id="release-local-history" tabIndex={-1} aria-label="Original local release history controls"><LocalReleaseHistory state={localHistoryState} controller={localHistory} onShow={()=>navigate('releases')}/></section>
+-            <section id="release-store-access" tabIndex={-1} aria-label="Original Store access check controls"><LocalStorePreflight state={localStoreState} controller={localStore} onCredentials={()=>navigate('credentials')} onShow={()=>navigate('releases')}/></section>
+-            <LocalStorePrepare state={localStorePrepareState} controller={localStorePrepare} onCredentials={()=>navigate('credentials')} onShow={()=>navigate('releases')}/>
++            <section id="release-store-access" tabIndex={-1} aria-label="Original Store access check controls"><LocalStorePreflight agentReason={agentStoreReason} state={localStoreState} controller={localStore} onCredentials={()=>navigate('credentials')} onShow={()=>navigate('releases')}/></section>
++            <LocalStorePrepare agentReason={agentStoreReason} state={localStorePrepareState} controller={localStorePrepare} onCredentials={()=>navigate('credentials')} onShow={()=>navigate('releases')}/>
+             <LocalStoreExecute state={localStoreExecuteState} controller={localStoreExecute} onCredentials={()=>navigate('credentials')} onShow={()=>navigate('releases')}/>
+             <LocalStoreReconcile state={localStoreReconcileState} controller={localStoreReconcile} onCredentials={()=>navigate('credentials')} onShow={()=>navigate('releases')}/>
+           </>}
+--- a/desktop/src/components/LocalStorePreflight.tsx
++++ b/desktop/src/components/LocalStorePreflight.tsx
+@@ -26,7 +26,7 @@
+  'credential-format':'Service-account file format','query-prerequisites':'Saved app and query configuration',
+  'runtime-unavailable':'Bundled Store runtime','bundle-unavailable':'Bundled Store dependencies','store-access':'Google Play account access',
+ };
+-export function LocalStorePreflight({state,controller,compact=false,onCredentials,onShow}:{state:LocalStoreState;controller:LocalStorePreflightController;compact?:boolean;onCredentials:()=>void;onShow:()=>void}){
++export function LocalStorePreflight({state,controller,compact=false,onCredentials,onShow,agentReason=null}:{state:LocalStoreState;controller:LocalStorePreflightController;compact?:boolean;onCredentials:()=>void;onShow:()=>void;agentReason?:string|null}){
+  const op=state.status?.operation,retained=localStoreOwnerReason(state),reason=controller.prepareReason();
+  const apple=state.platform==='ios',store=apple?'App Store Connect':'Google Play';
+  const originalApple=op?.context.platform==='ios',resultHints=originalApple?appleHints:hints;
+@@ -54,7 +54,7 @@
+    {apple&&<IOSStoreVersions state={state} controller={controller} onCredentials={onCredentials} onShow={onShow}/>}
+    {!apple&&<AndroidStoreVersions state={state} controller={controller} onCredentials={onCredentials} onShow={onShow}/>}
+   </>}
+-  {state.consentUntil!==null&&<div className="notice"><p>{originalApple?'Contact App Store Connect to read the saved app identity, existing external TestFlight group and build inventory. Apple may log or rate-limit requests. This does not upload, change testing groups, submit for review or publish a release.':'This creates a temporary, uncommitted Google Play edit, reads app inventory and attempts to delete the edit. It never commits the edit or publishes a release. A cancellation or network failure can leave an uncommitted edit until Google expires it.'}</p><label><input type="checkbox" checked={state.acknowledged} onChange={e=>controller.acknowledge(e.target.checked)}/> I authorize this nonpublishing {originalApple?'App Store Connect':'Google Play'} access check.</label><button disabled={!state.acknowledged||state.pending||state.callersPending} onClick={()=>void controller.start()}>Check {originalApple?'App Store Connect':'Google Play'} access</button></div>}
++  {state.consentUntil!==null&&<div className="notice"><p>{originalApple?'Contact App Store Connect to read the saved app identity, existing external TestFlight group and build inventory. Apple may log or rate-limit requests. This does not upload, change testing groups, submit for review or publish a release.':'This creates a temporary, uncommitted Google Play edit, reads app inventory and attempts to delete the edit. It never commits the edit or publishes a release. A cancellation or network failure can leave an uncommitted edit until Google expires it.'}</p><label><input type="checkbox" checked={state.acknowledged} onChange={e=>controller.acknowledge(e.target.checked)}/> I authorize this nonpublishing {originalApple?'App Store Connect':'Google Play'} access check.</label><button disabled={!!agentReason||!state.acknowledged||state.pending||state.callersPending} onClick={()=>void controller.start()}>Check {originalApple?'App Store Connect':'Google Play'} access</button></div>}
+   {retained&&<div role="status"><p>{op?.phase==='running'?'Checking access. Up to 20 minutes; Cancel stops the original operation.':retained}</p><button onClick={()=>void controller.cancel()}>Cancel original check</button></div>}
+   <button disabled={state.mode!=='native'} onClick={()=>void controller.checkStatus()}>Refresh check status</button>
+   {state.error&&<p role="alert">{state.error}</p>}
+--- a/desktop/src/components/LocalStorePrepare.tsx
++++ b/desktop/src/components/LocalStorePrepare.tsx
+@@ -1,7 +1,8 @@
+ import { isLocalStoreStage, localStoreStageLabel } from '../localStoreStageProtocol.ts';
+ import { localStorePrepareOwnerReason, type LocalStorePrepareController, type LocalStorePrepareState } from '../localStorePrepare.ts';
+ 
+-export function LocalStorePrepare({ state, controller, compact = false, onCredentials, onShow }: {
++export function LocalStorePrepare({ state, controller, compact = false, onCredentials, onShow, agentReason = null }: {
++  agentReason?: string | null;
+   state: LocalStorePrepareState; controller: LocalStorePrepareController; compact?: boolean;
+   onCredentials: () => void; onShow: () => void;
+ }) {
+@@ -33,7 +34,7 @@
+       <p>{stage ? `Prepare ${target} using the original uploaded binary and the current saved metadata. This reads Store state and saves a new local plan; it does not send the promotion or publish. Android may create a temporary uncommitted edit.` : op?.context.platform === 'ios' ? 'Read App Store Connect for this iOS candidate and save a local TestFlight-internal plan. No build is uploaded and no Store release is changed.' : 'Prepare this Android candidate for internal testing, without uploading or publishing. This contacts Google Play and creates a temporary uncommitted edit. Cancellation or a network failure can leave that edit until Google expires it.'}</p>
+       <p>Version {op?.context.savedVersion.name} · Build {op?.context.savedVersion.build}. Candidate <code>{op?.context.candidateOperationId}</code>.</p>
+       <label><input type="checkbox" checked={state.acknowledged} onChange={event => controller.acknowledge(event.target.checked)} /> I authorize this preparation only, not a release.</label>
+-      <button disabled={!state.acknowledged || state.pending} onClick={() => void controller.start()}>Prepare local Store intent</button>
++      <button disabled={!!agentReason || !state.acknowledged || state.pending} onClick={() => void controller.start()}>Prepare local Store intent</button>
+     </div>}
+     {retained && <div role="status"><p>{op?.phase === 'running' ? 'Preparing the original candidate. This can take up to 20 minutes. Keep the application open until cleanup is confirmed.' : retained}</p><button onClick={() => void controller.cancel()}>Cancel original preparation</button></div>}
+     <button disabled={state.mode !== 'native'} onClick={() => void controller.checkStatus()}>Refresh preparation status</button>
+--- a/desktop/src/localStorePreflight.ts
++++ b/desktop/src/localStorePreflight.ts
+@@ -17,7 +17,7 @@
+ export interface LocalStoreState {mode:BridgeMode;platform:'android'|'ios'|'both';request:PrepareLocalStorePreflight|null;status:LocalStoreStatus|null;pending:boolean;callersPending:boolean;unconfirmed:boolean;blocked:boolean;historical:boolean;acknowledged:boolean;consentUntil:number|null;error:string|null}
+ export type LocalStoreProject=Pick<AndroidBuildProject,'projectId'|'draftRevision'|'baselineGeneration'|'observationGeneration'|'savedConfig'|'savedVersion'|'dirtyDraft'|'snapshotPending'|'versionPending'|'saveRecoveryRequired'|'inputIssue'> & { iosDemoRequired?: boolean | null; versionPlatforms?: readonly ('android'|'ios')[] | null };
+ interface Source {project:()=>LocalStoreProject|null;assets:()=>AssetDisplayState|null;otherOperationReason:()=>string|null;now?:()=>number}
+-interface Attempt {request:PrepareLocalStorePreflight;epoch:number;after:number;previous:LocalStoreIdentity|null;id:LocalStoreIdentity|null;retired:boolean;started:boolean}
++interface Attempt {delegated?:boolean;request:PrepareLocalStorePreflight;epoch:number;after:number;previous:LocalStoreIdentity|null;id:LocalStoreIdentity|null;retired:boolean;started:boolean}
+ const active=(s:LocalStoreStatus|null)=>!!s?.operation&&s.operation.phase!=='terminal';
+ const identity=(v:LocalStoreIdentity)=>({operationId:v.operationId,ownerGeneration:v.ownerGeneration});
+ const sameId=(a:LocalStoreIdentity|null|undefined,b:LocalStoreIdentity|null|undefined)=>!!a&&!!b&&a.operationId===b.operationId&&a.ownerGeneration===b.ownerGeneration;
+@@ -58,7 +58,15 @@
+  invalidate=()=>{this.epoch++;if(this.attempt)this.attempt.retired=true;this.clearTimer();this.update({acknowledged:false,consentUntil:null,historical:!!this.state.status?.operation});void this.cancelOriginal(false);};
+  beforeWorkspaceAction=()=>this.invalidate();selectionIntent=()=>this.invalidate();snapshotIntent=()=>this.invalidate();versionIntent=()=>this.invalidate();
+  setSelectionPending=(pending:boolean)=>{if(pending)this.invalidate();else this.syncProject();};
+- setVisible=(visible:boolean)=>{if(!visible&&this.attempt&&!this.attempt.started)this.invalidate();};
++ setVisible=(visible:boolean)=>{if(!visible&&this.attempt&&!this.attempt.started&&!this.attempt.delegated)this.invalidate();};
++ delegatePrepared(id:LocalStoreIdentity,revision:number):(()=>boolean)|null{
++  this.syncProject();const a=this.attempt,api=this.api;
++  const exact=()=>!!a&&this.attempt===a&&this.api===api&&api?.mode==='native'&&!this.disposed&&!a.retired&&!a.started&&a.epoch===this.epoch&&!this.reading&&!this.state.pending&&!this.state.blocked&&!this.state.unconfirmed&&!(this.hasPendingGuiSubmission()||false)&&sameId(a.id,id)&&sameId(a.id,this.state.status?.operation)&&this.state.status?.statusRevision===revision&&this.state.status.operation?.phase==='awaiting-consent'&&this.state.status.operation.intentUsable&&a.request.query===undefined&&(a.request.platform===undefined||a.request.platform==='android'||a.request.platform==='ios');
++  if(!exact()||!a||a.delegated||this.state.consentUntil===null||this.now()>=this.state.consentUntil)return null;
++  a.delegated=true;this.clearTimer();this.update({acknowledged:false,consentUntil:null});
++  // Survives removal of ordinary consent, not context/native-identity changes.
++  return ()=>exact()&&a.delegated===true;
++ }
+  beginConnection=()=>{this.invalidate();if(localStoreOwnerReason(this.state)){this.update({blocked:true});return;}this.unlisten?.();this.unlisten=null;this.api=null;this.update({mode:'unavailable',status:null});};
+  async connect(api:Port){if(this.disposed||this.api===api)return;if(this.api)this.beginConnection();if(this.api||this.state.blocked)return;this.api=api;this.update({mode:api.mode});if(api.mode!=='native')return;
+   try{const unlisten=await api.subscribeLocalStorePreflight(v=>{if(this.api===api)this.receive(v);});if(this.api!==api){unlisten();return;}this.unlisten=unlisten;await this.checkStatus();}catch{this.fail();}}
+@@ -103,6 +111,7 @@
+   }catch{this.fail();}finally{this.update({pending:false});this.returnedGuiSubmission();}}
+  acknowledge(value:boolean){if(this.state.consentUntil!==null&&this.now()<this.state.consentUntil)this.update({acknowledged:value});}
+  async start(){this.syncProject();const a=this.attempt,api=this.api,op=this.state.status?.operation;
++  if(a?.delegated)return; // Only native CLI consent can consume this linked review.
+   if(a?.started||this.hasPendingGuiSubmission())return; // A queued second click cannot cancel the original run.
+   if(!a||!api||a.retired||a.started||!a.id||a.epoch!==this.epoch||!sameId(a.id,op)||!op?.intentUsable||!this.state.acknowledged||this.state.consentUntil===null||this.now()>=this.state.consentUntil||this.source.otherOperationReason()){this.invalidate();return;}
+   const consentUntil=this.state.consentUntil;
+--- a/desktop/src/localStorePrepare.ts
++++ b/desktop/src/localStorePrepare.ts
+@@ -30,7 +30,7 @@
+ export class LocalStorePrepareController {
+  private state:LocalStorePrepareState={mode:'unavailable',applicationId:null,request:null,status:null,pending:false,unconfirmed:false,blocked:false,historical:false,acknowledged:false,consentUntil:null,error:null};
+  private api:Port|null=null;private unlisten:(()=>void)|null=null;private listeners=new Set<()=>void>();private disposed=false;private epoch=0;private reading=false;
+- private attempt:{request:PrepareLocalStoreIntent;epoch:number;after:number;previous:LocalStorePrepareIdentity|null;id:LocalStorePrepareIdentity|null;retired:boolean;started:boolean}|null=null;
++ private attempt:{delegated?:boolean;request:PrepareLocalStoreIntent;epoch:number;after:number;previous:LocalStorePrepareIdentity|null;id:LocalStorePrepareIdentity|null;retired:boolean;started:boolean}|null=null;
+  private cancelClaim:string|null=null;private failedCancel:string|null=null;private timer:ReturnType<typeof setTimeout>|null=null;
+  private readonly source:Source;
+  private selectionPending=false;private historyHead:number|null=null;
+@@ -44,7 +44,15 @@
+  invalidate=()=>{this.epoch++;if(this.attempt)this.attempt.retired=true;this.clearTimer();this.update({acknowledged:false,consentUntil:null,historical:!!this.state.status?.operation});void this.cancelOriginal(false);};
+  beforeWorkspaceAction=()=>this.invalidate();selectionIntent=()=>this.invalidate();snapshotIntent=()=>this.invalidate();versionIntent=()=>this.invalidate();
+  setSelectionPending=(pending:boolean)=>{this.selectionPending=pending;if(pending)this.invalidate();this.syncProject();};
+- setVisible=(visible:boolean)=>{if(!visible&&this.attempt&&!this.attempt.started)this.invalidate();};
++ setVisible=(visible:boolean)=>{if(!visible&&this.attempt&&!this.attempt.started&&!this.attempt.delegated)this.invalidate();};
++ delegatePrepared(id:LocalStorePrepareIdentity,revision:number):(()=>boolean)|null{
++  this.syncProject();const a=this.attempt,api=this.api;
++  const exact=()=>!!a&&this.attempt===a&&this.api===api&&api?.mode==='native'&&!this.disposed&&!a.retired&&!a.started&&a.epoch===this.epoch&&!this.reading&&!this.state.pending&&!this.state.blocked&&!this.state.unconfirmed&&!(false)&&sameId(a.id,id)&&sameId(a.id,this.state.status?.operation)&&this.state.status?.statusRevision===revision&&this.state.status.operation?.phase==='awaiting-consent'&&this.state.status.operation.intentUsable&&!('stage' in a.request);
++  if(!exact()||!a||a.delegated||this.state.consentUntil===null||this.now()>=this.state.consentUntil)return null;
++  a.delegated=true;this.clearTimer();this.update({acknowledged:false,consentUntil:null});
++  // Survives removal of ordinary consent, not context/native-identity changes.
++  return ()=>exact()&&a.delegated===true;
++ }
+  beginConnection=()=>{this.invalidate();if(localStorePrepareOwnerReason(this.state)){this.update({blocked:true});return;}this.unlisten?.();this.unlisten=null;this.api=null;this.update({mode:'unavailable',status:null});};
+  async connect(api:Port){if(this.disposed||this.api===api)return;if(this.api)this.beginConnection();if(this.api||this.state.blocked)return;this.api=api;this.update({mode:api.mode});if(api.mode!=='native')return;
+   try{const unlisten=await api.subscribeLocalStorePrepare(v=>{if(this.api===api)this.receive(v);});if(this.api!==api){unlisten();return;}this.unlisten=unlisten;await this.checkStatus();}catch{this.fail();}}
+@@ -72,6 +80,7 @@
+   }catch{this.fail();}finally{this.update({pending:false});}}
+  acknowledge(value:boolean){if(this.state.consentUntil!==null&&this.now()<this.state.consentUntil)this.update({acknowledged:value});}
+  async start(){this.syncProject();const a=this.attempt,api=this.api,op=this.state.status?.operation;
++  if(a?.delegated)return; // Only native CLI consent can consume this linked review.
+   if(a?.started)return; // A queued second click cannot cancel the running original.
+   if(!a||!api||a.retired||a.started||!a.id||a.epoch!==this.epoch||!sameId(a.id,op)||!op?.intentUsable||!this.state.acknowledged||this.state.consentUntil===null||this.now()>=this.state.consentUntil||this.source.otherOperationReason()){this.invalidate();return;}
+   a.started=true;this.clearTimer();this.update({pending:true,unconfirmed:true,consentUntil:null,acknowledged:false});
+--- a/desktop/package.json
++++ b/desktop/package.json
+@@ -8,6 +8,7 @@
+     "node": ">=22.12.0"
+   },
+   "scripts": {
++    "test:agent-store-access": "node --experimental-strip-types --test --test-concurrency=1 --test-timeout=10000 tests/agent-store-access.test.mjs",
+     "dev": "vite --host 127.0.0.1 --port 1420 --strictPort",
+     "typecheck": "tsc --noEmit -p tsconfig.json",
+     "test": "node --experimental-strip-types --test --test-isolation=none --test-concurrency=1 tests/drafts.test.mjs tests/catalog.test.mjs tests/preparation.test.mjs tests/setup-overview.test.mjs tests/setup-resume.test.mjs tests/release-rehearsal.test.mjs tests/smart-setup.test.mjs tests/external-project-observation.test.mjs tests/project-scripts.test.mjs tests/tool-preparation.test.mjs tests/config-edit.test.mjs tests/github-setup.test.mjs tests/github-publication.test.mjs tests/github-workflow-edit.test.mjs tests/project-initialization.test.mjs tests/credential-guide.test.mjs tests/asset-session.test.mjs tests/github-connection.test.mjs tests/github-history.test.mjs tests/github-preflight.test.mjs tests/github-release.test.mjs tests/metadata-text.test.mjs tests/environment.test.mjs tests/environment-diagnostics.test.mjs tests/release-version.test.mjs tests/release-version-edit.test.mjs tests/hosted-version-import.test.mjs tests/release-input-guidance.test.mjs tests/candidate-evidence.test.mjs tests/lifecycle-evidence.test.mjs tests/offline-preflight.test.mjs tests/agent-local-checks.test.mjs tests/agent-android-build.test.mjs tests/agent-ios-archive.test.mjs tests/service-git-permission.test.mjs tests/service-git-commit-permission.test.mjs tests/service-git-repository-permission.test.mjs tests/service-git-remote-permission.test.mjs tests/local-store-preflight.test.mjs tests/local-store-prepare.test.mjs tests/local-store-stage.test.mjs tests/local-store-execute.test.mjs tests/local-store-reconcile.test.mjs tests/local-release-history.test.mjs tests/artifact-inspection.test.mjs tests/android-build-controller.test.mjs tests/android-build-protocol.test.mjs tests/android-toolchain-catalog.test.mjs tests/android-tool-sources.test.mjs tests/ios-archive.test.mjs tests/ios-signing-reuse.test.mjs tests/project-recovery.test.mjs tests/metadata-images.test.mjs tests/installation-check.test.mjs tests/guided-configuration.test.mjs tests/credential-setup.test.mjs tests/version-automation.test.mjs tests/ios-store-versions.test.mjs tests/android-store-versions.test.mjs tests/paired-store-versions.test.mjs tests/version-reserve.test.mjs tests/version-ci.test.mjs tests/agent-version-reserve-access.test.mjs tests/tool-acquisition.test.mjs tests/tool-acquisition-sdk.test.mjs tests/cli-read-access.test.mjs tests/git-repository.test.mjs tests/draft-save-actions.test.mjs tests/project-identity.test.mjs tests/project-identity-native.test.mjs tests/ios-app-target-hints.test.mjs tests/tool-acquisition-native.test.mjs tests/tool-acquisition-controller.test.mjs tests/tool-acquisition-source-picker.test.mjs tests/github-gh-entry.test.mjs tests/github-device-connection.test.mjs tests/credential-backup.test.mjs tests/apple-provisioning-bundle-read.test.mjs tests/apple-provisioning-profile-read.test.mjs tests/agent-identity-requests.test.mjs tests/agent-identity-actions.test.mjs tests/credential-upload-key.test.mjs tests/apple-provisioning-controller.test.mjs tests/apple-provisioning-protocol.test.mjs tests/apple-provisioning-recovery.test.mjs tests/apple-profile-setup.test.mjs tests/apple-profile-recovery.test.mjs tests/apple-distribution-key-setup.test.mjs tests/apple-distribution-certificate-setup.test.mjs tests/apple-p12-setup.test.mjs tests/git-local.test.mjs tests/git-fetch.test.mjs tests/git-branches.test.mjs tests/git-switch.test.mjs tests/git-fast-forward.test.mjs tests/git-upstream.test.mjs tests/git-push.test.mjs tests/git-push-new-branch.test.mjs tests/git-rename.test.mjs tests/git-init.test.mjs tests/github-activity.test.mjs tests/github-pull-request.test.mjs tests/github-pull-request-management.test.mjs tests/github-actions-retry.test.mjs tests/github-play-cleanup.test.mjs",

@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<plist version="1.0"><dict>
+  <key>CFBundleIdentifier</key><string>dev.mobile-release-kit.desktop.xcode-setup.carrier</string>
+  <key>CFBundleName</key><string>MobileReleaseKit Xcode Setup</string>
+  <key>CFBundlePackageType</key><string>BNDL</string>
+  <key>CFBundleVersion</key><string>__MRK_PACKAGE_VERSION__</string>
+</dict></plist>

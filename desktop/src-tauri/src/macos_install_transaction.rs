@@ -1,0 +1,2264 @@
+//! Closed maintenance transaction DATA, not an Installer, native observer or
+//! action capability. Supplying a matching label cannot establish a package's
+//! authenticity, original custody, an actual join, or permission to write.
+//! State names an expected capsule ID; the later capsule binds actual state
+//! bytes. Neither record claims its own writer's future close or process exit.
+#![forbid(unsafe_code)]
+
+use std::collections::BTreeSet;
+use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use sha2::{Digest, Sha256};
+use crate::{macos_install_maintenance::{ActionData, ReleaseData, ReleaseSetData, PREDECESSOR_LIMIT},
+    macos_install_record::{DirectoryIdentity, CONTROL_LIMIT, FILE_LIMIT, INVENTORY_LIMIT, ORIGINAL_LIMIT, PAYLOAD_LIMIT}, protocol::strict_json};
+
+pub const STATE_LIMIT: usize = 16 * 1024;
+pub const INTENT_LIMIT: usize = 16 * 1024;
+/// Part of INTENT_LIMIT, never an additional record or allocation allowance.
+pub const FRESH_BIRTH_LIMIT: usize = 2 * 1024;
+pub const CAPSULE_LIMIT: usize = 64 * 1024;
+pub const REQUEST_EXPORT_LIMIT: usize = 64 * 1024;
+pub const PRODUCER_CONTROL_LIMIT: usize = crate::macos_install_producer::DESCRIPTOR_LIMIT
+    + crate::macos_install_producer::SIGNATURE_LIMIT;
+pub const INVOCATION_LIMIT: usize = 64;
+/// Launcher publication phase receipt retained in an invocation's stage.
+/// The installer's Applications PHASE_LIMIT is tested equal to this value.
+pub const LAUNCHER_PHASE_EVIDENCE_LIMIT: usize = 4096;
+/// Evidence retained in one invocation's stage that maintenance re-reads,
+/// hashes and charges in evidence_bytes (#49): four phase receipts (each read
+/// under STATE_LIMIT), the fresh output origin and enrollment journal, and
+/// one launcher publication phase. Each file keeps its own read limit; the
+/// aggregate control and storage caps still bound the sum. The fresh output
+/// ORIGIN_LIMIT (INTENT_LIMIT) and JOURNAL_LIMIT (INVENTORY_LIMIT) are tested
+/// equal; plain names keep this closed DATA independently compilable.
+pub const STAGE_EVIDENCE_LIMIT: usize = 4 * STATE_LIMIT + INTENT_LIMIT + INVENTORY_LIMIT + LAUNCHER_PHASE_EVIDENCE_LIMIT;
+/// Physical storage for current, retained and incoming generations together.
+/// Each generation still has its own PAYLOAD_LIMIT. Include the existing
+/// bounded control allowance for persisted evidence; this is a quota, never
+/// an allocation, available-disk observation or permission to retain a release.
+pub const MAINTENANCE_STORAGE_LIMIT: u64 =
+    (PREDECESSOR_LIMIT as u64 + 1) * PAYLOAD_LIMIT + CONTROL_LIMIT as u64;
+pub fn maintenance_storage_sum_data(before: u64, extra: u64) -> Result<u64> {
+    before.checked_add(extra).filter(|n| *n <= MAINTENANCE_STORAGE_LIMIT)
+        .ok_or(TransactionDataError::Limit)
+}
+pub const STATE_NAME: &str = "installation-v2.json";
+/// A request ID correlates one exact original Installer invocation with a
+/// unique pending export. It does not authenticate a package or grant writes.
+pub fn export_name_data(request_id: &str) -> Result<String> {
+    require(hex(request_id, 32), TransactionDataError::Binding)?;
+    Ok(format!("MobileReleaseKit-InstallerResult-v2-{request_id}.json"))
+}
+/// The native caller must first prove this basename belongs to its actual
+/// completed package. No path lookup, newest-file selection, or authority is
+/// inferred here. Finder's fixed name requests a fresh random correlation ID.
+pub fn request_from_package_name_data(name: &str) -> Result<Option<String>> {
+    if name == "Install.pkg" { return Ok(None); }
+    let request = name.strip_prefix("MobileReleaseKit-Request-")
+        .and_then(|value| value.strip_suffix(".pkg")).ok_or(TransactionDataError::Binding)?;
+    require(hex(request, 32), TransactionDataError::Binding)?;
+    Ok(Some(request.into()))
+}
+const INTENT_KIND: &str = "mrk-macos-maintenance-intent-v2";
+const STATE_KIND: &str = "mrk-macos-maintenance-state-v2";
+const CAPSULE_KIND: &str = "mrk-macos-maintenance-capsule-v2";
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum TransactionDataError { Shape, Limit, Binding, ReusedIdentity, Transition }
+type Result<T> = std::result::Result<T, TransactionDataError>;
+fn require(ok: bool, why: TransactionDataError) -> Result<()> { if ok { Ok(()) } else { Err(why) } }
+fn hex(value: &str, width: usize) -> bool {
+    value.len() == width && value.bytes().all(|b| b.is_ascii_digit() || (b'a'..=b'f').contains(&b))
+        && value.bytes().any(|b| b != b'0')
+}
+fn digest(bytes: &[u8]) -> String { format!("{:x}", Sha256::digest(bytes)) }
+fn object(value: &serde_json::Value) -> Result<()> { require(value.is_object(), TransactionDataError::Shape) }
+fn field<'a>(value: &'a serde_json::Value, name: &str) -> Result<&'a serde_json::Value> {
+    value.get(name).ok_or(TransactionDataError::Shape)
+}
+fn record_field(value: &serde_json::Value, name: &str, nullable: bool) -> Result<()> {
+    let nested = field(value, name)?;
+    if nullable && nested.is_null() { Ok(()) } else { object(nested) }
+}
+fn records<'a>(value: &'a serde_json::Value, name: &str, limit: usize) -> Result<&'a [serde_json::Value]> {
+    let items = field(value, name)?.as_array().ok_or(TransactionDataError::Shape)?;
+    require(items.len() <= limit, TransactionDataError::Limit)?;
+    for item in items { object(item)?; }
+    Ok(items)
+}
+fn raw(bytes: &[u8], limit: usize) -> Result<serde_json::Value> {
+    require(!bytes.is_empty() && bytes.len() <= limit, TransactionDataError::Limit)?;
+    let value = strict_json(bytes).map_err(|_| TransactionDataError::Shape)?;
+    object(&value)?; Ok(value)
+}
+fn decode<T: DeserializeOwned>(value: serde_json::Value) -> Result<T> {
+    serde_json::from_value(value).map_err(|_| TransactionDataError::Shape)
+}
+fn encode<T: Serialize>(value: &T, limit: usize) -> Result<Vec<u8>> {
+    let mut bytes = serde_json::to_vec(value).map_err(|_| TransactionDataError::Shape)?;
+    bytes.push(b'\n');
+    require(bytes.len() <= limit, TransactionDataError::Limit)?;
+    Ok(bytes)
+}
+/// Fixed single-component DATA names. The native caller still owns EXCL,
+/// no-follow lookup, original identity and all publication/close observations.
+pub fn intent_name_data(invocation: &str) -> Result<String> { evidence_name(invocation, "intent") }
+pub fn archived_state_name_data(invocation: &str) -> Result<String> { evidence_name(invocation, "state") }
+pub fn capsule_name_data(invocation: &str) -> Result<String> { evidence_name(invocation, "capsule") }
+fn evidence_name(invocation: &str, role: &str) -> Result<String> {
+    require(hex(invocation, 32), TransactionDataError::Binding)?;
+    Ok(format!(".maintenance-{invocation}.{role}.json"))
+}
+pub fn retained_app_name_data(invocation: &str) -> Result<String> {
+    require(hex(invocation, 32), TransactionDataError::Binding)?;
+    Ok(format!(".retained-app-{invocation}"))
+}
+fn header(schema: u32, kind: &str, expected_kind: &str, target: &str, invocation: &str, request_id: &str,
+    expected: &ReleaseSetData) -> Result<()> {
+    require(schema == 2 && kind == expected_kind && target == expected.target_data().target()
+        && hex(invocation, 32) && hex(request_id, 32), TransactionDataError::Binding)
+}
+fn pair(expected: &ReleaseSetData, action: ActionData, old: Option<&ReleaseData>, new: &ReleaseData, current: bool) -> Result<()> {
+    require(expected.contains_data(new) && (!current || new == expected.current_data())
+        && old.is_none_or(|r| expected.contains_data(r)), TransactionDataError::Binding)?;
+    require(match action {
+        ActionData::FreshInstall => old.is_none(),
+        ActionData::SamePackageNoop | ActionData::RestoreFixedApp => old == Some(new),
+        ActionData::Update => old.is_some_and(|r| new.is_strictly_newer_data(r)),
+        ActionData::Uninstall => false,
+    }, TransactionDataError::Binding)
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct StateLink { invocation: String, sha256: String }
+impl StateLink { fn valid(&self) -> bool { hex(&self.invocation, 32) && hex(&self.sha256, 64) } }
+
+/// Closed reference to an immutable original-preservation receipt. This is
+/// correlation DATA, never authority to discover or move a directory. Native
+/// observation must authenticate the original stage, receipt and old complete
+/// records before using it. Omitted on all legacy/ordinary transactions.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RecoveryReferenceData {
+    stage_invocation: String, torn_invocation: String, receipt_sha256: String,
+}
+impl RecoveryReferenceData {
+    pub fn new_data(stage: &str, torn: &str, receipt_sha256: &str) -> Result<Self> {
+        let value = Self { stage_invocation:stage.into(), torn_invocation:torn.into(),
+            receipt_sha256:receipt_sha256.into() };
+        require(value.valid(), TransactionDataError::Binding)?; Ok(value)
+    }
+    fn valid(&self) -> bool { hex(&self.stage_invocation,32) && hex(&self.torn_invocation,32)
+        && self.stage_invocation != self.torn_invocation && hex(&self.receipt_sha256,64) }
+    pub fn stage_invocation_data(&self) -> &str { &self.stage_invocation }
+    pub fn torn_invocation_data(&self) -> &str { &self.torn_invocation }
+    pub fn receipt_sha256_data(&self) -> &str { &self.receipt_sha256 }
+    pub fn receipt_name_data(&self) -> String { format!(".noop-recovery-{}.json",self.torn_invocation) }
+    pub fn preserved_name_data(&self,invocation:&str,role:&str)->Result<String> {
+        require(hex(invocation,32) && matches!(role,"intent"|"state"|"receipt-prefix"),TransactionDataError::Binding)?;
+        Ok(format!(".noop-recovery-{}-{invocation}.{role}.json",self.torn_invocation))
+    }
+}
+
+/// Restore-only correlation to a new immutable original-preservation receipt.
+/// Native custody must bind that receipt's ownAttempt and every older original;
+/// this DATA reference cannot retrospectively prove who created a file.
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+pub struct RestoreReferenceData {
+    torn_invocation: String, receipt_invocation: String, receipt_sha256: String,
+}
+impl RestoreReferenceData {
+    pub fn new_data(torn: &str, receipt: &str, sha256: &str) -> Result<Self> {
+        let value=Self {torn_invocation:torn.into(),receipt_invocation:receipt.into(),receipt_sha256:sha256.into()};
+        require(value.valid(),TransactionDataError::Binding)?;Ok(value)
+    }
+    fn valid(&self) -> bool {hex(&self.torn_invocation,32) && hex(&self.receipt_invocation,32)
+        && self.torn_invocation!=self.receipt_invocation && hex(&self.receipt_sha256,64)}
+    pub fn torn_invocation_data(&self) -> &str {&self.torn_invocation}
+    pub fn receipt_invocation_data(&self) -> &str {&self.receipt_invocation}
+    pub fn receipt_sha256_data(&self) -> &str {&self.receipt_sha256}
+    pub fn receipt_name_data(&self) -> String {format!(".restore-recovery-{}.json",self.receipt_invocation)}
+    pub fn preserved_stage_name_data(&self) -> String {format!(".restore-recovery-{}.stage",self.torn_invocation)}
+    pub fn preserved_intent_name_data(&self,invocation:&str) -> Result<String> {
+        require(hex(invocation,32),TransactionDataError::Binding)?;
+        Ok(format!(".restore-recovery-{}-{invocation}.intent.json",self.torn_invocation))
+    }
+}
+
+/// Comparison labels for the two existing registration protocols. A decoded
+/// label cannot attest lock acquisition, absence, creation or original close.
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum FreshRegistrationOriginData {
+    ExistingExclusiveBeforeMaintenance,
+    AbsentBeforeMaintenanceCreatedUnderMaintenance,
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct FreshBirthIdentityWire {
+    device: i64, inode: u64, birth_seconds: i64, birth_nanoseconds: i64,
+    volume_uuid: crate::macos_persistent_identity::VolumeUuid,
+}
+impl FreshBirthIdentityWire {
+    fn valid(&self) -> bool { self.device >= 0 && self.inode > 0 && self.birth_seconds > 0
+        && (0..1_000_000_000).contains(&self.birth_nanoseconds) }
+}
+/// Validated stable comparison DATA. Mandatory UUIDs have no legacy fallback.
+/// Native callers still owe held/name, protection and complete original POST.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FreshBirthIdentityData(FreshBirthIdentityWire);
+impl FreshBirthIdentityData {
+    pub fn from_original_fields_data(device: i64, inode: u64, birth_seconds: i64,
+        birth_nanoseconds: i64, volume_uuid: crate::macos_persistent_identity::VolumeUuid) -> Result<Self> {
+        let wire = FreshBirthIdentityWire {device,inode,birth_seconds,birth_nanoseconds,volume_uuid};
+        require(wire.valid(),TransactionDataError::Binding)?; Ok(Self(wire))
+    }
+    pub fn fields_data(&self) -> (i64,u64,i64,i64,crate::macos_persistent_identity::VolumeUuid) {
+        (self.0.device,self.0.inode,self.0.birth_seconds,self.0.birth_nanoseconds,self.0.volume_uuid)
+    }
+    /// Persistent correspondence tolerates device renumbering only. Live
+    /// original comparison must additionally compare the actual device value.
+    pub fn same_object_data(&self, other: &Self) -> bool {
+        self.0.volume_uuid == other.0.volume_uuid && self.0.inode == other.0.inode
+            && self.0.birth_seconds == other.0.birth_seconds && self.0.birth_nanoseconds == other.0.birth_nanoseconds
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct FreshBirthWire {
+    schema_version: u32, kind: String, producer_descriptor_sha256: String, producer_signature_sha256: String,
+    registration_origin: FreshRegistrationOriginData,
+    install_root: FreshBirthIdentityWire, versions_root: FreshBirthIdentityWire,
+    registration_gate: FreshBirthIdentityWire, maintenance_gate: FreshBirthIdentityWire,
+}
+impl FreshBirthWire {
+    fn validate(&self) -> Result<()> {
+        require(self.schema_version == 1 && self.kind == "mrk-macos-fresh-birth-v1"
+            && hex(&self.producer_descriptor_sha256,64) && hex(&self.producer_signature_sha256,64),
+            TransactionDataError::Binding)?;
+        let roles = [self.install_root,self.versions_root,self.registration_gate,self.maintenance_gate];
+        require(roles.iter().all(|r|r.valid() && r.volume_uuid == self.install_root.volume_uuid)
+            && roles.iter().enumerate().all(|(at,r)|roles[..at].iter().all(|old|old.inode != r.inode)),
+            TransactionDataError::Binding)?;
+        encode(self,FRESH_BIRTH_LIMIT)?; Ok(())
+    }
+}
+/// Bounded birth comparison DATA, not an authenticated attempt or GO token.
+/// The enclosing Intent binds target/IDs and its complete signed ReleaseData,
+/// including sourceCommit and package/inventory/runtime/policy commitments.
+/// No runtime Git tree is claimed or inferred from this record.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FreshBirthData(FreshBirthWire);
+impl FreshBirthData {
+    pub fn from_original_fields_data(producer_descriptor_sha256: &str, producer_signature_sha256: &str,
+        registration_origin: FreshRegistrationOriginData, install_root: FreshBirthIdentityData,
+        versions_root: FreshBirthIdentityData, registration_gate: FreshBirthIdentityData,
+        maintenance_gate: FreshBirthIdentityData) -> Result<Self> {
+        require(hex(producer_descriptor_sha256,64) && hex(producer_signature_sha256,64),TransactionDataError::Binding)?;
+        let wire = FreshBirthWire {schema_version:1,kind:"mrk-macos-fresh-birth-v1".into(),
+            producer_descriptor_sha256:producer_descriptor_sha256.into(),producer_signature_sha256:producer_signature_sha256.into(),
+            registration_origin,install_root:install_root.0,versions_root:versions_root.0,
+            registration_gate:registration_gate.0,maintenance_gate:maintenance_gate.0};
+        wire.validate()?; Ok(Self(wire))
+    }
+    fn shape(value: &serde_json::Value) -> Result<()> {
+        object(value)?;
+        require(field(value,"registrationOrigin")?.is_string(),TransactionDataError::Shape)?;
+        for key in ["installRoot","versionsRoot","registrationGate","maintenanceGate"] {record_field(value,key,false)?;}
+        Ok(())
+    }
+    pub fn parse_data(bytes: &[u8]) -> Result<Self> {
+        let value = raw(bytes,FRESH_BIRTH_LIMIT)?; Self::shape(&value)?;
+        let wire: FreshBirthWire = decode(value)?; wire.validate()?; Ok(Self(wire))
+    }
+    pub fn canonical_bytes_data(&self) -> Result<Vec<u8>> { encode(&self.0,FRESH_BIRTH_LIMIT) }
+    pub fn producer_digests_data(&self) -> (&str,&str) {(&self.0.producer_descriptor_sha256,&self.0.producer_signature_sha256)}
+    pub fn registration_origin_data(&self) -> FreshRegistrationOriginData {self.0.registration_origin}
+    /// Fixed order: install root, versions root, R, M. No input-selected roles.
+    pub fn identities_data(&self) -> [FreshBirthIdentityData;4] {
+        [self.0.install_root,self.0.versions_root,self.0.registration_gate,self.0.maintenance_gate].map(FreshBirthIdentityData)
+    }
+}
+
+/// Closed correlation with the final native blank-versions receipt. This
+/// DATA cannot construct an exclusion, conservation owner, or Fresh readiness.
+#[derive(Clone,Debug,Deserialize,Serialize,PartialEq,Eq)]
+#[serde(rename_all="camelCase",deny_unknown_fields)]
+pub struct FreshConservationReferenceData { invocation:String,receipt_sha256:String }
+impl FreshConservationReferenceData {
+    pub fn new_data(invocation:&str,receipt_sha256:&str)->Result<Self> {
+        let value=Self{invocation:invocation.into(),receipt_sha256:receipt_sha256.into()};
+        require(value.valid(),TransactionDataError::Binding)?;Ok(value)
+    }
+    fn valid(&self)->bool {hex(&self.invocation,32)&&hex(&self.receipt_sha256,64)}
+    pub fn invocation_data(&self)->&str{&self.invocation}
+    pub fn receipt_sha256_data(&self)->&str{&self.receipt_sha256}
+}
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct IntentWire {
+    schema_version: u32, kind: String, target: String, invocation: String, request_id: String, action: ActionData,
+    previous: Option<ReleaseData>, next: ReleaseData, previous_state: Option<StateLink>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    recovery: Option<RecoveryReferenceData>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    restore_recovery: Option<RestoreReferenceData>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    fresh_birth: Option<FreshBirthWire>,
+    #[serde(default,skip_serializing_if="Option::is_none")]
+    fresh_conservation:Option<FreshConservationReferenceData>,
+}
+/// Validated comparison input only; no Deserialize bypass or mutation methods.
+#[derive(Debug)]
+pub struct IntentData { wire: IntentWire, body_sha256: String }
+impl IntentData {
+    pub fn parse_data(bytes: &[u8], expected: &ReleaseSetData) -> Result<Self> {
+        Self::parse_selected_data(bytes, expected, true)
+    }
+    /// An explicitly linked historical intent is compared to the same producer
+    /// set. Its old next tuple is not substituted for the current selection.
+    pub fn parse_recorded_data(bytes: &[u8], expected: &ReleaseSetData) -> Result<Self> {
+        Self::parse_selected_data(bytes, expected, false)
+    }
+    fn parse_selected_data(bytes: &[u8], expected: &ReleaseSetData, current: bool) -> Result<Self> {
+        let value = raw(bytes, INTENT_LIMIT)?;
+        record_field(&value, "previous", true)?; record_field(&value, "next", false)?;
+        record_field(&value, "previousState", true)?;
+        if value.get("recovery").is_some() { record_field(&value,"recovery",false)?; }
+        if value.get("restoreRecovery").is_some() { record_field(&value,"restoreRecovery",false)?; }
+        if let Some(birth) = value.get("freshBirth") {FreshBirthData::shape(birth)?;}
+        if value.get("freshConservation").is_some(){record_field(&value,"freshConservation",false)?;}
+        let wire: IntentWire = decode(value)?;
+        header(wire.schema_version, &wire.kind, INTENT_KIND, &wire.target, &wire.invocation, &wire.request_id, expected)?;
+        pair(expected, wire.action, wire.previous.as_ref(), &wire.next, current)?;
+        require(match &wire.previous_state {
+            None => wire.action == ActionData::FreshInstall,
+            Some(link) => link.valid() && link.invocation != wire.invocation && wire.previous.is_some(),
+        }, TransactionDataError::Binding)?;
+        require(wire.recovery.as_ref().is_none_or(|r| r.valid()
+            && wire.action == ActionData::SamePackageNoop && r.torn_invocation != wire.invocation),
+            TransactionDataError::Binding)?;
+        require(wire.restore_recovery.as_ref().is_none_or(|r|r.valid() && wire.recovery.is_none()
+            && wire.action==ActionData::RestoreFixedApp && r.receipt_invocation==wire.invocation
+            && wire.previous_state.as_ref().is_some_and(|old|old.invocation!=r.torn_invocation)),
+            TransactionDataError::Binding)?;
+        require(wire.fresh_conservation.as_ref().is_none_or(|r|r.valid() && r.invocation!=wire.invocation
+            && r.invocation!=wire.request_id),TransactionDataError::Binding)?;
+        if let Some(birth) = &wire.fresh_birth {
+            birth.validate()?;
+            require(wire.action == ActionData::FreshInstall && wire.previous.is_none() && wire.previous_state.is_none()
+                && wire.invocation != wire.request_id && wire.recovery.is_none() && wire.restore_recovery.is_none(),
+                TransactionDataError::Binding)?;
+        }
+        Ok(Self { wire, body_sha256: digest(bytes) })
+    }
+    pub fn invocation_data(&self) -> &str { &self.wire.invocation }
+    pub fn request_id_data(&self) -> &str { &self.wire.request_id }
+    pub fn digest_data(&self) -> &str { &self.body_sha256 }
+    pub fn recovery_data(&self) -> Option<&RecoveryReferenceData> { self.wire.recovery.as_ref() }
+    pub fn restore_recovery_data(&self) -> Option<&RestoreReferenceData> {self.wire.restore_recovery.as_ref()}
+    pub fn fresh_birth_data(&self) -> Option<FreshBirthData> {self.wire.fresh_birth.clone().map(FreshBirthData)}
+    pub fn fresh_conservation_data(&self)->Option<&FreshConservationReferenceData>{self.wire.fresh_conservation.as_ref()}
+    /// Exact encoder order and newline, retaining optional historical fields.
+    /// It neither changes the stored original digest nor nominates new work.
+    pub fn canonical_bytes_data(&self) -> Result<Vec<u8>> {encode(&self.wire,INTENT_LIMIT)}
+    pub fn parse_canonical_data(bytes: &[u8], expected: &ReleaseSetData, current: bool) -> Result<Self> {
+        let value = Self::parse_selected_data(bytes,expected,current)?;
+        require(value.canonical_bytes_data()? == bytes,TransactionDataError::Binding)?; Ok(value)
+    }
+    /// Strict comparison entry for a future birth-aware observer. Legacy and
+    /// torn records refuse here; even success supplies no native authority.
+    pub fn parse_fresh_birth_data(bytes: &[u8], expected: &ReleaseSetData) -> Result<Self> {
+        let value = Self::parse_canonical_data(bytes,expected,true)?;
+        require(value.wire.fresh_birth.is_some(),TransactionDataError::Binding)?; Ok(value)
+    }
+    pub fn action_data(&self) -> ActionData { self.wire.action }
+    pub fn next_data(&self) -> &ReleaseData { &self.wire.next }
+    pub fn previous_data(&self) -> Option<&ReleaseData> { self.wire.previous.as_ref() }
+    pub fn previous_state_data(&self) -> Option<(&str, &str)> {
+        self.wire.previous_state.as_ref().map(|link| (link.invocation.as_str(), link.sha256.as_str()))
+    }
+    /// Reconstruct only the canonical body of a receipt-bound historical
+    /// Restore retry. The caller must first authenticate that receipt's actual
+    /// ownAttempt original. This recorded comparison is NOT active admission;
+    /// current-only parse/RestorePrepublicationData still gate new work.
+    pub fn restore_retry_body_recorded_data(base:&Self, invocation:&str, request:&str,
+        previous:(&StateData,&CapsuleData),reference:&RestoreReferenceData,
+        expected:&ReleaseSetData) -> Result<Vec<u8>> {
+        require(base.action_data()==ActionData::RestoreFixedApp && base.recovery_data().is_none()
+            && base.restore_recovery_data().is_none_or(|old|old.torn_invocation!=invocation)
+            && previous_matches(base,Some(previous))
+            && expected.contains_data(base.next_data()) && reference.valid()
+            && reference.torn_invocation==base.invocation_data()
+            && reference.receipt_invocation==invocation && invocation!=base.invocation_data()
+            && request!=base.request_id_data(),TransactionDataError::Binding)?;
+        let mut wire=base.wire.clone();wire.invocation=invocation.into();wire.request_id=request.into();
+        wire.restore_recovery=Some(reference.clone());
+        let bytes=encode(&wire,INTENT_LIMIT)?;
+        let parsed=Self::parse_recorded_data(&bytes,expected)?;
+        require(previous_matches(&parsed,Some(previous)),TransactionDataError::Binding)?;
+        Ok(bytes)
+    }
+    /// Construct comparison DATA only after the original observer selected the
+    /// action. A previous successful WORKER capsule is necessary; no file is
+    /// asked to attest its old outer Installer's future exit.
+    pub fn encode_data(invocation: &str, request_id: &str, action: ActionData,
+        previous: Option<(&StateData, &CapsuleData)>, expected: &ReleaseSetData) -> Result<Vec<u8>> {
+        Self::encode_with_recovery_data(invocation,request_id,action,previous,None,expected)
+    }
+    pub fn encode_with_recovery_data(invocation: &str, request_id: &str, action: ActionData,
+        previous: Option<(&StateData, &CapsuleData)>, recovery: Option<&RecoveryReferenceData>,
+        expected: &ReleaseSetData) -> Result<Vec<u8>> {
+        Self::encode_with_references_data(invocation,request_id,action,previous,recovery,None,expected)
+    }
+    pub fn encode_with_fresh_birth_data(invocation: &str, request_id: &str,
+        birth: &FreshBirthData, expected: &ReleaseSetData) -> Result<Vec<u8>> {
+        birth.0.validate()?;
+        let base = Self::encode_data(invocation,request_id,ActionData::FreshInstall,None,expected)?;
+        let mut intent = Self::parse_data(&base,expected)?;
+        intent.wire.fresh_birth = Some(birth.0.clone());
+        let bytes = intent.canonical_bytes_data()?;
+        Self::parse_fresh_birth_data(&bytes,expected)?; Ok(bytes)
+    }
+    pub fn encode_with_fresh_conservation_data(invocation:&str,request_id:&str,birth:&FreshBirthData,
+        reference:&FreshConservationReferenceData,expected:&ReleaseSetData)->Result<Vec<u8>> {
+        let raw=Self::encode_with_fresh_birth_data(invocation,request_id,birth,expected)?;
+        let mut value=Self::parse_fresh_birth_data(&raw,expected)?;
+        value.wire.fresh_conservation=Some(reference.clone());
+        let raw=encode(&value.wire,INTENT_LIMIT)?;Self::parse_fresh_birth_data(&raw,expected)?;Ok(raw)
+    }
+    pub fn encode_with_restore_recovery_data(invocation:&str,request_id:&str,
+        previous:(&StateData,&CapsuleData),reference:&RestoreReferenceData,expected:&ReleaseSetData) -> Result<Vec<u8>> {
+        Self::encode_with_references_data(invocation,request_id,ActionData::RestoreFixedApp,
+            Some(previous),None,Some(reference),expected)
+    }
+    fn encode_with_references_data(invocation:&str,request_id:&str,action:ActionData,
+        previous:Option<(&StateData,&CapsuleData)>,recovery:Option<&RecoveryReferenceData>,
+        restore:Option<&RestoreReferenceData>,expected:&ReleaseSetData) -> Result<Vec<u8>> {
+        require(recovery.is_none_or(|r| previous.is_some_and(|(state,_)|
+            r.stage_invocation == state.current_data().instance_data())),TransactionDataError::Binding)?;
+        let wire = IntentWire { schema_version: 2, kind: INTENT_KIND.into(),
+            target: expected.target_data().target().into(), invocation: invocation.into(), request_id: request_id.into(), action,
+            previous: previous.map(|(state, _)| state.wire.current.release.clone()),
+            next: expected.current_data().clone(), previous_state: previous.map(|(state, _)| StateLink {
+                invocation: state.wire.invocation.clone(), sha256: state.body_sha256.clone() }),
+            recovery:recovery.cloned(),restore_recovery:restore.cloned(),fresh_birth:None,
+            fresh_conservation:previous.and_then(|(state,_)|state.wire.fresh_conservation.clone()) };
+        let bytes = encode(&wire, INTENT_LIMIT)?;
+        let parsed = Self::parse_data(&bytes, expected)?;
+        require(previous_matches(&parsed, previous), TransactionDataError::Binding)?;
+        Ok(bytes)
+    }
+}
+
+/// Directory identity is DATA, not a live ACL/mount/xattr/name observation.
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+struct AppIdentity {
+    device: i64, inode: u64, mode: u32, uid: u32, gid: u32, flags: u32,
+    #[serde(default, rename="volumeUuid", skip_serializing_if="Option::is_none", deserialize_with="crate::macos_persistent_identity::present_uuid")]
+    volume_uuid: Option<crate::macos_persistent_identity::VolumeUuid>,
+}
+impl PartialEq for AppIdentity {
+    fn eq(&self, other: &Self) -> bool {
+        crate::macos_persistent_identity::same_volume_data((self.device,self.volume_uuid),(other.device,other.volume_uuid))
+            && (self.inode,self.mode,self.uid,self.gid,self.flags)==(other.inode,other.mode,other.uid,other.gid,other.flags)
+    }
+}
+impl Eq for AppIdentity {}
+impl AppIdentity {
+    fn valid(&self) -> bool { self.device > 0 && self.inode > 0 && self.mode == 0o040555
+        && self.uid == 0 && self.gid == 0 && self.flags == 0 }
+}
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(tag = "location", rename_all = "kebab-case", deny_unknown_fields)]
+enum AppSlot { Canonical { identity: AppIdentity }, Retained { invocation: String, identity: AppIdentity } }
+impl AppSlot {
+    fn identity(&self) -> &AppIdentity { match self { Self::Canonical { identity } | Self::Retained { identity, .. } => identity } }
+}
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct Generation {
+    release: ReleaseData, instance: String, release_directory: DirectoryIdentity, app: AppSlot,
+}
+fn generation_shape(value: &serde_json::Value) -> Result<()> {
+    object(value)?; record_field(value, "release", false)?; record_field(value, "releaseDirectory", false)?;
+    record_field(value, "app", false)?; record_field(field(value, "app")?, "identity", false)
+}
+impl Generation {
+    fn valid(&self, expected: &ReleaseSetData) -> bool {
+        expected.contains_data(&self.release) && hex(&self.instance, 32) && self.release_directory.valid()
+            && self.app.identity().valid()
+            && match (self.release_directory.volume_uuid,self.app.identity().volume_uuid) {
+                (Some(a),Some(b)) => a==b,
+                (None,None) => self.release_directory.device==self.app.identity().device,
+                // Restore may publish a durable app beside an immutable legacy
+                // runtime record. Native admission authenticates both originals.
+                (None,Some(_)) => true,
+                (Some(_),None) => false,
+            } && match &self.app {
+                AppSlot::Canonical { .. } => true,
+                AppSlot::Retained { invocation, .. } => hex(invocation, 32),
+            }
+    }
+    fn same_runtime(&self, other: &Self) -> bool {
+        self.release == other.release && self.instance == other.instance && self.release_directory == other.release_directory
+    }
+    fn same_objects(&self, other: &Self) -> bool { self.same_runtime(other) && self.app.identity() == other.app.identity() }
+}
+/// Observed identity DATA for the native writer/reader. Construction validates
+/// shape, not a syscall, signature, ACL, mount, original name or permission.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AppIdentityData(AppIdentity);
+impl AppIdentityData {
+    pub fn from_original_fields_data(device: i64, inode: u64, mode: u32, uid: u32, gid: u32, flags: u32) -> Result<Self> {
+        let value = AppIdentity { device, inode, mode, uid, gid, flags, volume_uuid: None };
+        require(value.valid(), TransactionDataError::Binding)?; Ok(Self(value))
+    }
+    pub fn from_original_volume_fields_data(device: i64, inode: u64, mode: u32, uid: u32, gid: u32, flags: u32,
+        volume_uuid: crate::macos_persistent_identity::VolumeUuid) -> Result<Self> {
+        let value = AppIdentity { device, inode, mode, uid, gid, flags, volume_uuid: Some(volume_uuid) };
+        require(value.valid(), TransactionDataError::Binding)?; Ok(Self(value))
+    }
+    pub fn volume_uuid_data(&self) -> Option<crate::macos_persistent_identity::VolumeUuid> { self.0.volume_uuid }
+    pub fn matches_legacy_binding_data(&self, observed: &Self,
+        binding: crate::macos_persistent_identity::LegacyVolumeBindingData) -> bool {
+        self.0.valid() && observed.0.valid()
+            && (self.0.inode,self.0.mode,self.0.uid,self.0.gid,self.0.flags)
+                ==(observed.0.inode,observed.0.mode,observed.0.uid,observed.0.gid,observed.0.flags)
+            && binding.matches_data((self.0.device,self.0.volume_uuid),(observed.0.device,observed.0.volume_uuid))
+    }
+    pub fn fields_data(&self) -> (i64, u64, u32, u32, u32, u32) {
+        (self.0.device, self.0.inode, self.0.mode, self.0.uid, self.0.gid, self.0.flags)
+    }
+}
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GenerationData(Generation);
+impl GenerationData {
+    pub fn from_original_fields_data(expected: &ReleaseSetData, release: &ReleaseData, instance: &str,
+        release_directory: DirectoryIdentity, app: AppIdentityData) -> Result<Self> {
+        let value = Generation { release: release.clone(), instance: instance.into(), release_directory,
+            app: AppSlot::Canonical { identity: app.0 } };
+        require(value.valid(expected), TransactionDataError::Binding)?;
+        // Every selected generation belongs to the one fixed installation
+        // volume. A boot-local device change cannot disguise an inode alias.
+        require(value.release_directory.inode != value.app.identity().inode, TransactionDataError::ReusedIdentity)?;
+        Ok(Self(value))
+    }
+    pub fn release_data(&self) -> &ReleaseData { &self.0.release }
+    pub fn instance_data(&self) -> &str { &self.0.instance }
+    pub fn release_directory_data(&self) -> DirectoryIdentity { self.0.release_directory }
+    pub fn app_identity_data(&self) -> AppIdentityData { AppIdentityData(self.0.app.identity().clone()) }
+    pub fn retained_invocation_data(&self) -> Option<&str> {
+        match &self.0.app { AppSlot::Canonical { .. } => None, AppSlot::Retained { invocation, .. } => Some(invocation) }
+    }
+}
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+enum StatePhase { MutationRecorded, InverseRecorded, PartialRecorded }
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct EvidenceRef { invocation: String, intent_sha256: String, state_sha256: String, capsule_sha256: String }
+#[derive(Clone, Copy)]
+pub struct EvidenceLinkData<'a> {
+    pub invocation: &'a str, pub intent_sha256: &'a str, pub state_sha256: &'a str, pub capsule_sha256: &'a str,
+}
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct Residue {
+    invocation: String, release: ReleaseData, staging_present: bool, runtime_present: bool,
+}
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct StateWire {
+    schema_version: u32, kind: String, target: String, invocation: String, request_id: String, capsule_invocation: String,
+    intended_action: ActionData, phase: StatePhase, current: Generation, retained: Vec<Generation>,
+    previous_evidence: Vec<EvidenceRef>, residue: Option<Residue>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    recovery: Option<RecoveryReferenceData>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    restore_recovery: Option<RestoreReferenceData>,
+    #[serde(default,skip_serializing_if="Option::is_none")]
+    fresh_conservation:Option<FreshConservationReferenceData>,
+}
+#[derive(Debug)]
+pub struct StateData { wire: StateWire, body_sha256: String }
+impl StateData {
+    pub fn parse_data(bytes: &[u8], expected: &ReleaseSetData) -> Result<Self> {
+        let value = raw(bytes, STATE_LIMIT)?;
+        generation_shape(field(&value, "current")?)?;
+        for item in records(&value, "retained", PREDECESSOR_LIMIT)? { generation_shape(item)?; }
+        records(&value, "previousEvidence", INVOCATION_LIMIT - 1)?;
+        record_field(&value, "residue", true)?;
+        if value.get("recovery").is_some() { record_field(&value,"recovery",false)?; }
+        if value.get("restoreRecovery").is_some() { record_field(&value,"restoreRecovery",false)?; }
+        if value.get("freshConservation").is_some(){record_field(&value,"freshConservation",false)?;}
+        if !field(&value, "residue")?.is_null() { record_field(field(&value, "residue")?, "release", false)?; }
+        let wire: StateWire = decode(value)?;
+        header(wire.schema_version, &wire.kind, STATE_KIND, &wire.target, &wire.invocation, &wire.request_id, expected)?;
+        require(wire.capsule_invocation == wire.invocation && wire.intended_action != ActionData::Uninstall
+            && wire.current.valid(expected) && matches!(wire.current.app, AppSlot::Canonical { .. }), TransactionDataError::Binding)?;
+        let mut generations = vec![&wire.current];
+        let mut volume = None;
+        for generation in std::iter::once(&wire.current).chain(wire.retained.iter()) {
+            for uuid in [generation.release_directory.volume_uuid,generation.app.identity().volume_uuid].into_iter().flatten() {
+                require(volume.is_none_or(|observed|observed==uuid),TransactionDataError::Binding)?;
+                volume=Some(uuid);
+            }
+        }
+        let mut identities = BTreeSet::new();
+        for identity in [wire.current.release_directory.inode, wire.current.app.identity().inode] {
+            require(identities.insert(identity), TransactionDataError::ReusedIdentity)?;
+        }
+        let mut names = BTreeSet::new();
+        for item in &wire.retained {
+            require(item.valid(expected) && match &item.app {
+                AppSlot::Retained { invocation, .. } => names.insert(invocation.as_str()), _ => false,
+            }, TransactionDataError::Binding)?;
+            require(!generations.iter().any(|old| old.release == item.release || old.instance == item.instance
+                || old.release_directory == item.release_directory || old.app.identity() == item.app.identity()),
+                TransactionDataError::ReusedIdentity)?;
+            for identity in [item.release_directory.inode, item.app.identity().inode] {
+                require(identities.insert(identity), TransactionDataError::ReusedIdentity)?;
+            }
+            generations.push(item);
+        }
+        let mut previous = "";
+        for item in &wire.previous_evidence {
+            require(hex(&item.invocation, 32) && item.invocation != wire.invocation && item.invocation.as_str() > previous
+                && [&item.intent_sha256, &item.state_sha256, &item.capsule_sha256].iter().all(|x| hex(x, 64)), TransactionDataError::Binding)?;
+            previous = &item.invocation;
+        }
+        // Every retained name is explicitly linked, never an unknown historical
+        // directory adopted merely because it has the right spelling.
+        for name in names {
+            require(name == wire.invocation || wire.previous_evidence.iter().any(|item| item.invocation == name),
+                TransactionDataError::Binding)?;
+        }
+        if let Some(residue) = &wire.residue {
+            require(wire.phase != StatePhase::MutationRecorded && residue.invocation == wire.invocation
+                && residue.release == *expected.current_data() && (residue.staging_present || residue.runtime_present), TransactionDataError::Binding)?;
+        }
+        require(wire.phase != StatePhase::InverseRecorded || wire.intended_action == ActionData::Update,
+            TransactionDataError::Binding)?;
+        require(wire.recovery.as_ref().is_none_or(|r| r.valid()
+            && wire.intended_action == ActionData::SamePackageNoop && wire.phase == StatePhase::MutationRecorded
+            && r.stage_invocation == wire.current.instance && r.torn_invocation != wire.invocation
+            && !wire.previous_evidence.iter().any(|old|old.invocation == r.torn_invocation)),
+            TransactionDataError::Binding)?;
+        require(wire.restore_recovery.as_ref().is_none_or(|r|r.valid() && wire.recovery.is_none()
+            && wire.intended_action==ActionData::RestoreFixedApp && wire.phase==StatePhase::MutationRecorded
+            && r.receipt_invocation==wire.invocation
+            && !wire.previous_evidence.iter().any(|old|old.invocation==r.torn_invocation)),TransactionDataError::Binding)?;
+        require(wire.fresh_conservation.as_ref().is_none_or(|r|r.valid() && r.invocation!=wire.invocation
+            && r.invocation!=wire.request_id && !wire.previous_evidence.iter().any(|old|old.invocation==r.invocation)),
+            TransactionDataError::Binding)?;
+        Ok(Self { wire, body_sha256: digest(bytes) })
+    }
+    pub fn invocation_data(&self) -> &str { &self.wire.invocation }
+    pub fn request_id_data(&self) -> &str { &self.wire.request_id }
+    pub fn digest_data(&self) -> &str { &self.body_sha256 }
+    pub fn action_data(&self) -> ActionData { self.wire.intended_action }
+    pub fn recovery_data(&self) -> Option<&RecoveryReferenceData> { self.wire.recovery.as_ref() }
+    pub fn restore_recovery_data(&self) -> Option<&RestoreReferenceData> {self.wire.restore_recovery.as_ref()}
+    pub fn fresh_conservation_data(&self)->Option<&FreshConservationReferenceData>{self.wire.fresh_conservation.as_ref()}
+    pub fn current_data(&self) -> GenerationData { GenerationData(self.wire.current.clone()) }
+    pub fn retained_data(&self) -> impl Iterator<Item = GenerationData> + '_ {
+        self.wire.retained.iter().cloned().map(GenerationData)
+    }
+    pub fn evidence_data(&self) -> impl Iterator<Item = EvidenceLinkData<'_>> {
+        self.wire.previous_evidence.iter().map(|item| EvidenceLinkData { invocation: &item.invocation,
+            intent_sha256: &item.intent_sha256, state_sha256: &item.state_sha256, capsule_sha256: &item.capsule_sha256 })
+    }
+    pub fn mutation_recorded_data(&self) -> bool { self.wire.phase == StatePhase::MutationRecorded && self.wire.residue.is_none() }
+    fn next_evidence(previous: Option<(&StateData, &CapsuleData)>) -> Result<Vec<EvidenceRef>> {
+        let Some((old, capsule)) = previous else { return Ok(Vec::new()); };
+        require(old.wire.previous_evidence.len() < INVOCATION_LIMIT - 1, TransactionDataError::Limit)?;
+        let mut refs = old.wire.previous_evidence.clone();
+        refs.push(EvidenceRef { invocation: old.wire.invocation.clone(), intent_sha256: capsule.wire.intent_sha256.clone(),
+            state_sha256: old.body_sha256.clone(), capsule_sha256: capsule.body_sha256.clone() });
+        refs.sort_by(|a, b| a.invocation.cmp(&b.invocation)); Ok(refs)
+    }
+    /// Records actual supplied generation observations and derives the exact
+    /// retained/evidence set. It does not publish, close, commit or authenticate.
+    pub fn encode_applied_data(intent: &IntentData, previous: Option<(&StateData, &CapsuleData)>,
+        current: &GenerationData, expected: &ReleaseSetData) -> Result<Vec<u8>> {
+        require(previous_matches(intent, previous) && current.0.release == intent.wire.next
+            && matches!(current.0.app, AppSlot::Canonical { .. }), TransactionDataError::Binding)?;
+        let mut retained = previous.map_or_else(Vec::new, |(old, _)| old.wire.retained.clone());
+        let shape = match (intent.wire.action, previous) {
+            (ActionData::FreshInstall, None) => true,
+            (ActionData::SamePackageNoop, Some((old, _))) => old.wire.current == current.0,
+            (ActionData::RestoreFixedApp, Some((old, _))) => old.wire.current.same_runtime(&current.0),
+            (ActionData::Update, Some((old, _))) => {
+                require(retained.len() < PREDECESSOR_LIMIT, TransactionDataError::Limit)?;
+                let mut held = old.wire.current.clone();
+                held.app = AppSlot::Retained { invocation: intent.wire.invocation.clone(), identity: held.app.identity().clone() };
+                retained.push(held); true
+            },
+            _ => false,
+        };
+        require(shape, TransactionDataError::Binding)?;
+        let wire = StateWire { schema_version: 2, kind: STATE_KIND.into(), target: intent.wire.target.clone(),
+            invocation: intent.wire.invocation.clone(), request_id: intent.wire.request_id.clone(), capsule_invocation: intent.wire.invocation.clone(),
+            intended_action: intent.wire.action, phase: StatePhase::MutationRecorded, current: current.0.clone(),
+            retained, previous_evidence: Self::next_evidence(previous)?, residue: None, recovery:intent.wire.recovery.clone(),restore_recovery:intent.wire.restore_recovery.clone(),
+            fresh_conservation:intent.wire.fresh_conservation.clone() };
+        let bytes = encode(&wire, STATE_LIMIT)?; Self::parse_data(&bytes, expected)?; Ok(bytes)
+    }
+    /// Only the known one-inverse path may supply these observations. A failed
+    /// update is retained as such; restored A is not relabeled as successful B.
+    pub fn encode_inverse_data(intent: &IntentData, previous: (&StateData, &CapsuleData),
+        staging_present: bool, runtime_present: bool, expected: &ReleaseSetData) -> Result<Vec<u8>> {
+        require(intent.wire.action == ActionData::Update && previous_matches(intent, Some(previous))
+            && staging_present && runtime_present, TransactionDataError::Binding)?;
+        let wire = StateWire { schema_version: 2, kind: STATE_KIND.into(), target: intent.wire.target.clone(),
+            invocation: intent.wire.invocation.clone(), request_id: intent.wire.request_id.clone(), capsule_invocation: intent.wire.invocation.clone(),
+            intended_action: intent.wire.action, phase: StatePhase::InverseRecorded,
+            current: previous.0.wire.current.clone(), retained: previous.0.wire.retained.clone(),
+            previous_evidence: Self::next_evidence(Some(previous))?, residue: Some(Residue {
+                invocation: intent.wire.invocation.clone(), release: intent.wire.next.clone(), staging_present, runtime_present }), recovery:None,restore_recovery:None,
+            fresh_conservation:intent.wire.fresh_conservation.clone() };
+        let bytes = encode(&wire, STATE_LIMIT)?; Self::parse_data(&bytes, expected)?; Ok(bytes)
+    }
+}
+
+/// Comparison-only disposition of a Noop's exact State pair. No raw State
+/// can attest a successful interrupted worker; the prior genuine capsule is
+/// required before deriving any allowed writer prefix.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum NoopStatePlacementData { Unchanged, PendingBeforeSwap, Swapped }
+pub struct NoopRecoveryData {
+    torn_invocation:String, previous_invocation:String, previous_state_sha256:String,
+    previous_capsule_sha256:String, stage_invocation:String, expected_state:Vec<u8>,
+}
+impl NoopRecoveryData {
+    pub fn from_recorded_data(torn:&IntentData, previous:(&StateData,&CapsuleData),
+        expected:&ReleaseSetData)->Result<Self> {
+        require(torn.action_data()==ActionData::SamePackageNoop && previous_matches(torn,Some(previous))
+            && expected.contains_data(previous.0.current_data().release_data()),TransactionDataError::Binding)?;
+        let stage=previous.0.current_data().instance_data().to_owned();
+        require(torn.recovery_data().is_none_or(|r|r.stage_invocation==stage),TransactionDataError::Binding)?;
+        Ok(Self {torn_invocation:torn.invocation_data().into(),previous_invocation:previous.0.invocation_data().into(),
+            previous_state_sha256:previous.0.digest_data().into(),previous_capsule_sha256:previous.1.digest_data().into(),
+            stage_invocation:stage,expected_state:StateData::encode_applied_data(torn,Some(previous),
+                &previous.0.current_data(),expected)?})
+    }
+    pub fn expected_state_data(&self)->&[u8] {&self.expected_state}
+    pub fn torn_invocation_data(&self)->&str {&self.torn_invocation}
+    pub fn stage_invocation_data(&self)->&str {&self.stage_invocation}
+    pub fn previous_data(&self)->(&str,&str,&str) {
+        (&self.previous_invocation,&self.previous_state_sha256,&self.previous_capsule_sha256)
+    }
+    pub fn state_placement_data(&self, previous:&[u8], canonical:&[u8], archived:Option<&[u8]>)
+        ->Result<NoopStatePlacementData> {
+        require(!previous.is_empty() && previous.len()<=STATE_LIMIT
+            && digest(previous)==self.previous_state_sha256 && canonical.len()<=STATE_LIMIT
+            && archived.is_none_or(|a|a.len()<=STATE_LIMIT),TransactionDataError::Binding)?;
+        match (canonical==previous,archived) {
+            (true,None)=>Ok(NoopStatePlacementData::Unchanged),
+            (true,Some(pending)) if self.expected_state.starts_with(pending)
+                && pending!=previous=>Ok(NoopStatePlacementData::PendingBeforeSwap),
+            (false,Some(old)) if old==previous && canonical==self.expected_state=>Ok(NoopStatePlacementData::Swapped),
+            _=>Err(TransactionDataError::Transition),
+        }
+    }
+}
+
+/// Restore's pre-publication comparison is intentionally distinct from Noop
+/// State-swap recovery. Native admission must still verify the signed app-only
+/// prefix, complete stage-created receipt, unchanged launcher, original custody
+/// and whole namespace. This type supplies neither effect nor replay authority.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RestoreOriginalPlacementData { Original, Preserved }
+impl RestoreOriginalPlacementData {
+    pub fn compare_data(expected:crate::macos_applications_launcher::OriginalIdentityData,
+        original:Option<crate::macos_applications_launcher::OriginalIdentityData>,
+        preserved:Option<crate::macos_applications_launcher::OriginalIdentityData>)->Result<Self> {
+        require(expected.valid_data(),TransactionDataError::Binding)?;
+        match (original,preserved) {
+            (Some(value),None) if value==expected=>Ok(Self::Original),
+            (None,Some(value)) if value==expected=>Ok(Self::Preserved),
+            _=>Err(TransactionDataError::Transition),
+        }
+    }
+}
+pub struct RestorePrepublicationData {
+    torn_invocation: String, torn_request: String, torn_sha256: String,
+    previous_invocation: String, previous_state_sha256: String, previous_capsule_sha256: String,
+    runtime_instance: String, release: ReleaseData,
+}
+impl RestorePrepublicationData {
+    pub fn from_recorded_data(torn: &IntentData, previous: (&StateData, &CapsuleData),
+        expected: &ReleaseSetData) -> Result<Self> {
+        require(torn.restore_recovery_data().is_none(),TransactionDataError::Binding)?;
+        Self::from_current_recorded(torn,previous,expected)
+    }
+    /// Comparison only, after the native caller has fully audited the exact
+    /// referenced prior preservation group. A complete receipt by itself is
+    /// insufficient. The current-source/no-State-change requirements remain.
+    pub fn from_preserved_retry_data(torn:&IntentData,prior_base:&IntentData,
+        previous:(&StateData,&CapsuleData),expected:&ReleaseSetData)->Result<Self> {
+        require(torn.restore_recovery_data().is_some_and(|reference|
+            reference.torn_invocation==prior_base.invocation_data()&&reference.receipt_invocation==torn.invocation_data())
+            && prior_base.action_data()==ActionData::RestoreFixedApp&&prior_base.recovery_data().is_none()
+            && previous_matches(prior_base,Some(previous))&&prior_base.next_data()==torn.next_data()
+            && torn.request_id_data()!=prior_base.request_id_data(),TransactionDataError::Binding)?;
+        Self::from_current_recorded(torn,previous,expected)
+    }
+    fn from_current_recorded(torn:&IntentData,previous:(&StateData,&CapsuleData),expected:&ReleaseSetData)->Result<Self> {
+        require(torn.action_data() == ActionData::RestoreFixedApp && torn.recovery_data().is_none()
+            && previous_matches(torn, Some(previous))
+            && torn.next_data() == expected.current_data()
+            && previous.0.current_data().release_data() == expected.current_data(),
+            TransactionDataError::Binding)?;
+        Ok(Self { torn_invocation: torn.invocation_data().into(), torn_request: torn.request_id_data().into(),
+            torn_sha256: torn.digest_data().into(), previous_invocation: previous.0.invocation_data().into(),
+            previous_state_sha256: previous.0.digest_data().into(),
+            previous_capsule_sha256: previous.1.digest_data().into(),
+            runtime_instance: previous.0.current_data().instance_data().into(), release: torn.next_data().clone() })
+    }
+    pub fn torn_data(&self) -> (&str, &str, &str) {
+        (&self.torn_invocation, &self.torn_request, &self.torn_sha256)
+    }
+    pub fn previous_data(&self) -> (&str, &str, &str) {
+        (&self.previous_invocation, &self.previous_state_sha256, &self.previous_capsule_sha256)
+    }
+    pub fn runtime_instance_data(&self) -> &str { &self.runtime_instance }
+    /// Canonical bytes must still be the exact previous State. Even an empty
+    /// pending State or an equal-byte published App is outside this slice.
+    /// None means the native observer proved absence; it is not proof itself.
+    pub fn unchanged_state_data(&self, canonical: &[u8], pending_state: Option<&[u8]>,
+        fixed_app: Option<crate::macos_applications_launcher::OriginalIdentityData>) -> Result<()> {
+        require(!canonical.is_empty() && canonical.len() <= STATE_LIMIT
+            && digest(canonical) == self.previous_state_sha256
+            && pending_state.is_none() && fixed_app.is_none(), TransactionDataError::Transition)
+    }
+    /// A newly admitted invocation must retain exactly the same old history,
+    /// runtime and selected release, without replaying either request identity.
+    pub fn retry_data(&self, next: &IntentData, previous: (&StateData, &CapsuleData),
+        expected: &ReleaseSetData) -> Result<()> {
+        require(next.action_data()==ActionData::RestoreFixedApp && next.recovery_data().is_none()
+            && previous_matches(next,Some(previous)) && next.next_data()==expected.current_data()
+            && next.next_data()==&self.release
+            && next.restore_recovery_data().is_none_or(|r|r.torn_invocation==self.torn_invocation),
+            TransactionDataError::Binding)?;
+        require(next.invocation_data()!=self.torn_invocation && next.request_id_data()!=self.torn_request,
+            TransactionDataError::ReusedIdentity)?;
+        require((previous.0.invocation_data(),previous.0.digest_data(),previous.1.digest_data())==self.previous_data()
+            && previous.0.current_data().instance_data()==self.runtime_instance,TransactionDataError::Binding)
+    }
+    /// Compare one stage/intent original against its immutable receipt binding.
+    /// Called separately for BOTH objects, after real no-follow metadata/flags/
+    /// byte audits. A source-equal replacement cannot replace dev/inode/birth.
+    pub fn original_placement_data(&self, expected: crate::macos_applications_launcher::OriginalIdentityData,
+        original: Option<crate::macos_applications_launcher::OriginalIdentityData>,
+        preserved: Option<crate::macos_applications_launcher::OriginalIdentityData>)
+        -> Result<RestoreOriginalPlacementData> {
+        RestoreOriginalPlacementData::compare_data(expected,original,preserved)
+    }
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+enum WorkerOutcome { Applied, SamePackage, RestoredApp, InverseRecorded, Refused, Partial, Unknown }
+/// Actual original returns must be supplied by the native parent, not decoded
+/// from a worker's assertion about its own future join or inherited-gate close.
+pub struct WriterObservationData {
+    pub returned: bool, pub exit_code: Option<u8>, pub original_joined: bool, pub result_eof: bool,
+    pub original_closes_known: bool, pub within_original_deadline: bool,
+    pub payload_write_count: u64, pub payload_write_bytes: u64,
+}
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum RecordedOutcomeData { Applied, SamePackage, RestoredApp, InverseRecorded, Refused, Partial, Unknown }
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct WorkerFacts {
+    returned: bool, exit_code: Option<u8>, original_joined: bool, result_eof: bool,
+    original_closes_known: bool, within_original_deadline: bool, payload_write_count: u64, payload_write_bytes: u64,
+}
+impl WorkerFacts {
+    fn settled_data(&self) -> bool { self.returned && self.original_joined && self.result_eof
+        && self.original_closes_known && self.within_original_deadline }
+}
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(rename_all = "camelCase", deny_unknown_fields)]
+struct CapsuleWire {
+    schema_version: u32, kind: String, target: String, invocation: String, request_id: String, intended_action: ActionData,
+    previous: Option<ReleaseData>, next: ReleaseData, actual_current: Option<ReleaseData>,
+    intent_sha256: String, state_sha256: Option<String>, outcome: WorkerOutcome, writer: WorkerFacts,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    launcher: Option<crate::macos_applications_launcher::ObservationData>,
+}
+#[derive(Debug)]
+pub struct CapsuleData { wire: CapsuleWire, body_sha256: String }
+impl CapsuleData {
+    pub fn parse_data(bytes: &[u8], expected: &ReleaseSetData) -> Result<Self> {
+        Self::parse_selected_data(bytes, expected, true)
+    }
+    /// Historical capsule DATA may name only a tuple in the independently
+    /// selected producer set. It does not select a new expected release/target.
+    pub fn parse_recorded_data(bytes: &[u8], expected: &ReleaseSetData) -> Result<Self> {
+        Self::parse_selected_data(bytes, expected, false)
+    }
+    fn parse_selected_data(bytes: &[u8], expected: &ReleaseSetData, current: bool) -> Result<Self> {
+        let value = raw(bytes, CAPSULE_LIMIT)?;
+        for name in ["previous", "actualCurrent"] { record_field(&value, name, true)?; }
+        for name in ["next", "writer"] { record_field(&value, name, false)?; }
+        field(&value, "stateSha256")?; field(field(&value, "writer")?, "exitCode")?;
+        if value.get("launcher").is_some() { record_field(&value, "launcher", false)?; }
+        let wire: CapsuleWire = decode(value)?;
+        header(wire.schema_version, &wire.kind, CAPSULE_KIND, &wire.target, &wire.invocation, &wire.request_id, expected)?;
+        pair(expected, wire.intended_action, wire.previous.as_ref(), &wire.next, current)?;
+        require(hex(&wire.intent_sha256, 64) && wire.state_sha256.as_ref().is_none_or(|h| hex(h, 64))
+            && wire.actual_current.as_ref().is_none_or(|r| expected.contains_data(r))
+            && wire.writer.returned == wire.writer.exit_code.is_some()
+            && (!wire.writer.original_joined || wire.writer.returned)
+            && (wire.writer.payload_write_count == 0) == (wire.writer.payload_write_bytes == 0)
+            && wire.writer.payload_write_count <= wire.writer.payload_write_bytes
+            && wire.writer.payload_write_bytes <= PAYLOAD_LIMIT,
+            TransactionDataError::Binding)?;
+        require(wire.launcher.as_ref().is_none_or(|row| row.valid_data()
+            && wire.writer.payload_write_bytes.checked_add(row.write_bytes).is_some_and(|n| n <= PAYLOAD_LIMIT)),
+            TransactionDataError::Binding)?;
+        if let Some(row) = &wire.launcher {
+            require(match wire.outcome {
+                WorkerOutcome::Applied | WorkerOutcome::SamePackage | WorkerOutcome::RestoredApp => row.complete_data(false),
+                WorkerOutcome::InverseRecorded => row.complete_data(true),
+                _ => true,
+            }, TransactionDataError::Binding)?;
+        }
+        Ok(Self { wire, body_sha256: digest(bytes) })
+    }
+    pub fn digest_data(&self) -> &str { &self.body_sha256 }
+    pub fn invocation_data(&self) -> &str { &self.wire.invocation }
+    pub fn request_id_data(&self) -> &str { &self.wire.request_id }
+    pub fn intent_digest_data(&self) -> &str { &self.wire.intent_sha256 }
+    pub fn launcher_data(&self) -> Option<&crate::macos_applications_launcher::ObservationData> { self.wire.launcher.as_ref() }
+    pub fn encode_data(intent: &IntentData, previous: Option<(&StateData, &CapsuleData)>, state: Option<&StateData>,
+        actual_current: Option<&ReleaseData>, outcome: RecordedOutcomeData, observed: WriterObservationData,
+        expected: &ReleaseSetData) -> Result<Vec<u8>> {
+        Self::encode_with_launcher_data(intent, previous, state, actual_current, outcome, observed, None, expected)
+    }
+    pub fn encode_with_launcher_data(intent: &IntentData, previous: Option<(&StateData, &CapsuleData)>, state: Option<&StateData>,
+        actual_current: Option<&ReleaseData>, outcome: RecordedOutcomeData, observed: WriterObservationData,
+        launcher: Option<crate::macos_applications_launcher::ObservationData>, expected: &ReleaseSetData) -> Result<Vec<u8>> {
+        let wire_outcome = match outcome {
+            RecordedOutcomeData::Applied => WorkerOutcome::Applied, RecordedOutcomeData::SamePackage => WorkerOutcome::SamePackage,
+            RecordedOutcomeData::RestoredApp => WorkerOutcome::RestoredApp, RecordedOutcomeData::InverseRecorded => WorkerOutcome::InverseRecorded,
+            RecordedOutcomeData::Refused => WorkerOutcome::Refused, RecordedOutcomeData::Partial => WorkerOutcome::Partial,
+            RecordedOutcomeData::Unknown => WorkerOutcome::Unknown,
+        };
+        let wire = CapsuleWire { schema_version: 2, kind: CAPSULE_KIND.into(), target: intent.wire.target.clone(),
+            invocation: intent.wire.invocation.clone(), request_id: intent.wire.request_id.clone(), intended_action: intent.wire.action,
+            previous: intent.wire.previous.clone(), next: intent.wire.next.clone(), actual_current: actual_current.cloned(),
+            intent_sha256: intent.body_sha256.clone(), state_sha256: state.map(|s| s.body_sha256.clone()), outcome: wire_outcome,
+            writer: WorkerFacts { returned: observed.returned, exit_code: observed.exit_code,
+                original_joined: observed.original_joined, result_eof: observed.result_eof,
+                original_closes_known: observed.original_closes_known, within_original_deadline: observed.within_original_deadline,
+                payload_write_count: observed.payload_write_count, payload_write_bytes: observed.payload_write_bytes }, launcher };
+        let bytes = encode(&wire, CAPSULE_LIMIT)?;
+        let capsule = Self::parse_data(&bytes, expected)?;
+        let correspondence = correspondence_data(intent, previous, state, Some(&capsule));
+        let wanted = match outcome {
+            RecordedOutcomeData::Applied | RecordedOutcomeData::SamePackage | RecordedOutcomeData::RestoredApp => CorrespondenceData::MatchingRecordedData,
+            RecordedOutcomeData::InverseRecorded => CorrespondenceData::InverseRecorded,
+            RecordedOutcomeData::Refused | RecordedOutcomeData::Partial => CorrespondenceData::FailureRecorded,
+            RecordedOutcomeData::Unknown => CorrespondenceData::Indeterminate,
+        };
+        require(correspondence == wanted, TransactionDataError::Binding)?; Ok(bytes)
+    }
+}
+
+/// Comparison labels only. Even MatchingRecordedData does not establish that
+/// these files were trusted, this is the current invocation, or any native event
+/// occurred. The actual owner must retain those independent original proofs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CorrespondenceData { Pending, Mismatch, Indeterminate, FailureRecorded, InverseRecorded, MatchingRecordedData }
+fn previous_matches(intent: &IntentData, previous: Option<(&StateData, &CapsuleData)>) -> bool {
+    match (&intent.wire.previous_state, previous) {
+        (None, None) => true,
+        (Some(link), Some((state, capsule))) => {
+            let c = &capsule.wire;
+            link.invocation == state.wire.invocation && link.sha256 == state.body_sha256
+                && intent.wire.previous.as_ref() == Some(&state.wire.current.release)
+                && state.wire.phase == StatePhase::MutationRecorded && state.wire.residue.is_none()
+                && c.invocation == state.wire.invocation && c.target == intent.wire.target
+                && c.request_id == state.wire.request_id && intent.wire.request_id != state.wire.request_id
+                && c.intended_action == state.wire.intended_action
+                && c.state_sha256.as_deref() == Some(state.body_sha256.as_str())
+                && c.actual_current.as_ref() == Some(&state.wire.current.release)
+                && c.next == state.wire.current.release && c.writer.settled_data() && c.writer.exit_code == Some(0)
+                && match c.outcome {
+                    WorkerOutcome::Applied => matches!(c.intended_action, ActionData::FreshInstall | ActionData::Update)
+                        && c.writer.payload_write_count > 0,
+                    WorkerOutcome::SamePackage => c.intended_action == ActionData::SamePackageNoop && c.writer.payload_write_count == 0,
+                    WorkerOutcome::RestoredApp => c.intended_action == ActionData::RestoreFixedApp && c.writer.payload_write_count > 0,
+                    _ => false,
+                }
+        },
+        _ => false,
+    }
+}
+fn evidence_matches(state: &StateWire, previous: Option<(&StateData, &CapsuleData)>) -> bool {
+    let Some((old, capsule)) = previous else { return state.previous_evidence.is_empty(); };
+    let mut expected = old.wire.previous_evidence.clone();
+    expected.push(EvidenceRef { invocation: old.wire.invocation.clone(), intent_sha256: capsule.wire.intent_sha256.clone(),
+        state_sha256: old.body_sha256.clone(), capsule_sha256: capsule.body_sha256.clone() });
+    expected.sort_by(|a, b| a.invocation.cmp(&b.invocation));
+    state.previous_evidence == expected
+}
+pub fn correspondence_data(intent: &IntentData, previous: Option<(&StateData, &CapsuleData)>, state: Option<&StateData>,
+    capsule: Option<&CapsuleData>) -> CorrespondenceData {
+    if intent.wire.previous_state.is_some() && previous.is_none() { return CorrespondenceData::Pending; }
+    if previous.is_some_and(|(old,_)|old.wire.fresh_conservation!=intent.wire.fresh_conservation)
+        || !previous_matches(intent, previous) || intent.recovery_data().is_some_and(|r|
+        previous.is_none_or(|(old,_)|r.stage_invocation != old.current_data().instance_data())) {
+        return CorrespondenceData::Mismatch;
+    }
+    let Some(capsule) = capsule else { return CorrespondenceData::Pending; };
+    let c = &capsule.wire; let i = &intent.wire;
+    if c.invocation != i.invocation || c.request_id != i.request_id || c.target != i.target || c.intended_action != i.action
+        || c.previous != i.previous || c.next != i.next || c.intent_sha256 != intent.body_sha256 {
+        return CorrespondenceData::Mismatch;
+    }
+    if !c.writer.settled_data() || c.outcome == WorkerOutcome::Unknown { return CorrespondenceData::Indeterminate; }
+    if let Some(state) = state {
+        if c.state_sha256.as_deref() != Some(state.body_sha256.as_str()) || state.wire.invocation != i.invocation
+            || state.wire.request_id != i.request_id || state.wire.target != i.target || state.wire.intended_action != i.action
+            || c.actual_current.as_ref() != Some(&state.wire.current.release)
+            || state.wire.recovery != i.recovery || state.wire.restore_recovery != i.restore_recovery
+            || state.wire.fresh_conservation != i.fresh_conservation { return CorrespondenceData::Mismatch; }
+    } else if c.state_sha256.is_some() { return CorrespondenceData::Pending; }
+    if matches!(c.outcome, WorkerOutcome::Refused | WorkerOutcome::Partial) {
+        return if c.writer.exit_code.is_some_and(|code| code != 0) { CorrespondenceData::FailureRecorded }
+            else { CorrespondenceData::Mismatch };
+    }
+    let Some(state) = state else { return CorrespondenceData::Pending; };
+    let s = &state.wire;
+    if !evidence_matches(s, previous) { return CorrespondenceData::Mismatch; }
+    let previous = previous.map(|(state, _)| state);
+    if c.outcome == WorkerOutcome::InverseRecorded {
+        return if i.action == ActionData::Update && s.phase == StatePhase::InverseRecorded
+            && previous.is_some_and(|old| old.wire.current == s.current && old.wire.retained == s.retained)
+            && s.residue.as_ref().is_some_and(|r| r.staging_present && r.runtime_present && r.release == i.next)
+            && c.writer.exit_code.is_some_and(|code| code != 0) {
+            CorrespondenceData::InverseRecorded
+        } else { CorrespondenceData::Mismatch };
+    }
+    if c.writer.exit_code != Some(0) || s.phase != StatePhase::MutationRecorded || s.residue.is_some()
+        || s.current.release != i.next { return CorrespondenceData::Mismatch; }
+    let objects = match i.action {
+        ActionData::FreshInstall => c.outcome == WorkerOutcome::Applied && c.writer.payload_write_count > 0
+            && s.retained.is_empty() && s.previous_evidence.is_empty(),
+        ActionData::SamePackageNoop => c.outcome == WorkerOutcome::SamePackage && c.writer.payload_write_count == 0
+            && previous.is_some_and(|old| old.wire.current == s.current && old.wire.retained == s.retained),
+        ActionData::RestoreFixedApp => c.outcome == WorkerOutcome::RestoredApp && c.writer.payload_write_count > 0
+            && previous.is_some_and(|old| old.wire.current.same_runtime(&s.current) && old.wire.retained == s.retained),
+        ActionData::Update => c.outcome == WorkerOutcome::Applied && c.writer.payload_write_count > 0 && previous.is_some_and(|old| {
+            s.retained.len() == old.wire.retained.len() + 1
+                && old.wire.retained.iter().all(|retained| s.retained.contains(retained))
+                && s.retained.iter().any(|retained| old.wire.current.same_objects(retained)
+                    && matches!(&retained.app, AppSlot::Retained { invocation, .. } if invocation == &i.invocation))
+        }),
+        ActionData::Uninstall => false,
+    };
+    if objects { CorrespondenceData::MatchingRecordedData } else { CorrespondenceData::Mismatch }
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct GenerationCostData { pub files: u64, pub bytes: u64 }
+/// Closed first rejected predicate only. These labels convey no native facts
+/// or authority; the original observer must supply every complete input.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BudgetRefusalData {
+    Generations, Invocations, Control, Originals, LiveFds, GenerationFiles,
+    GenerationBytes, Evidence, Storage, Arithmetic,
+}
+impl BudgetRefusalData {
+    pub fn reason_data(self) -> &'static str {
+        match self {
+            Self::Generations => "maintenance-budget-generations",
+            Self::Invocations => "maintenance-budget-invocations",
+            Self::Control => "maintenance-budget-control",
+            Self::Originals => "maintenance-budget-originals",
+            Self::LiveFds => "maintenance-budget-live-fds",
+            Self::GenerationFiles => "maintenance-budget-generation-files",
+            Self::GenerationBytes => "maintenance-budget-generation-bytes",
+            Self::Evidence => "maintenance-budget-evidence",
+            Self::Storage => "maintenance-budget-storage",
+            Self::Arithmetic => "maintenance-budget-arithmetic",
+        }
+    }
+}
+#[derive(Debug)]
+pub struct BudgetData { payload_bytes: u64, payload_files: u64, storage_bytes: u64 }
+impl BudgetData {
+    /// Numbers supplied by an actual future inventory observer, including ALL
+    /// retained/current physical payloads AND incoming staging, not merely a
+    /// count of release names. This neither observes nor reserves those objects.
+    pub fn checked_data(generations: &[GenerationCostData], invocation_count: usize, evidence_bytes: u64,
+        control_bytes: u64, original_records: u64, live_fds: u64) -> Result<Self> {
+        Self::checked_with_reason_data(generations, invocation_count, evidence_bytes, control_bytes,
+            original_records, live_fds).map_err(|_| TransactionDataError::Limit)
+    }
+    pub fn checked_with_reason_data(generations: &[GenerationCostData], invocation_count: usize, evidence_bytes: u64,
+        control_bytes: u64, original_records: u64, live_fds: u64) -> std::result::Result<Self, BudgetRefusalData> {
+        use BudgetRefusalData as B;
+        if generations.is_empty() || generations.len() > PREDECESSOR_LIMIT + 1 { return Err(B::Generations); }
+        if invocation_count == 0 || invocation_count > INVOCATION_LIMIT { return Err(B::Invocations); }
+        if control_bytes > CONTROL_LIMIT as u64 { return Err(B::Control); }
+        if original_records > ORIGINAL_LIMIT as u64 { return Err(B::Originals); }
+        if live_fds > 96 { return Err(B::LiveFds); }
+        let (mut payload_bytes, mut payload_files) = (0u64, 0u64);
+        for generation in generations {
+            if generation.files == 0 || generation.files > FILE_LIMIT as u64 { return Err(B::GenerationFiles); }
+            if generation.bytes > PAYLOAD_LIMIT { return Err(B::GenerationBytes); }
+            payload_bytes = payload_bytes.checked_add(generation.bytes).ok_or(B::Arithmetic)?;
+            payload_files = payload_files.checked_add(generation.files).ok_or(B::Arithmetic)?;
+        }
+        // Includes each unique result alongside its linked records, even when
+        // its fixed parent is Application Support rather than the install root,
+        // and the bounded evidence retained in each invocation's stage. Fresh
+        // installs retain an output journal there (up to JOURNAL_LIMIT); before
+        // #49 it was charged but not allowed, refusing every later Update.
+        let evidence_bound = (invocation_count as u64).checked_mul((INTENT_LIMIT + STATE_LIMIT + CAPSULE_LIMIT
+            + REQUEST_EXPORT_LIMIT + STAGE_EVIDENCE_LIMIT) as u64)
+            .ok_or(B::Arithmetic)?;
+        // The pair is persisted outside payload/record hashes, but occupies
+        // actual storage in every current/retained generation. Reserve its full
+        // bounded extent even before an incoming original pair is published.
+        let producer_bound = (generations.len() as u64).checked_mul(PRODUCER_CONTROL_LIMIT as u64)
+            .ok_or(B::Arithmetic)?;
+        if evidence_bytes > evidence_bound { return Err(B::Evidence); }
+        let storage_bytes = maintenance_storage_sum_data(payload_bytes, evidence_bytes)
+            .and_then(|n| maintenance_storage_sum_data(n, producer_bound)).map_err(|_| B::Storage)?;
+        if payload_files > (PREDECESSOR_LIMIT as u64 + 1) * FILE_LIMIT as u64 { return Err(B::GenerationFiles); }
+        Ok(Self { payload_bytes, payload_files, storage_bytes })
+    }
+    pub fn payload_totals_data(&self) -> (u64, u64) { (self.payload_files, self.payload_bytes) }
+    /// Charge independently observed archives once against the same storage
+    /// quota used by update, snapshot and recovery; no payload cap substitution.
+    pub fn storage_with_archives_data(&self, archive_bytes: u64) -> Result<u64> {
+        maintenance_storage_sum_data(self.storage_bytes, archive_bytes)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum StepData { Reobserved, Prepared, RuntimePublished, MetadataPublished, OldAppQuarantined, AppPublished,
+    StatePublished, NewAppWithdrawn, OldAppRestored, StateRestored, OriginalsSettled }
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ReturnedData { KnownSuccess, KnownRefusal, Unknown }
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ProgressOutcomeData { InProgress, Recorded, Refused, Unknown, InverseRecorded }
+/// Finite returned-effect accounting only. No clock call, handle, permission or
+/// operation dispatch; an actual owner must supply the SAME original endpoint,
+/// observations and returned effects. A true supplied bit is not their proof.
+#[derive(Debug)]
+pub struct ProgressData {
+    action: ActionData, end: u64, last_observed: u64, expired: bool, next: usize, unknown: bool, failed: bool,
+    sequence_invalid: bool,
+    inverse_started: bool, inverse_admitted: bool, inverse_complete: bool, inverse_next: usize,
+    old_quarantined: bool, app_published: bool, state_published: bool, settled: bool,
+}
+impl ProgressData {
+    pub fn new_data(action: ActionData, observed_start: u64, original_endpoint: u64) -> Result<Self> {
+        require(action != ActionData::Uninstall && observed_start < original_endpoint, TransactionDataError::Binding)?;
+        Ok(Self { action, end: original_endpoint, last_observed: observed_start, expired: false, next: 0, unknown: false,
+            failed: false, sequence_invalid: false, inverse_started: false, inverse_admitted: false, inverse_complete: false, inverse_next: 0,
+            old_quarantined: false, app_published: false, state_published: false, settled: false })
+    }
+    fn forward(&self) -> &'static [StepData] {
+        use StepData::*;
+        match self.action {
+            ActionData::FreshInstall => &[Prepared, RuntimePublished, MetadataPublished, AppPublished, StatePublished, OriginalsSettled],
+            ActionData::SamePackageNoop => &[Reobserved, StatePublished, OriginalsSettled],
+            ActionData::RestoreFixedApp => &[Reobserved, Prepared, AppPublished, StatePublished, OriginalsSettled],
+            ActionData::Update => &[Reobserved, Prepared, RuntimePublished, MetadataPublished, OldAppQuarantined, AppPublished, StatePublished, OriginalsSettled],
+            ActionData::Uninstall => &[],
+        }
+    }
+    fn returned(&mut self, returned: ReturnedData, at: u64) -> bool {
+        // Late returned successes do not disappear; the original effect still
+        // exists. They can never authorize the next effect or an inverse.
+        if returned == ReturnedData::Unknown || at < self.last_observed { self.unknown = true; }
+        self.last_observed = self.last_observed.max(at);
+        self.expired |= at >= self.end;
+        if returned != ReturnedData::KnownSuccess || self.expired { self.failed = true; }
+        !self.unknown && !self.failed
+    }
+    /// A real validation/persistence refusal after a known effect is not a
+    /// second publication or an out-of-order returned effect. Keep the effect
+    /// and latch failure/uncertainty without manufacturing another step.
+    pub fn stop_data(&mut self, returned: ReturnedData, observed_after: u64) -> Result<()> {
+        require(returned != ReturnedData::KnownSuccess, TransactionDataError::Transition)?;
+        // A post-effect failure during/after inverse settlement must not let the
+        // historical inverse_complete bit become a successful current outcome.
+        if self.inverse_started { self.sequence_invalid = true; self.inverse_admitted = false; }
+        self.returned(returned, observed_after);
+        Err(TransactionDataError::Transition)
+    }
+    pub fn forward_return_data(&mut self, step: StepData, returned: ReturnedData, observed_after: u64) -> Result<()> {
+        if self.failed || self.unknown || self.inverse_started || self.settled || self.forward().get(self.next) != Some(&step) {
+            self.sequence_invalid = true; self.failed = true;
+            self.returned(returned, observed_after);
+            return Err(TransactionDataError::Transition);
+        }
+        // Account known original publication even when its return is late.
+        if returned == ReturnedData::KnownSuccess {
+            self.old_quarantined |= step == StepData::OldAppQuarantined;
+            self.app_published |= step == StepData::AppPublished;
+            self.state_published |= step == StepData::StatePublished;
+            self.settled |= step == StepData::OriginalsSettled;
+            self.next += 1;
+        }
+        if self.returned(returned, observed_after) { Ok(()) } else { Err(TransactionDataError::Transition) }
+    }
+    pub fn begin_inverse_data(&mut self, observed_before: u64, same_originals: bool, exclusive_destinations_absent: bool) -> Result<()> {
+        let allowed = self.action == ActionData::Update && self.failed && !self.unknown && !self.inverse_started
+            && !self.expired && !self.sequence_invalid && !self.settled && !self.state_published && self.old_quarantined
+            && observed_before >= self.last_observed && observed_before < self.end
+            && same_originals && exclusive_destinations_absent;
+        // Attempt and admission are distinct: a refused begin must never open
+        // the inverse-return path or relabel already settled forward work.
+        self.inverse_started = true;
+        self.inverse_admitted = allowed;
+        self.last_observed = self.last_observed.max(observed_before);
+        self.expired |= observed_before >= self.end;
+        if allowed { Ok(()) } else { self.failed = true; Err(TransactionDataError::Transition) }
+    }
+    pub fn inverse_return_data(&mut self, step: StepData, returned: ReturnedData, observed_after: u64) -> Result<()> {
+        use StepData::*;
+        let steps: &[StepData] = if self.app_published { &[NewAppWithdrawn, OldAppRestored, StateRestored, OriginalsSettled] }
+            else { &[OldAppRestored, StateRestored, OriginalsSettled] };
+        if !self.inverse_admitted || self.unknown || self.expired || self.settled || steps.get(self.inverse_next) != Some(&step) {
+            self.sequence_invalid = true; self.inverse_admitted = false; self.failed = true;
+            self.returned(returned, observed_after);
+            return Err(TransactionDataError::Transition);
+        }
+        if returned == ReturnedData::KnownSuccess {
+            self.inverse_next += 1; self.settled |= step == OriginalsSettled;
+        }
+        if returned == ReturnedData::Unknown || observed_after < self.last_observed { self.unknown = true; }
+        self.last_observed = self.last_observed.max(observed_after);
+        self.expired |= observed_after >= self.end;
+        if returned != ReturnedData::KnownSuccess || self.unknown || self.expired {
+            self.inverse_admitted = false; return Err(TransactionDataError::Transition);
+        }
+        self.inverse_complete = self.settled; Ok(())
+    }
+    pub fn outcome_data(&self) -> ProgressOutcomeData {
+        if self.unknown { ProgressOutcomeData::Unknown }
+        // Retain the historical inverse-complete fact, but never let it turn a
+        // subsequent contradictory/late returned effect into a positive label.
+        else if self.sequence_invalid || self.expired { ProgressOutcomeData::Refused }
+        else if self.inverse_complete { ProgressOutcomeData::InverseRecorded }
+        else if self.failed { ProgressOutcomeData::Refused }
+        else if self.settled { ProgressOutcomeData::Recorded } else { ProgressOutcomeData::InProgress }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::macos_install_maintenance::MaintenanceTargetData;
+    use serde_json::{json, Value};
+    // Inert unsigned comparison data, never native package/installation proof.
+    fn release(n: u32) -> Value { json!({"profile":"fixed-macos26-arm64-maintenance-v2",
+        "packageIdentifier":"dev.mobile-release-kit.desktop.installed","bundleIdentifier":"dev.mobile-release-kit.desktop",
+        "packageVersion":format!("0.{n}.0"),"release":format!("macos26-arm64-data-{n}"),"sourceCommit":format!("{n:040x}"),
+        "protocolSha256":"a".repeat(64),"runtimeManifestSha256":format!("{n:064x}"),
+        "inventorySha256":format!("{:064x}",n+20),"signingPolicySha256":"b".repeat(64),"packageSha256":format!("{:064x}",n+40)}) }
+    fn bytes(v: &Value) -> Vec<u8> { serde_json::to_vec(v).unwrap() }
+    const RELEASE_FIELDS: &[&str] = &["profile", "packageIdentifier", "bundleIdentifier", "packageVersion", "release", "sourceCommit",
+        "protocolSha256", "runtimeManifestSha256", "inventorySha256", "signingPolicySha256", "packageSha256"];
+    fn positional(value: &Value, keys: &[&str]) -> Value {
+        Value::Array(keys.iter().map(|key| value[*key].clone()).collect())
+    }
+    fn expected() -> ReleaseSetData { ReleaseSetData::parse_for_target_data(&bytes(&json!({"schemaVersion":2,
+        "current":release(3),"acceptedPredecessors":[release(2)]})), MaintenanceTargetData::Arm64).unwrap() }
+    fn id(n: u32) -> String { format!("{n:032x}") }
+    fn parent(n: u64) -> Value { json!({"device":1,"inode":n,"mode":0o040755,"uid":0,"gid":0,"flags":0}) }
+    fn generation(n: u32) -> Value { json!({"release":release(n),"instance":id(n),"releaseDirectory":parent(100+u64::from(n)),
+        "app":{"location":"canonical","identity":{"device":1,"inode":200+u64::from(n),"mode":0o040555,"uid":0,"gid":0,"flags":0}}}) }
+    fn state(n: u32, invocation: u32) -> Value { json!({"schemaVersion":2,"kind":STATE_KIND,
+        "target":"aarch64-apple-darwin","invocation":id(invocation),"requestId":id(invocation+100),"capsuleInvocation":id(invocation),
+        "intendedAction":"fresh-install","phase":"mutation-recorded","current":generation(n),
+        "retained":[],"previousEvidence":[],"residue":null}) }
+    fn intent(action: &str, old: Option<&Value>) -> Value {
+        let previous = old.map(|v| v["current"]["release"].clone());
+        json!({"schemaVersion":2,"kind":INTENT_KIND,"target":"aarch64-apple-darwin","invocation":id(9),"requestId":id(109),
+            "action":action,"previous":previous,"next":release(3),"previousState":old.map(|v| json!({"invocation":v["invocation"],"sha256":digest(&bytes(v))}))})
+    }
+    fn capsule(intent: &Value, state: &Value, outcome: &str) -> Value { json!({"schemaVersion":2,"kind":CAPSULE_KIND,
+        "target":"aarch64-apple-darwin","invocation":intent["invocation"],"requestId":intent["requestId"],"intendedAction":intent["action"],
+        "previous":intent["previous"],"next":intent["next"],"actualCurrent":state["current"]["release"],
+        "intentSha256":digest(&bytes(intent)),"stateSha256":digest(&bytes(state)),"outcome":outcome,
+        "writer":{"returned":true,"exitCode":0,"originalJoined":true,"resultEof":true,"originalClosesKnown":true,
+            "withinOriginalDeadline":true,"payloadWriteCount":if outcome == "same-package" { 0 } else { 1 },
+            "payloadWriteBytes":if outcome == "same-package" { 0 } else { 1 }}}) }
+    fn prior_capsule(old: &Value) -> Value {
+        let i = json!({"invocation":old["invocation"],"requestId":old["requestId"],"action":old["intendedAction"],"previous":null,
+            "next":old["current"]["release"]});
+        capsule(&i, old, "applied")
+    }
+    fn record_previous(state: &mut Value, old: &Value) {
+        let c = prior_capsule(old);
+        let mut rows = old["previousEvidence"].as_array().unwrap().clone();
+        rows.push(json!({"invocation":old["invocation"],"intentSha256":c["intentSha256"],
+            "stateSha256":digest(&bytes(old)),"capsuleSha256":digest(&bytes(&c))}));
+        rows.sort_by(|a,b| a["invocation"].as_str().cmp(&b["invocation"].as_str()));
+        state["previousEvidence"] = json!(rows);
+    }
+    fn retained(mut value: Value, invocation: u32) -> Value {
+        value["app"]["location"] = json!("retained"); value["app"]["invocation"] = json!(id(invocation)); value
+    }
+    fn compare(i: &Value, old: Option<&Value>, s: &Value, c: &Value) -> CorrespondenceData {
+        let expected = expected(); let i = IntentData::parse_data(&bytes(i), &expected).unwrap();
+        let prior = old.map(|v| (StateData::parse_data(&bytes(v), &expected).unwrap(),
+            CapsuleData::parse_recorded_data(&bytes(&prior_capsule(v)), &expected).unwrap()));
+        let s = StateData::parse_data(&bytes(s), &expected).unwrap(); let c = CapsuleData::parse_data(&bytes(c), &expected).unwrap();
+        correspondence_data(&i, prior.as_ref().map(|(s,c)| (s,c)), Some(&s), Some(&c))
+    }
+    fn fresh_codec_vectors() -> Value {
+        serde_json::from_str(include_str!("../../../tests/desktop/fixtures/fresh_birth_codec_vectors.json")).unwrap()
+    }
+    fn fresh_codec_selected(vector: &Value) -> ReleaseSetData {
+        let target = match vector["target"].as_str().unwrap() {
+            "aarch64-apple-darwin" => MaintenanceTargetData::Arm64,
+            "x86_64-apple-darwin" => MaintenanceTargetData::Intel,
+            _ => panic!("closed codec target"),
+        };
+        ReleaseSetData::parse_for_target_data(&bytes(&vector["releaseSet"]),target).unwrap()
+    }
+    #[test]
+    fn fresh_birth_codecs_match_shared_exact_vectors_and_legacy_bytes() {
+        let corpus = fresh_codec_vectors();
+        for vector in corpus["vectors"].as_array().unwrap() {
+            let expected = fresh_codec_selected(vector);
+            let raw = vector["canonical"].as_str().unwrap().as_bytes();
+            assert_eq!(digest(raw),vector["sha256"].as_str().unwrap());
+            let parsed = IntentData::parse_canonical_data(raw,&expected,true).unwrap();
+            assert_eq!(parsed.canonical_bytes_data().unwrap(),raw);
+            assert_eq!(parsed.digest_data(),vector["sha256"].as_str().unwrap());
+            assert_eq!(parsed.fresh_birth_data().is_some(),vector["hasFreshBirth"].as_bool().unwrap());
+            if let Some(birth) = parsed.fresh_birth_data() {
+                let [root,versions,r,m] = birth.identities_data();
+                let (descriptor,signature) = birth.producer_digests_data();
+                let rebuilt = FreshBirthData::from_original_fields_data(descriptor,signature,
+                    birth.registration_origin_data(),root,versions,r,m).unwrap();
+                assert_eq!(birth,rebuilt);
+                assert!(birth.canonical_bytes_data().unwrap().len() <= FRESH_BIRTH_LIMIT);
+                assert_eq!(FreshBirthData::parse_data(&birth.canonical_bytes_data().unwrap()).unwrap(),birth);
+                assert_eq!(IntentData::encode_with_fresh_birth_data(parsed.invocation_data(),parsed.request_id_data(),
+                    &birth,&expected).unwrap(),raw);
+                assert!(IntentData::parse_fresh_birth_data(raw,&expected).is_ok());
+                assert!(FreshBirthData::from_original_fields_data(descriptor,signature,
+                    birth.registration_origin_data(),root,root,r,m).is_err());
+                let (dev,ino,sec,nsec,uuid) = root.fields_data();
+                let remounted = FreshBirthIdentityData::from_original_fields_data(dev+1,ino,sec,nsec,uuid).unwrap();
+                assert!(root.same_object_data(&remounted));
+                let replaced = FreshBirthIdentityData::from_original_fields_data(dev,ino,sec+1,nsec,uuid).unwrap();
+                assert!(!root.same_object_data(&replaced));
+                assert!(FreshBirthIdentityData::from_original_fields_data(dev,0,sec,nsec,uuid).is_err());
+            } else {
+                assert_eq!(IntentData::encode_data(parsed.invocation_data(),parsed.request_id_data(),
+                    ActionData::FreshInstall,None,&expected).unwrap(),raw);
+                assert!(IntentData::parse_recorded_data(raw,&expected).is_ok());
+                assert!(IntentData::parse_fresh_birth_data(raw,&expected).is_err());
+            }
+        }
+        assert_eq!((INTENT_LIMIT,FRESH_BIRTH_LIMIT),(16*1024,2*1024));
+    }
+    #[test]
+    fn fresh_birth_codecs_reject_shared_mutations_and_noncanonical_records() {
+        let corpus = fresh_codec_vectors(); let vector = &corpus["vectors"][1];
+        let expected = fresh_codec_selected(vector);
+        let raw = vector["canonical"].as_str().unwrap().as_bytes();
+        let original: Value = serde_json::from_slice(raw).unwrap();
+        for mutation in corpus["invalidMutations"].as_array().unwrap() {
+            let mut value = original.clone();
+            let (parent,key) = mutation["path"].as_str().unwrap().rsplit_once('/').unwrap();
+            let object = value.pointer_mut(parent).unwrap().as_object_mut().unwrap();
+            if mutation["delete"] == true {object.remove(key);} else {object.insert(key.into(),mutation["value"].clone());}
+            assert!(IntentData::parse_data(&bytes(&value),&expected).is_err(),"{}",mutation["name"]);
+        }
+        let mut changed = original.clone(); changed["target"] = json!("x86_64-apple-darwin");
+        assert!(IntentData::parse_data(&bytes(&changed),&expected).is_err());
+        for action in ["update","same-package-noop","restore-fixed-app","uninstall"] {
+            let mut changed = original.clone(); changed["action"] = json!(action);
+            assert!(IntentData::parse_data(&bytes(&changed),&expected).is_err());
+        }
+        let sorted = bytes(&original);
+        assert!(IntentData::parse_data(&sorted,&expected).is_ok());
+        assert!(IntentData::parse_fresh_birth_data(&sorted,&expected).is_err());
+        assert!(IntentData::parse_fresh_birth_data(&raw[..raw.len()-1],&expected).is_err());
+        assert!(IntentData::parse_data(&raw[..raw.len()-2],&expected).is_err());
+        let duplicate = String::from_utf8(raw.to_vec()).unwrap().replacen("\"freshBirth\":", "\"freshBirth\":null,\"freshBirth\":",1);
+        assert!(IntentData::parse_data(duplicate.as_bytes(),&expected).is_err());
+        assert!(FreshBirthData::parse_data(&vec![b' ';FRESH_BIRTH_LIMIT+1]).is_err());
+        assert!(IntentData::parse_data(&vec![b' ';INTENT_LIMIT+1],&expected).is_err());
+    }
+    #[test]
+    fn fresh_birth_recorded_membership_and_capsule_binding_remain_distinct() {
+        let corpus = fresh_codec_vectors(); let vector = &corpus["vectors"][1];
+        let expected = fresh_codec_selected(vector);
+        let mut value: Value = serde_json::from_str(vector["canonical"].as_str().unwrap()).unwrap();
+        value["next"] = vector["releaseSet"]["acceptedPredecessors"][0].clone();
+        let old = IntentData::parse_recorded_data(&bytes(&value),&expected).unwrap();
+        let old_raw = old.canonical_bytes_data().unwrap();
+        assert!(IntentData::parse_canonical_data(&old_raw,&expected,false).is_ok());
+        assert!(IntentData::parse_data(&old_raw,&expected).is_err());
+        assert!(IntentData::parse_fresh_birth_data(&old_raw,&expected).is_err());
+        let i: Value = serde_json::from_str(vector["canonical"].as_str().unwrap()).unwrap();
+        let s = state(3,9); let c = capsule(&i,&s,"applied");
+        assert_eq!(compare(&i,None,&s,&c),CorrespondenceData::MatchingRecordedData);
+        let mut altered = i.clone(); altered["freshBirth"]["producerDescriptorSha256"] = json!("e".repeat(64));
+        assert_eq!(compare(&altered,None,&s,&c),CorrespondenceData::Mismatch);
+    }
+    #[test]
+    fn records_are_bounded_closed_objects_including_every_nested_record() {
+        let e = expected(); let old = state(2, 2); let i = intent("update", Some(&old));
+        let mut s = state(3, 9); s["intendedAction"] = json!("update"); s["retained"] = json!([retained(generation(2), 9)]);
+        record_previous(&mut s, &old);
+        let c = capsule(&i, &s, "applied");
+        // Full-arity sequence encodings would otherwise be accepted by derived
+        // Deserialize; empty arrays alone do not protect the map-only contract.
+        for (path, keys) in [("/previous", RELEASE_FIELDS), ("/next", RELEASE_FIELDS),
+            ("/previousState", &["invocation", "sha256"][..])] {
+            let mut value = i.clone(); let sequence = positional(value.pointer(path).unwrap(), keys);
+            *value.pointer_mut(path).unwrap() = sequence;
+            assert!(IntentData::parse_data(&bytes(&value), &e).is_err(), "{path}");
+        }
+        let state_records: &[(&str, &[&str])] = &[
+            ("/current", &["release", "instance", "releaseDirectory", "app"]), ("/current/release", RELEASE_FIELDS),
+            ("/current/releaseDirectory", &["device", "inode", "mode", "uid", "gid", "flags"]),
+            ("/current/app", &["location", "identity"]), ("/current/app/identity", &["device", "inode", "mode", "uid", "gid", "flags"]),
+            ("/retained/0", &["release", "instance", "releaseDirectory", "app"]), ("/retained/0/release", RELEASE_FIELDS),
+            ("/retained/0/releaseDirectory", &["device", "inode", "mode", "uid", "gid", "flags"]),
+            ("/retained/0/app", &["location", "invocation", "identity"]),
+            ("/retained/0/app/identity", &["device", "inode", "mode", "uid", "gid", "flags"]),
+            ("/previousEvidence/0", &["invocation", "intentSha256", "stateSha256", "capsuleSha256"])];
+        for (path, keys) in state_records {
+            let mut value = s.clone(); let sequence = positional(value.pointer(path).unwrap(), keys);
+            *value.pointer_mut(path).unwrap() = sequence;
+            assert!(StateData::parse_data(&bytes(&value), &e).is_err(), "{path}");
+        }
+        for (path, keys) in [("/previous", RELEASE_FIELDS), ("/next", RELEASE_FIELDS), ("/actualCurrent", RELEASE_FIELDS),
+            ("/writer", &["returned", "exitCode", "originalJoined", "resultEof", "originalClosesKnown", "withinOriginalDeadline", "payloadWriteCount", "payloadWriteBytes"][..])] {
+            let mut value = c.clone(); let sequence = positional(value.pointer(path).unwrap(), keys);
+            *value.pointer_mut(path).unwrap() = sequence;
+            assert!(CapsuleData::parse_data(&bytes(&value), &e).is_err(), "{path}");
+        }
+        assert!(IntentData::parse_data(&bytes(&positional(&i, &["schemaVersion", "kind", "target", "invocation", "requestId", "action", "previous", "next", "previousState"])), &e).is_err());
+        assert!(StateData::parse_data(&bytes(&positional(&s, &["schemaVersion", "kind", "target", "invocation", "requestId", "capsuleInvocation", "intendedAction", "phase", "current", "retained", "previousEvidence", "residue"])), &e).is_err());
+        assert!(CapsuleData::parse_data(&bytes(&positional(&c, &["schemaVersion", "kind", "target", "invocation", "requestId", "intendedAction", "previous", "next", "actualCurrent", "intentSha256", "stateSha256", "outcome", "writer"])), &e).is_err());
+        for bad in [b"[]".as_slice(), b"{\"schemaVersion\":2,\"schemaVersion\":2}", b"\xff", b"{\"schemaVersion\":NaN}"] {
+            assert!(IntentData::parse_data(bad, &e).is_err()); assert!(StateData::parse_data(bad, &e).is_err());
+            assert!(CapsuleData::parse_data(bad, &e).is_err());
+        }
+        assert!(IntentData::parse_data(&vec![b' '; INTENT_LIMIT + 1], &e).is_err());
+        assert!(StateData::parse_data(&vec![b' '; STATE_LIMIT + 1], &e).is_err());
+        assert!(CapsuleData::parse_data(&vec![b' '; CAPSULE_LIMIT + 1], &e).is_err());
+        for key in ["authority", "parentFutureExit", "path"] {
+            let mut value = s.clone(); value[key] = json!(true); assert!(StateData::parse_data(&bytes(&value), &e).is_err());
+        }
+        assert_eq!(compare(&i, Some(&old), &s, &c), CorrespondenceData::MatchingRecordedData);
+    }
+    #[test]
+    fn capsule_requires_exact_intent_state_target_and_original_worker_facts_data() {
+        let e = expected(); let i = intent("fresh-install", None); let s = state(3, 9); let c = capsule(&i, &s, "applied");
+        let ip = IntentData::parse_data(&bytes(&i), &e).unwrap(); let sp = StateData::parse_data(&bytes(&s), &e).unwrap();
+        assert_eq!(correspondence_data(&ip, None, Some(&sp), None), CorrespondenceData::Pending);
+        assert_eq!(compare(&i, None, &s, &c), CorrespondenceData::MatchingRecordedData);
+        // Count actual positive write returns, not descriptor records. Both
+        // live and historical capsules keep the same required byte accounting.
+        for (count, written) in [(24577u64, 24577u64), (1, PAYLOAD_LIMIT)] {
+            let mut short = c.clone(); short["writer"]["payloadWriteCount"] = json!(count);
+            short["writer"]["payloadWriteBytes"] = json!(written);
+            assert!(CapsuleData::parse_data(&bytes(&short), &e).is_ok());
+            assert!(CapsuleData::parse_recorded_data(&bytes(&short), &e).is_ok());
+            assert_eq!(compare(&i, None, &s, &short), CorrespondenceData::MatchingRecordedData);
+        }
+        for (count, written) in [(1u64, 0u64), (0, 1), (2, 1), (1, PAYLOAD_LIMIT + 1),
+            (PAYLOAD_LIMIT + 1, PAYLOAD_LIMIT + 1)] {
+            let mut invalid = c.clone(); invalid["writer"]["payloadWriteCount"] = json!(count);
+            invalid["writer"]["payloadWriteBytes"] = json!(written);
+            assert!(CapsuleData::parse_data(&bytes(&invalid), &e).is_err());
+            assert!(CapsuleData::parse_recorded_data(&bytes(&invalid), &e).is_err());
+        }
+        let mut missing_bytes = c.clone(); missing_bytes["writer"].as_object_mut().unwrap().remove("payloadWriteBytes");
+        assert!(CapsuleData::parse_data(&bytes(&missing_bytes), &e).is_err());
+        assert!(CapsuleData::parse_recorded_data(&bytes(&missing_bytes), &e).is_err());
+        for name in ["invocation", "requestId", "intentSha256", "stateSha256"] {
+            let mut altered = c.clone(); altered[name] = json!("f".repeat(if name == "invocation" || name == "requestId" { 32 } else { 64 }));
+            assert_eq!(compare(&i, None, &s, &altered), CorrespondenceData::Mismatch, "{name}");
+        }
+        for fact in ["originalJoined", "resultEof", "originalClosesKnown", "withinOriginalDeadline"] {
+            let mut altered = c.clone(); altered["writer"][fact] = json!(false);
+            assert_eq!(compare(&i, None, &s, &altered), CorrespondenceData::Indeterminate, "{fact}");
+        }
+        let mut unavailable = c.clone(); unavailable["writer"]["returned"] = json!(false);
+        unavailable["writer"]["originalJoined"] = json!(false); unavailable["writer"]["exitCode"] = Value::Null;
+        assert_eq!(compare(&i, None, &s, &unavailable), CorrespondenceData::Indeterminate);
+        let mut mixed = c.clone(); mixed["target"] = json!(MaintenanceTargetData::Intel.target());
+        assert!(CapsuleData::parse_data(&bytes(&mixed), &e).is_err());
+        let mut wrong = c.clone(); wrong["writer"]["exitCode"] = json!(true);
+        assert!(CapsuleData::parse_data(&bytes(&wrong), &e).is_err());
+        let mut missing = unavailable.clone(); missing["writer"].as_object_mut().unwrap().remove("exitCode");
+        assert!(CapsuleData::parse_data(&bytes(&missing), &e).is_err());
+        let mut missing = c.clone(); missing.as_object_mut().unwrap().remove("stateSha256");
+        assert!(CapsuleData::parse_data(&bytes(&missing), &e).is_err());
+        let cp = CapsuleData::parse_data(&bytes(&c), &e).unwrap();
+        assert_eq!(correspondence_data(&ip, None, None, Some(&cp)), CorrespondenceData::Pending);
+        // The identical DATA contract also works for a caller-selected Intel
+        // tuple; neither a capsule nor its state chooses that expectation.
+        let mut intel_release = release(3); intel_release["profile"] = json!("fixed-macos26-x86_64-maintenance-v2");
+        intel_release["release"] = json!("macos26-x86_64-data-3");
+        let intel_expected = ReleaseSetData::parse_for_target_data(&bytes(&json!({"schemaVersion":2,
+            "current":intel_release,"acceptedPredecessors":[]})), MaintenanceTargetData::Intel).unwrap();
+        let mut ii = i.clone(); ii["target"] = json!(MaintenanceTargetData::Intel.target()); ii["next"] = intel_release.clone();
+        let mut ss = s.clone(); ss["target"] = json!(MaintenanceTargetData::Intel.target()); ss["current"]["release"] = intel_release;
+        let mut cc = capsule(&ii, &ss, "applied"); cc["target"] = json!(MaintenanceTargetData::Intel.target());
+        let ii = IntentData::parse_data(&bytes(&ii), &intel_expected).unwrap();
+        let ss = StateData::parse_data(&bytes(&ss), &intel_expected).unwrap();
+        let cc = CapsuleData::parse_data(&bytes(&cc), &intel_expected).unwrap();
+        assert_eq!(correspondence_data(&ii, None, Some(&ss), Some(&cc)), CorrespondenceData::MatchingRecordedData);
+        // A recorded Update is ordered within the selected history too: both
+        // tuples being accepted predecessors is not permission for a downgrade.
+        let historical = ReleaseSetData::parse_for_target_data(&bytes(&json!({"schemaVersion":2,
+            "current":release(4),"acceptedPredecessors":[release(2),release(3)]})), MaintenanceTargetData::Arm64).unwrap();
+        let old = state(2,2); let hi = intent("update", Some(&old));
+        let mut hs = state(3,9); hs["intendedAction"] = json!("update");
+        let hc = capsule(&hi, &hs, "applied");
+        assert!(CapsuleData::parse_recorded_data(&bytes(&hc), &historical).is_ok());
+        assert!(CapsuleData::parse_data(&bytes(&hc), &historical).is_err());
+        let mut downgrade = hc.clone(); downgrade["previous"] = release(3); downgrade["next"] = release(2);
+        downgrade["actualCurrent"] = release(2);
+        assert!(CapsuleData::parse_recorded_data(&bytes(&downgrade), &historical).is_err());
+        let mut same = hc.clone(); same["previous"] = same["next"].clone();
+        assert!(CapsuleData::parse_recorded_data(&bytes(&same), &historical).is_err());
+    }
+    #[test]
+    fn same_package_has_new_invocation_zero_payload_writes_and_no_generation_replacement() {
+        let old = state(3, 3); let i = intent("same-package-noop", Some(&old));
+        let mut s = state(3, 9); s["intendedAction"] = json!("same-package-noop"); record_previous(&mut s, &old);
+        let c = capsule(&i, &s, "same-package");
+        assert_eq!(compare(&i, Some(&old), &s, &c), CorrespondenceData::MatchingRecordedData);
+        let mut writes = c.clone(); writes["writer"]["payloadWriteCount"] = json!(1);
+        writes["writer"]["payloadWriteBytes"] = json!(1);
+        assert_eq!(compare(&i, Some(&old), &s, &writes), CorrespondenceData::Mismatch);
+        let mut replaced = s.clone(); replaced["current"]["app"]["identity"]["inode"] = json!(999);
+        let changed = capsule(&i, &replaced, "same-package");
+        assert_eq!(compare(&i, Some(&old), &replaced, &changed), CorrespondenceData::Mismatch);
+        let mut missing_evidence = s.clone(); missing_evidence["previousEvidence"] = json!([]);
+        assert_eq!(compare(&i, Some(&old), &missing_evidence, &capsule(&i, &missing_evidence, "same-package")), CorrespondenceData::Mismatch);
+        let e = expected(); let ip = IntentData::parse_data(&bytes(&i), &e).unwrap();
+        let sp = StateData::parse_data(&bytes(&s), &e).unwrap(); let cp = CapsuleData::parse_data(&bytes(&c), &e).unwrap();
+        let op = StateData::parse_data(&bytes(&old), &e).unwrap();
+        assert_eq!(correspondence_data(&ip, None, Some(&sp), Some(&cp)), CorrespondenceData::Pending);
+        let mut old_capsule = prior_capsule(&old); old_capsule["writer"]["originalJoined"] = json!(false);
+        let oc = CapsuleData::parse_recorded_data(&bytes(&old_capsule), &e).unwrap();
+        assert_eq!(correspondence_data(&ip, Some((&op,&oc)), Some(&sp), Some(&cp)), CorrespondenceData::Mismatch);
+        let mut old_capsule = prior_capsule(&old); old_capsule["intentSha256"] = json!("e".repeat(64));
+        let oc = CapsuleData::parse_recorded_data(&bytes(&old_capsule), &e).unwrap();
+        assert_eq!(correspondence_data(&ip, Some((&op,&oc)), Some(&sp), Some(&cp)), CorrespondenceData::Mismatch);
+        let mut replay = i.clone(); replay["invocation"] = old["invocation"].clone();
+        assert!(IntentData::parse_data(&bytes(&replay), &expected()).is_err());
+        let mut restore = i.clone(); restore["action"] = json!("restore-fixed-app");
+        replaced["intendedAction"] = json!("restore-fixed-app");
+        let restored = capsule(&restore, &replaced, "restored-app");
+        assert_eq!(compare(&restore, Some(&old), &replaced, &restored), CorrespondenceData::MatchingRecordedData);
+        replaced["current"]["releaseDirectory"]["inode"] = json!(1000);
+        let changed = capsule(&restore, &replaced, "restored-app");
+        assert_eq!(compare(&restore, Some(&old), &replaced, &changed), CorrespondenceData::Mismatch);
+    }
+    #[test]
+    fn noop_recovery_reference_requires_genuine_old_finality_and_exact_state_placements() {
+        let e=expected(); let old=state(3,3); let old_raw=bytes(&old);
+        let old_state=StateData::parse_data(&old_raw,&e).unwrap();
+        let old_capsule=CapsuleData::parse_data(&bytes(&prior_capsule(&old)),&e).unwrap();
+        let raw=IntentData::encode_data(&id(9),&id(109),ActionData::SamePackageNoop,
+            Some((&old_state,&old_capsule)),&e).unwrap();
+        assert!(serde_json::from_slice::<Value>(&raw).unwrap().get("recovery").is_none());
+        let torn=IntentData::parse_data(&raw,&e).unwrap();
+        let recovery=NoopRecoveryData::from_recorded_data(&torn,(&old_state,&old_capsule),&e).unwrap();
+        use NoopStatePlacementData as P;
+        let next=recovery.expected_state_data();
+        assert_eq!(recovery.state_placement_data(&old_raw,&old_raw,None),Ok(P::Unchanged));
+        assert_eq!(recovery.state_placement_data(&old_raw,next,Some(&old_raw)),Ok(P::Swapped));
+        for end in [0,1,next.len()/2,next.len()-1,next.len()] {
+            assert_eq!(recovery.state_placement_data(&old_raw,&old_raw,Some(&next[..end])),Ok(P::PendingBeforeSwap));
+        }
+        for (canonical,archive) in [(next,None),(next,Some(next)),(&old_raw[..],Some(&old_raw[..])),
+            (&next[..next.len()-1],Some(&old_raw[..])),(&old_raw[..],Some(b"foreign".as_slice()))] {
+            assert!(recovery.state_placement_data(&old_raw,canonical,archive).is_err());
+        }
+        let mut changed=old_raw.clone(); changed[0]=b'[';
+        assert!(recovery.state_placement_data(&changed,&changed,None).is_err());
+        let reference=RecoveryReferenceData::new_data(old_state.current_data().instance_data(),&id(9),&"a".repeat(64)).unwrap();
+        let retry_raw=IntentData::encode_with_recovery_data(&id(10),&id(110),ActionData::SamePackageNoop,
+            Some((&old_state,&old_capsule)),Some(&reference),&e).unwrap();
+        let retry=IntentData::parse_data(&retry_raw,&e).unwrap();
+        let retry_state_raw=StateData::encode_applied_data(&retry,Some((&old_state,&old_capsule)),
+            &old_state.current_data(),&e).unwrap();
+        let retry_state=StateData::parse_data(&retry_state_raw,&e).unwrap();
+        assert_eq!(retry.recovery_data(),Some(&reference)); assert_eq!(retry_state.recovery_data(),Some(&reference));
+        let retry_value:Value=serde_json::from_slice(&retry_raw).unwrap();
+        let state_value:Value=serde_json::from_slice(&retry_state_raw).unwrap();
+        let mut retry_capsule_value=capsule(&retry_value,&state_value,"same-package");
+        retry_capsule_value["intentSha256"]=json!(retry.digest_data());
+        retry_capsule_value["stateSha256"]=json!(retry_state.digest_data());
+        let retry_capsule=CapsuleData::parse_data(&bytes(&retry_capsule_value),&e).unwrap();
+        assert_eq!(correspondence_data(&retry,Some((&old_state,&old_capsule)),Some(&retry_state),Some(&retry_capsule)),
+            CorrespondenceData::MatchingRecordedData);
+        // Reference removal/substitution cannot be hidden under a genuine
+        // worker capsule: correspondence binds BOTH new intent and State.
+        let mut stripped=state_value.clone();stripped.as_object_mut().unwrap().remove("recovery");
+        let stripped_state=StateData::parse_data(&bytes(&stripped),&e).unwrap();
+        let mut stripped_capsule_value=capsule(&retry_value,&stripped,"same-package");
+        stripped_capsule_value["intentSha256"]=json!(retry.digest_data());
+        let stripped_capsule=CapsuleData::parse_data(&bytes(&stripped_capsule_value),&e).unwrap();
+        assert_eq!(correspondence_data(&retry,Some((&old_state,&old_capsule)),Some(&stripped_state),Some(&stripped_capsule)),
+            CorrespondenceData::Mismatch);
+        for bad in [Value::Null,json!([]),json!({"stageInvocation":id(3),"tornInvocation":id(9),
+            "receiptSha256":"a".repeat(64),"extra":true}),json!({"stageInvocation":id(3),"tornInvocation":id(10),
+            "receiptSha256":"a".repeat(64)})] {
+            let mut changed=retry_value.clone(); changed["recovery"]=bad;
+            assert!(IntentData::parse_data(&bytes(&changed),&e).is_err());
+        }
+        let wrong_stage=RecoveryReferenceData::new_data(&id(99),&id(9),&"a".repeat(64)).unwrap();
+        assert!(IntentData::encode_with_recovery_data(&id(10),&id(110),ActionData::SamePackageNoop,
+            Some((&old_state,&old_capsule)),Some(&wrong_stage),&e).is_err());
+        for fact in ["originalJoined","resultEof","originalClosesKnown","withinOriginalDeadline"] {
+            let mut incomplete=prior_capsule(&old);incomplete["writer"][fact]=json!(false);
+            let incomplete=CapsuleData::parse_data(&bytes(&incomplete),&e).unwrap();
+            assert!(NoopRecoveryData::from_recorded_data(&torn,(&old_state,&incomplete),&e).is_err());
+        }
+        let mut update=retry_value.clone();update["action"]=json!("restore-fixed-app");
+        assert!(IntentData::parse_data(&bytes(&update),&e).is_err());
+        let duplicate=String::from_utf8(retry_raw).unwrap().replacen("\"recovery\":", "\"recovery\":null,\"recovery\":",1);
+        assert!(IntentData::parse_data(duplicate.as_bytes(),&e).is_err());
+    }
+    #[test]
+    fn restore_reference_is_action_closed_and_binds_new_intent_state_and_capsule() {
+        let e=expected(); let old=state(3,3);
+        let old_state=StateData::parse_data(&bytes(&old),&e).unwrap();
+        let old_capsule=CapsuleData::parse_data(&bytes(&prior_capsule(&old)),&e).unwrap();
+        let prior=(&old_state,&old_capsule);
+        let torn=IntentData::parse_data(&IntentData::encode_data(&id(9),&id(109),ActionData::RestoreFixedApp,
+            Some(prior),&e).unwrap(),&e).unwrap();
+        let admission=RestorePrepublicationData::from_recorded_data(&torn,prior,&e).unwrap();
+        let reference=RestoreReferenceData::new_data(&id(9),&id(10),&"a".repeat(64)).unwrap();
+        assert_eq!(reference.receipt_name_data(),format!(".restore-recovery-{}.json",id(10)));
+        assert_eq!(reference.preserved_stage_name_data(),format!(".restore-recovery-{}.stage",id(9)));
+        assert_eq!(reference.preserved_intent_name_data(&id(9)).unwrap(),format!(".restore-recovery-{}-{}.intent.json",id(9),id(9)));
+        assert!(reference.preserved_intent_name_data("../other").is_err());
+        assert!(RestoreReferenceData::new_data(&id(9),&id(9),&"a".repeat(64)).is_err());
+        let raw=IntentData::encode_with_restore_recovery_data(&id(10),&id(110),prior,&reference,&e).unwrap();
+        let retry=IntentData::parse_data(&raw,&e).unwrap();
+        assert_eq!(retry.restore_recovery_data(),Some(&reference));
+        assert!(admission.retry_data(&retry,prior,&e).is_ok());
+        assert!(RestorePrepublicationData::from_recorded_data(&retry,prior,&e).is_err());
+        let next_admission=RestorePrepublicationData::from_preserved_retry_data(&retry,&torn,prior,&e).unwrap();
+        assert_eq!(next_admission.torn_data(),(retry.invocation_data(),retry.request_id_data(),retry.digest_data()));
+        assert!(RestorePrepublicationData::from_preserved_retry_data(&retry,&retry,prior,&e).is_err());
+        let next_ref=RestoreReferenceData::new_data(&id(10),&id(12),&"b".repeat(64)).unwrap();
+        let next_raw=IntentData::restore_retry_body_recorded_data(&retry,&id(12),&id(112),prior,&next_ref,&e).unwrap();
+        let next_intent=IntentData::parse_data(&next_raw,&e).unwrap();
+        assert!(next_admission.retry_data(&next_intent,prior,&e).is_ok());
+        let cycle_ref=RestoreReferenceData::new_data(&id(10),&id(9),&"c".repeat(64)).unwrap();
+        assert!(IntentData::restore_retry_body_recorded_data(&retry,&id(9),&id(113),prior,&cycle_ref,&e).is_err());
+        assert!(IntentData::encode_with_restore_recovery_data(&id(11),&id(110),prior,&reference,&e).is_err());
+        let other_base=RestoreReferenceData::new_data(&id(8),&id(10),&"a".repeat(64)).unwrap();
+        let other=IntentData::parse_data(&IntentData::encode_with_restore_recovery_data(&id(10),&id(110),prior,&other_base,&e).unwrap(),&e).unwrap();
+        assert!(admission.retry_data(&other,prior,&e).is_err());
+        let state_raw=StateData::encode_applied_data(&retry,Some(prior),&old_state.current_data(),&e).unwrap();
+        let state=StateData::parse_data(&state_raw,&e).unwrap();
+        assert_eq!(state.restore_recovery_data(),Some(&reference));
+        let writer=||WriterObservationData{returned:true,exit_code:Some(0),original_joined:true,result_eof:true,
+            original_closes_known:true,within_original_deadline:true,payload_write_count:1,payload_write_bytes:1};
+        let cap=CapsuleData::parse_data(&CapsuleData::encode_data(&retry,Some(prior),Some(&state),Some(e.current_data()),
+            RecordedOutcomeData::RestoredApp,writer(),&e).unwrap(),&e).unwrap();
+        assert_eq!(correspondence_data(&retry,Some(prior),Some(&state),Some(&cap)),CorrespondenceData::MatchingRecordedData);
+        let mut stripped:Value=serde_json::from_slice(&state_raw).unwrap();stripped.as_object_mut().unwrap().remove("restoreRecovery");
+        let stripped_state=StateData::parse_data(&bytes(&stripped),&e).unwrap();
+        let retry_value:Value=serde_json::from_slice(&raw).unwrap();
+        let mut stripped_cap=capsule(&retry_value,&stripped,"restored-app");
+        stripped_cap["intentSha256"]=json!(retry.digest_data());
+        let stripped_cap=CapsuleData::parse_data(&bytes(&stripped_cap),&e).unwrap();
+        assert_eq!(correspondence_data(&retry,Some(prior),Some(&stripped_state),Some(&stripped_cap)),CorrespondenceData::Mismatch);
+        for (name,body) in [("intent",raw.as_slice()),("state",state_raw.as_slice())] {
+            let value:Value=serde_json::from_slice(body).unwrap();
+            for bad in [Value::Null,json!([]),json!({"tornInvocation":id(9),"receiptInvocation":id(10),
+                "receiptSha256":"a".repeat(64),"extra":true}),json!({"tornInvocation":id(10),"receiptInvocation":id(10),
+                "receiptSha256":"a".repeat(64)}),json!({"tornInvocation":id(9),"receiptInvocation":id(11),"receiptSha256":"a".repeat(64)})] {
+                let mut bad_value=value.clone();bad_value["restoreRecovery"]=bad;
+                if name=="intent"{assert!(IntentData::parse_data(&bytes(&bad_value),&e).is_err());}
+                else{assert!(StateData::parse_data(&bytes(&bad_value),&e).is_err());}
+            }
+            let mut both=value.clone();both["recovery"]=json!({"stageInvocation":id(3),"tornInvocation":id(9),"receiptSha256":"a".repeat(64)});
+            if name=="intent"{assert!(IntentData::parse_data(&bytes(&both),&e).is_err());}
+            else{assert!(StateData::parse_data(&bytes(&both),&e).is_err());}
+            let mut wrong=value;wrong[if name=="intent"{"action"}else{"intendedAction"}]=json!("same-package-noop");
+            if name=="intent"{assert!(IntentData::parse_data(&bytes(&wrong),&e).is_err());}
+            else{assert!(StateData::parse_data(&bytes(&wrong),&e).is_err());}
+        }
+        // A later genuine producer set keeps old namespace comparisons valid
+        // without changing its current release or enabling an old Restore.
+        let newer=ReleaseSetData::parse_for_target_data(&bytes(&json!({"schemaVersion":2,
+            "current":release(4),"acceptedPredecessors":[release(3)]})),MaintenanceTargetData::Arm64).unwrap();
+        let recorded=IntentData::restore_retry_body_recorded_data(&torn,&id(10),&id(110),prior,&reference,&newer).unwrap();
+        assert_eq!(recorded,raw);
+        assert!(IntentData::parse_recorded_data(&recorded,&newer).is_ok());
+        assert!(IntentData::parse_data(&recorded,&newer).is_err());
+        assert!(RestorePrepublicationData::from_recorded_data(&torn,prior,&newer).is_err());
+        assert!(RestorePrepublicationData::from_preserved_retry_data(&retry,&torn,prior,&newer).is_err());
+        assert!(admission.retry_data(&retry,prior,&newer).is_err());
+        assert!(IntentData::restore_retry_body_recorded_data(&retry,&id(10),&id(110),prior,&reference,&newer).is_err());
+        assert!(IntentData::restore_retry_body_recorded_data(&torn,&id(10),&id(109),prior,&reference,&newer).is_err());
+        assert!(IntentData::restore_retry_body_recorded_data(&torn,&id(11),&id(110),prior,&reference,&newer).is_err());
+        assert!(IntentData::restore_retry_body_recorded_data(&torn,&id(10),&id(110),prior,&other_base,&newer).is_err());
+        let unknown=ReleaseSetData::parse_for_target_data(&bytes(&json!({"schemaVersion":2,
+            "current":release(4),"acceptedPredecessors":[]})),MaintenanceTargetData::Arm64).unwrap();
+        assert!(IntentData::restore_retry_body_recorded_data(&torn,&id(10),&id(110),prior,&reference,&unknown).is_err());
+        let mut bad_prior=prior_capsule(&old);bad_prior["writer"]["originalClosesKnown"]=json!(false);
+        let bad_prior=CapsuleData::parse_recorded_data(&bytes(&bad_prior),&newer).unwrap();
+        assert!(IntentData::restore_retry_body_recorded_data(&torn,&id(10),&id(110),(&old_state,&bad_prior),&reference,&newer).is_err());
+        let duplicate=String::from_utf8(raw).unwrap().replacen("\"restoreRecovery\":", "\"restoreRecovery\":null,\"restoreRecovery\":",1);
+        assert!(IntentData::parse_data(duplicate.as_bytes(),&e).is_err());
+        let legacy=IntentData::encode_data(&id(11),&id(111),ActionData::RestoreFixedApp,Some(prior),&e).unwrap();
+        assert!(serde_json::from_slice::<Value>(&legacy).unwrap().get("restoreRecovery").is_none());
+    }
+    #[test]
+    fn restore_prepublication_requires_exact_completed_history_and_fresh_retry() {
+        let e = expected(); let old = state(3,3); let old_raw = bytes(&old);
+        let old_state = StateData::parse_data(&old_raw, &e).unwrap();
+        let old_capsule = CapsuleData::parse_data(&bytes(&prior_capsule(&old)), &e).unwrap();
+        let prior = (&old_state, &old_capsule);
+        let make = |inv, request, action| IntentData::parse_data(
+            &IntentData::encode_data(&id(inv), &id(request), action, Some(prior), &e).unwrap(), &e).unwrap();
+        let torn = make(9,109,ActionData::RestoreFixedApp);
+        let data = RestorePrepublicationData::from_recorded_data(&torn, prior, &e).unwrap();
+        assert_eq!(data.torn_data(), (torn.invocation_data(), torn.request_id_data(), torn.digest_data()));
+        assert_eq!(data.previous_data(), (old_state.invocation_data(), old_state.digest_data(), old_capsule.digest_data()));
+        assert_eq!(data.runtime_instance_data(), old_state.current_data().instance_data());
+        assert!(data.retry_data(&make(10,110,ActionData::RestoreFixedApp), prior, &e).is_ok());
+        assert_eq!(data.retry_data(&torn, prior, &e), Err(TransactionDataError::ReusedIdentity));
+        assert_eq!(data.retry_data(&make(10,109,ActionData::RestoreFixedApp), prior, &e), Err(TransactionDataError::ReusedIdentity));
+        let noop = make(10,110,ActionData::SamePackageNoop);
+        assert!(RestorePrepublicationData::from_recorded_data(&noop, prior, &e).is_err());
+        assert!(data.retry_data(&noop, prior, &e).is_err());
+        let newer = ReleaseSetData::parse_for_target_data(&bytes(&json!({"schemaVersion":2,
+            "current":release(4),"acceptedPredecessors":[release(3)]})), MaintenanceTargetData::Arm64).unwrap();
+        assert!(RestorePrepublicationData::from_recorded_data(&torn, prior, &newer).is_err());
+        let different_old = state(3,4);
+        let different_state = StateData::parse_data(&bytes(&different_old), &e).unwrap();
+        let different_cap = CapsuleData::parse_data(&bytes(&prior_capsule(&different_old)), &e).unwrap();
+        let different_prior = (&different_state, &different_cap);
+        let next = IntentData::parse_data(&IntentData::encode_data(&id(10), &id(110),
+            ActionData::RestoreFixedApp, Some(different_prior), &e).unwrap(), &e).unwrap();
+        assert!(data.retry_data(&next, different_prior, &e).is_err());
+        assert!(RestorePrepublicationData::from_recorded_data(&torn, different_prior, &e).is_err());
+        for fact in ["originalJoined", "resultEof", "originalClosesKnown", "withinOriginalDeadline"] {
+            let mut bad = prior_capsule(&old); bad["writer"][fact] = json!(false);
+            let bad = CapsuleData::parse_data(&bytes(&bad), &e).unwrap();
+            assert!(RestorePrepublicationData::from_recorded_data(&torn, (&old_state, &bad), &e).is_err(), "{fact}");
+        }
+        let mut failed = prior_capsule(&old); failed["writer"]["exitCode"] = json!(20);
+        let failed = CapsuleData::parse_data(&bytes(&failed), &e).unwrap();
+        assert!(RestorePrepublicationData::from_recorded_data(&torn, (&old_state, &failed), &e).is_err());
+    }
+    #[test]
+    fn restore_prepublication_rejects_state_publication_and_foreign_original_placements() {
+        use crate::macos_applications_launcher::OriginalIdentityData as I;
+        use RestoreOriginalPlacementData as P;
+        let e = expected(); let old = state(3,3); let raw = bytes(&old);
+        let old_state = StateData::parse_data(&raw, &e).unwrap();
+        let old_capsule = CapsuleData::parse_data(&bytes(&prior_capsule(&old)), &e).unwrap();
+        let torn = IntentData::parse_data(&IntentData::encode_data(&id(9), &id(109), ActionData::RestoreFixedApp,
+            Some((&old_state, &old_capsule)), &e).unwrap(), &e).unwrap();
+        let data = RestorePrepublicationData::from_recorded_data(&torn, (&old_state, &old_capsule), &e).unwrap();
+        let original = I {device:1,inode:42,birth_seconds:10,birth_nanoseconds:20,volume_uuid:None};
+        assert!(data.unchanged_state_data(&raw,None,None).is_ok());
+        for pending in [b"".as_slice(),raw.as_slice(),b"unfinished".as_slice()] {
+            assert!(data.unchanged_state_data(&raw,Some(pending),None).is_err());
+        }
+        assert!(data.unchanged_state_data(&raw,None,Some(original)).is_err());
+        for changed in [b"".as_slice(),&raw[..raw.len()-1],b"foreign".as_slice()] {
+            assert!(data.unchanged_state_data(changed,None,None).is_err());
+        }
+        assert_eq!(data.original_placement_data(original,Some(original),None),Ok(P::Original));
+        assert_eq!(data.original_placement_data(original,None,Some(original)),Ok(P::Preserved));
+        assert!(data.original_placement_data(original,Some(original),Some(original)).is_err());
+        assert!(data.original_placement_data(original,None,None).is_err());
+        for changed in [I {device:2,..original},I {inode:43,..original},I {birth_seconds:11,..original},
+            I {birth_nanoseconds:21,..original}] {
+            assert!(data.original_placement_data(original,Some(changed),None).is_err());
+            assert!(data.original_placement_data(original,None,Some(changed)).is_err());
+            assert!(data.original_placement_data(original,Some(original),Some(changed)).is_err());
+        }
+        let invalid = I {inode:0,..original};
+        assert!(data.original_placement_data(invalid,Some(invalid),None).is_err());
+    }
+    #[test]
+    fn generation_volume_binding_rejects_mismatch_and_downgrade() {
+        let expected=expected();
+        let legacy=state(3,9);
+        let mut durable=legacy.clone();
+        durable["current"]["releaseDirectory"]["volumeUuid"]=json!("1".repeat(32));
+        durable["current"]["app"]["identity"]["volumeUuid"]=json!("1".repeat(32));
+        durable["current"]["app"]["identity"]["device"]=json!(2);
+        assert!(StateData::parse_data(&bytes(&durable),&expected).is_ok());
+        let mut restored=legacy.clone();
+        restored["current"]["app"]["identity"]=durable["current"]["app"]["identity"].clone();
+        assert!(StateData::parse_data(&bytes(&restored),&expected).is_ok());
+        for fault in 0..4 {
+            let mut bad=durable.clone();
+            match fault {
+                0=>bad["current"]["app"]["identity"]["volumeUuid"]=json!("2".repeat(32)),
+                1=>{bad["current"]["app"]["identity"].as_object_mut().unwrap().remove("volumeUuid");},
+                2=>{bad=legacy.clone();bad["current"]["app"]["identity"]["device"]=json!(2);},
+                _=>{bad["current"]["app"]["identity"]["inode"]=bad["current"]["releaseDirectory"]["inode"].clone();},
+            }
+            assert!(StateData::parse_data(&bytes(&bad),&expected).is_err(),"fault {fault}");
+        }
+        let mut retained_state=state(3,9);
+        retained_state["retained"]=json!([retained(generation(2),9)]);
+        retained_state["current"]=durable["current"].clone();
+        retained_state["retained"][0]["app"]["identity"]["volumeUuid"]=json!("2".repeat(32));
+        assert!(StateData::parse_data(&bytes(&retained_state),&expected).is_err());
+    }
+    #[test]
+    fn retained_generations_and_inverse_never_adopt_partial_or_unrelated_state() {
+        let e = expected(); let old = state(2, 2); let i = intent("update", Some(&old));
+        let mut s = state(3, 9); s["intendedAction"] = json!("update"); s["retained"] = json!([retained(generation(2), 9)]);
+        record_previous(&mut s, &old);
+        let c = capsule(&i, &s, "applied"); assert_eq!(compare(&i, Some(&old), &s, &c), CorrespondenceData::MatchingRecordedData);
+        let mut duplicate = s.clone(); duplicate["retained"] = json!([retained(generation(2), 9),retained(generation(2), 8)]);
+        assert!(StateData::parse_data(&bytes(&duplicate), &e).is_err());
+        let mut unrelated = s.clone(); unrelated["retained"][0]["app"]["invocation"] = json!(id(77));
+        assert!(StateData::parse_data(&bytes(&unrelated), &e).is_err());
+        let mut alias = s.clone(); alias["retained"][0]["app"]["identity"]["inode"] = s["current"]["releaseDirectory"]["inode"].clone();
+        assert!(StateData::parse_data(&bytes(&alias), &e).is_err());
+        let mut missing = s.clone(); missing["retained"] = json!([]);
+        assert_eq!(compare(&i, Some(&old), &missing, &capsule(&i, &missing, "applied")), CorrespondenceData::Mismatch);
+        let mut inverse = old.clone(); inverse["invocation"] = json!(id(9)); inverse["requestId"] = json!(id(109)); inverse["capsuleInvocation"] = json!(id(9));
+        inverse["intendedAction"] = json!("update"); inverse["phase"] = json!("inverse-recorded");
+        inverse["residue"] = json!({"invocation":id(9),"release":release(3),"stagingPresent":true,"runtimePresent":true});
+        record_previous(&mut inverse, &old);
+        let mut restored = capsule(&i, &inverse, "inverse-recorded"); restored["writer"]["exitCode"] = json!(20);
+        assert_eq!(compare(&i, Some(&old), &inverse, &restored), CorrespondenceData::InverseRecorded);
+        restored["outcome"] = json!("applied"); restored["writer"]["exitCode"] = json!(0);
+        assert_eq!(compare(&i, Some(&old), &inverse, &restored), CorrespondenceData::Mismatch);
+        for (path, keys) in [("/residue", &["invocation", "release", "stagingPresent", "runtimePresent"][..]),
+            ("/residue/release", RELEASE_FIELDS)] {
+            let mut value = inverse.clone(); let sequence = positional(value.pointer(path).unwrap(), keys);
+            *value.pointer_mut(path).unwrap() = sequence;
+            assert!(StateData::parse_data(&bytes(&value), &e).is_err());
+        }
+    }
+    #[test]
+    fn optional_launcher_capsule_binds_finality_and_separately_accounts_noop_restoration() {
+        use crate::macos_applications_launcher::{ObservationData, OutcomeData};
+        let expected = expected();
+        let old = state(3, 3);
+        let i = intent("same-package-noop", Some(&old));
+        let mut s = state(3, 9); s["intendedAction"] = json!("same-package-noop");
+        record_previous(&mut s, &old);
+        let legacy = capsule(&i, &s, "same-package");
+        let ip = IntentData::parse_data(&bytes(&i), &expected).unwrap();
+        let old_state = StateData::parse_data(&bytes(&old), &expected).unwrap();
+        let old_capsule = CapsuleData::parse_recorded_data(&bytes(&prior_capsule(&old)), &expected).unwrap();
+        let sp = StateData::parse_data(&bytes(&s), &expected).unwrap();
+        let writer = || WriterObservationData { returned:true,exit_code:Some(0),original_joined:true,result_eof:true,
+            original_closes_known:true,within_original_deadline:true,payload_write_count:0,payload_write_bytes:0 };
+        let previous = Some((&old_state, &old_capsule));
+        let legacy_encoded = CapsuleData::encode_data(&ip, previous, Some(&sp), Some(expected.current_data()),
+            RecordedOutcomeData::SamePackage, writer(), &expected).unwrap();
+        assert_eq!(legacy_encoded, CapsuleData::encode_with_launcher_data(&ip, previous, Some(&sp), Some(expected.current_data()),
+            RecordedOutcomeData::SamePackage, writer(), None, &expected).unwrap());
+        assert!(serde_json::from_slice::<Value>(&legacy_encoded).unwrap().get("launcher").is_none());
+        assert!(CapsuleData::parse_data(&bytes(&legacy), &expected).unwrap().launcher_data().is_none());
+        let observation = ObservationData { outcome:OutcomeData::Restored,
+            published_identity:Some(crate::macos_applications_launcher::OriginalIdentityData {device:1,inode:42,birth_seconds:1,birth_nanoseconds:0, volume_uuid: None }),
+            publication_phase:Some(crate::macos_applications_launcher::PhaseReferenceData {stage_instance:"1".repeat(32),sha256:"2".repeat(64)}),write_count:2,write_bytes:17,
+            originals_closed:true,within_original_deadline:true,readback_verified:true,workspace_cleared:true };
+        let encoded = CapsuleData::encode_with_launcher_data(&ip, previous, Some(&sp), Some(expected.current_data()),
+            RecordedOutcomeData::SamePackage, writer(), Some(observation.clone()), &expected).unwrap();
+        let value: Value = serde_json::from_slice(&encoded).unwrap();
+        let parsed = CapsuleData::parse_data(&encoded, &expected).unwrap();
+        assert_eq!(parsed.launcher_data(), Some(&observation));
+        assert_eq!(value["writer"]["payloadWriteCount"], json!(0));
+        assert_eq!(value["writer"]["payloadWriteBytes"], json!(0));
+        assert_eq!(correspondence_data(&ip, previous, Some(&sp), Some(&parsed)), CorrespondenceData::MatchingRecordedData);
+        for key in ["originalsClosed", "withinOriginalDeadline", "readbackVerified", "workspaceCleared"] {
+            let mut failed = value.clone(); failed["launcher"][key] = json!(false);
+            assert!(CapsuleData::parse_data(&bytes(&failed), &expected).is_err());
+        }
+        for outcome in ["inverse-restored", "refused", "unknown"] {
+            let mut failed = value.clone(); failed["launcher"]["outcome"] = json!(outcome);
+            assert!(CapsuleData::parse_data(&bytes(&failed), &expected).is_err());
+        }
+        for bad in [Value::Null, positional(&value["launcher"], &["outcome", "writeCount", "writeBytes", "originalsClosed",
+            "withinOriginalDeadline", "readbackVerified", "workspaceCleared"])] {
+            let mut failed = value.clone(); failed["launcher"] = bad;
+            assert!(CapsuleData::parse_data(&bytes(&failed), &expected).is_err());
+        }
+        let mut unknown = value.clone(); unknown["launcher"]["trusted"] = json!(true);
+        assert!(CapsuleData::parse_data(&bytes(&unknown), &expected).is_err());
+        let mut inflated = value.clone(); inflated["writer"]["payloadWriteCount"] = json!(1);
+        inflated["writer"]["payloadWriteBytes"] = json!(PAYLOAD_LIMIT);
+        assert!(CapsuleData::parse_data(&bytes(&inflated), &expected).is_err());
+        let mut violated = writer(); violated.payload_write_count = 1; violated.payload_write_bytes = 1;
+        assert!(CapsuleData::encode_with_launcher_data(&ip, previous, Some(&sp), Some(expected.current_data()),
+            RecordedOutcomeData::SamePackage, violated, Some(observation), &expected).is_err());
+        // Absence remains legacy DATA; native callers MUST use their actual
+        // authenticated inventory to require this observation for enrollment.
+    }
+
+    #[test]
+    fn constructed_action_chain_keeps_runtime_identity_and_exact_linked_worker_evidence() {
+        // These are comparison DATA, not package trust, native writes, or an
+        // assertion that a historical outer Installer ever returned success.
+        let a = ReleaseSetData::parse_for_target_data(&bytes(&json!({"schemaVersion":2,
+            "current":release(2),"acceptedPredecessors":[]})), MaintenanceTargetData::Arm64).unwrap();
+        let b = expected();
+        let roundtrip = ReleaseSetData::parse_for_target_data(&b.encode_data().unwrap(), b.target_data()).unwrap();
+        assert_eq!(roundtrip.current_data(), b.current_data());
+        assert_eq!(roundtrip.predecessor_data(), b.predecessor_data());
+        let app = |inode| AppIdentityData::from_original_fields_data(1,inode,0o040555,0,0,0).unwrap();
+        let directory = |inode| DirectoryIdentity { device:1,inode,mode:0o040755,uid:0,gid:0,flags:0, volume_uuid: None };
+        let observed = |writes, code| WriterObservationData { returned:true,exit_code:Some(code),original_joined:true,
+            result_eof:true,original_closes_known:true,within_original_deadline:true,
+            payload_write_count:writes,payload_write_bytes:writes };
+        let original = GenerationData::from_original_fields_data(&a,a.current_data(),&id(2),directory(102),app(202)).unwrap();
+        let fresh_i = IntentData::parse_data(&IntentData::encode_data(&id(2),&id(102),ActionData::FreshInstall,None,&a).unwrap(),&a).unwrap();
+        let fresh_s = StateData::parse_data(&StateData::encode_applied_data(&fresh_i,None,&original,&a).unwrap(),&a).unwrap();
+        let fresh_c = CapsuleData::parse_data(&CapsuleData::encode_data(&fresh_i,None,Some(&fresh_s),Some(a.current_data()),
+            RecordedOutcomeData::Applied,observed(24_577,0),&a).unwrap(),&a).unwrap();
+        assert_eq!(correspondence_data(&fresh_i,None,Some(&fresh_s),Some(&fresh_c)),CorrespondenceData::MatchingRecordedData);
+        // Required linkage prevents a prior request export being presented as
+        // this operation. Matching IDs remain comparison DATA, not authority.
+        assert_ne!(fresh_i.request_id_data(),fresh_i.invocation_data());
+        assert_eq!(fresh_i.request_id_data(),fresh_s.request_id_data());
+        assert_eq!(fresh_i.request_id_data(),fresh_c.request_id_data());
+        assert_eq!(request_from_package_name_data("Install.pkg").unwrap(),None);
+        assert_eq!(request_from_package_name_data(&format!("MobileReleaseKit-Request-{}.pkg",id(102))).unwrap(),Some(id(102)));
+        assert_eq!(export_name_data(&id(102)).unwrap(),format!("MobileReleaseKit-InstallerResult-v2-{}.json",id(102)));
+        for bad in ["Other.pkg".into(),"../Install.pkg".into(),"Install.pkg/".into(),
+            format!("MobileReleaseKit-Request-{}.pkg","0".repeat(32)),
+            format!("MobileReleaseKit-Request-{}.pkg","A".repeat(32)),
+            format!("MobileReleaseKit-Request-{}.pkg.trailing",id(102))] {
+            assert!(request_from_package_name_data(&bad).is_err());
+        }
+        let mut missing = serde_json::to_value(&fresh_i.wire).unwrap();
+        missing.as_object_mut().unwrap().remove("requestId");
+        assert!(IntentData::parse_data(&bytes(&missing),&a).is_err());
+        let mut missing = serde_json::to_value(&fresh_s.wire).unwrap();
+        missing.as_object_mut().unwrap().remove("requestId");
+        assert!(StateData::parse_data(&bytes(&missing),&a).is_err());
+        let mut missing = serde_json::to_value(&fresh_c.wire).unwrap();
+        missing.as_object_mut().unwrap().remove("requestId");
+        assert!(CapsuleData::parse_data(&bytes(&missing),&a).is_err());
+        let mut changed = serde_json::to_value(&fresh_c.wire).unwrap(); changed["requestId"] = json!(id(999));
+        let wrong = CapsuleData::parse_data(&bytes(&changed),&a).unwrap();
+        assert_eq!(correspondence_data(&fresh_i,None,Some(&fresh_s),Some(&wrong)),CorrespondenceData::Mismatch);
+        let mut changed = serde_json::to_value(&fresh_s.wire).unwrap(); changed["requestId"] = json!(id(999));
+        let wrong = StateData::parse_data(&bytes(&changed),&a).unwrap();
+        assert_eq!(correspondence_data(&fresh_i,None,Some(&wrong),Some(&fresh_c)),CorrespondenceData::Mismatch);
+        assert!(IntentData::encode_data(&id(5),fresh_i.request_id_data(),ActionData::SamePackageNoop,Some((&fresh_s,&fresh_c)),&a).is_err());
+        assert!(IntentData::encode_data(&id(2),&id(102),ActionData::SamePackageNoop,Some((&fresh_s,&fresh_c)),&a).is_err());
+        let noop_i = IntentData::parse_data(&IntentData::encode_data(&id(5),&id(105),ActionData::SamePackageNoop,Some((&fresh_s,&fresh_c)),&a).unwrap(),&a).unwrap();
+        let noop_s = StateData::parse_data(&StateData::encode_applied_data(&noop_i,Some((&fresh_s,&fresh_c)),&original,&a).unwrap(),&a).unwrap();
+        let noop_c = CapsuleData::parse_data(&CapsuleData::encode_data(&noop_i,Some((&fresh_s,&fresh_c)),Some(&noop_s),Some(a.current_data()),
+            RecordedOutcomeData::SamePackage,observed(0,0),&a).unwrap(),&a).unwrap();
+        assert_eq!(noop_s.current_data(),original);
+        assert_eq!(noop_s.evidence_data().map(|e| e.invocation).collect::<Vec<_>>(),[id(2).as_str()]);
+        assert_eq!(noop_s.retained_data().count(),0);
+        assert!(CapsuleData::encode_data(&noop_i,Some((&fresh_s,&fresh_c)),Some(&noop_s),Some(a.current_data()),
+            RecordedOutcomeData::SamePackage,observed(1,0),&a).is_err());
+        let restored = GenerationData::from_original_fields_data(&a,a.current_data(),original.instance_data(),
+            original.release_directory_data(),app(302)).unwrap();
+        assert!(StateData::encode_applied_data(&noop_i,Some((&fresh_s,&fresh_c)),&restored,&a).is_err());
+        let restore_i = IntentData::parse_data(&IntentData::encode_data(&id(6),&id(106),ActionData::RestoreFixedApp,Some((&noop_s,&noop_c)),&a).unwrap(),&a).unwrap();
+        let restore_s = StateData::parse_data(&StateData::encode_applied_data(&restore_i,Some((&noop_s,&noop_c)),&restored,&a).unwrap(),&a).unwrap();
+        let restore_c = CapsuleData::parse_data(&CapsuleData::encode_data(&restore_i,Some((&noop_s,&noop_c)),Some(&restore_s),Some(a.current_data()),
+            RecordedOutcomeData::RestoredApp,observed(17,0),&a).unwrap(),&a).unwrap();
+        assert_eq!(restore_s.current_data().instance_data(),original.instance_data());
+        assert_eq!(restore_s.current_data().release_directory_data(),original.release_directory_data());
+        assert_ne!(restore_s.current_data().app_identity_data(),original.app_identity_data());
+        let wrong_runtime = GenerationData::from_original_fields_data(&a,a.current_data(),original.instance_data(),directory(303),app(302)).unwrap();
+        assert!(StateData::encode_applied_data(&restore_i,Some((&noop_s,&noop_c)),&wrong_runtime,&a).is_err());
+        let update_i_bytes = IntentData::encode_data(&id(7),&id(107),ActionData::Update,Some((&restore_s,&restore_c)),&b).unwrap();
+        let update_i = IntentData::parse_data(&update_i_bytes,&b).unwrap();
+        let next = GenerationData::from_original_fields_data(&b,b.current_data(),&id(3),directory(103),app(203)).unwrap();
+        let update_s = StateData::parse_data(&StateData::encode_applied_data(&update_i,Some((&restore_s,&restore_c)),&next,&b).unwrap(),&b).unwrap();
+        let update_c = CapsuleData::parse_data(&CapsuleData::encode_data(&update_i,Some((&restore_s,&restore_c)),Some(&update_s),Some(b.current_data()),
+            RecordedOutcomeData::Applied,observed(31,0),&b).unwrap(),&b).unwrap();
+        let retained = update_s.retained_data().collect::<Vec<_>>();
+        assert_eq!(retained.len(),1); assert_eq!(retained[0].release_directory_data(),original.release_directory_data());
+        assert_eq!(retained[0].app_identity_data(),restored.app_identity_data());
+        assert_eq!(retained[0].retained_invocation_data(),Some(id(7).as_str()));
+        assert_eq!(update_s.evidence_data().map(|e| e.invocation.to_owned()).collect::<Vec<_>>(),[id(2),id(5),id(6)]);
+        assert_eq!(correspondence_data(&update_i,Some((&restore_s,&restore_c)),Some(&update_s),Some(&update_c)),CorrespondenceData::MatchingRecordedData);
+        let inverse_s = StateData::parse_data(&StateData::encode_inverse_data(&update_i,(&restore_s,&restore_c),true,true,&b).unwrap(),&b).unwrap();
+        let inverse_c = CapsuleData::parse_data(&CapsuleData::encode_data(&update_i,Some((&restore_s,&restore_c)),Some(&inverse_s),Some(a.current_data()),
+            RecordedOutcomeData::InverseRecorded,observed(31,20),&b).unwrap(),&b).unwrap();
+        assert!(!inverse_s.mutation_recorded_data()); assert_eq!(inverse_s.current_data(),restored);
+        assert_eq!(correspondence_data(&update_i,Some((&restore_s,&restore_c)),Some(&inverse_s),Some(&inverse_c)),CorrespondenceData::InverseRecorded);
+        assert!(IntentData::encode_data(&id(8),&id(108),ActionData::Update,Some((&inverse_s,&inverse_c)),&b).is_err());
+        assert!(StateData::encode_inverse_data(&update_i,(&restore_s,&restore_c),false,true,&b).is_err());
+        assert!(CapsuleData::encode_data(&update_i,Some((&restore_s,&restore_c)),Some(&update_s),Some(b.current_data()),
+            RecordedOutcomeData::Applied,WriterObservationData { original_joined:false,..observed(31,0) },&b).is_err());
+        assert!(GenerationData::from_original_fields_data(&a,b.current_data(),&id(3),directory(103),app(203)).is_err());
+        for bad in ["", ".", "../other", &"0".repeat(32), &"A".repeat(32)] {
+            assert!(intent_name_data(bad).is_err()); assert!(archived_state_name_data(bad).is_err());
+            assert!(capsule_name_data(bad).is_err()); assert!(retained_app_name_data(bad).is_err());
+            assert!(export_name_data(bad).is_err());
+        }
+    }
+    #[test]
+    fn returned_effects_enforce_order_same_endpoint_one_inverse_and_absorbing_unknown() {
+        use ReturnedData::*; use StepData::*;
+        let mut update = ProgressData::new_data(ActionData::Update, 1, 100).unwrap();
+        for step in [Reobserved, Prepared, RuntimePublished, MetadataPublished, OldAppQuarantined] {
+            update.forward_return_data(step, KnownSuccess, 20).unwrap();
+        }
+        assert!(update.forward_return_data(AppPublished, KnownRefusal, 30).is_err());
+        update.begin_inverse_data(31, true, true).unwrap();
+        for step in [OldAppRestored, StateRestored, OriginalsSettled] { update.inverse_return_data(step, KnownSuccess, 40).unwrap(); }
+        assert_eq!(update.outcome_data(), ProgressOutcomeData::InverseRecorded);
+        assert!(update.begin_inverse_data(41, true, true).is_err());
+        // Rejected admission performed no new effect; the recorded inverse
+        // remains historical DATA. Actual later returns are different.
+        assert_eq!(update.outcome_data(), ProgressOutcomeData::InverseRecorded);
+        for (forward, late) in [(false,false),(true,false),(false,true),(true,true)] {
+            let mut value = ProgressData::new_data(ActionData::Update, 1, 100).unwrap();
+            for step in [Reobserved, Prepared, RuntimePublished, MetadataPublished, OldAppQuarantined] {
+                value.forward_return_data(step, KnownSuccess, 20).unwrap();
+            }
+            assert!(value.forward_return_data(AppPublished, KnownRefusal, 30).is_err());
+            value.begin_inverse_data(31, true, true).unwrap();
+            for step in [OldAppRestored, StateRestored, OriginalsSettled] { value.inverse_return_data(step, KnownSuccess, 40).unwrap(); }
+            let returned = if forward { value.forward_return_data(Reobserved, KnownSuccess, if late { 100 } else { 41 }) }
+                else { value.inverse_return_data(OldAppRestored, KnownSuccess, if late { 100 } else { 41 }) };
+            assert!(returned.is_err()); assert!(value.inverse_complete);
+            assert_eq!(value.outcome_data(), ProgressOutcomeData::Refused);
+        }
+        let mut unknown = ProgressData::new_data(ActionData::FreshInstall, 1, 100).unwrap();
+        assert!(unknown.forward_return_data(Prepared, Unknown, 20).is_err());
+        assert!(unknown.forward_return_data(Prepared, KnownSuccess, 21).is_err());
+        assert!(unknown.begin_inverse_data(22, true, true).is_err());
+        assert_eq!(unknown.outcome_data(), ProgressOutcomeData::Unknown);
+        let mut late = ProgressData::new_data(ActionData::SamePackageNoop, 1, 100).unwrap();
+        late.forward_return_data(Reobserved, KnownSuccess, 10).unwrap(); late.forward_return_data(StatePublished, KnownSuccess, 20).unwrap();
+        assert!(late.forward_return_data(OriginalsSettled, KnownSuccess, 100).is_err());
+        assert_eq!(late.outcome_data(), ProgressOutcomeData::Refused);
+        let mut order = ProgressData::new_data(ActionData::Update, 1, 100).unwrap();
+        assert!(order.forward_return_data(AppPublished, KnownSuccess, 10).is_err());
+        assert!(order.forward_return_data(Reobserved, KnownSuccess, 11).is_err());
+        assert_eq!(order.outcome_data(), ProgressOutcomeData::Refused);
+        // Refused inverse admission is not a permit; late known forward effects
+        // cannot gain a new window by supplying an earlier comparison timestamp.
+        for mode in ["unowned", "late", "wrong-name", "late-monotonic"] {
+            let mut value = ProgressData::new_data(ActionData::Update, 1, 100).unwrap();
+            for step in [Reobserved, Prepared, RuntimePublished, MetadataPublished] {
+                value.forward_return_data(step, KnownSuccess, 20).unwrap();
+            }
+            if mode == "late" || mode == "late-monotonic" {
+                assert!(value.forward_return_data(OldAppQuarantined, KnownSuccess, 100).is_err());
+                assert!(value.expired); assert_eq!(value.end, 100);
+            } else {
+                value.forward_return_data(OldAppQuarantined, KnownSuccess, 20).unwrap();
+                assert!(value.forward_return_data(AppPublished, KnownRefusal, 30).is_err());
+            }
+            let (begin_at, returned_at) = if mode == "late-monotonic" { (101, 102) } else { (31, 40) };
+            assert!(value.begin_inverse_data(begin_at, mode != "unowned", mode != "wrong-name").is_err());
+            // Admission alone reports no new effect. Its refusal preserves the
+            // known quarantine, including a late return, without inverse authority.
+            assert_eq!(value.outcome_data(), ProgressOutcomeData::Refused);
+            assert!(value.old_quarantined); assert!(!value.inverse_admitted);
+            assert!(value.inverse_return_data(OldAppRestored, KnownSuccess, returned_at).is_err());
+            // Only the backwards returned observation (40 after 100) makes the
+            // effect account Unknown; monotonic expired returns remain Refused.
+            assert_eq!(value.outcome_data(), if mode == "late" { ProgressOutcomeData::Unknown }
+                else { ProgressOutcomeData::Refused });
+            assert!(value.old_quarantined); assert!(!value.inverse_complete);
+            if mode == "late" {
+                assert!(value.forward_return_data(Reobserved, KnownSuccess, 101).is_err());
+                assert_eq!(value.outcome_data(), ProgressOutcomeData::Unknown);
+            }
+        }
+        assert!(late.begin_inverse_data(21, true, true).is_err());
+        assert_ne!(late.outcome_data(), ProgressOutcomeData::InverseRecorded);
+        let mut bad_inverse = ProgressData::new_data(ActionData::Update, 1, 100).unwrap();
+        for step in [Reobserved, Prepared, RuntimePublished, MetadataPublished, OldAppQuarantined] {
+            bad_inverse.forward_return_data(step, KnownSuccess, 20).unwrap();
+        }
+        assert!(bad_inverse.forward_return_data(AppPublished, KnownRefusal, 30).is_err());
+        bad_inverse.begin_inverse_data(31, true, true).unwrap();
+        assert!(bad_inverse.inverse_return_data(StateRestored, KnownSuccess, 35).is_err());
+        assert!(bad_inverse.inverse_return_data(OldAppRestored, KnownSuccess, 40).is_err());
+        assert_eq!(bad_inverse.outcome_data(), ProgressOutcomeData::Refused);
+        assert!(bad_inverse.inverse_return_data(OldAppRestored, Unknown, 41).is_err());
+        assert_eq!(bad_inverse.outcome_data(), ProgressOutcomeData::Unknown);
+        for after_state in [false, true] {
+            let mut value = ProgressData::new_data(ActionData::Update, 1, 100).unwrap();
+            for step in [Reobserved, Prepared, RuntimePublished, MetadataPublished, OldAppQuarantined, AppPublished] {
+                value.forward_return_data(step, KnownSuccess, 20).unwrap();
+            }
+            if after_state {
+                value.forward_return_data(StatePublished, KnownSuccess, 25).unwrap();
+                assert!(value.forward_return_data(OriginalsSettled, KnownRefusal, 30).is_err());
+                assert!(value.begin_inverse_data(31, true, true).is_err());
+                assert_eq!(value.outcome_data(), ProgressOutcomeData::Refused);
+            } else {
+                assert!(value.forward_return_data(StatePublished, KnownRefusal, 30).is_err());
+                value.begin_inverse_data(31, true, true).unwrap();
+                for step in [NewAppWithdrawn, OldAppRestored, StateRestored, OriginalsSettled] {
+                    value.inverse_return_data(step, KnownSuccess, 40).unwrap();
+                }
+                assert_eq!(value.outcome_data(), ProgressOutcomeData::InverseRecorded);
+            }
+        }
+        // A real POST/fsync failure follows a positively returned mutation. It
+        // must latch failure without inventing a duplicate publication, and a
+        // failed inverse POST must never retain a positive current outcome.
+        for (after_inverse, refusal) in [(false,KnownRefusal),(true,KnownRefusal),(false,Unknown),(true,Unknown)] {
+            let mut value = ProgressData::new_data(ActionData::Update,1,100).unwrap();
+            for step in [Reobserved,Prepared,RuntimePublished,MetadataPublished,OldAppQuarantined] {
+                value.forward_return_data(step,KnownSuccess,20).unwrap();
+            }
+            assert!(value.stop_data(KnownSuccess,21).is_err());
+            assert_eq!(value.outcome_data(),ProgressOutcomeData::InProgress);
+            assert!(value.stop_data(KnownRefusal,22).is_err());
+            assert!(value.old_quarantined && !value.sequence_invalid);
+            value.begin_inverse_data(23,true,true).unwrap();
+            value.inverse_return_data(OldAppRestored,KnownSuccess,24).unwrap();
+            if after_inverse {
+                value.inverse_return_data(StateRestored,KnownSuccess,25).unwrap();
+                value.inverse_return_data(OriginalsSettled,KnownSuccess,26).unwrap();
+                assert_eq!(value.outcome_data(),ProgressOutcomeData::InverseRecorded);
+            }
+            assert!(value.stop_data(refusal,27).is_err());
+            assert!(value.old_quarantined && value.sequence_invalid && !value.inverse_admitted);
+            assert_eq!(value.inverse_complete,after_inverse);
+            assert_eq!(value.outcome_data(),if refusal == Unknown { ProgressOutcomeData::Unknown } else { ProgressOutcomeData::Refused });
+            assert!(value.inverse_return_data(StateRestored,KnownSuccess,28).is_err());
+            assert_ne!(value.outcome_data(),ProgressOutcomeData::InverseRecorded);
+        }
+    }
+    #[test]
+    fn retained_storage_and_original_budget_arithmetic_refuse_before_effects() {
+        let one = GenerationCostData { files: 10, bytes: 1024 };
+        let admitted = BudgetData::checked_data(&[one, one], 2, 4096, 4096, 100, 12).unwrap();
+        assert_eq!(admitted.payload_totals_data(), (20, 2048));
+        let record_and_result = (INTENT_LIMIT + STATE_LIMIT + CAPSULE_LIMIT + REQUEST_EXPORT_LIMIT) as u64;
+        let payload = GenerationCostData { files:1, bytes:PAYLOAD_LIMIT };
+        assert!(BudgetData::checked_data(&[payload],1,record_and_result,0,2,2).is_ok());
+        let too_large = GenerationCostData { files:1, bytes:payload.bytes+1 };
+        assert!(BudgetData::checked_data(&[too_large],1,record_and_result,0,2,2).is_err());
+        assert!(BudgetData::checked_data(&[one],1,record_and_result+STAGE_EVIDENCE_LIMIT as u64,0,2,2).is_ok());
+        assert!(BudgetData::checked_data(&[one],1,record_and_result+STAGE_EVIDENCE_LIMIT as u64+1,0,2,2).is_err());
+        // Signed control bytes cannot evade the aggregate merely by living
+        // outside versions/<release>. The payload-only accessor stays truthful.
+        let nine = PREDECESSOR_LIMIT + 1;
+        let mut costs = vec![GenerationCostData { files:1, bytes:PAYLOAD_LIMIT }; nine];
+        assert_eq!(BudgetData::checked_data(&costs,1,record_and_result,0,ORIGINAL_LIMIT as u64,96).unwrap().payload_totals_data(),
+            (nine as u64, nine as u64 * PAYLOAD_LIMIT));
+        costs[0].bytes += 1;
+        assert!(BudgetData::checked_data(&costs,1,record_and_result,0,ORIGINAL_LIMIT as u64,96).is_err());
+        // The actual Fresh observer charges three originals per copied leaf,
+        // plus three per directory and 259 fixed future records before its
+        // already-held originals/launcher additions. This realistic Store
+        // roster alone exceeded the obsolete 24,576 record ceiling.
+        let store = GenerationCostData { files: 8_622, bytes: 256 * 1024 * 1024 };
+        let fresh_minimum_records = store.files * 3 + 259;
+        assert_eq!(fresh_minimum_records, 26_125);
+        assert_eq!(BudgetData::checked_data(&[store],1,record_and_result,
+            4096,fresh_minimum_records,96).unwrap().payload_totals_data(),
+            (store.files,store.bytes));
+        assert!(BudgetData::checked_data(&[store],1,record_and_result,
+            CONTROL_LIMIT as u64,ORIGINAL_LIMIT as u64,96).is_ok());
+        for (count, evidence, control, records, fds) in [(0,0,0,0,0),(INVOCATION_LIMIT+1,0,0,0,0),
+            (1,u64::MAX,0,0,0),(1,0,CONTROL_LIMIT as u64+1,0,0),
+            (1,0,0,ORIGINAL_LIMIT as u64+1,0),(1,0,0,0,97)] {
+            assert!(BudgetData::checked_data(&[one], count, evidence, control, records, fds).is_err());
+        }
+        assert!(BudgetData::checked_data(&[one; PREDECESSOR_LIMIT+2], 1, 0, 0, 0, 0).is_err());
+        assert!(BudgetData::checked_data(&[GenerationCostData { files: 1, bytes: PAYLOAD_LIMIT }, one], 1,0,0,0,0).is_ok());
+        assert!(BudgetData::checked_data(&[GenerationCostData { files: u64::MAX, bytes: 0 }], 1,0,0,0,0).is_err());
+        assert!(BudgetData::checked_data(&[], 1,0,0,0,0).is_err());
+    }
+    #[test]
+    fn evidence_bound_admits_retained_stage_evidence_per_invocation() {
+        use BudgetRefusalData as B;
+        let one = GenerationCostData {files:1,bytes:1};
+        let records = (INTENT_LIMIT + STATE_LIMIT + CAPSULE_LIMIT + REQUEST_EXPORT_LIMIT) as u64;
+        let stage = STAGE_EVIDENCE_LIMIT as u64;
+        assert_eq!(stage, 4 * STATE_LIMIT as u64 + INTENT_LIMIT as u64 + INVENTORY_LIMIT as u64 + 4096);
+        assert_eq!(crate::macos_fresh_recovery::ORIGIN_LIMIT, INTENT_LIMIT);
+        assert_eq!(crate::macos_fresh_recovery::JOURNAL_LIMIT, INVENTORY_LIMIT);
+        // #49: fresh history (records + phases + output journal) plus the
+        // planned Update records/results for two invocations.
+        let journal = 1_500_000u64;
+        let fresh_history = (INTENT_LIMIT + STATE_LIMIT + CAPSULE_LIMIT) as u64 + 4 * STATE_LIMIT as u64
+            + INTENT_LIMIT as u64 + journal + 4096;
+        let planned = fresh_history + (INTENT_LIMIT + STATE_LIMIT + CAPSULE_LIMIT) as u64 + 2 * REQUEST_EXPORT_LIMIT as u64;
+        assert!(planned > 2 * records); // the previous bound refused it
+        assert!(BudgetData::checked_with_reason_data(&[one],2,planned,0,0,0).is_ok());
+        // The widened bound is still exact and per invocation.
+        for n in [1usize, 2, INVOCATION_LIMIT] {
+            let bound = n as u64 * (records + stage);
+            assert!(BudgetData::checked_with_reason_data(&[one],n,bound,0,0,0).is_ok());
+            assert_eq!(BudgetData::checked_with_reason_data(&[one],n,bound+1,0,0,0).unwrap_err(),B::Evidence);
+        }
+    }
+    #[test]
+    fn update_storage_and_first_refusal_preserve_individual_limits() {
+        // Exact authenticated inventories from the original owner refusal.
+        // This lower bound is not a native observation of the omitted metadata,
+        // launcher copies, control quote, original records or live descriptors.
+        let observed = [GenerationCostData {files:7203,bytes:283_826_469},
+            GenerationCostData {files:7230,bytes:331_920_402}];
+        let budget = BudgetData::checked_data(&observed,2,0,0,0,0).unwrap();
+        assert_eq!(budget.payload_totals_data(), (14_433,615_746_871));
+        assert!(budget.payload_totals_data().1 > PAYLOAD_LIMIT);
+        let storage = budget.storage_with_archives_data(0).unwrap();
+        assert_eq!(storage,615_746_871+2*PRODUCER_CONTROL_LIMIT as u64);
+        let remaining = MAINTENANCE_STORAGE_LIMIT-storage;
+        assert_eq!(budget.storage_with_archives_data(remaining),Ok(MAINTENANCE_STORAGE_LIMIT));
+        assert!(budget.storage_with_archives_data(remaining+1).is_err());
+        assert!(budget.storage_with_archives_data(u64::MAX).is_err());
+        assert_eq!(maintenance_storage_sum_data(MAINTENANCE_STORAGE_LIMIT-1,1),Ok(MAINTENANCE_STORAGE_LIMIT));
+        assert!(maintenance_storage_sum_data(MAINTENANCE_STORAGE_LIMIT,1).is_err());
+        assert!(maintenance_storage_sum_data(u64::MAX,1).is_err());
+        let one = GenerationCostData {files:1,bytes:1};
+        use BudgetRefusalData as B;
+        for (n,e,c,r,f,want) in [(0,0,0,0,0,B::Invocations),
+            (INVOCATION_LIMIT+1,0,0,0,0,B::Invocations),
+            (1,0,CONTROL_LIMIT as u64+1,0,0,B::Control),
+            (1,0,0,ORIGINAL_LIMIT as u64+1,0,B::Originals),
+            (1,0,0,0,97,B::LiveFds),(1,u64::MAX,0,0,0,B::Evidence)] {
+            assert_eq!(BudgetData::checked_with_reason_data(&[one],n,e,c,r,f).unwrap_err(),want);
+        }
+        assert_eq!(BudgetData::checked_with_reason_data(&[],1,0,0,0,0).unwrap_err(),B::Generations);
+        assert_eq!(BudgetData::checked_with_reason_data(&[one;PREDECESSOR_LIMIT+2],1,0,0,0,0).unwrap_err(),B::Generations);
+        for bad in [GenerationCostData{files:0,..one},GenerationCostData{files:FILE_LIMIT as u64+1,..one}] {
+            assert_eq!(BudgetData::checked_with_reason_data(&[bad],1,0,0,0,0).unwrap_err(),B::GenerationFiles);
+        }
+        assert_eq!(BudgetData::checked_with_reason_data(&[GenerationCostData{bytes:PAYLOAD_LIMIT+1,..one}],1,0,0,0,0)
+            .unwrap_err(),B::GenerationBytes);
+        // First rejection is frozen in the same original check order.
+        assert_eq!(BudgetData::checked_with_reason_data(&[],0,u64::MAX,u64::MAX,u64::MAX,u64::MAX)
+            .unwrap_err(),B::Generations);
+        assert_eq!(BudgetData::checked_with_reason_data(&[one],1,0,u64::MAX,u64::MAX,u64::MAX)
+            .unwrap_err(),B::Control);
+        assert_eq!(B::GenerationBytes.reason_data(),"maintenance-budget-generation-bytes");
+        assert_eq!(B::LiveFds.reason_data(),"maintenance-budget-live-fds");
+    }
+}

@@ -33,6 +33,11 @@ from types import MappingProxyType
 
 AGGREGATE_SECONDS = 3300
 DISK_RESERVE = 4 * 1024**3 + 512 * 1024**2
+# The integrated Desktop checkout is about 4,100 blobs and 149 MiB. Bound
+# the complete snapshot independently of per-file identity checks.
+SOURCE_MAX_FILES = 4128
+SOURCE_MAX_FILE_BYTES = 32 * 1024**2
+SOURCE_MAX_TOTAL_BYTES = 160 * 1024**2
 MINITEST_FOOTER = (r"(?m)^(\d{1,9}) runs, (\d{1,9}) assertions, (\d{1,9}) failures, "
                    r"(\d{1,9}) errors, (\d{1,9}) skips[ \t]*$")
 NATIVE_DIAGNOSTIC_PREFIX = "MRK_NATIVE_DIAGNOSTIC="
@@ -719,12 +724,15 @@ RUBY_NATIVE_CAPTURE_SHARED_SECONDS = 10
 RUBY_PARTITION_CONTRACTS = (
     ("ruby-native-owner", "test_native_upload_process.rb", 52, 44, 120, None),
     ("ruby-native-capture", "test_native_upload_validation.rb", 22, 18, 310, "NativeUploadValidationTest"),
-    ("ruby-ios_upload_validation", "test_ios_upload_validation.rb", 32, 23, 300, "IosUploadValidationTest"),
-    ("ruby-android_upload_validation", "test_android_upload_validation.rb", 32, 23, 300, "AndroidUploadValidationTest"),
+    ("ruby-ios_upload_validation", "test_ios_upload_validation.rb", 35, 26, 300, "IosUploadValidationTest"),
+    ("ruby-android_upload_validation", "test_android_upload_validation.rb", 37, 28, 300, "AndroidUploadValidationTest"),
 )
 PARTITIONED_RUBY_GATES = tuple(row[0] for row in RUBY_PARTITION_CONTRACTS)
 RUBY_SUITES = (
     ("ruby-support", "test_fastlane_support.rb", 12),
+    ("ruby-metadata-image-catalog", "test_metadata_image_catalog.rb", 0),
+    ("ruby-local-store-intent", "test_local_store_intent.rb", 0),
+    ("ruby-local-store-execution-runtime", "test_local_store_execution_runtime.rb", 0),
     ("ruby-store_document", "test_store_document.rb", 0),
     ("ruby-store_lane_lifetime", "test_store_lane_lifetime.rb", 0),
     ("ruby-store_lane_nested_validation", "test_store_lane_nested_validation.rb", 0),
@@ -1146,7 +1154,7 @@ def environment(paths: Paths, platform: str) -> tuple[tuple[str, str], ...]:
         "MOBILE_RELEASE_TEST_PYTHON": str(paths.source_python),
     }
     if platform == "macos":
-        env["DEVELOPER_DIR"] = "/Applications/Xcode_26.3.app/Contents/Developer"
+        env["DEVELOPER_DIR"] = "/Applications/Xcode_27.1.app/Contents/Developer"
     if paths.java_home is not None:
         env["JAVA_HOME"] = str(paths.java_home)
     return tuple(sorted(env.items()))
@@ -1511,6 +1519,21 @@ def trusted_command(argv: tuple[str, ...], *, deadline: float, cwd: Path | None 
     return result.stdout
 
 
+def source_inventory_bytes(inventory: dict) -> int:
+    """One finite source-only envelope; unrelated input readers stay bounded."""
+    if type(inventory) is not dict or not 1 <= len(inventory) <= SOURCE_MAX_FILES:
+        raise VerificationError("SOURCE_INVENTORY_BOUND")
+    total = 0
+    for expected in inventory.values():
+        if (type(expected) is not dict or type(expected.get("bytes")) is not int
+                or not 0 <= expected["bytes"] <= SOURCE_MAX_FILE_BYTES):
+            raise VerificationError("SOURCE_FILE_BOUND")
+        total += expected["bytes"]
+        if total > SOURCE_MAX_TOTAL_BYTES:
+            raise VerificationError("SOURCE_TOTAL_BOUND")
+    return total
+
+
 def snapshot_source(checkout: Path, destination: Path, commit: str, *, deadline: float) -> tuple[dict, dict]:
     """Copy the exact committed ordinary-file tree; no worktree/index mutation."""
     if not re.fullmatch(r"[0-9a-f]{40}", commit):
@@ -1523,11 +1546,12 @@ def snapshot_source(checkout: Path, destination: Path, commit: str, *, deadline:
     if trusted_command((*git, "status", "--porcelain=v1", "--untracked-files=all"), deadline=deadline):
         raise VerificationError("CHECKOUT_NOT_CLEAN")
     entries = trusted_command((*git, "ls-tree", "-rz", "--full-tree", "HEAD"), deadline=deadline).split(b"\0")
-    if entries[-1] or not 1 <= len(entries) - 1 <= 512:
+    if entries[-1] or not 1 <= len(entries) - 1 <= SOURCE_MAX_FILES:
         raise VerificationError("SOURCE_INVENTORY_BOUND")
-    check_capacity(destination.parent, 16 * 1024**2)
+    check_capacity(destination.parent, SOURCE_MAX_TOTAL_BYTES)
     destination.mkdir(mode=0o755)
     inventory = {}
+    total = 0
     for entry in entries[:-1]:
         check_clock(deadline)
         header, raw_name = entry.split(b"\t", 1)
@@ -1538,7 +1562,10 @@ def snapshot_source(checkout: Path, destination: Path, commit: str, *, deadline:
                 or ".." in relative.parts or ".git" in relative.parts or relative.as_posix() != name
                 or re.search(r"[\x00-\x1f\x7f\\]", name) or name in inventory):
             raise VerificationError("SOURCE_ENTRY")
-        raw = read_regular(checkout / relative, deadline=deadline)
+        raw = read_regular(checkout / relative, deadline=deadline, maximum=SOURCE_MAX_FILE_BYTES)
+        total += len(raw)
+        if total > SOURCE_MAX_TOTAL_BYTES:
+            raise VerificationError("SOURCE_TOTAL_BOUND")
         if bool((checkout / relative).stat().st_mode & 0o111) != (mode == "100755"):
             raise VerificationError("SOURCE_CHECKOUT_MODE")
         if hashlib.sha1(f"blob {len(raw)}\0".encode("ascii") + raw).hexdigest() != blob:
@@ -1578,6 +1605,7 @@ def freeze_tree(root: Path, *, deadline: float, link_roots: tuple[Path, ...] = (
 
 
 def verify_source(root: Path, inventory: dict, *, deadline: float, generated: bool = False) -> None:
+    source_inventory_bytes(inventory)
     if root.resolve(strict=True) != root or not stat.S_ISDIR(root.lstat().st_mode):
         raise VerificationError("SOURCE_ROOT_NOT_DIRECTORY")
     actual = set()
@@ -1596,7 +1624,7 @@ def verify_source(root: Path, inventory: dict, *, deadline: float, generated: bo
             expected = inventory.get(relative)
             if expected is None:
                 raise VerificationError("SOURCE_UNEXPECTED_FILE")
-            raw = read_regular(path, deadline=deadline)
+            raw = read_regular(path, deadline=deadline, maximum=SOURCE_MAX_FILE_BYTES)
             if len(raw) != expected["bytes"] or hashlib.sha256(raw).hexdigest() != expected["sha256"]:
                 raise VerificationError("SOURCE_CONTENT_DRIFT")
             if bool(path.stat().st_mode & 0o111) != (expected["git_mode"] == "100755"):
@@ -1610,13 +1638,15 @@ def walk_error(_error: OSError) -> None:
 
 
 def copy_build(source: Path, destination: Path, inventory: dict, uid: int, gid: int, *, deadline: float) -> None:
+    source_inventory_bytes(inventory)
+    check_capacity(destination.parent, SOURCE_MAX_TOTAL_BYTES)
     destination.mkdir(mode=0o700)
     for relative, expected in inventory.items():
         check_clock(deadline)
         path = destination / relative
         path.parent.mkdir(mode=0o755, parents=True, exist_ok=True)
-        data = read_regular(source / relative, deadline=deadline)
-        if hashlib.sha256(data).hexdigest() != expected["sha256"]:
+        data = read_regular(source / relative, deadline=deadline, maximum=SOURCE_MAX_FILE_BYTES)
+        if len(data) != expected["bytes"] or hashlib.sha256(data).hexdigest() != expected["sha256"]:
             raise VerificationError("BUILD_COPY_SOURCE_CHANGED")
         create_file(path, data, mode=0o755 if expected["git_mode"] == "100755" else 0o644, deadline=deadline)
     for directory, dirs, files in os.walk(destination, followlinks=False, onerror=walk_error):
@@ -1833,12 +1863,13 @@ def parse_capture(step: Step, result, paths: Paths, platform: str, checks, *, de
             raise VerificationError("NATIVE_PYTHON_INVENTORY")
         details.update(tests=len(expected), completed=list(observed))
     elif step.parser == "xcode":
-        if stdout.strip().splitlines() != ["Xcode 26.3", "Build version 17C529"]:
+        if stdout.strip().splitlines() != ["Xcode 27.1", "Build version 27A9275"]:
             raise VerificationError("XCODE_VERSION")
-        details["version"] = "Xcode26.3/17C529"
+        details["version"] = "Xcode27.1/27A9275"
     elif step.parser == "check":
         lines = [line[len("MRK_CHECK_RESULT="):] for line in stdout.splitlines() if line.startswith("MRK_CHECK_RESULT=")]
-        if len(lines) != 1 or len(lines[0]) > 256 * 1024:
+        limit = (512 if step.id == "python-full" else 256) * 1024
+        if len(lines) != 1 or len(lines[0]) > limit:
             raise VerificationError("CHECK_SUMMARY_BOUND")
         summary = strict_json(lines[0])
         if (type(summary) is not dict or set(summary) != {"check", "ok", "tests", "details"}
@@ -2176,7 +2207,7 @@ def _signing_matrix_diagnostic_scope(scope) -> bool:
             and type(scope.regression_ids) is tuple
             and all(type(value) is str and value in scope.identifiers for value in scope.regression_ids)
             and len(set(scope.regression_ids)) == len(scope.regression_ids)
-            and type(scope.files) is tuple and len(scope.files) <= 512
+            and type(scope.files) is tuple and len(scope.files) <= 1024
             and all(type(value) is str and len(value) <= 256 and re.fullmatch(
                 r"(?:tests|\.github/scripts|src/mobile_release)/(?:[A-Za-z_][A-Za-z0-9_-]*/)*[A-Za-z_][A-Za-z0-9_-]*\.py",
                 value) for value in scope.files)
@@ -3475,7 +3506,7 @@ def _native_test_failure_locations(text: str, paths: Paths, phase: str, source_f
     if deadline is not None:
         check_clock(deadline)
     if (phase not in {"source", "wheel"} or type(source_files) is not tuple
-            or len(source_files) > 512 or not paths.source.is_absolute() or not paths.work.is_absolute()):
+            or len(source_files) > 1024 or not paths.source.is_absolute() or not paths.work.is_absolute()):
         raise VerificationError("NATIVE_DIAGNOSTIC_SCOPE")
     package = paths.work / ("source-build/src/mobile_release" if phase == "source" else
                             "wheel-venv/lib/python3.11/site-packages/mobile_release")
@@ -3484,7 +3515,7 @@ def _native_test_failure_locations(text: str, paths: Paths, phase: str, source_f
         if deadline is not None:
             check_clock(deadline)
         if (type(name) is not str or not re.fullmatch(
-                r"(?:src/mobile_release|tests(?:/[A-Za-z_][A-Za-z0-9_]*)*)/[A-Za-z_][A-Za-z0-9_]*\.py", name)):
+                r"(?:src/mobile_release|tests)(?:/[A-Za-z_][A-Za-z0-9_]*)*/[A-Za-z_][A-Za-z0-9_]*\.py", name)):
             raise VerificationError("NATIVE_DIAGNOSTIC_SCOPE")
         actual = package / name.removeprefix("src/mobile_release/") if name.startswith("src/") else paths.source / name
         if str(actual) in filenames:
@@ -3533,8 +3564,11 @@ def failure_details(result, step: Step | None = None, paths: Paths | None = None
     value["locations"] = [[name, int(line)] for name, line in re.findall(
         r'File "[^"\r\n]*/(ci_sandbox\.py|ci_checks\.py)", line ([0-9]{1,6})', text)][-8:]
     value["exception_types"] = re.findall(r"(?m)^([A-Za-z_][A-Za-z0-9_.]*(?:Error|Exception)):", text)[-8:]
-    if (result.ok is False and step is not None and paths is not None and step.parser == "native"
-            and step.id in {"native-profile-source", "native-profile-wheel"}):
+    native_entry = (step is not None and step.parser == "native"
+                    and (step.id in {"native-profile-source", "native-profile-wheel"}
+                         or step.id in {"python-full", "python-wheel"}
+                         and step.native_partition in PYTHON_SINGLETON_PARTITIONS))
+    if result.ok is False and paths is not None and native_entry:
         try:
             locations = _native_entry_failure_locations(text,
                 paths.source / "tests/workflow/run_native_profile_checks.py", deadline=deadline)
@@ -3545,8 +3579,10 @@ def failure_details(result, step: Step | None = None, paths: Paths | None = None
             # Expiry still consumes the same original deadline, never a new one.
             if deadline is not None:
                 check_clock(deadline)
+    prefix = "MRK_CHECK_RESULT="
+    limit = (512 if step is not None and step.id == "python-full" else 256) * 1024
     for line in result.stdout.decode("utf-8", "replace").splitlines():
-        if not line.startswith("MRK_CHECK_RESULT=") or len(line) > 256 * 1024:
+        if not line.startswith(prefix) or len(line) - len(prefix) > limit:
             continue
         try:
             data = strict_json(line.split("=", 1)[1])
@@ -3704,10 +3740,7 @@ def failure_details(result, step: Step | None = None, paths: Paths | None = None
             if deadline is not None:
                 check_clock(deadline)
             value["ruby_diagnostics_unavailable"] = True
-    if (step is not None and paths is not None and checks is not None
-            and (step.id in {"native-profile-source", "native-profile-wheel"}
-                 or step.id in {"python-full", "python-wheel"} and step.parser == "native"
-                 and step.native_partition in PYTHON_SINGLETON_PARTITIONS)):
+    if paths is not None and checks is not None and native_entry:
         stderr = result.stderr.decode("utf-8", "replace")
         lowered = stderr.lower()
         # These fixed tokens are observations of captured text, not diagnoses
@@ -3724,8 +3757,9 @@ def failure_details(result, step: Step | None = None, paths: Paths | None = None
         try:
             if deadline is not None:
                 check_clock(deadline)
-            expected = (_native_expected if _native_expected is not None else
-                        checks.native_partition_ids(paths.source, step.native_partition, deadline=deadline))
+            expected = _native_expected if _native_expected is not None else _python_expected
+            if expected is None:
+                expected = checks.native_partition_ids(paths.source, step.native_partition, deadline=deadline)
             diagnostic = native_failure_diagnostic(result.stdout.decode("utf-8", "replace") + "\n" + stderr,
                                                    expected, deadline=deadline)
             if diagnostic is not None:
@@ -4025,7 +4059,7 @@ def retain_native_header(paths: Paths, session, checks, platform: str, state: Na
     # GCC's assembler/linker must never search mutable work, venv or Bundler
     # directories. No CPATH/GCC_EXEC_PREFIX/COMPILER_PATH or arbitrary -B/-I.
     env = {"PATH": "/usr/bin:/bin"} if platform == "linux" else {
-        "DEVELOPER_DIR": "/Applications/Xcode_26.3.app/Contents/Developer",
+        "DEVELOPER_DIR": "/Applications/Xcode_27.1.app/Contents/Developer",
     }
     version_argv = (compiler, "--version") if platform == "linux" else (compiler, "--no-default-config", "--version")
     version = original_native_capture(session, version_argv, paths, rows, "compiler-version",
@@ -4584,7 +4618,12 @@ def perform_python_gate(step: Step, paths: Paths, session, checks,
         if active is not None and active["status"] == "RUNNING":
             active["status"] = "FAIL"
         details["failure"] = error_details(exc)
-        return CheckResult(False, details, exc.code if isinstance(exc, VerificationError) else "PYTHON_GATE_FAILURE")
+        code = exc.code if isinstance(exc, VerificationError) else "PYTHON_GATE_FAILURE"
+        if (type(exc) is getattr(checks, "CheckError", None) and len(exc.args) == 1
+                and type(exc.args[0]) is str and re.fullmatch(r"[A-Z][A-Z0-9_]{0,79}", exc.args[0])):
+            code = exc.args[0]
+            details["failure"]["error"] = code
+        return CheckResult(False, details, code)
 
 
 def perform_partitioned_ruby_gate(step: Step, paths: Paths, session, checks, platform: str,
@@ -5816,7 +5855,24 @@ def perform_step(step: Step, paths: Paths, session, checks, inventory: dict,
         freeze_tree(paths.work / "wheels", deadline=deadline)
         if list((paths.work / "wheels").iterdir()) != [paths.wheel]:
             raise VerificationError("WHEEL_OUTPUT_INVENTORY")
-        details = checks.inspect_project_wheel(paths.wheel, paths.source, deadline=deadline)
+        try:
+            details = checks.inspect_project_wheel(paths.wheel, paths.source, deadline=deadline)
+        except checks.CheckError as error:
+            # Only literal policy codes from the exact admitted helper may
+            # cross this DATA boundary. Never stringify private/unknown errors.
+            codes = frozenset({
+                "SOURCE_BUILD_BACKEND", "SOURCE_PACKAGE_CONTRACT", "SOURCE_PACKAGE_DATA",
+                "SOURCE_PACKAGE_FILES", "SOURCE_PUBLIC_RESOURCE_PINS", "WHEEL_METADATA_SIZE",
+                "WHEEL_METADATA_PARSE", "WHEEL_METADATA_HEADER", "WHEEL_EXTRAS",
+                "WHEEL_RUNTIME_OR_UNPINNED_DEPENDENCY", "WHEEL_README_BYTES", "WHEEL_MEMBER_LIMIT",
+                "WHEEL_UNSAFE_MEMBER", "WHEEL_DUPLICATE_OR_OVERSIZED_MEMBER", "WHEEL_EXPANDED_LIMIT",
+                "WHEEL_MEMBER_SIZE", "WHEEL_COMPLETE_INVENTORY", "WHEEL_FIRST_PARTY_BYTES",
+                "WHEEL_RECORD_INVENTORY", "WHEEL_RECORD_SELF", "WHEEL_RECORD_BYTES", "WHEEL_ENTRY_CONTRACT",
+            })
+            if (type(error) is checks.CheckError and type(error.args) is tuple and len(error.args) == 1
+                    and type(error.args[0]) is str and error.args[0] in codes):
+                raise VerificationError(error.args[0]) from error
+            raise
     elif step.id == "wheel-freeze":
         current = paths.work / "wheel-venv"
         freeze_tree(current, deadline=deadline, link_roots=(current, *session.tool_prefixes))
@@ -6008,6 +6064,17 @@ def finalize_report(report: dict, session, *, summary: Path | None, runner_temp:
         if summary is None or runner_temp is None:
             raise VerificationError("NO_SAFE_SUMMARY_DESTINATION")
         publish_summary(summary, report, runner_temp=runner_temp, deadline=deadline)
+        # Keep the original failure available in log tails after large inventories.
+        first_failure = next((row for row in report["rows"] if row["status"] == "FAIL"), None)
+        if first_failure is not None:
+            details = first_failure.get("details", {})
+            diagnostic = {"gate": first_failure["id"], "error": first_failure.get("error"),
+                          "stage": details.get("stage"), "failure": details.get("failure")}
+            native_controls = [row["last_native_control"] for row in report.get("admission", ())
+                               if row.get("ok") is False and "last_native_control" in row]
+            if native_controls:
+                diagnostic["lastNativeControls"] = native_controls
+            print("MRK_CI_GATE_FAILURE=" + json.dumps(diagnostic, sort_keys=True, ensure_ascii=True), flush=True)
     except BaseException as exc:
         fail(exc)
         print("MRK_CI_PUBLICATION_FAILED=" + json.dumps(error_details(exc), sort_keys=True), flush=True)

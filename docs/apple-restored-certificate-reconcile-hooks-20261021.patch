@@ -1,0 +1,75 @@
+diff --git a/desktop/src-tauri/src/saved_command_apple_provisioning.rs b/desktop/src-tauri/src/saved_command_apple_provisioning.rs
+index 27433f8c..88ad22f2 100644
+--- a/desktop/src-tauri/src/saved_command_apple_provisioning.rs
++++ b/desktop/src-tauri/src/saved_command_apple_provisioning.rs
+@@ -578,6 +578,13 @@ impl State {
+                 && route.received == route.completed
+         })
+     }
++    /// A certificate key reply must have actually entered and returned on the
++    /// original writer. This alone is not worker/native/private retirement.
++    pub(super) fn certificate_key_returned(&self) -> bool {
++        self.route.try_lock().is_ok_and(|route| !route.failed && route.pending.is_none()
++            && !route.ack_writing && route.received == route.completed && route.completed >= 1
++            && route.ack_entered.first() == Some(&true))
++    }
+     /// After F only an already-armed attempt may publish its bounded audit.
+     /// This never admits another Pending event or authorizes provider work.
+     pub(super) fn accepts_audit(&self, event: &apple_wire::EventDataFrame) -> bool {
+diff --git a/desktop/src-tauri/src/saved_command_apple_provisioning_native.rs b/desktop/src-tauri/src/saved_command_apple_provisioning_native.rs
+index 84c8837d..2aa44ac8 100644
+--- a/desktop/src-tauri/src/saved_command_apple_provisioning_native.rs
++++ b/desktop/src-tauri/src/saved_command_apple_provisioning_native.rs
+@@ -542,7 +542,7 @@ pub(super) fn request(
+     if input.context().mode.certificate() {
+         let key_preparation=apple_wire::certificate_key_preparation(account,&scope)?;
+         let prior=if input.context().mode == apple_wire::Mode::CertificateReconcile {
+-            Some(apple_wire::certificate_prior(account,&scope,input.context().reference.as_ref().ok_or_else(apple_wire::invalid)?)?)
++            Some(apple_wire::certificate_prior(account,&scope,input.context())?)
+         } else { None };
+         let certificate=scope.certificate.as_mut().ok_or_else(apple_wire::invalid)?;
+         certificate.key_preparation=key_preparation; certificate.prior=prior;
+@@ -1051,5 +1051,5 @@ pub(super) fn certificate_history(owner: &Session) -> Option<apple_wire::Certifi
+     let jobs=owner.apple.native.try_lock().ok()?;
+     if !jobs.complete || !jobs.sealed || !jobs.slots.iter().all(Slot::known) { return None; }
+     let Some(Ok(Value::Account(account)))=jobs.slots[INITIAL].returned.as_ref() else { return None; };
+-    apple_wire::certificate_recovery_history(account,&binding.scope).ok()
++    super::super::apple_key::certificate::recovery_history(owner,account,&binding)
+ }
+diff --git a/desktop/src-tauri/src/saved_command_apple_provisioning_tests.rs b/desktop/src-tauri/src/saved_command_apple_provisioning_tests.rs
+index 523c1e6b..115cb5f7 100644
+--- a/desktop/src-tauri/src/saved_command_apple_provisioning_tests.rs
++++ b/desktop/src-tauri/src/saved_command_apple_provisioning_tests.rs
+@@ -12,6 +12,32 @@ fn context() -> apple_wire::Context {
+         "mode":"review","reference":null,"newApplication":false,"displayName":"Explicit name"})).unwrap().context
+ }
+
++#[test]
++fn certificate_history_requires_original_entered_returned_key_ack_not_completed_data() {
++    let state = State::new(None);
++    assert!(!state.certificate_key_returned());
++    {
++        let mut route = state.route.lock().unwrap();
++        route.received = 1;
++        route.ack_entered[0] = true;
++    }
++    assert!(!state.certificate_key_returned()); // Entered/partial is not returned.
++    state.route.lock().unwrap().completed = 1;
++    assert!(state.certificate_key_returned()); // Only this original route factor, NOT all-jobs finality.
++    for field in 0..4 {
++        let mut route = state.route.lock().unwrap();
++        match field { 0 => route.ack_writing = true, 1 => route.failed = true,
++            2 => route.received = 2, _ => route.ack_entered[0] = false }
++        drop(route);
++        assert!(!state.certificate_key_returned());
++        let mut route = state.route.lock().unwrap();
++        route.ack_writing = false; route.failed = false; route.received = 1; route.ack_entered[0] = true;
++    }
++    let held = state.route.lock().unwrap();
++    assert!(!state.certificate_key_returned()); // Never wait/reborrow the route under a publication guard.
++    drop(held);
++}
++
+ fn projection() -> RunProjection {
+     let context = context();
+     let terminal: apple_wire::Terminal = serde_json::from_value(json!({

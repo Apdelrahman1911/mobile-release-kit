@@ -1,0 +1,22 @@
+name: "Check the compiled observer before building more helpers or notarizing"
+description: "Shared original recipe; job retains its original result and timeout"
+runs:
+  using: "composite"
+  steps:
+    - name: "Check the compiled observer before building more helpers or notarizing"
+      id: "recipe"
+      shell: "bash"
+      run: |
+        "$MRK_PYTHON" -I -S -B - <<'PY'
+        import hashlib, json, os, pathlib, re, subprocess
+        binary = pathlib.Path(os.environ['MRK_MACOS_OBSERVER_BINARY'])
+        with binary.open('rb') as stream:
+            if hashlib.file_digest(stream, 'sha256').hexdigest() != os.environ['MRK_MACOS_OBSERVER_SHA256']:
+                raise SystemExit('compiled observer digest mismatch')
+        result = subprocess.run([str(binary), 'data-contracts'], capture_output=True, timeout=45)
+        lines = re.findall(rb'^MRK_MACOS_DATA_CONTRACT_FAILURE=([0-9]{1,6})$', result.stderr, re.M)
+        print(json.dumps({'check':'compiled-observer-data-contracts', 'returncode':result.returncode,
+                          'failureLines':[int(line) for line in lines[:4]]}))
+        if result.returncode or result.stdout != b'MRK_MACOS_DATA_CONTRACTS=passed\n' or result.stderr:
+            raise SystemExit('compiled observer DATA contracts failed before further packaging')
+        PY

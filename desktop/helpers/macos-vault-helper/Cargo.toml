@@ -1,0 +1,15 @@
+[package]
+name = "mrk-vault-keychain"
+version = "0.1.0"
+edition = "2021"
+rust-version = "1.98"
+license = "MIT"
+publish = false
+
+# Deliberately a separate Cargo graph: selecting this role must never unify
+#native process-policy activation into Tauri or the ordinary desktop library.
+[workspace]
+[dependencies]
+mrk-macos-installed-native = { path = "../../native/macos-installed-native", features = ["vault-helper"] }
+[profile.release]
+panic = "unwind"

@@ -1,0 +1,122 @@
+{
+  "schemaVersion": 1,
+  "scope": "Lead-owned macOS issues; local verification is separate from hosted delivery and merge",
+  "sourceBase": "906eeb3d",
+  "sharedEnvironment": "Reserved for the external Specialist until an explicit handoff; no Lead installed test has started",
+  "issues": {
+    "45": {
+      "status": "verified-fixed-locally; issue remains open for delivery review",
+      "rootCause": "confirmed: same-controller React state dispatches during native status backlogs caused update-depth failure",
+      "fixCommit": "ded08721d26d38d12eb2a001450a5360eb0221a5",
+      "review": {
+        "selectionDispatch": "The synchronous controller reference is updated before dispatch; unchanged selections do not dispatch",
+        "rapidProjectABA": "Both intents update the synchronous reference, preserving the final project and the per-project draft controllers",
+        "connectionLoss": "The same synchronization path transitions to null and invalidates availability without changing original operation custody",
+        "diagnostics": "Bounded local records; hostile exception getters, unavailable storage, failure storms and listener teardown retain the original failure semantics",
+        "sourceChangesRequired": false
+      },
+      "freshTests": {
+        "command": "node --experimental-strip-types --test tests/workspace-diagnostics.test.mjs",
+        "tests": 8,
+        "passed": 8,
+        "failed": 0,
+        "skipped": 0
+      },
+      "retainedRegression": {
+        "beforeFix": "React 185 at 52 cycles / 208 native event deliveries",
+        "beforeFixLogSha256": "1e613605f74c5a6fea6a6219eee465db041fb30184c27e1d2b07dd6e6645c5ee",
+        "afterFix": "900 cycles / 3600 deliveries; project drafts and rapid ABA preserved; helper approval return passes",
+        "nativeAndDiagnosticsPassed": 10,
+        "nativeAndDiagnosticsLogSha256": "ecbce3cf3e7abbfc9880bdd7093f19fab22bffa09813bcf1aa4c88342b144e71",
+        "fullFrontendPassed": 2465
+      },
+      "retainedInstalledAcceptance": {
+        "sourceCommit": "ded08721d26d38d12eb2a001450a5360eb0221a5",
+        "actualHelperOffOnAndWorkspaceReturn": true,
+        "savedVersionAndNavigationPreserved": true,
+        "workspaceErrorsAfterRefresh": 0,
+        "helperReturnReceiptSha256": "4f095dddc6e7aa131981424cc9999b26c3e553e067aaffb0e5ce6db64c74c003",
+        "refreshedDiagnosticsViewSha256": "d0557a776c228fe8a5cb36783428be61150640a8cb4cbfdebbadb3b89c8cde9f",
+        "originalRestorationReceiptSha256": "e0fb18d981f722c17740e595def3ccb5b95613490f9dd3435cfbe64f2bef0459",
+        "allThreeReceiptHashesIndependentlyMatched": true,
+        "restorationDescribes": "The completed #45 test transaction; later Specialist-owned #17 overlays have their own state",
+        "helperInstallationQualified": false
+      },
+      "remaining": [
+        "The earliest historical exception text was not captured; the later installed React 185 reproduction and regression establish the verified defect",
+        "Hosted evidence, merge and release acceptance remain distinct delivery requirements; no close, merge or publication is claimed"
+      ]
+    },
+    "65": {
+      "status": "partially-resolved; installed GUI interruption acceptance pending",
+      "rootCause": "confirmed narrow defect: changed journal originals could be classified as filesystem_error instead of stale_revision according to cleanup enumeration order",
+      "fixCommit": "f20b94639a1035752e5b6e209de8aa1881a3ce09",
+      "previousCrashCoverageCommit": "d902dbf3d748199bba99a1ccea90304efbb4c0d1",
+      "newRegression": {
+        "testFile": "tests/desktop/test_configuration_crash_recovery.py",
+        "sourceSha256": "6e53ecfd8040c9d2b15720be45fa6b886255410973da1bc9a750e8b7d7d60567",
+        "additionalKilledWriters": 12,
+        "additionalFreshRecoveryProcesses": 12,
+        "domains": ["configuration", "github_workflows", "project_initialization"],
+        "cuts": ["staged before ready", "after first replacement", "after commit marker", "during old-file cleanup"],
+        "assertions": [
+          "Original writer is killed and reaped before fresh recovery or fixture cleanup",
+          "Each interrupted file has whole old or approved new bytes",
+          "Fresh recovery yields all original bytes before commit and all approved bytes after commit",
+          "Unrelated file bytes, inode and metadata, and preexisting directory identities are preserved",
+          "No journals, unexpected files or directories, or symlinks remain after recovery"
+        ],
+        "combinedCoverage": "32 real SIGKILL cases across the seven edit-engine domains; this does not cover every application operation or physical power loss"
+      },
+      "freshTests": {
+        "command": "python3 -B -m unittest (13 configuration, recovery, identity, workflow and transaction modules)",
+        "pythonVersion": "3.14.6",
+        "tests": 192,
+        "passed": 192,
+        "failed": 0,
+        "elapsedSeconds": 204.732834000024,
+        "stderrSha256": "dfe72b76cf0cb8e58051fcf2ab9efd061dab9d9b4c6d12bb59a261a637e713dc",
+        "fixtureCorrection": "The inert initialization routing control now supplies reserved=None, matching the real input cleanup interface",
+        "installedApplicationTouched": false,
+        "realProjectsTouched": false
+      },
+      "transportInterruption": {
+        "testFile": "tests/desktop/test_configuration_transport_interruption.py",
+        "sourceSha256": "a48e83fdae5cc2cc98752b4809cba271e29cccc7e583afcee099e3ef68b28013",
+        "scope": "Actual source engine and three pipes; not installed GUI or Rust-channel acceptance",
+        "cases": ["stdin EOF before COMMITTED", "stdin EOF after durable COMMITTED"],
+        "assertions": [
+          "The original EditInput reads exactly one real EOF at its original checkpoint",
+          "Before commit both configuration and gitignore return to old bytes; after commit both retain approved new bytes",
+          "The original typed terminal reports cancellation, clean journal and settled resources",
+          "Original targets retain modes and ownership; rollback restores their inodes; unrelated files retain complete facts",
+          "No transaction namespaces or unexpected files remain and the original child exits zero"
+        ],
+        "negativeControl": "Sending an unexpected actual pipe byte instead of EOF fails both tests even though cancellation and cleanup still settle",
+        "freshTests": {
+          "tests": 79,
+          "passed": 79,
+          "failed": 0,
+          "pythonVersion": "3.14.7",
+          "macOSVersion": "27.0",
+          "architecture": "arm64",
+          "elapsedSeconds": 62.188961791,
+          "stderrSha256": "dab7306186cca609d3894f83a7a4203659031ce3066abf011928cb69544e43dd"
+        },
+        "candidateCoreComparison": "The engine, input owner, transaction, configuration adapter and observation shim are byte-identical to source 11628c1c",
+        "newProductDefectFound": false,
+        "installedApplicationTouched": false,
+        "realProjectsTouched": false,
+        "rootUsed": false
+      },
+      "remaining": [
+        "Run installed GUI crash, restart and explicit recovery against disposable projects after the Specialist releases the Mac",
+        "Do not infer installed acceptance or absence of all integrity defects from these transaction-engine tests"
+      ]
+    },
+    "66": { "status": "pending", "next": "Physical-Mac startup, idle, large-project and one-hour measurements after exclusive environment handoff" },
+    "50": { "status": "pending", "next": "Installed CLI explicit grant, revoke and expiry acceptance after environment handoff" },
+    "62": { "status": "pending", "next": "Installed Android journey with identity/version changes and actual APK inspection" },
+    "63": { "status": "pending", "next": "Installed iOS simulator/archive and available signed export; coordinate protected Xcode dependencies with Specialist" }
+  }
+}

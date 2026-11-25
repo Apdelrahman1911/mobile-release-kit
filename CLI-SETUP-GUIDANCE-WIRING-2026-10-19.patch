@@ -1,0 +1,263 @@
+--- a/desktop/src-tauri/src/service_protocol.rs
++++ b/desktop/src-tauri/src/service_protocol.rs
+@@ -169,6 +169,18 @@
+     pub configuration: SavedConfiguration,
+     pub discovery_partial: bool,
+     pub issue_count: u32,
++    #[serde(default, deserialize_with = "crate::service_setup_guidance::deserialize_optional", skip_serializing_if = "Option::is_none")]
++    pub setup_analysis: Option<crate::service_setup_guidance::SetupAnalysis>,
++}
++impl SavedObservation {
++    // Optional guidance cannot contradict its enclosing saved observation or
++    // conceal a failure of the required base fields. It grants no operation.
++    pub(crate) fn normalize_setup_analysis(&mut self) {
++        if self.setup_analysis.as_ref().is_some_and(|analysis|
++            !analysis.matches(self.configuration.state, self.discovery_partial)) {
++            self.setup_analysis = None;
++        }
++    }
+ }
+
+ #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+@@ -270,9 +282,18 @@
+ pub fn decode_response(bytes: &[u8], request_id: &Id, instance: &Id) -> Result<Response, Error> {
+     if bytes.is_empty() || bytes.len() > RESPONSE_BYTES { return Err(Error::InvalidRequest); }
+     nesting(bytes)?;
+-    let response: Response = serde_json::from_slice(bytes).map_err(|_| Error::InvalidRequest)?;
++    let mut response: Response = serde_json::from_slice(bytes).map_err(|_| Error::InvalidRequest)?;
+     if response.version != VERSION || &response.request_id != request_id || &response.service_instance != instance {
+         return Err(Error::Conflict);
++    }
++    let projects = match &mut response.response {
++        ResponseBody::Projects(rows) => rows.as_mut_slice(),
++        ResponseBody::Observation(row) => std::slice::from_mut(row),
++        _ => &mut [],
++    };
++    if projects.len() > PROJECT_LIMIT { return Err(Error::InvalidRequest); }
++    for project in projects {
++        if let Some(saved) = &mut project.observation { saved.normalize_setup_analysis(); }
+     }
+     validate_response(&response)?;
+     Ok(response)
+--- a/desktop/src-tauri/src/application_service.rs
++++ b/desktop/src-tauri/src/application_service.rs
+@@ -72,6 +72,9 @@
+         let snapshot = store.read(Namespace::Projects).map_err(|e| e.code)?;
+         let mut saved = if snapshot.bytes.is_empty() && snapshot.revision == Revision(0) { Persisted::empty() }
+             else { serde_json::from_slice::<Persisted>(&snapshot.bytes).map_err(|_| Error::RecoveryRequired)? };
++        for project in &mut saved.projects {
++            if let Some(observation) = &mut project.observation { observation.normalize_setup_analysis(); }
++        }
+         saved.validate(snapshot.revision)?;
+         // Remembered facts remain readable, but restart does not reacquire the
+         // original project, operation, credential or observation authority.
+@@ -215,8 +218,12 @@
+         let partial = snapshot.pointer("/discovery/partial").and_then(|v| v.as_bool()).ok_or(Error::InvalidRequest)?;
+         let issues = snapshot.get("issues").and_then(|v| v.as_array()).ok_or(Error::InvalidRequest)?.len();
+         if issues > 20_000 { return Err(Error::InvalidRequest); }
++        // Same completed passive response, no new read or readiness analysis.
++        // Unsupported optional DATA must not discard the useful base result.
++        let setup_analysis = crate::service_setup_guidance::project(snapshot.get("setupAnalysis"), config_state, partial);
+         if state.saved.projects[index].observation.as_ref().is_some_and(|previous| !previous.stale
+-            && previous.configuration == saved_config && previous.discovery_partial == partial && previous.issue_count == issues as u32) {
++            && previous.configuration == saved_config && previous.discovery_partial == partial && previous.issue_count == issues as u32
++            && previous.setup_analysis == setup_analysis) {
+             // Idle saved-file polling is not a new observation revision when
+             // every retained fact is unchanged. A stale->fresh return still
+             // persists below, even if the same saved bytes were observed.
+@@ -225,7 +232,7 @@
+         let revision = state.revision.0.checked_add(1).ok_or(Error::StateUnknown)?;
+         let mut next = state.saved.clone();
+         next.projects[index].observation = Some(p::SavedObservation { revision, stale: false, configuration: saved_config,
+-            discovery_partial: partial, issue_count: issues as u32 });
++            discovery_partial: partial, issue_count: issues as u32, setup_analysis });
+         self.save(&mut state, next)?;
+         Ok(view(&state, &state.saved.projects[index]))
+     }
+@@ -502,4 +509,100 @@
+         assert_eq!(store.read(Namespace::Projects).unwrap().bytes, before.bytes);
+         service.stop().unwrap(); store.close().unwrap();
+     }
+-}
++
++    #[test]
++    fn optional_setup_guidance_uses_original_store_redaction_and_dedup() {
++        use crate::service_setup_guidance as guidance;
++        let f = Fixture::new(); let store = Arc::new(PrivateStateDirectory::open(&f.app).unwrap());
++        let service = ApplicationService::open(store.clone()).unwrap();
++        let (id, root) = register_fixture(&service, &f.app, "project", "project-1");
++        let mut saved = passive(&root, &"1".repeat(64));
++        let absent = service.publish_passive_snapshot("project-1", &saved).unwrap().observation.unwrap();
++        assert!(absent.setup_analysis.is_none());
++        saved["setupAnalysis"] = guidance::fixture(&[guidance::Platform::Android], p::ConfigurationState::FormatValid, false);
++        saved["setupAnalysis"]["requirements"][0]["summary"] = serde_json::json!("never-store-summary-sentinel");
++        saved["setupAnalysis"]["requirements"][0]["reference"] = serde_json::json!("never-store-path-sentinel/file");
++        let projected = service.publish_passive_snapshot("project-1", &saved).unwrap().observation.unwrap();
++        assert!(projected.setup_analysis.is_some()); assert!(projected.revision > absent.revision);
++        let before = store.read(Namespace::Projects).unwrap();
++        assert!(!String::from_utf8(before.bytes.clone()).unwrap().contains("sentinel"));
++        saved["setupAnalysis"]["requirements"][0]["summary"] = serde_json::json!("Different discarded text.");
++        assert_eq!(service.publish_passive_snapshot("project-1", &saved).unwrap().observation.unwrap(), projected);
++        let unchanged = store.read(Namespace::Projects).unwrap();
++        assert_eq!(unchanged.revision, before.revision); assert_eq!(unchanged.bytes, before.bytes);
++        saved["setupAnalysis"]["requirements"][0]["state"] = serde_json::json!("needs-input");
++        let changed = service.publish_passive_snapshot("project-1", &saved).unwrap().observation.unwrap();
++        assert!(changed.revision > projected.revision);
++        service.allow_agent_read(vec![id.clone()], Duration::from_secs(30)).unwrap();
++        let client = service.admit_client().unwrap();
++        let request = request(p::RequestBody::Observe(p::ProjectQuery { project_id: id }));
++        let response = service.dispatch(&client, request.clone());
++        let bytes = p::encode_response(&response).unwrap();
++        let decoded = p::decode_response(&bytes, &request.request_id, service.instance()).unwrap();
++        assert_eq!(decoded, response);
++        let mut incompatible = serde_json::to_value(&response).unwrap();
++        incompatible["response"]["value"]["observation"]["setupAnalysis"]["discoveryPartial"] = serde_json::json!(true);
++        let decoded = p::decode_response(&serde_json::to_vec(&incompatible).unwrap(), &request.request_id, service.instance()).unwrap();
++        match decoded.response { p::ResponseBody::Observation(row) => {
++            let observed = row.observation.unwrap(); assert!(observed.setup_analysis.is_none());
++            assert_eq!(observed.configuration, changed.configuration);
++        }, _ => panic!("wrong response") }
++        saved["setupAnalysis"]["schemaVersion"] = serde_json::json!(2);
++        let unavailable = service.publish_passive_snapshot("project-1", &saved).unwrap().observation.unwrap();
++        assert!(unavailable.setup_analysis.is_none()); assert!(unavailable.revision > changed.revision);
++        assert_eq!(unavailable.configuration, changed.configuration);
++        let before = store.read(Namespace::Projects).unwrap();
++        service.publish_passive_snapshot("project-1", &saved).unwrap();
++        let after = store.read(Namespace::Projects).unwrap();
++        assert_eq!(before.revision, after.revision); assert_eq!(before.bytes, after.bytes);
++        saved["config"]["content"]["sha256"] = serde_json::json!("bad");
++        assert_eq!(service.publish_passive_snapshot("project-1", &saved).err(), Some(Error::InvalidRequest));
++        service.stop().unwrap(); store.close().unwrap();
++    }
++    #[test]
++    fn setup_guidance_restart_is_stale_and_optional_damage_does_not_hide_base_damage() {
++        use crate::service_setup_guidance as guidance;
++        let f = Fixture::new(); let store = Arc::new(PrivateStateDirectory::open(&f.app).unwrap());
++        let service = ApplicationService::open(store.clone()).unwrap();
++        let (id, root) = register_fixture(&service, &f.app, "project", "project-1");
++        let mut saved = passive(&root, &"1".repeat(64));
++        saved["setupAnalysis"] = guidance::fixture(&[guidance::Platform::Ios], p::ConfigurationState::FormatValid, false);
++        let original = service.publish_passive_snapshot("project-1", &saved).unwrap().observation.unwrap();
++        service.stop().unwrap(); drop(service); store.close().unwrap(); drop(store);
++        let store = Arc::new(PrivateStateDirectory::open(&f.app).unwrap());
++        let service = ApplicationService::open(store.clone()).unwrap();
++        assert!(service.admit_client().is_err()); assert!(service.native_binding("project-1").is_err());
++        let stat = File::open(&root).unwrap().metadata().unwrap();
++        assert_eq!(service.register_native("project-9", &root, stat.dev(), stat.ino()).unwrap().project_id, id);
++        service.allow_agent_read(vec![id.clone()], Duration::from_secs(30)).unwrap();
++        let client = service.admit_client().unwrap();
++        let response = service.dispatch(&client, request(p::RequestBody::Observe(p::ProjectQuery { project_id: id })));
++        match response.response { p::ResponseBody::Observation(row) => {
++            let restored = row.observation.unwrap(); assert!(restored.stale);
++            assert_eq!(restored.setup_analysis, original.setup_analysis);
++        }, _ => panic!("wrong response") }
++        let refreshed = service.publish_passive_snapshot("project-9", &saved).unwrap().observation.unwrap();
++        assert!(!refreshed.stale); assert!(refreshed.revision > original.revision);
++        service.stop().unwrap(); drop(service);
++        // Exact original store CAS, not a replacement/mocked filesystem owner.
++        let current = store.read(Namespace::Projects).unwrap();
++        let mut data: serde_json::Value = serde_json::from_slice(&current.bytes).unwrap();
++        data["projects"][0]["observation"]["setupAnalysis"]["discoveryPartial"] = serde_json::json!(true);
++        store.replace(Namespace::Projects, current.revision, &serde_json::to_vec(&data).unwrap()).unwrap();
++        let reopened = ApplicationService::open(store.clone()).unwrap();
++        assert!(reopened.state.lock().unwrap().saved.projects[0].observation.as_ref().unwrap().setup_analysis.is_none());
++        reopened.stop().unwrap(); drop(reopened);
++        let current = store.read(Namespace::Projects).unwrap();
++        data["projects"][0]["observation"]["setupAnalysis"] = serde_json::json!({"unsupported": "no-default-empty"});
++        store.replace(Namespace::Projects, current.revision, &serde_json::to_vec(&data).unwrap()).unwrap();
++        let reopened = ApplicationService::open(store.clone()).unwrap();
++        let observed = reopened.state.lock().unwrap().saved.projects[0].observation.clone().unwrap();
++        assert!(observed.setup_analysis.is_none()); assert_eq!(observed.configuration, original.configuration);
++        reopened.stop().unwrap(); drop(reopened);
++        let current = store.read(Namespace::Projects).unwrap();
++        data["projects"][0]["observation"]["issueCount"] = serde_json::json!(20_001);
++        store.replace(Namespace::Projects, current.revision, &serde_json::to_vec(&data).unwrap()).unwrap();
++        assert_eq!(ApplicationService::open(store.clone()).err(), Some(Error::RecoveryRequired));
++        store.close().unwrap();
++    }
++}
+--- a/desktop/src-tauri/src/installed_cli.rs
++++ b/desktop/src-tauri/src/installed_cli.rs
+@@ -21,6 +21,7 @@
+ Capabilities describe this CLI without opening Desktop or reading project data.\n\
+ For the other commands, open Desktop, select a project, then enable agent read access in Settings.\n\
+ Reads return saved observations; they do not rerun actions or validate a release.\n\
++observe --json may include optional setup state codes, not a passed check or release approval.\n\
+ Identity requests additionally need the separate 15-minute Desktop request permission.\n\
+ In Desktop Settings, check requests and explicitly review/preview/apply the unchanged proposal.\n\
+ Stdin is one closed JSON object: selection {platform,target,project}, desiredIdentity, identityIntent.\n\
+@@ -60,7 +61,7 @@
+ const READ_COMMANDS: [CommandCapability; 5] = [
+     CommandCapability { command: "status", arguments: &[], description: "Read the current Desktop service access status." },
+     CommandCapability { command: "projects", arguments: &[], description: "List projects allowed by the current read grant." },
+-    CommandCapability { command: "observe", arguments: &["PROJECT_ID"], description: "Read a saved project observation, which may be stale." },
++    CommandCapability { command: "observe", arguments: &["PROJECT_ID"], description: "Read a saved project observation and optional redacted setup guidance, which may be stale." },
+     CommandCapability { command: "operations", arguments: &["PROJECT_ID"], description: "List saved operation observations for a project." },
+     CommandCapability { command: "operation", arguments: &["PROJECT_ID", "OPERATION_ID"], description: "Read one saved operation observation; it is not native finality authority." },
+ ];
+@@ -183,7 +184,15 @@
+     match response {
+         p::ResponseBody::Info(_) => "Connected to Desktop with read-only access. Results are saved observations, not release validation.\n".to_owned(),
+         p::ResponseBody::Projects(projects) => if projects.is_empty() { "No projects are allowed for this read session.\n".to_owned() } else { projects.iter().map(project).collect() },
+-        p::ResponseBody::Observation(value) => project(value),
++        p::ResponseBody::Observation(value) => {
++            let mut text = project(value);
++            match value.observation.as_ref().filter(|saved| !saved.stale).and_then(|saved|
++                saved.setup_analysis.as_ref().filter(|analysis| analysis.matches(saved.configuration.state, saved.discovery_partial))) {
++                Some(analysis) => text.push_str(&format!("  Setup guidance: {} saved requirement states; not checks or release approval. Use --json for codes.\n", analysis.requirements.len())),
++                None => text.push_str("  Setup guidance unavailable for a current saved observation.\n"),
++            }
++            text
++        },
+         p::ResponseBody::Operations(operations) => if operations.is_empty() { "No operation observations have been published for this project.\n".to_owned() } else { operations.iter().map(operation).collect() },
+         p::ResponseBody::Operation(value) => operation(value),
+         p::ResponseBody::Error(error) => format!("{}\n", error.message()),
+@@ -287,4 +296,27 @@
+         assert!(human.contains("availability not checked") && human.contains("Direct edits, credentials, builds and publishing are not supported"));
+         assert!(human.contains("mrk identity-request PROJECT_ID OBSERVATION_REVISION --stdin") && human.contains("explicit Desktop review/apply"));
+     }
+-}
++
++    #[test]
++    fn setup_guidance_cli_is_optional_saved_data_and_stale_is_unavailable() {
++        use crate::service_setup_guidance as guidance;
++        let source = guidance::fixture(&[guidance::Platform::Android], p::ConfigurationState::FormatValid, false);
++        let mut project = p::ProjectObservation {
++            project_id: Id::parse(&"1".repeat(32)).unwrap(), registered_in_current_host: true,
++            observation: Some(p::SavedObservation { revision: 1, stale: false,
++                configuration: p::SavedConfiguration { state: p::ConfigurationState::FormatValid, bytes: None, sha256: None },
++                discovery_partial: false, issue_count: 0,
++                setup_analysis: guidance::project(Some(&source), p::ConfigurationState::FormatValid, false) }),
++        };
++        assert!(human(&p::ResponseBody::Observation(project.clone())).contains("not checks or release approval"));
++        project.observation.as_mut().unwrap().stale = true;
++        assert!(human(&p::ResponseBody::Observation(project.clone())).contains("Setup guidance unavailable"));
++        project.observation.as_mut().unwrap().stale = false;
++        project.observation.as_mut().unwrap().setup_analysis = None;
++        assert!(human(&p::ResponseBody::Observation(project.clone())).contains("Setup guidance unavailable"));
++        let old = serde_json::to_value(project).unwrap();
++        assert!(old["observation"].get("setupAnalysis").is_none());
++        let decoded: p::ProjectObservation = serde_json::from_value(old).unwrap();
++        assert!(decoded.observation.unwrap().setup_analysis.is_none());
++    }
++}
+--- a/desktop/src-tauri/src/installed_cli_main.rs
++++ b/desktop/src-tauri/src/installed_cli_main.rs
+@@ -3,6 +3,7 @@
+ #![forbid(unsafe_code)]
+
+ mod service_protocol;
++mod service_setup_guidance;
+ mod agent_identity_requests;
+ #[cfg(any(target_os = "linux", target_os = "macos"))]
+ mod application_state_store;
+--- a/desktop/src-tauri/src/lib.rs
++++ b/desktop/src-tauri/src/lib.rs
+@@ -101,6 +101,7 @@
+ pub mod error;
+ pub mod protocol;
+ mod service_protocol;
++mod service_setup_guidance;
+ mod agent_identity_requests;
+ #[cfg(any(target_os = "linux", target_os = "macos"))]
+ mod version_allocation_state_native;

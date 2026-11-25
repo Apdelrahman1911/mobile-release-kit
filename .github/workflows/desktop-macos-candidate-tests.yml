@@ -1,0 +1,1186 @@
+name: macOS saved-candidate test groups
+
+on:
+  workflow_call:
+    secrets:
+      MRK_MACOS_DEVELOPER_ID_P12_BASE64:
+        required: false
+      MRK_MACOS_DEVELOPER_ID_P12_PASSWORD:
+        required: false
+      MRK_MACOS_INSTALLER_P12_BASE64:
+        required: false
+      MRK_MACOS_INSTALLER_P12_PASSWORD:
+        required: false
+      MRK_MACOS_NOTARY_API_KEY_BASE64:
+        required: false
+
+permissions:
+  contents: read
+  actions: read
+
+jobs:
+  candidate-tests:
+    # On a rerun, nominate the original producer attempt from its unique
+    # retained artifact, then fetch that COMPLETE actual attempt's jobs page.
+    # Never substitute the consumer's attempt or rebuild its signed app.
+    if: ${{ !cancelled() && (github.ref == 'refs/heads/verify/desktop-macos-candidate' || (github.ref == 'refs/heads/main' && github.ref_protected && github.event_name == 'workflow_dispatch' && github.event.inputs.operation == 'local-desktop-carrier' && github.event.inputs.prepared_source == github.sha && github.event.inputs.target == 'aarch64-apple-darwin')) && (github.event_name == 'push' || (github.event_name == 'workflow_dispatch' && (github.event.inputs.operation == 'local-desktop-carrier' || github.event.inputs.operation == 'candidate-tests' || github.event.inputs.operation == 'local-carrier' || github.event.inputs.operation == 'git-cli-timing' || github.event.inputs.operation == 'git-cli-process-data'))) }}
+    environment: macos-developer-id
+    name: ${{ github.event.inputs.operation == 'local-desktop-carrier' && 'Prepare authenticated ordinary Desktop carrier for the owner Mac' || github.event.inputs.operation == 'git-cli-process-data' && 'Observe only original installed Git printable process chain (saved Git27)' || github.event.inputs.operation == 'git-cli-timing' && 'Measure only the original installed Git index journey (saved Git27)' || matrix.group == 'local-carrier' && 'Prepare authenticated Tool26 carrier for the owner Mac' || format('Test saved candidate ({0})', matrix.group) }}
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: ${{ matrix.timeout }}
+    strategy:
+      fail-fast: false
+      max-parallel: 4
+      # The owner qualifies service-cli locally with actual macOS approval.
+      # A new push runs Git first; all saved singleton groups remain selectable.
+      # local-carrier only retains the successful Tool package owner's signed
+      # files. It does not request a service or qualify any of the eleven groups.
+      matrix:
+        include: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.operation == 'local-desktop-carrier' && fromJSON('[{"target":"aarch64-apple-darwin","group":"local-carrier","native_scope":"disabled","runner":"macos-26","hosted_job":"github-hosted-macos26-arm64","timeout":100}]') || github.event_name == 'workflow_dispatch' && github.event.inputs.operation == 'local-carrier' && fromJSON('[{"target":"aarch64-apple-darwin","group":"local-carrier","native_scope":"tool-setup","runner":"macos-26","hosted_job":"github-hosted-macos26-arm64","timeout":65}]') || github.event_name == 'workflow_dispatch' && fromJSON('{"git-local":[{"target":"aarch64-apple-darwin","group":"git-local","native_scope":"git-native","runner":"xcode-27","hosted_job":"github-hosted-xcode27-arm64","timeout":65}],"git-fetch":[{"target":"aarch64-apple-darwin","group":"git-fetch","native_scope":"git-native","runner":"xcode-27","hosted_job":"github-hosted-xcode27-arm64","timeout":65}],"git-push":[{"target":"aarch64-apple-darwin","group":"git-push","native_scope":"git-native","runner":"xcode-27","hosted_job":"github-hosted-xcode27-arm64","timeout":65}],"git-create":[{"target":"aarch64-apple-darwin","group":"git-create","native_scope":"git-native","runner":"xcode-27","hosted_job":"github-hosted-xcode27-arm64","timeout":65}],"git-upstream":[{"target":"aarch64-apple-darwin","group":"git-upstream","native_scope":"git-native","runner":"xcode-27","hosted_job":"github-hosted-xcode27-arm64","timeout":65}],"service-cli":[{"target":"aarch64-apple-darwin","group":"service-cli","native_scope":"tool-setup","runner":"macos-26","hosted_job":"github-hosted-macos26-arm64","timeout":65}],"public-acquisition":[{"target":"aarch64-apple-darwin","group":"public-acquisition","native_scope":"tool-setup","runner":"macos-26","hosted_job":"github-hosted-macos26-arm64","timeout":160}],"sdk-registration":[{"target":"aarch64-apple-darwin","group":"sdk-registration","native_scope":"tool-setup","runner":"macos-26","hosted_job":"github-hosted-macos26-arm64","timeout":165}],"upload-keys":[{"target":"aarch64-apple-darwin","group":"upload-keys","native_scope":"tool-setup","runner":"macos-26","hosted_job":"github-hosted-macos26-arm64","timeout":190}],"cold-restart":[{"target":"aarch64-apple-darwin","group":"cold-restart","native_scope":"tool-setup","runner":"macos-26","hosted_job":"github-hosted-macos26-arm64","timeout":190}],"backup":[{"target":"aarch64-apple-darwin","group":"backup","native_scope":"tool-setup","runner":"macos-26","hosted_job":"github-hosted-macos26-arm64","timeout":190}],"git-branch":[{"target":"aarch64-apple-darwin","group":"git-branch","native_scope":"git-native","runner":"xcode-27","hosted_job":"github-hosted-xcode27-arm64","timeout":65}]}')[github.event.inputs.test_group] || fromJSON('[{"target":"aarch64-apple-darwin","group":"git-local","native_scope":"git-native","runner":"xcode-27","hosted_job":"github-hosted-xcode27-arm64","timeout":65}]') }}
+    env:
+      RUSTUP_TOOLCHAIN: '1.98.1'
+      MRK_MACOS_TARGET: aarch64-apple-darwin
+      MRK_MACOS_RUNNER: ${{ matrix.runner }}
+      MRK_MACOS_MACHINE: arm64
+      MRK_MACOS_HOSTED_JOB: ${{ matrix.hosted_job }}
+      MRK_EXPECTED_SHA: ${{ github.sha }}
+      MRK_MACOS_INSTALL_SOURCE_COMMIT: ${{ github.sha }}
+      MRK_MACOS_PACKAGE_ROLE: ${{ github.event.inputs.operation == 'local-desktop-carrier' && 'ordinary-image' || 'installed-shell-observation' }}
+      MRK_MACOS_NATIVE_SCOPE: ${{ matrix.native_scope }}
+      MRK_MACOS_PREPARED_TEST: 'true'
+      MRK_MACOS_PREPARED_RESUME: ${{ github.event_name == 'workflow_dispatch' && 'true' || 'false' }}
+      MRK_MACOS_LOCAL_DESKTOP_CARRIER: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.operation == 'local-desktop-carrier' && 'true' || 'false' }}
+      MRK_MACOS_STORE_RUNTIME: signed-component
+      MRK_MACOS_SAME_PACKAGE_SCOPE: disabled
+      MACOSX_DEPLOYMENT_TARGET: '26.0'
+      DEVELOPER_DIR: /Library/Developer/CommandLineTools
+    steps:
+      - name: Admit only the disposable hosted prepared-input route
+        timeout-minutes: 1
+        shell: bash
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          SELECTED_OPERATION: ${{ github.event.inputs.operation }}
+          SELECTED_SOURCE: ${{ github.event.inputs.prepared_source }}
+          SELECTED_RUN: ${{ github.event.inputs.prepared_run }}
+          SELECTED_GROUP: ${{ github.event.inputs.test_group }}
+        run: |
+          set -euo pipefail
+          [[ "$RUNNER_ENVIRONMENT" == github-hosted && "$RUNNER_OS" == macOS ]] || exit 1
+          if [[ "$GITHUB_REF" == refs/heads/main ]]; then
+            [[ "$GITHUB_REF_PROTECTED" == true && "$GITHUB_EVENT_NAME" == workflow_dispatch && "$SELECTED_OPERATION" == local-desktop-carrier && "$SELECTED_SOURCE" == "$GITHUB_SHA" ]] || exit 1
+          else
+            [[ "$GITHUB_REF" == refs/heads/verify/desktop-macos-candidate ]] || exit 1
+          fi
+          [[ "$GITHUB_SHA" == "$GITHUB_WORKFLOW_SHA" && "$GITHUB_REPOSITORY" == Apdelrahman1911/mobile-release-kit ]] || exit 1
+          if [[ "$GITHUB_EVENT_NAME" == workflow_dispatch && ( "$SELECTED_OPERATION" == git-cli-timing || "$SELECTED_OPERATION" == git-cli-process-data ) ]]; then
+            [[ "$SELECTED_SOURCE" == 4ab9e7b6c97136a15d6df8ce0bb09e1f5259e73c && "$SELECTED_RUN" == 41233002402 && "$SELECTED_GROUP" == git-local ]] || exit 1
+          fi
+          case "$MRK_MACOS_TARGET/$RUNNER_ARCH/$(/usr/bin/uname -m)" in
+            aarch64-apple-darwin/ARM64/arm64|x86_64-apple-darwin/X64/x86_64) ;;
+            *) exit 1 ;;
+          esac
+          if [[ "$SELECTED_OPERATION" == local-desktop-carrier ]]; then
+            [[ "$GITHUB_EVENT_NAME" == workflow_dispatch && "$MRK_MACOS_PACKAGE_ROLE" == ordinary-image && "$MRK_MACOS_NATIVE_SCOPE" == disabled && "$MRK_MACOS_TARGET" == aarch64-apple-darwin && "$SELECTED_GROUP" == service-cli ]] || exit 1
+            [[ "$SELECTED_SOURCE" =~ ^[0-9a-f]{40}$ && "$SELECTED_RUN" =~ ^[1-9][0-9]{0,19}$ ]] || exit 1
+            # The original full comparison and held package readers below
+            # admit source compatibility before any native preparation.
+          fi
+          expected_host_major=26
+          if [[ "$MRK_MACOS_NATIVE_SCOPE" == git-native ]]; then expected_host_major=27; fi
+          [[ "$(/usr/bin/id -u)" != 0 && "$(/usr/bin/sw_vers -productVersion)" == "$expected_host_major".* ]] || exit 1
+      - name: Check signing credential availability before downloading the package
+        timeout-minutes: 1
+        shell: bash
+        env:
+          SIGNING_IDENTITY: ${{ secrets.MRK_MACOS_DEVELOPER_ID_P12_BASE64 }}
+          SIGNING_PASSWORD: ${{ secrets.MRK_MACOS_DEVELOPER_ID_P12_PASSWORD }}
+        run: |
+          set +x
+          set -euo pipefail
+          if [[ -z "$SIGNING_IDENTITY" || -z "$SIGNING_PASSWORD" ]]; then
+            printf '%s\n' '::error::The test job did not receive its macos-developer-id signing credentials.'
+            exit 1
+          fi
+          unset SIGNING_IDENTITY SIGNING_PASSWORD
+      - name: Check out the exact current harness source without credentials
+        timeout-minutes: 3
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: false
+      - name: Select DATA Python, never the packaged interpreter
+        id: python
+        timeout-minutes: 3
+        uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.14.7'
+      - name: Reserve one fresh consumer work directory
+        id: work
+        timeout-minutes: 1
+        shell: bash
+        env:
+          MRK_PYTHON: ${{ steps.python.outputs.python-path }}
+        run: |
+          set -euo pipefail
+          umask 077
+          [[ "$RUNNER_TEMP" == /Users/runner/work/_temp && "$GITHUB_WORKSPACE" == /Users/runner/work/mobile-release-kit/mobile-release-kit ]] || exit 1
+          [[ "$(/usr/bin/git rev-parse HEAD)" == "$GITHUB_SHA" ]] || exit 1
+          tree=$(/usr/bin/git rev-parse 'HEAD^{tree}')
+          [[ "$tree" =~ ^[0-9a-f]{40}$ ]] || exit 1
+          root=$(/usr/bin/mktemp -d "$RUNNER_TEMP/mrk-macos-installed.XXXXXXXX")
+          printf 'root=%s\n' "$root" >> "$GITHUB_OUTPUT"
+          printf 'MRK_MACOS_WORK=%s\nMRK_PYTHON=%s\nMRK_CONSUMER_TREE=%s\nCARGO_TARGET_DIR=%s/cargo-target\n' "$root" "$MRK_PYTHON" "$tree" "$root" >> "$GITHUB_ENV"
+      - name: Select the one closed upstream target checkpoint without matrix output ambiguity
+        id: prepared
+        timeout-minutes: 4
+        shell: bash
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          PRODUCER_SOURCE: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.prepared_source || github.sha }}
+          PRODUCER_RUN: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.prepared_run || github.run_id }}
+          GH_TOKEN: ${{ github.token }}
+          GH_HOST: github.com
+        run: |
+          set +x
+          set -euo pipefail
+          set -o noclobber
+          umask 077
+          ulimit -c 0
+          [[ "$PRODUCER_SOURCE" =~ ^[0-9a-f]{40}$ && "$PRODUCER_RUN" =~ ^[1-9][0-9]{0,19}$ ]] || exit 1
+          fetch() { (ulimit -f 16384; gh api "$1" > "$2"); }
+          fetch "repos/$GITHUB_REPOSITORY/actions/runs/$PRODUCER_RUN/artifacts?per_page=100" "$MRK_MACOS_WORK/prepared-artifacts.json"
+          printf '0\n' > "$MRK_MACOS_WORK/prepared-artifact-api.status"
+          "$MRK_PYTHON" -I -S -B desktop/tools/macos_prepared_package.py producer-attempt --target "$MRK_MACOS_TARGET" \
+            --producer-source "$PRODUCER_SOURCE" --producer-run "$PRODUCER_RUN" > "$MRK_MACOS_WORK/prepared-producer-attempt.txt"
+          IFS= read -r producer_attempt < "$MRK_MACOS_WORK/prepared-producer-attempt.txt"
+          [[ "$producer_attempt" =~ ^[1-9][0-9]{0,19}$ ]] || exit 1
+          fetch "repos/$GITHUB_REPOSITORY/actions/runs/$PRODUCER_RUN/attempts/$producer_attempt/jobs?per_page=100" "$MRK_MACOS_WORK/prepared-jobs.json"
+          if [[ "$MRK_MACOS_PACKAGE_ROLE" == ordinary-image ]]; then
+            checkpoint=image
+          else
+            checkpoint=observer
+          fi
+          "$MRK_PYTHON" -I -S -B desktop/tools/macos_prepared_package.py "$checkpoint-attempt" --target "$MRK_MACOS_TARGET" \
+            --producer-source "$PRODUCER_SOURCE" --producer-run "$PRODUCER_RUN" > "$MRK_MACOS_WORK/prepared-$checkpoint-attempt.txt"
+          IFS= read -r checkpoint_attempt < "$MRK_MACOS_WORK/prepared-$checkpoint-attempt.txt"
+          [[ "$checkpoint_attempt" =~ ^[1-9][0-9]{0,15}$ ]] || exit 1
+          fetch "repos/$GITHUB_REPOSITORY/actions/runs/$PRODUCER_RUN/attempts/$checkpoint_attempt/jobs?per_page=100" "$MRK_MACOS_WORK/prepared-$checkpoint-jobs.json"
+          fetch "repos/$GITHUB_REPOSITORY/actions/runs/$PRODUCER_RUN/attempts/$checkpoint_attempt" "$MRK_MACOS_WORK/prepared-$checkpoint-run.json"
+          fetch "repos/$GITHUB_REPOSITORY/git/commits/$PRODUCER_SOURCE" "$MRK_MACOS_WORK/prepared-commit.json"
+          printf '0\n' > "$MRK_MACOS_WORK/prepared-api.status"
+          unset GH_TOKEN
+          "$MRK_PYTHON" -I -S -B desktop/tools/macos_prepared_package.py select --target "$MRK_MACOS_TARGET" \
+            --producer-source "$PRODUCER_SOURCE" --producer-run "$PRODUCER_RUN" > "$MRK_MACOS_WORK/prepared-selection.txt"
+          /bin/cat "$MRK_MACOS_WORK/prepared-selection.txt" >> "$GITHUB_OUTPUT"
+      - name: Capture the exact selected producer attempt, not the current rerun attempt
+        timeout-minutes: 2
+        shell: bash
+        env:
+          PRODUCER_RUN: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.prepared_run || github.run_id }}
+          PRODUCER_ATTEMPT: ${{ steps.prepared.outputs.producer-attempt }}
+          PRODUCER_SOURCE: ${{ steps.prepared.outputs.producer-source }}
+          GH_TOKEN: ${{ github.token }}
+          GH_HOST: github.com
+        run: |
+          set +x
+          set -euo pipefail
+          set -o noclobber
+          umask 077
+          [[ "$PRODUCER_RUN" =~ ^[1-9][0-9]{0,19}$ && "$PRODUCER_ATTEMPT" =~ ^[1-9][0-9]{0,19}$ && "$PRODUCER_SOURCE" =~ ^[0-9a-f]{40}$ ]] || exit 1
+          (ulimit -f 16384; gh api "repos/$GITHUB_REPOSITORY/actions/runs/$PRODUCER_RUN/attempts/$PRODUCER_ATTEMPT" > "$MRK_MACOS_WORK/prepared-service/run.json")
+          if [[ "$MRK_MACOS_PREPARED_RESUME" == true && "$PRODUCER_SOURCE" != "$GITHUB_SHA" ]]; then
+            (ulimit -f 16384; gh api "repos/$GITHUB_REPOSITORY/compare/$PRODUCER_SOURCE...$GITHUB_SHA" > "$MRK_MACOS_WORK/prepared-service/compatibility.json")
+          fi
+          printf '0\n' > "$MRK_MACOS_WORK/prepared-service/metadata.status"
+          if [[ "${MRK_MACOS_PACKAGE_ROLE-}" == ordinary-image ]]; then
+            # Reject an incompatible harness before the large transport. The
+            # original held-file hydrate/install admission repeats this check.
+            "$MRK_PYTHON" -I -S -B - <<'PY'
+          import os, sys
+          from pathlib import Path
+          sys.path.insert(0, str(Path.cwd()))
+          from desktop.tools import macos_prepared_package as P
+          work = Path(os.environ['MRK_MACOS_WORK']) / 'prepared-service'
+          commit = P.decode((work / 'commit.json').read_bytes(), 8 * P.MIB)
+          source = os.environ['PRODUCER_SOURCE']
+          P.need(commit['sha'] == source, 'prepared-selected-tree')
+          if source != os.environ['GITHUB_SHA']:
+              comparison = P.decode((work / 'compatibility.json').read_bytes(), 8 * P.MIB)
+              P.compatible_harness_data(comparison, dict(source=source, tree=commit['tree']['sha']),
+                  P.consumer_data(os.environ, os.environ['MRK_CONSUMER_TREE'], os.environ['MRK_MACOS_TARGET']),
+                  desktop_carrier=P.ordinary_desktop_carrier(os.environ))
+          PY
+          fi
+      - name: Download only the selected prepared artifact with service digest verification
+        timeout-minutes: 5
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          artifact-ids: ${{ steps.prepared.outputs.artifact-id }}
+          github-token: ${{ github.token }}
+          repository: Apdelrahman1911/mobile-release-kit
+          run-id: ${{ github.event_name == 'workflow_dispatch' && github.event.inputs.prepared_run || github.run_id }}
+          path: ${{ steps.work.outputs.root }}/prepared-input
+          merge-multiple: true
+          digest-mismatch: error
+          skip-decompress: 'false'
+      - name: Check out the immutable producer source for its package reader and producer build
+        if: github.event_name == 'workflow_dispatch'
+        timeout-minutes: 3
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ steps.prepared.outputs.producer-source }}
+          path: prepared-built-source
+          persist-credentials: false
+      - name: Reconstruct fresh script originals and repeat full finalized product audit
+        timeout-minutes: 5
+        shell: bash
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: |
+          set -euo pipefail
+          ulimit -c 0
+          "$MRK_PYTHON" -I -S -B desktop/tools/macos_prepared_package.py hydrate --target "$MRK_MACOS_TARGET" --consumer-tree "$MRK_CONSUMER_TREE" > "$MRK_MACOS_WORK/prepared-runtime.env"
+          /bin/cat "$MRK_MACOS_WORK/prepared-runtime.env" >> "$GITHUB_ENV"
+      - name: Install and verify only the pinned producer toolchain
+        timeout-minutes: 8
+        shell: bash
+        run: /bin/bash desktop/tools/macos_installed_direct_rust.sh
+      - name: Fetch only the exact producer source dependencies before its unchanged offline build
+        timeout-minutes: 8
+        shell: bash
+        env:
+          BUILT_SOURCE: ${{ steps.prepared.outputs.producer-source }}
+        run: |
+          set -euo pipefail
+          checkout="$GITHUB_WORKSPACE"
+          if [[ "$BUILT_SOURCE" != "$GITHUB_SHA" ]]; then checkout="$checkout/prepared-built-source"; fi
+          [[ "$(/usr/bin/git -C "$checkout" rev-parse HEAD)" == "$BUILT_SOURCE" ]] || exit 1
+          /usr/bin/env -i PATH="/Users/runner/.rustup/toolchains/${RUSTUP_TOOLCHAIN}-$MRK_MACOS_TARGET/bin:/usr/bin:/bin:/usr/sbin:/sbin" \
+            HOME=/Users/runner CARGO_HOME=/Users/runner/.cargo RUSTUP_HOME=/Users/runner/.rustup \
+            RUSTUP_TOOLCHAIN="$RUSTUP_TOOLCHAIN" RUSTUP_AUTO_INSTALL=0 \
+            DEVELOPER_DIR="$DEVELOPER_DIR" MACOSX_DEPLOYMENT_TARGET=26.0 \
+            "/Users/runner/.rustup/toolchains/${RUSTUP_TOOLCHAIN}-$MRK_MACOS_TARGET/bin/cargo" fetch \
+              --manifest-path "$checkout/desktop/src-tauri/Cargo.toml" --locked --target "$MRK_MACOS_TARGET"
+      - name: Standard Installer only is privileged; never execute the app or Python as root
+        if: success()
+        id: package_install
+        timeout-minutes: 25
+        shell: bash
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          MRK_MACOS_DEVELOPER_ID_P12_BASE64: ${{ secrets.MRK_MACOS_DEVELOPER_ID_P12_BASE64 }}
+          MRK_MACOS_DEVELOPER_ID_P12_PASSWORD: ${{ secrets.MRK_MACOS_DEVELOPER_ID_P12_PASSWORD }}
+        run: |
+          set +x
+          set +a
+          export -n MRK_MACOS_DEVELOPER_ID_P12_BASE64 MRK_MACOS_DEVELOPER_ID_P12_PASSWORD
+          set -euo pipefail
+          set -o noclobber
+          umask 077
+          # Existing owner/deadlines cover signature, readonly mount, Installer
+          # and V2 readback; earlier construction is not installation evidence.
+          set +e
+          MRK_MACOS_DEVELOPER_ID_P12_BASE64="$MRK_MACOS_DEVELOPER_ID_P12_BASE64" \
+          MRK_MACOS_DEVELOPER_ID_P12_PASSWORD="$MRK_MACOS_DEVELOPER_ID_P12_PASSWORD" \
+            "$MRK_PYTHON" -I -S -B desktop/tools/macos_prepared_package.py package-install --target "$MRK_MACOS_TARGET" --consumer-tree "$MRK_CONSUMER_TREE" \
+            > "$MRK_MACOS_WORK/package-install.stdout"
+          package_status=$?
+          printf '%s\n' "$package_status" > "$MRK_MACOS_WORK/package-install.status"
+          package_status_saved=$?
+          set -e
+          if [[ "$package_status" != 0 ]]; then exit "$package_status"; fi
+          [[ "$package_status_saved" == 0 ]] || exit "$package_status_saved"
+          # The receipt is not its own exit proof: only this original0, the
+          # saved Installer0, same-request readback and known detach permit use.
+          # Unknown resources remain retained; no forced detach or root Python.
+          unset MRK_MACOS_DEVELOPER_ID_P12_BASE64 MRK_MACOS_DEVELOPER_ID_P12_PASSWORD
+      - name: Retain bounded image signing and detach diagnostics
+        if: ${{ !cancelled() && (steps.package_install.outcome == 'success' || steps.package_install.outcome == 'failure') }}
+        timeout-minutes: 2
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: candidate-install-diagnostics-${{ matrix.group }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ steps.work.outputs.root }}/android-helper-distribution-sign.stderr
+            ${{ steps.work.outputs.root }}/android-helper-distribution-sign.stdout
+            ${{ steps.work.outputs.root }}/android-helper-distribution-sign.status
+            ${{ steps.work.outputs.root }}/android-helper-observation-sign.stderr
+            ${{ steps.work.outputs.root }}/android-helper-observation-sign.stdout
+            ${{ steps.work.outputs.root }}/android-helper-observation-sign.status
+            ${{ steps.work.outputs.root }}/android-helper-distribution-detach.stderr
+            ${{ steps.work.outputs.root }}/android-helper-distribution-detach.status
+          if-no-files-found: ignore
+          retention-days: 14
+      - name: Bind the closed Tool owner output for local transport
+        id: local_carrier_export
+        if: matrix.group == 'local-carrier' && steps.package_install.outcome == 'success'
+        timeout-minutes: 1
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          "$MRK_PYTHON" -I -S -B - <<'PY'
+          import os, stat, sys
+          from pathlib import Path
+          root = Path('/Users/runner/work/mobile-release-kit/mobile-release-kit')
+          sys.path.insert(0, str(root))
+          from desktop.tools import macos_prepared_package as P
+          work = Path(os.environ['MRK_MACOS_WORK'])
+          assert work.parent == Path('/Users/runner/work/_temp')
+          fields = ('st_dev','st_ino','st_mode','st_uid','st_gid','st_nlink','st_size','st_mtime_ns','st_ctime_ns','st_flags')
+          def identity(info): return tuple(getattr(info,k) for k in fields)
+          held, parents, values = [], {}, {}
+          try:
+              work_fd = os.open(work, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC)
+              held.append(work_fd)
+              work_pre = identity(os.fstat(work_fd))
+              assert work_pre == identity(work.lstat())
+              assert os.fstat(work_fd).st_uid == os.getuid() and stat.S_IMODE(os.fstat(work_fd).st_mode) == 0o700
+              for name, wanted in (('producer-root', {'Install.pkg','producer.json','producer.sig'}), ('prepared-input', set(P.NAMES))):
+                  before = os.stat(name, dir_fd=work_fd, follow_symlinks=False)
+                  fd = os.open(name, os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=work_fd)
+                  held.append(fd)
+                  assert identity(os.fstat(fd)) == identity(before)
+                  assert before.st_uid == os.getuid() and before.st_flags == 0 and set(os.listdir(fd)) == wanted
+                  parents[name] = (fd, identity(before))
+              for name, limit in P.LOCAL_CARRIER_FILES.items():
+                  parent, leaf = name.rsplit('/',1) if '/' in name else ('',name)
+                  parent_fd = parents[parent][0] if parent else work_fd
+                  before = os.stat(leaf, dir_fd=parent_fd, follow_symlinks=False)
+                  assert stat.S_ISREG(before.st_mode) and before.st_uid == os.getuid() and before.st_nlink == 1
+                  assert before.st_flags == 0 and not stat.S_IMODE(before.st_mode) & 0o7022 and 0 < before.st_size <= limit
+                  fd = os.open(leaf, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC, dir_fd=parent_fd)
+                  held.append(fd)
+                  assert identity(os.fstat(fd)) == identity(before)
+                  body = os.pread(fd, before.st_size, 0)
+                  assert len(body) == before.st_size and not os.pread(fd, 1, before.st_size)
+                  assert identity(os.fstat(fd)) == identity(os.stat(leaf, dir_fd=parent_fd, follow_symlinks=False)) == identity(before)
+                  values[name] = body
+              consumer = P.consumer_data(os.environ, os.environ['MRK_CONSUMER_TREE'], os.environ['MRK_MACOS_TARGET'])
+              if os.environ['MRK_MACOS_PACKAGE_ROLE'] == 'ordinary-image':
+                  record = P.canonical(P.ordinary_local_carrier_transport_data(values, consumer))
+              else:
+                  record = P.canonical(P.local_carrier_transport_data(values, consumer))
+              for name, (fd, before) in parents.items():
+                  assert identity(os.fstat(fd)) == identity(os.stat(name, dir_fd=work_fd, follow_symlinks=False)) == before
+              assert identity(os.fstat(work_fd)) == identity(work.lstat()) == work_pre
+              fd = os.open('LOCAL-CARRIER.json', os.O_RDWR | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600, dir_fd=work_fd)
+              held.append(fd)
+              offset = 0
+              while offset < len(record):
+                  count = os.write(fd, record[offset:]); assert count > 0; offset += count
+              os.fchmod(fd, 0o444); os.fsync(fd)
+              assert os.pread(fd, len(record)+1, 0) == record
+              assert identity(os.fstat(fd)) == identity(os.stat('LOCAL-CARRIER.json', dir_fd=work_fd, follow_symlinks=False))
+          finally:
+              for fd in reversed(held): os.close(fd)
+          print('Closed package files bound for transport; local installation and service remain unqualified.')
+          PY
+      - name: Retain only authenticated files for the owner local installation
+        if: matrix.group == 'local-carrier' && steps.local_carrier_export.outcome == 'success'
+        timeout-minutes: 2
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: candidate-local-carrier-${{ steps.prepared.outputs.producer-source }}-${{ steps.prepared.outputs.producer-attempt }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          # The standard owner has already joined signature verification,
+          # Installer/readback/detach and all original closes. Transport these
+          # two signed files and their exact build/owner/status records only.
+          # No key, signer binary, SDK, package duplicate or service result.
+          path: |
+            ${{ steps.work.outputs.root }}/producer-root/producer.json
+            ${{ steps.work.outputs.root }}/producer-root/producer.sig
+            ${{ steps.work.outputs.root }}/prepared-input/PREPARED.json
+            ${{ steps.work.outputs.root }}/android-helper-package-install.json
+            ${{ steps.work.outputs.root }}/package-install.status
+            ${{ steps.work.outputs.root }}/LOCAL-CARRIER.json
+          if-no-files-found: error
+          retention-days: 14
+          overwrite: false
+      - name: Stage the matching removal scripts and unsigned Remove package without
+          executing removal
+        id: remove_stage
+        if: matrix.group == 'local-carrier' && steps.local_carrier_export.outcome ==
+          'success'
+        timeout-minutes: 8
+        shell: bash
+        env:
+          BUILT_SOURCE: "${{ steps.prepared.outputs.producer-source }}"
+        run: |
+          set -euo pipefail
+          set -o noclobber
+          umask 077
+          built="$GITHUB_WORKSPACE"
+          if [[ "$BUILT_SOURCE" != "$GITHUB_SHA" ]]; then built="$built/prepared-built-source"; fi
+          [[ "$(/usr/bin/git -C "$built" rev-parse HEAD)" == "$BUILT_SOURCE" ]] || exit 1
+          # The remover is the signed leaf inside the installed package's own
+          # inventory (hydrated above); its digest comes only from that inventory.
+          BUILT_ROOT="$built" "$MRK_PYTHON" -I -S -B - > "$MRK_MACOS_WORK/remove-selection.env" <<'PY'
+          import importlib.util, os, re
+          from pathlib import Path
+          built = Path(os.environ['BUILT_ROOT'])
+          spec = importlib.util.spec_from_file_location('_mrk_remove_stager', built / 'desktop/tools/stage_macos_installed.py')
+          stager = importlib.util.module_from_spec(spec); spec.loader.exec_module(stager)
+          work = Path(os.environ['MRK_MACOS_WORK'])
+          inventory = (work / 'scripts/input' / stager.INSTALLATION_INVENTORY_NAME).read_bytes()
+          rows = stager.observation_inventory_bytes(inventory, os.environ['MRK_MACOS_INSTALL_INVENTORY_SHA256'],
+                                                    os.environ['MRK_BUNDLED_RUNTIME_MANIFEST_SHA256'])
+          row = rows['app/' + stager.REMOVER]
+          assert row['executable'] is True and re.fullmatch(r'[0-9a-f]{64}', row['sha256'])
+          selection = stager.source_build_selection(os.environ['MRK_MACOS_TARGET'])
+          assert re.fullmatch(r'[0-9]+\.[0-9]+\.[0-9]+', selection.package_version)
+          print('MRK_MACOS_REMOVER_SHA256=' + row['sha256'])
+          print('MRK_MACOS_SOURCE_PACKAGE_VERSION=' + selection.package_version)
+          PY
+          /bin/cat "$MRK_MACOS_WORK/remove-selection.env" >> "$GITHUB_ENV"
+          set -a; source "$MRK_MACOS_WORK/remove-selection.env"; set +a
+          remover="$MRK_MACOS_WORK/scripts/input/app/Contents/Helpers/MobileReleaseKitPayload.app/Contents/Helpers/mrk-macos-remove"
+          "$MRK_PYTHON" -I -S -B "$built/desktop/tools/stage_macos_installed.py" remove-scripts --target "$MRK_MACOS_TARGET" \
+            --remover "$remover" --expected-remover "$MRK_MACOS_REMOVER_SHA256" --output "$MRK_MACOS_WORK/remove-scripts" \
+            > "$MRK_MACOS_WORK/remove-scripts-result.json"
+          [[ ! -e "$MRK_MACOS_WORK/Remove-original.pkg" && ! -L "$MRK_MACOS_WORK/Remove-original.pkg" ]] || exit 1
+          /usr/bin/pkgbuild --nopayload --scripts "$MRK_MACOS_WORK/remove-scripts" \
+            --identifier dev.mobile-release-kit.desktop.remove --version "$MRK_MACOS_SOURCE_PACKAGE_VERSION" \
+            --install-location / --ownership recommended "$MRK_MACOS_WORK/Remove-original.pkg"
+          "$MRK_PYTHON" -I -S -B "$built/desktop/tools/stage_macos_installed.py" prepare-remove-package --target "$MRK_MACOS_TARGET" --expected-remover "$MRK_MACOS_REMOVER_SHA256" \
+            --scripts "$MRK_MACOS_WORK/remove-scripts" --package "$MRK_MACOS_WORK/Remove-original.pkg" \
+            --output "$MRK_MACOS_WORK/remove-package-parts" > "$MRK_MACOS_WORK/remove-package-prepare.json"
+          [[ ! -e "$MRK_MACOS_WORK/remove-package-parts/Scripts" && ! -L "$MRK_MACOS_WORK/remove-package-parts/Scripts" ]] || exit 1
+          (
+            cd "$MRK_MACOS_WORK/remove-scripts" || exit
+            /usr/bin/env -i PATH=/usr/bin:/bin LC_ALL=C TZ=UTC COPYFILE_DISABLE=1 \
+              /usr/bin/tar -c -z -f "$MRK_MACOS_WORK/remove-package-parts/Scripts" --format=odc --uid=0 --gid=0 \
+              --no-acls --no-xattrs --no-fflags --no-mac-metadata .
+          )
+          /bin/mkdir -m 700 "$MRK_MACOS_WORK/remove-package-unsigned"
+          (
+            cd "$MRK_MACOS_WORK/remove-package-parts" || exit
+            /usr/bin/env -i PATH=/usr/bin:/bin LC_ALL=C TZ=UTC COPYFILE_DISABLE=1 \
+              /usr/bin/xar -c -f "$MRK_MACOS_WORK/remove-package-unsigned/Remove.pkg" \
+              --compression=none PackageInfo Scripts
+          )
+          # Unsigned and not executed; the next fixed phases sign and notarize it.
+      - name: Sign and notarize the matching removal package without executing it
+        id: remove_finalize
+        if: steps.remove_stage.outcome == 'success'
+        timeout-minutes: 32
+        shell: bash
+        env:
+          RUNNER_ENVIRONMENT: "${{ runner.environment }}"
+          MRK_MACOS_INSTALLER_P12_BASE64: "${{ secrets.MRK_MACOS_INSTALLER_P12_BASE64 }}"
+          MRK_MACOS_INSTALLER_P12_PASSWORD: "${{ secrets.MRK_MACOS_INSTALLER_P12_PASSWORD }}"
+          MRK_MACOS_NOTARY_API_KEY_BASE64: "${{ secrets.MRK_MACOS_NOTARY_API_KEY_BASE64 }}"
+        run: |
+          set +x
+          set +a
+          export -n MRK_MACOS_INSTALLER_P12_BASE64 MRK_MACOS_INSTALLER_P12_PASSWORD MRK_MACOS_NOTARY_API_KEY_BASE64
+          set -euo pipefail
+          set -o noclobber
+          umask 077
+          set +e
+          MRK_MACOS_INSTALLER_P12_BASE64="$MRK_MACOS_INSTALLER_P12_BASE64" \
+          MRK_MACOS_INSTALLER_P12_PASSWORD="$MRK_MACOS_INSTALLER_P12_PASSWORD" \
+          MRK_MACOS_NOTARY_API_KEY_BASE64="$MRK_MACOS_NOTARY_API_KEY_BASE64" \
+            "$MRK_PYTHON" -I -S -B desktop/tools/macos_prepared_package.py finalize-remove-package --target "$MRK_MACOS_TARGET" --consumer-tree "$MRK_CONSUMER_TREE" \
+            > "$MRK_MACOS_WORK/remove-package-finalization.stdout" 2> "$MRK_MACOS_WORK/remove-package-finalization.stderr"
+          status=$?
+          printf '%s\n' "$status" > "$MRK_MACOS_WORK/remove-package-finalization.status"
+          unset MRK_MACOS_INSTALLER_P12_BASE64 MRK_MACOS_INSTALLER_P12_PASSWORD MRK_MACOS_NOTARY_API_KEY_BASE64
+          set -e
+          /usr/bin/tail -c 4096 "$MRK_MACOS_WORK/remove-package-finalization.stderr" >&2 || :
+          exit "$status"
+      - name: Emit the genuine removal descriptor and readonly carrier without executing
+          removal
+        id: remove_package
+        if: steps.remove_finalize.outcome == 'success'
+        timeout-minutes: 18
+        shell: bash
+        env:
+          RUNNER_ENVIRONMENT: "${{ runner.environment }}"
+          MRK_MACOS_DEVELOPER_ID_P12_BASE64: "${{ secrets.MRK_MACOS_DEVELOPER_ID_P12_BASE64 }}"
+          MRK_MACOS_DEVELOPER_ID_P12_PASSWORD: "${{ secrets.MRK_MACOS_DEVELOPER_ID_P12_PASSWORD }}"
+        run: |
+          set +x
+          set +a
+          export -n MRK_MACOS_DEVELOPER_ID_P12_BASE64 MRK_MACOS_DEVELOPER_ID_P12_PASSWORD
+          set -euo pipefail
+          set -o noclobber
+          umask 077
+          set +e
+          MRK_MACOS_DEVELOPER_ID_P12_BASE64="$MRK_MACOS_DEVELOPER_ID_P12_BASE64" \
+          MRK_MACOS_DEVELOPER_ID_P12_PASSWORD="$MRK_MACOS_DEVELOPER_ID_P12_PASSWORD" \
+            "$MRK_PYTHON" -I -S -B desktop/tools/macos_prepared_package.py package-remove --target "$MRK_MACOS_TARGET" --consumer-tree "$MRK_CONSUMER_TREE" \
+            > "$MRK_MACOS_WORK/package-remove.stdout" 2> "$MRK_MACOS_WORK/package-remove.stderr"
+          status=$?
+          printf '%s\n' "$status" > "$MRK_MACOS_WORK/package-remove.status"
+          unset MRK_MACOS_DEVELOPER_ID_P12_BASE64 MRK_MACOS_DEVELOPER_ID_P12_PASSWORD
+          set -e
+          /usr/bin/tail -c 4096 "$MRK_MACOS_WORK/package-remove.stderr" >&2 || :
+          exit "$status"
+      - name: Notarize staple and verify the matching readonly removal carrier
+        id: remove_image
+        if: steps.remove_package.outcome == 'success'
+        timeout-minutes: 32
+        shell: bash
+        env:
+          RUNNER_ENVIRONMENT: "${{ runner.environment }}"
+          MRK_MACOS_NOTARY_API_KEY_BASE64: "${{ secrets.MRK_MACOS_NOTARY_API_KEY_BASE64 }}"
+        run: |
+          set +x
+          set +a
+          export -n MRK_MACOS_NOTARY_API_KEY_BASE64
+          set -euo pipefail
+          set -o noclobber
+          umask 077
+          set +e
+          MRK_MACOS_NOTARY_API_KEY_BASE64="$MRK_MACOS_NOTARY_API_KEY_BASE64" \
+            "$MRK_PYTHON" -I -S -B desktop/tools/macos_prepared_package.py finalize-remove-image --target "$MRK_MACOS_TARGET" --consumer-tree "$MRK_CONSUMER_TREE" \
+            > "$MRK_MACOS_WORK/remove-image-finalization.stdout" 2> "$MRK_MACOS_WORK/remove-image-finalization.stderr"
+          status=$?
+          printf '%s\n' "$status" > "$MRK_MACOS_WORK/remove-image-finalization.status"
+          unset MRK_MACOS_NOTARY_API_KEY_BASE64
+          set -e
+          /usr/bin/tail -c 4096 "$MRK_MACOS_WORK/remove-image-finalization.stderr" >&2 || :
+          exit "$status"
+      - name: Retain removal construction diagnostics
+        if: "${{ !cancelled() && steps.remove_stage.outcome != 'skipped' }}"
+        timeout-minutes: 2
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: candidate-remove-diagnostics-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ steps.work.outputs.root }}/remove-scripts-result.json
+            ${{ steps.work.outputs.root }}/remove-package-prepare.json
+            ${{ steps.work.outputs.root }}/remove-package-finalization.status
+            ${{ steps.work.outputs.root }}/remove-package-finalization.stdout
+            ${{ steps.work.outputs.root }}/package-remove.status
+            ${{ steps.work.outputs.root }}/package-remove.stdout
+            ${{ steps.work.outputs.root }}/remove-image-finalization.status
+            ${{ steps.work.outputs.root }}/remove-image-finalization.stdout
+            ${{ steps.work.outputs.root }}/android-helper-finalize-remove-package.json
+            ${{ steps.work.outputs.root }}/android-helper-package-remove.json
+            ${{ steps.work.outputs.root }}/android-helper-finalize-remove-image.json
+          if-no-files-found: ignore
+          retention-days: 14
+      - name: Retain the matching notarized removal image for the owner
+        if: steps.remove_image.outcome == 'success'
+        timeout-minutes: 2
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a
+        with:
+          name: candidate-local-remove-${{ steps.prepared.outputs.producer-source }}-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ steps.work.outputs.root }}/remove-distribution-final/MobileReleaseKit-Remove.dmg
+          if-no-files-found: error
+          retention-days: 14
+          compression-level: 0
+          overwrite: false
+      - name: Notarize, staple and verify only the final user image
+        id: finalize_image
+        if: github.ref == 'refs/heads/main' && steps.remove_image.outcome == 'success'
+        timeout-minutes: 32
+        shell: bash
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          MRK_MACOS_NOTARY_API_KEY_BASE64: ${{ secrets.MRK_MACOS_NOTARY_API_KEY_BASE64 }}
+        run: |
+          set +x
+          set +a
+          export -n MRK_MACOS_NOTARY_API_KEY_BASE64
+          set -euo pipefail
+          set -o noclobber
+          umask 077
+          # Finalize only our copy; readonly contents stay bound to P/producer.
+          set +e
+          MRK_MACOS_NOTARY_API_KEY_BASE64="$MRK_MACOS_NOTARY_API_KEY_BASE64" \
+            "$MRK_PYTHON" -I -S -B desktop/tools/macos_prepared_package.py finalize-image --target "$MRK_MACOS_TARGET" --consumer-tree "$MRK_CONSUMER_TREE" \
+            > "$MRK_MACOS_WORK/image-finalization.stdout"
+          image_status=$?
+          printf '%s\n' "$image_status" > "$MRK_MACOS_WORK/image-finalization.status"
+          image_status_saved=$?
+          unset MRK_MACOS_NOTARY_API_KEY_BASE64
+          set -e
+          if [[ "$image_status" != 0 ]]; then exit "$image_status"; fi
+          [[ "$image_status_saved" == 0 ]] || exit "$image_status_saved"
+          # Require original0; no old-image fallback.
+      - name: Verify and freeze only the exact signed release media
+        if: steps.finalize_image.outcome == 'success'
+        timeout-minutes: 8
+        shell: bash
+        env:
+          PRODUCER_RUN: ${{ github.event.inputs.prepared_run }}
+        run: |
+          set -euo pipefail
+          umask 077
+          "$MRK_PYTHON" -I -S -B desktop/tools/macos_release_media.py freeze "$MRK_MACOS_WORK" "$MRK_MACOS_WORK/frozen-release"
+      - name: Retain the verified release media for attestation
+        if: github.ref == 'refs/heads/main' && steps.finalize_image.outcome == 'success' && success()
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: macos-release-frozen-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ steps.work.outputs.root }}/frozen-release
+          if-no-files-found: error
+          retention-days: 30
+          compression-level: 0
+          overwrite: false
+      - name: Run only this independent Git group
+        if: matrix.native_scope == 'git-native' && steps.package_install.outcome == 'success' && github.event.inputs.operation != 'git-cli-timing' && github.event.inputs.operation != 'git-cli-process-data'
+        timeout-minutes: 25
+        shell: bash
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          TEST_GROUP: ${{ matrix.group }}
+        run: |
+          set -euo pipefail
+          umask 077
+          ulimit -c 0
+          observe() { "$MRK_PYTHON" -I -S -B desktop/tools/macos_identity_current_runtime.py --target "$MRK_MACOS_TARGET" --scope "$1"; }
+          case "$TEST_GROUP" in
+            git-local) observe git-index-cli-native; observe git-branch-cli-native ;;
+            git-branch) observe git-branch-cli-native ;;
+            git-fetch) observe git-fetch-native ;;
+            git-push) observe git-push-native ;;
+            git-create) observe git-push-create-native ;;
+            git-upstream) observe git-upstream-native ;;
+            *) exit 1 ;;
+          esac
+      - name: Measure the original installed Git index journey without changing its checks
+        id: git_cli_timing
+        if: github.event.inputs.operation == 'git-cli-timing' && matrix.group == 'git-local' && steps.package_install.outcome == 'success'
+        timeout-minutes: 5
+        shell: bash
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: |
+          set -euo pipefail
+          umask 077
+          ulimit -c 0
+          "$MRK_PYTHON" -I -S -B - <<'PY'
+          import importlib.util, json, os, pathlib, sys, threading, time
+          root = pathlib.Path.cwd()
+          spec = importlib.util.spec_from_file_location('original_current_identity_driver', root / 'desktop/tools/macos_identity_current_runtime.py')
+          identity = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(identity)
+          started = time.monotonic()
+          records = []
+          record_lock = threading.Lock()
+          restorations = []
+          overflow = False
+
+          def record(phase, before, returned, remaining=None):
+              global overflow
+              try:
+                  row = {'phase': phase, 'startedSeconds': before - started,
+                         'durationSeconds': time.monotonic() - before, 'returned': returned}
+                  if remaining is not None:
+                      row['originalSuccessRemainingSecondsBefore'] = remaining
+                  with record_lock:
+                      if len(records) < 24:
+                          records.append(row)
+                      else:
+                          overflow = True
+              except BaseException:
+                  overflow = True
+
+          def timed(original, phase, args, kwargs, remaining=None):
+              before = time.monotonic()
+              returned = False
+              try:
+                  value = original(*args, **kwargs)
+                  returned = True
+                  return value
+              finally:
+                  record(phase, before, returned, remaining)
+
+          original_load = identity._load_observer
+
+          def load(*, retained=False):
+              aqua = original_load(retained=retained)
+              if retained or aqua.GIT_CLI is not aqua.CLI.GIT_CLI:
+                  raise AssertionError('fixed current Git fixture only')
+              recipe, cli = aqua.GIT_CLI, aqua.CLI
+              original_phase = recipe._phase
+              original_call = cli._call
+              original_before = recipe.before_invocation
+              def phase(c, calls, number):
+                  labels = ('allowed', 'prepared', 'terminal', 'revoked', 'reallowed')
+                  label = 'phase-' + labels[number] if type(number) is int and 0 <= number < len(labels) else 'phase-invalid'
+                  return timed(original_phase, label, (c, calls, number), {}, calls.success_end - time.monotonic())
+              def call(*args, **kwargs):
+                  number = args[5] if len(args) > 5 else None
+                  label = 'cli-' + str(number) if type(number) is int and 0 <= number < 8 else 'cli-invalid'
+                  return timed(original_call, label, args, kwargs)
+              def before(*args, **kwargs):
+                  return timed(original_before, 'fixture-before-invocation', args, kwargs)
+              recipe._phase, cli._call, recipe.before_invocation = phase, call, before
+              restorations.extend(((recipe, '_phase', original_phase), (cli, '_call', original_call), (recipe, 'before_invocation', original_before)))
+              return aqua
+
+          identity._load_observer = load
+          sys.argv = ['desktop/tools/macos_identity_current_runtime.py', '--target', 'aarch64-apple-darwin', '--scope', 'git-index-cli-native']
+          status = None
+          try:
+              status = identity.main()
+          finally:
+              identity._load_observer = original_load
+              for module, name, original in reversed(restorations):
+                  setattr(module, name, original)
+              report = {'schemaVersion': 1, 'scope': 'original-installed-git-index-passive-timing-data',
+                        'applicationSource': '4ab9e7b6c97136a15d6df8ce0bb09e1f5259e73c',
+                        'producerRun': '41233002402', 'workflowSource': os.environ['GITHUB_SHA'],
+                        'runId': os.environ['GITHUB_RUN_ID'], 'runAttempt': os.environ['GITHUB_RUN_ATTEMPT'],
+                        'durationSeconds': time.monotonic() - started, 'driverOriginalStatus': status,
+                        'originalClocksAndPredicatesUnchanged': True, 'installedGitQualified': False,
+                        'appReturnOrInvocationFinalitySuppliedByTiming': False, 'records': records, 'overflow': overflow}
+              body = json.dumps(report, sort_keys=True, separators=(',', ':'), allow_nan=False).encode() + b'\n'
+              if len(body) > 16384:
+                  raise AssertionError('fixed timing report backing exceeded')
+              folder = pathlib.Path(os.environ['MRK_MACOS_WORK']) / 'git-cli-timing-data'
+              folder.mkdir(mode=0o700)
+              with (folder / 'original-timing.json').open('xb') as stream:
+                  stream.write(body)
+              print(body.decode(), flush=True)
+          if type(status) is not int:
+              raise AssertionError('original driver status absent')
+          raise SystemExit(status)
+          PY
+      - name: Retain only bounded original installed Git timing DATA
+        if: ${{ !cancelled() && github.event.inputs.operation == 'git-cli-timing' && (steps.git_cli_timing.outcome == 'success' || steps.git_cli_timing.outcome == 'failure') }}
+        timeout-minutes: 2
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: original-installed-git-timing-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ steps.work.outputs.root }}/git-cli-timing-data/original-timing.json
+          if-no-files-found: error
+          retention-days: 7
+          overwrite: false
+      - name: Observe only original installed Git printable process chain
+        id: git_cli_process_data
+        if: github.event.inputs.operation == 'git-cli-process-data' && matrix.group == 'git-local' && steps.package_install.outcome == 'success'
+        timeout-minutes: 5
+        shell: bash
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: |
+          set -euo pipefail
+          umask 077
+          ulimit -c 0
+          "$MRK_PYTHON" -I -S -B - <<'PY'
+          import hashlib, importlib.util, json, os, pathlib, re, stat, subprocess, sys, threading, time
+          root = pathlib.Path.cwd()
+          spec = importlib.util.spec_from_file_location('original_current_identity_driver', root / 'desktop/tools/macos_identity_current_runtime.py')
+          identity = importlib.util.module_from_spec(spec)
+          spec.loader.exec_module(identity)
+          started = time.monotonic()
+          records, snapshots, restorations = [], [], []
+          record_lock = threading.Lock()
+          diagnostic_context = threading.local()
+          overflow = False
+          folder = pathlib.Path(os.environ['MRK_MACOS_WORK']) / 'git-cli-process-data'
+          folder.mkdir(mode=0o700)
+          APP = '/Library/Application Support/MobileReleaseKit/Mobile Release Kit.app/Contents/Helpers/MobileReleaseKitPayload.app/Contents/MacOS/mobile-release-kit-desktop'
+          GIT = '/Library/Developer/CommandLineTools/usr/bin/git'
+          COMMAND_BOOTSTRAP = '\nimport os, signal, sys\n_self = os.getpid()\n_raise, _kill, _park, _sig = signal.raise_signal, os.kill, signal.pause, signal.SIGKILL\n_role = sys.argv[2]\nif _role == "W":\n    _enter, _stage = True, 0\n    while True:\n        try:\n            if _enter:\n                _enter = False\n                sys.path.insert(0, sys.argv[1])\n                from mobile_release._command_process import helper_main\n                helper_main(sys.argv[2:], None)\n            if _stage == 0:\n                _stage = 1\n                _raise(_sig)\n            if _stage == 1:\n                _stage = 2\n                _kill(_self, _sig)\n            _park()\n        except BaseException:\n            _enter = False\nelse:\n    _policy = None\n    if _role == "C":\n        _policy = 0\n        for _bit, _number in enumerate((signal.SIGINT, signal.SIGTERM, signal.SIGCHLD)):\n            _old = signal.getsignal(_number)\n            if _old == signal.SIG_IGN:\n                _policy |= 1 << _bit\n            elif not (_old == signal.SIG_DFL or _number == signal.SIGINT and _old is signal.default_int_handler):\n                raise SystemExit(70)\n        if _policy & 4:\n            raise SystemExit(70)\n    sys.path.insert(0, sys.argv[1])\n    from mobile_release._command_process import helper_main\n    raise SystemExit(helper_main(sys.argv[2:], _policy))\n'
+          ENV = {'PATH': '/usr/bin:/bin:/usr/sbin:/sbin', 'LC_ALL': 'C', 'LANG': 'C'}
+          ERROR_PREDICATES = frozenset(['diagnostic-fixed-pid', 'diagnostic-fixed-six-role-limit', 'diagnostic-original-Apple-tool-anchor', 'diagnostic-original-Apple-tool-metadata', 'diagnostic-original-Apple-tool-name', 'diagnostic-original-Apple-tool-post', 'diagnostic-original-command-child-correlation', 'diagnostic-original-command-parent-depth', 'diagnostic-original-count-shape', 'diagnostic-original-duration-bound', 'diagnostic-original-duration-range', 'diagnostic-original-duration-shape', 'diagnostic-original-fixed-command-bootstrap', 'diagnostic-original-fixed-worker-correlation', 'diagnostic-original-installed-app-correlation', 'diagnostic-original-inventory-shape', 'diagnostic-original-metrics-shape', 'diagnostic-original-ps-correlation-changed', 'diagnostic-original-ps-return', 'diagnostic-original-ps-shape', 'diagnostic-single-original-command-child', 'diagnostic-single-original-git-worker', 'diagnostic-single-original-installed-app'])
+
+
+          def record(phase, before, returned, remaining=None):
+              global overflow
+              try:
+                  row = {'phase': phase, 'startedSeconds': before - started,
+                         'durationSeconds': time.monotonic() - before, 'returned': returned}
+                  if remaining is not None:
+                      row['originalSuccessRemainingSecondsBefore'] = remaining
+                  with record_lock:
+                      if len(records) < 24:
+                          records.append(row)
+                      else:
+                          overflow = True
+              except BaseException:
+                  overflow = True
+
+
+          def timed(original, phase, args, kwargs, remaining=None):
+              before, returned = time.monotonic(), False
+              try:
+                  value = original(*args, **kwargs)
+                  returned = True
+                  return value
+              finally:
+                  record(phase, before, returned, remaining)
+
+
+          def diagnostic_timeout(maximum):
+              remaining = diagnostic_context.end - time.monotonic()
+              if remaining <= 0:
+                  raise TimeoutError('diagnostic-budget-spent')
+              return min(maximum, remaining)
+
+
+          def ps(*args):
+              result = subprocess.run(['/bin/ps', *args], env=ENV, capture_output=True, timeout=diagnostic_timeout(2))
+              if result.returncode != 0 or result.stderr or len(result.stdout) > 65536:
+                  raise RuntimeError('diagnostic-original-ps-return')
+              return result.stdout.decode('utf-8', errors='strict')
+
+
+          def process_row(pid):
+              if type(pid) is not int or not 1 <= pid < 2 ** 31:
+                  raise RuntimeError('diagnostic-fixed-pid')
+              facts = ps('-p', str(pid), '-o', 'uid=,ppid=,lstart=').strip().split(None, 2)
+              if len(facts) != 3 or not facts[0].isdecimal() or not facts[1].isdecimal():
+                  raise RuntimeError('diagnostic-original-ps-shape')
+              return {'pid': pid, 'uid': int(facts[0]), 'parentPid': int(facts[1]), 'start': facts[2],
+                      'executable': ps('-p', str(pid), '-o', 'comm=').strip(),
+                      'arguments': ps('-ww', '-p', str(pid), '-o', 'args=').strip()}
+
+
+          def original_helper_role(arguments, executable, runtime, expected_parent):
+              # ps text is transient DATA, never launch/source/native authority. Accept
+              # only the SAME original bootstrap's whitespace or Apple printable form.
+              prefix = executable + ' -I -S -B -c '
+              separator = ' ' + runtime + '/core.zip '
+              if not arguments.startswith(prefix) or separator not in arguments:
+                  return None
+              body, suffix = arguments[len(prefix):].rsplit(separator, 1)
+              rendered = (COMMAND_BOOTSTRAP, COMMAND_BOOTSTRAP.replace('\n', '?').replace('\t', '?'),
+                          COMMAND_BOOTSTRAP.replace('\n', '\\012'))
+              if ' '.join(body.split()) not in {' '.join(v.split()) for v in rendered}:
+                  return None
+              fields = suffix.split()
+              if len(fields) != 9 or fields[0] not in ('C', 'A', 'W'):
+                  return None
+              role, parent, session, group, work, hard, nonce, account, version = fields
+              if not all(v.isdecimal() and 0 < int(v) < 2**63 for v in (parent, session, group, work, hard)):
+                  return None
+              if int(parent) != expected_parent or int(work) >= int(hard) or not re.fullmatch('[0-9a-f]{32}', nonce) or account != '-' or version != '1':
+                  return None
+              return role, nonce
+
+
+          def select_processes():
+              inventory = []
+              for line in ps('-axww', '-o', 'pid=,ppid=,comm=').splitlines():
+                  fields = line.strip().split(None, 2)
+                  if len(fields) != 3 or not fields[0].isdecimal() or not fields[1].isdecimal():
+                      raise RuntimeError('diagnostic-original-inventory-shape')
+                  inventory.append((int(fields[0]), int(fields[1]), fields[2]))
+              app = [pid for pid, parent, executable in inventory if executable == APP]
+              if len(app) != 1:
+                  raise RuntimeError('diagnostic-single-original-installed-app')
+              original = process_row(app[0])
+              if original['uid'] != os.getuid() or original['uid'] == 0 or original['executable'] != APP or original['arguments'] != APP + ' git-index-cli':
+                  raise RuntimeError('diagnostic-original-installed-app-correlation')
+              selected = [('app', original)]
+              worker_path = re.compile(r'/Library/Application Support/MobileReleaseKit/versions/[A-Za-z0-9._-]{1,160}/runtime/python/bin/python3')
+              children = [(pid, executable) for pid, parent, executable in inventory if parent == app[0] and worker_path.fullmatch(executable)]
+              if len(children) > 1:
+                  raise RuntimeError('diagnostic-single-original-git-worker')
+              for pid, executable in children:
+                  row = process_row(pid)
+                  runtime = executable.removesuffix('/python/bin/python3')
+                  allowed = [(role, executable + ' -I -S -B ' + runtime + '/' + name + ' ' + runtime + '/core.zip') for role, name in
+                             (('read-worker', 'git_read_bootstrap.py'), ('local-worker', 'git_local_bootstrap.py'))]
+                  role = next((role for role, arguments in allowed if row['arguments'] == arguments), None)
+                  if row['uid'] != original['uid'] or row['parentPid'] != original['pid'] or row['executable'] != executable or role is None:
+                      raise RuntimeError('diagnostic-original-fixed-worker-correlation')
+                  selected.append((role, row))
+                  parent, nonce = pid, None
+                  for expected, closed in [('C', 'command-custodian'), ('A', 'command-anchor'), ('W', 'command-worker')]:
+                      candidates = [(child, path) for child, ancestor, path in inventory if ancestor == parent and path in (executable, GIT)]
+                      if len(candidates) > 1:
+                          raise RuntimeError('diagnostic-single-original-command-child')
+                      if not candidates:
+                          break
+                      child, path = candidates[0]
+                      facts = process_row(child)
+                      if facts['uid'] != original['uid'] or facts['parentPid'] != parent or facts['executable'] != path:
+                          raise RuntimeError('diagnostic-original-command-child-correlation')
+                      if path == GIT:
+                          if expected != 'W' or not facts['arguments'].startswith(GIT + ' '):
+                              raise RuntimeError('diagnostic-original-command-parent-depth')
+                          selected.append(('git-command', facts))
+                          break
+                      parsed = original_helper_role(facts['arguments'], executable, runtime, parent)
+                      if parsed is None or parsed[0] != expected or (nonce is not None and parsed[1] != nonce):
+                          raise RuntimeError('diagnostic-original-fixed-command-bootstrap')
+                      nonce = parsed[1]  # Original request correlation; never retained.
+                      selected.append((closed, facts))
+                      parent = child
+              if len(selected) > 6:
+                  raise RuntimeError('diagnostic-fixed-six-role-limit')
+              return selected
+
+
+          def duration(value):
+              if not re.fullmatch(r'(?:[0-9]{1,6}-)?[0-9]{1,8}(?::[0-9]{2}){1,2}(?:\.[0-9]{1,6})?', value):
+                  raise RuntimeError('diagnostic-original-duration-shape')
+              days, rest = value.split('-', 1) if '-' in value else ('0', value)
+              fields = rest.split(':')
+              total = int(days) * 86400 + float(fields[-1])
+              if float(fields[-1]) >= 60 or len(fields) == 3 and int(fields[-2]) >= 60:
+                  raise RuntimeError('diagnostic-original-duration-range')
+              total += int(fields[-2]) * 60
+              if len(fields) == 3:
+                  total += int(fields[0]) * 3600
+              if not 0 <= total < 10 * 366 * 86400:
+                  raise RuntimeError('diagnostic-original-duration-bound')
+              return total
+
+
+          def metrics(row):
+              fields = ps('-p', str(row['pid']), '-o', 'state=,time=,etime=,rss=,nvcsw=,nivcsw=').strip().split()
+              if len(fields) != 6 or not re.fullmatch(r'[A-Za-z+<>]{1,16}', fields[0]):
+                  raise RuntimeError('diagnostic-original-metrics-shape')
+              def count(value):
+                  if value == '-':
+                      return None
+                  if not value.isdecimal() or not 0 <= int(value) < 2 ** 63:
+                      raise RuntimeError('diagnostic-original-count-shape')
+                  return int(value)
+              state = {'R': 'running', 'S': 'sleeping', 'I': 'idle', 'U': 'uninterruptible', 'D': 'uninterruptible',
+                       'T': 'stopped', 'Z': 'zombie'}.get(fields[0][0], 'other')
+              return {'stateCategory': state, 'cpuSeconds': duration(fields[1]), 'elapsedSeconds': duration(fields[2]),
+                      'residentKiB': count(fields[3]), 'voluntarySwitches': count(fields[4]), 'involuntarySwitches': count(fields[5])}
+
+
+          def signature(value):
+              return (value.st_dev, value.st_ino, value.st_mode, value.st_uid, value.st_gid, value.st_nlink,
+                      value.st_size, value.st_mtime_ns, value.st_ctime_ns, value.st_flags)
+
+
+          def observe_once(label, delay):
+              row = {'phase': label, 'scheduledDelaySeconds': delay, 'diagnosticBudgetSeconds': 3,
+                     'processCorrelationNativeAuthority': False, 'installedOrNativeQualification': False, 'processes': []}
+              diagnostic_context.end = time.monotonic() + 3
+              tool, fd = pathlib.Path('/bin/ps'), None
+              try:
+                  fd = os.open(tool, os.O_RDONLY | os.O_NOFOLLOW | os.O_CLOEXEC)
+                  before = os.fstat(fd)
+                  if not stat.S_ISREG(before.st_mode) or before.st_uid != 0 or before.st_nlink != 1 or before.st_mode & 0o022 or not before.st_mode & 0o111:
+                      raise RuntimeError('diagnostic-original-Apple-tool-metadata')
+                  if signature(tool.lstat()) != signature(before):
+                      raise RuntimeError('diagnostic-original-Apple-tool-name')
+                  verify = subprocess.run(['/usr/bin/codesign', '--verify', '--strict', '-R=anchor apple', str(tool)], env=ENV,
+                                          capture_output=True, timeout=diagnostic_timeout(2))
+                  if verify.returncode != 0 or verify.stdout or verify.stderr:
+                      raise RuntimeError('diagnostic-original-Apple-tool-anchor')
+                  selected = select_processes()
+                  for role, original in selected:
+                      observed_at = time.monotonic()
+                      value = metrics(original)
+                      if process_row(original['pid']) != original:
+                          raise RuntimeError('diagnostic-original-ps-correlation-changed')
+                      # Retain only fixed roles and bounded numeric/state DATA. PID, argv,
+                      # paths, inventory, UID and lstart stay transient, never in artifact.
+                      row['processes'].append({'role': role, 'observedSeconds': observed_at - started,
+                                              'sameOriginalPsTupleAfter': True, **value})
+                  if signature(os.fstat(fd)) != signature(before) or signature(tool.lstat()) != signature(before):
+                      raise RuntimeError('diagnostic-original-Apple-tool-post')
+                  os.close(fd)
+                  fd = None
+                  row['originalAppleToolFdNamePostAndClose'] = True
+                  row['status'] = 'diagnostic-returned'
+              except Exception as error:
+                  row['status'] = 'diagnostic-unavailable'
+                  row['errorCategory'] = type(error).__name__
+                  row['errorPredicate'] = (error.args[0] if type(error) is RuntimeError and len(error.args) == 1
+                                           and error.args[0] in ERROR_PREDICATES else 'unmapped-diagnostic-error')
+              finally:
+                  if fd is not None:
+                      os.close(fd)
+                  with record_lock:
+                      if len(snapshots) < 9:
+                          snapshots.append(row)
+
+
+          def observe_phase(label, stopped):
+              before = time.monotonic()
+              for delay in (4, 12, 24):
+                  if stopped.wait(max(0, before + delay - time.monotonic())):
+                      return
+                  observe_once(label, delay)
+
+
+          original_load = identity._load_observer
+
+
+          def load(*, retained=False):
+              aqua = original_load(retained=retained)
+              if retained or aqua.GIT_CLI is not aqua.CLI.GIT_CLI:
+                  raise AssertionError('fixed current Git fixture only')
+              recipe, cli = aqua.GIT_CLI, aqua.CLI
+              original_phase, original_call, original_before = recipe._phase, cli._call, recipe.before_invocation
+              def phase(c, calls, number):
+                  labels = ('allowed', 'prepared', 'terminal', 'revoked', 'reallowed')
+                  label = 'phase-' + labels[number] if type(number) is int and 0 <= number < len(labels) else 'phase-invalid'
+                  stopped, worker = threading.Event(), None
+                  try:
+                      if type(number) is int and 0 <= number <= 2:
+                          try:
+                              worker = threading.Thread(target=observe_phase, args=(label, stopped), daemon=False)
+                              worker.start()
+                          except Exception:
+                              worker = None
+                      return timed(original_phase, label, (c, calls, number), {}, calls.success_end - time.monotonic())
+                  finally:
+                      stopped.set()
+                      if worker is not None:
+                          try:
+                              worker.join(4)
+                          except Exception:
+                              pass
+              def call(*args, **kwargs):
+                  number = args[5] if len(args) > 5 else None
+                  label = 'cli-' + str(number) if type(number) is int and 0 <= number < 8 else 'cli-invalid'
+                  return timed(original_call, label, args, kwargs)
+              def before(*args, **kwargs):
+                  return timed(original_before, 'fixture-before-invocation', args, kwargs)
+              recipe._phase, cli._call, recipe.before_invocation = phase, call, before
+              restorations.extend(((recipe, '_phase', original_phase), (cli, '_call', original_call), (recipe, 'before_invocation', original_before)))
+              return aqua
+
+
+          identity._load_observer = load
+          sys.argv = ['desktop/tools/macos_identity_current_runtime.py', '--target', 'aarch64-apple-darwin', '--scope', 'git-index-cli-native']
+          status = None
+          try:
+              status = identity.main()
+          finally:
+              identity._load_observer = original_load
+              for module, name, original in reversed(restorations):
+                  setattr(module, name, original)
+              report = {'schemaVersion': 3, 'scope': 'original-installed-git-index-printable-process-chain-data',
+                        'applicationSource': '4ab9e7b6c97136a15d6df8ce0bb09e1f5259e73c',
+                        'producerRun': '41233002402', 'workflowSource': os.environ['GITHUB_SHA'],
+                        'runId': os.environ['GITHUB_RUN_ID'], 'runAttempt': os.environ['GITHUB_RUN_ATTEMPT'],
+                        'durationSeconds': time.monotonic() - started, 'driverOriginalStatus': status,
+                        'originalDeadlineValuesAndPredicatesUnchanged': True, 'targetSuspensionRequested': False,
+                        'installedGitQualified': False, 'appReturnOrInvocationFinalitySuppliedByObservation': False,
+                        'records': records, 'snapshots': snapshots, 'overflow': overflow}
+              body = json.dumps(report, sort_keys=True, separators=(',', ':'), allow_nan=False).encode() + b'\n'
+              if len(body) > 32768:
+                  raise AssertionError('fixed process summary backing exceeded')
+              report_path = folder / 'original-process-observation.json'
+              held = os.open(report_path, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600)
+              try:
+                  view = memoryview(body)
+                  while view:
+                      count = os.write(held, view)
+                      if not 0 < count <= len(view):
+                          raise AssertionError('original diagnostic report write progress')
+                      view = view[count:]
+                  os.fsync(held)
+                  original = os.fstat(held)
+                  if not stat.S_ISREG(original.st_mode) or original.st_uid != os.getuid() or original.st_nlink != 1 or original.st_size != len(body):
+                      raise AssertionError('original diagnostic report writer')
+                  if signature(os.fstat(held)) != signature(original) or signature(report_path.lstat()) != signature(original):
+                      raise AssertionError('original diagnostic report writer post')
+              finally:
+                  os.close(held)
+          raise SystemExit(status)
+          PY
+      - name: Retain bounded original installed Git process DATA
+        if: ${{ !cancelled() && github.event.inputs.operation == 'git-cli-process-data' && (steps.git_cli_process_data.outcome == 'success' || steps.git_cli_process_data.outcome == 'failure') }}
+        timeout-minutes: 2
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: original-installed-git-process-data-${{ github.sha }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ steps.work.outputs.root }}/git-cli-process-data/original-process-observation.json
+          if-no-files-found: error
+          retention-days: 7
+          overwrite: false
+      - name: Request the fixed native service once and confirm its joined readiness
+        id: tool_service
+        if: matrix.native_scope == 'tool-setup' && matrix.group != 'local-carrier' && steps.package_install.outcome == 'success'
+        timeout-minutes: 13
+        shell: bash
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: |
+          set -euo pipefail
+          umask 077
+          ulimit -c 0
+          # Register once, then Check. Exit78 is unexecuted, never a pass/retry.
+          exec "$MRK_PYTHON" -I -S -B desktop/tools/macos_identity_current_runtime.py --target "$MRK_MACOS_TARGET" --scope tool-service-prerequisite
+      - name: Report finite Apple service errors after a failed prerequisite
+        if: ${{ !cancelled() && steps.tool_service.outcome == 'failure' }}
+        timeout-minutes: 1
+        shell: bash
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: |
+          set -euo pipefail
+          "$MRK_PYTHON" -I -S -B desktop/tools/macos_tool_service_diagnostic.py
+      - name: Verify the installed CLI against the joined native service
+        id: installed_cli_native
+        if: matrix.native_scope == 'tool-setup' && steps.tool_service.outcome == 'success'
+        timeout-minutes: 3
+        shell: bash
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: |
+          set -euo pipefail
+          umask 077
+          ulimit -c 0
+          # Same image: one local check, seven CLI calls, eight IPC joins.
+          # Separate step contains its original135s caller and cleanup; the
+          # service's preceding765s caller cannot consume this outer budget.
+          exec "$MRK_PYTHON" -I -S -B desktop/tools/macos_identity_current_runtime.py --target "$MRK_MACOS_TARGET" --scope installed-cli-local-check
+      - name: Prepare three isolated platform-only SDK sources with shared JDK and Gradle
+        id: tool_inputs
+        if: matrix.native_scope == 'tool-setup' && matrix.group != 'service-cli' && steps.installed_cli_native.outcome == 'success'
+        timeout-minutes: 22
+        shell: bash
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: |
+          set -euo pipefail
+          umask 077
+          ulimit -c 0
+          export MRK_ANDROID_PREPARATION_WORK="$MRK_MACOS_WORK"
+          # Existing bounded download/extraction originals, once per pinned
+          # public archive; never supplier execution or sdkmanager. At least
+          # 8GiB free, unchanged private ancestry and no prior task leaf required.
+          exec "$MRK_PYTHON" -I -S -B desktop/tools/macos_android_dependency_preparation.py prepare-tool-setup-inputs
+      - name: Observe public acquisition, cancellation and missing-only SDK registration reuse
+        id: tool_native
+        if: matrix.native_scope == 'tool-setup' && matrix.group != 'service-cli' && steps.tool_inputs.outcome == 'success'
+        timeout-minutes: 122
+        shell: bash
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+        run: |
+          set -euo pipefail
+          umask 077
+          ulimit -c 0
+          if [[ '${{ matrix.group }}' == public-acquisition ]]; then
+            exec "$MRK_PYTHON" -I -S -B desktop/tools/macos_identity_current_runtime.py --target "$MRK_MACOS_TARGET" --scope tool-setup --tool-cases public-acquisition
+          fi
+          # Fresh registration is required on each isolated runner. No saved
+          # service or SDK state is accepted from another runner's test result.
+          exec "$MRK_PYTHON" -I -S -B desktop/tools/macos_identity_current_runtime.py --target "$MRK_MACOS_TARGET" --scope tool-setup
+      - name: Run only this key or backup group
+        if: (matrix.group == 'upload-keys' || matrix.group == 'cold-restart' || matrix.group == 'backup') && steps.tool_native.outcome == 'success'
+        timeout-minutes: 60
+        shell: bash
+        env:
+          RUNNER_ENVIRONMENT: ${{ runner.environment }}
+          TEST_GROUP: ${{ matrix.group }}
+        run: |
+          set -euo pipefail
+          umask 077
+          ulimit -c 0
+          observe() { "$MRK_PYTHON" -I -S -B desktop/tools/macos_identity_current_runtime.py --target "$MRK_MACOS_TARGET" --scope "$1"; }
+          case "$TEST_GROUP" in
+            upload-keys)
+              observe upload-key-roundtrip
+              observe upload-key-stop-before-go
+              observe upload-key-stop-after-new ;;
+            cold-restart) observe upload-key-cold-restart ;;
+            backup)
+              observe upload-key-backup-roundtrip
+              observe upload-key-backup-cli ;;
+            *) exit 1 ;;
+          esac
+

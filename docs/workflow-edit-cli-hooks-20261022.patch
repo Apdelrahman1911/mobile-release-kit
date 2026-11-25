@@ -1,0 +1,1315 @@
+diff --git a/desktop/package.json b/desktop/package.json
+--- a/desktop/package.json
++++ b/desktop/package.json
+@@ -18,7 +18,7 @@
+     "test:agent-store-access": "node --experimental-strip-types --test --test-concurrency=1 --test-timeout=10000 tests/agent-store-access.test.mjs",
+     "dev": "vite --host 127.0.0.1 --port 1420 --strictPort",
+     "typecheck": "tsc --noEmit -p tsconfig.json",
+-    "test": "node --experimental-strip-types --test --test-isolation=none --test-concurrency=1 tests/drafts.test.mjs tests/catalog.test.mjs tests/preparation.test.mjs tests/setup-overview.test.mjs tests/setup-resume.test.mjs tests/release-rehearsal.test.mjs tests/smart-setup.test.mjs tests/external-project-observation.test.mjs tests/project-scripts.test.mjs tests/tool-preparation.test.mjs tests/config-edit.test.mjs tests/service-configuration.test.mjs tests/service-metadata-text.test.mjs tests/github-setup.test.mjs tests/github-publication.test.mjs tests/version-counter-setup.test.mjs tests/github-workflow-edit.test.mjs tests/project-initialization.test.mjs tests/service-initialization.test.mjs tests/credential-guide.test.mjs tests/asset-session.test.mjs tests/github-connection.test.mjs tests/github-history.test.mjs tests/github-candidate-download.test.mjs tests/github-preflight.test.mjs tests/github-release.test.mjs tests/metadata-text.test.mjs tests/environment.test.mjs tests/environment-diagnostics.test.mjs tests/release-version.test.mjs tests/release-version-edit.test.mjs tests/service-version-edit.test.mjs tests/service-version-prepare.test.mjs tests/hosted-version-import.test.mjs tests/release-input-guidance.test.mjs tests/candidate-evidence.test.mjs tests/lifecycle-evidence.test.mjs tests/offline-preflight.test.mjs tests/agent-local-checks.test.mjs tests/agent-android-build.test.mjs tests/agent-ios-archive.test.mjs tests/agent-ios-recovery.test.mjs tests/service-git-permission.test.mjs tests/service-git-commit-permission.test.mjs tests/service-git-repository-permission.test.mjs tests/service-git-remote-permission.test.mjs tests/local-store-preflight.test.mjs tests/agent-store-access.test.mjs tests/agent-store-release.test.mjs tests/agent-store-preparation.test.mjs tests/agent-tool-setup.test.mjs tests/tool-setup-saved-requirements.test.mjs tests/tool-setup-acquisition.test.mjs tests/local-store-prepare.test.mjs tests/local-store-stage.test.mjs tests/local-store-execute.test.mjs tests/local-store-reconcile.test.mjs tests/local-release-history.test.mjs tests/agent-local-history.test.mjs tests/agent-local-history-prepare.test.mjs tests/artifact-inspection.test.mjs tests/android-build-controller.test.mjs tests/android-build-protocol.test.mjs tests/android-toolchain-catalog.test.mjs tests/android-tool-sources.test.mjs tests/ios-archive.test.mjs tests/ios-signing-reuse.test.mjs tests/project-recovery.test.mjs tests/metadata-images.test.mjs tests/service-metadata-images.test.mjs tests/service-metadata-images-prepare.test.mjs tests/installation-check.test.mjs tests/guided-configuration.test.mjs tests/credential-setup.test.mjs tests/version-automation.test.mjs tests/ios-store-versions.test.mjs tests/android-store-versions.test.mjs tests/paired-store-versions.test.mjs tests/version-reserve.test.mjs tests/version-reserve-review.test.mjs tests/version-ci.test.mjs tests/agent-version-reserve-access.test.mjs tests/tool-acquisition.test.mjs tests/tool-acquisition-sdk.test.mjs tests/cli-read-access.test.mjs tests/git-repository.test.mjs tests/draft-save-actions.test.mjs tests/project-identity.test.mjs tests/project-identity-native.test.mjs tests/ios-app-target-hints.test.mjs tests/tool-acquisition-native.test.mjs tests/tool-acquisition-controller.test.mjs tests/tool-acquisition-source-picker.test.mjs tests/github-gh-entry.test.mjs tests/github-device-connection.test.mjs tests/credential-backup.test.mjs tests/apple-provisioning-bundle-read.test.mjs tests/apple-provisioning-profile-read.test.mjs tests/agent-identity-requests.test.mjs tests/agent-identity-actions.test.mjs tests/credential-upload-key.test.mjs tests/agent-upload-key-access.test.mjs tests/agent-upload-key-backup.test.mjs tests/agent-upload-key-reuse.test.mjs tests/agent-credential-access.test.mjs tests/agent-apple-provisioning.test.mjs tests/agent-apple-preparation.test.mjs tests/apple-provisioning-controller.test.mjs tests/apple-provisioning-protocol.test.mjs tests/apple-provisioning-recovery.test.mjs tests/apple-profile-setup.test.mjs tests/apple-profile-recovery.test.mjs tests/apple-distribution-key-setup.test.mjs tests/apple-distribution-certificate-setup.test.mjs tests/apple-p12-setup.test.mjs tests/git-local.test.mjs tests/git-fetch.test.mjs tests/git-branches.test.mjs tests/git-switch.test.mjs tests/git-fast-forward.test.mjs tests/git-upstream.test.mjs tests/git-push.test.mjs tests/git-push-new-branch.test.mjs tests/git-rename.test.mjs tests/git-init.test.mjs tests/github-activity.test.mjs tests/github-pull-request.test.mjs tests/github-pull-request-mode.test.mjs tests/github-pull-request-management.test.mjs tests/github-actions-retry.test.mjs tests/agent-github-actions.test.mjs tests/version-enrollment.test.mjs tests/agent-version-enrollment.test.mjs tests/github-activity-delegation.test.mjs tests/github-publication-delegation.test.mjs tests/github-setup-prepare-delegation.test.mjs tests/github-play-cleanup.test.mjs tests/future-version-tag.test.mjs",
++    "test": "node --experimental-strip-types --test --test-isolation=none --test-concurrency=1 tests/drafts.test.mjs tests/catalog.test.mjs tests/preparation.test.mjs tests/setup-overview.test.mjs tests/setup-resume.test.mjs tests/release-rehearsal.test.mjs tests/smart-setup.test.mjs tests/external-project-observation.test.mjs tests/project-scripts.test.mjs tests/tool-preparation.test.mjs tests/config-edit.test.mjs tests/service-configuration.test.mjs tests/service-metadata-text.test.mjs tests/github-setup.test.mjs tests/github-publication.test.mjs tests/version-counter-setup.test.mjs tests/github-workflow-edit.test.mjs tests/service-workflow-edit.test.mjs tests/project-initialization.test.mjs tests/service-initialization.test.mjs tests/credential-guide.test.mjs tests/asset-session.test.mjs tests/github-connection.test.mjs tests/github-history.test.mjs tests/github-candidate-download.test.mjs tests/github-preflight.test.mjs tests/github-release.test.mjs tests/metadata-text.test.mjs tests/environment.test.mjs tests/environment-diagnostics.test.mjs tests/release-version.test.mjs tests/release-version-edit.test.mjs tests/service-version-edit.test.mjs tests/service-version-prepare.test.mjs tests/hosted-version-import.test.mjs tests/release-input-guidance.test.mjs tests/candidate-evidence.test.mjs tests/lifecycle-evidence.test.mjs tests/offline-preflight.test.mjs tests/agent-local-checks.test.mjs tests/agent-android-build.test.mjs tests/agent-ios-archive.test.mjs tests/agent-ios-recovery.test.mjs tests/service-git-permission.test.mjs tests/service-git-commit-permission.test.mjs tests/service-git-repository-permission.test.mjs tests/service-git-remote-permission.test.mjs tests/local-store-preflight.test.mjs tests/agent-store-access.test.mjs tests/agent-store-release.test.mjs tests/agent-store-preparation.test.mjs tests/agent-tool-setup.test.mjs tests/tool-setup-saved-requirements.test.mjs tests/tool-setup-acquisition.test.mjs tests/local-store-prepare.test.mjs tests/local-store-stage.test.mjs tests/local-store-execute.test.mjs tests/local-store-reconcile.test.mjs tests/local-release-history.test.mjs tests/agent-local-history.test.mjs tests/agent-local-history-prepare.test.mjs tests/artifact-inspection.test.mjs tests/android-build-controller.test.mjs tests/android-build-protocol.test.mjs tests/android-toolchain-catalog.test.mjs tests/android-tool-sources.test.mjs tests/ios-archive.test.mjs tests/ios-signing-reuse.test.mjs tests/project-recovery.test.mjs tests/metadata-images.test.mjs tests/service-metadata-images.test.mjs tests/service-metadata-images-prepare.test.mjs tests/installation-check.test.mjs tests/guided-configuration.test.mjs tests/credential-setup.test.mjs tests/version-automation.test.mjs tests/ios-store-versions.test.mjs tests/android-store-versions.test.mjs tests/paired-store-versions.test.mjs tests/version-reserve.test.mjs tests/version-reserve-review.test.mjs tests/version-ci.test.mjs tests/agent-version-reserve-access.test.mjs tests/tool-acquisition.test.mjs tests/tool-acquisition-sdk.test.mjs tests/cli-read-access.test.mjs tests/git-repository.test.mjs tests/draft-save-actions.test.mjs tests/project-identity.test.mjs tests/project-identity-native.test.mjs tests/ios-app-target-hints.test.mjs tests/tool-acquisition-native.test.mjs tests/tool-acquisition-controller.test.mjs tests/tool-acquisition-source-picker.test.mjs tests/github-gh-entry.test.mjs tests/github-device-connection.test.mjs tests/credential-backup.test.mjs tests/apple-provisioning-bundle-read.test.mjs tests/apple-provisioning-profile-read.test.mjs tests/agent-identity-requests.test.mjs tests/agent-identity-actions.test.mjs tests/credential-upload-key.test.mjs tests/agent-upload-key-access.test.mjs tests/agent-upload-key-backup.test.mjs tests/agent-upload-key-reuse.test.mjs tests/agent-credential-access.test.mjs tests/agent-apple-provisioning.test.mjs tests/agent-apple-preparation.test.mjs tests/apple-provisioning-controller.test.mjs tests/apple-provisioning-protocol.test.mjs tests/apple-provisioning-recovery.test.mjs tests/apple-profile-setup.test.mjs tests/apple-profile-recovery.test.mjs tests/apple-distribution-key-setup.test.mjs tests/apple-distribution-certificate-setup.test.mjs tests/apple-p12-setup.test.mjs tests/git-local.test.mjs tests/git-fetch.test.mjs tests/git-branches.test.mjs tests/git-switch.test.mjs tests/git-fast-forward.test.mjs tests/git-upstream.test.mjs tests/git-push.test.mjs tests/git-push-new-branch.test.mjs tests/git-rename.test.mjs tests/git-init.test.mjs tests/github-activity.test.mjs tests/github-pull-request.test.mjs tests/github-pull-request-mode.test.mjs tests/github-pull-request-management.test.mjs tests/github-actions-retry.test.mjs tests/agent-github-actions.test.mjs tests/version-enrollment.test.mjs tests/agent-version-enrollment.test.mjs tests/github-activity-delegation.test.mjs tests/github-publication-delegation.test.mjs tests/github-setup-prepare-delegation.test.mjs tests/github-play-cleanup.test.mjs tests/future-version-tag.test.mjs",
+     "build": "tsc --noEmit -p tsconfig.json && vite build",
+     "test:agent-store-preparation": "node --experimental-strip-types --test --test-concurrency=1 --test-timeout=10000 tests/agent-store-preparation.test.mjs",
+     "test:agent-version-enrollment": "node --experimental-strip-types --test --test-concurrency=1 --test-timeout=10000 tests/version-enrollment.test.mjs tests/agent-version-enrollment.test.mjs"
+diff --git a/desktop/src/App.tsx b/desktop/src/App.tsx
+--- a/desktop/src/App.tsx
++++ b/desktop/src/App.tsx
+@@ -160,7 +160,6 @@
+ import { GitHubHistoryController, githubHistoryOwnerReason } from './githubHistoryController.ts';
+ import { connectionRepository } from './githubConnectionProtocol.ts';
+ import type { GitHubConnectionObservationPort, GitHubConnectionTokenHandoff } from './githubConnectionTypes.ts';
+-import { workflowOwnerReason, workflowRetainsDraft } from './githubWorkflowEdit.ts';
+ import { GitHubWorkflowEditController } from './githubWorkflowEditController.ts';
+ import { AssetSessionController } from './assetSessionController.ts';
+ import { metadataProjectDirty } from './metadataText.ts';
+@@ -505,6 +504,7 @@
+     imageControllerRef.current?.beforeWorkspaceAction(action);
+     editControllerRef.current?.beforeWorkspaceAction(action);
+     initializationControllerRef.current?.beforeWorkspaceAction(action);
++    workflowControllerRef.current?.beforeWorkspaceAction(action);
+     const previous = workspaceRef.current;
+     const next = workspaceReducer(previous, action);
+     if (next === previous) return false;
+@@ -551,7 +551,7 @@
+   const [configEdit] = useState(() => new ConfigEditController({
+     project: (projectId) => Object.hasOwn(workspaceRef.current.projects, projectId) ? workspaceRef.current.projects[projectId] ?? null : null,
+     otherEditReason: (projectId) => savedCommandBusy() ?? (diagnosticsControllerRef.current ? diagnosticsOwnerReason(diagnosticsControllerRef.current.getSnapshot()) : null) ??
+-      (workflowControllerRef.current ? workflowOwnerReason(workflowControllerRef.current.getSnapshot(), projectId) : null) ??
++      (workflowControllerRef.current ? workflowControllerRef.current.ownerReason(projectId) : null) ??
+       (metadataControllerRef.current ? metadataOwnerReason(metadataControllerRef.current.getSnapshot(), projectId) : null),
+     selectedProject: () => { const w = workspaceRef.current; return w.selectedId ? w.projects[w.selectedId] ?? null : null; },
+     recoveryUnavailable: () => playCleanupBusy() ?? actionsRetryBusy() ?? pullRequestBusy() ?? activityBusy() ?? repositoryCreateBusy() ?? versionEnrollmentBusy() ?? gitBusy() ?? githubGhBusy() ?? identityBusy() ?? externalBusy() ?? (passivePending.current > 0 || connectionPicking.current ? 'Finish the original observation or project selection first.' :
+@@ -596,7 +596,7 @@
+       const saved = savedCommandBusy(); if (saved) return saved;
+       const projectId = workspaceRef.current.selectedId ?? '';
+       const edits = configurationOwnerReason(configEdit.getSnapshot(), projectId) ??
+-        (workflowControllerRef.current ? workflowOwnerReason(workflowControllerRef.current.getSnapshot(), projectId) : null) ??
++        (workflowControllerRef.current ? workflowControllerRef.current.ownerReason(projectId) : null) ??
+         (metadataControllerRef.current ? metadataOwnerReason(metadataControllerRef.current.getSnapshot(), projectId) : null);
+       if (edits) return edits;
+       const assets = assetControllerRef.current?.getSnapshot();
+@@ -680,7 +680,7 @@
+     const projectId = workspaceRef.current.selectedId ?? '';
+     const session = projectId ? workspaceRef.current.projects[projectId] : null;
+     return savedCommandBusy(false, false, false, false, false, false, false, true) ?? diagnosticsOwnerReason(diagnostics.getSnapshot()) ?? configurationOwnerReason(configEdit.getSnapshot(), projectId) ??
+-      (workflowControllerRef.current ? workflowOwnerReason(workflowControllerRef.current.getSnapshot(), projectId) : null) ??
++      (workflowControllerRef.current ? workflowControllerRef.current.ownerReason(projectId) : null) ??
+       (metadataControllerRef.current ? metadataOwnerReason(metadataControllerRef.current.getSnapshot(), projectId) : null) ??
+       (!session ? 'Select the original project first.' : null);
+   }, () => { const current = workspaceRef.current; return captureCounterSaved(current.selectedId ? current.projects[current.selectedId] ?? null : null, releaseVersion.getSnapshot()); }));
+@@ -689,7 +689,7 @@
+   const [githubRemoteSetup] = useState(() => new GitHubRemoteSetupController(githubConnection.getSnapshot, () => {
+     const projectId = workspaceRef.current.selectedId ?? '';
+     return savedCommandBusy(false, false, false, false, false, true) ?? diagnosticsOwnerReason(diagnostics.getSnapshot()) ?? configurationOwnerReason(configEdit.getSnapshot(), projectId) ??
+-      (workflowControllerRef.current ? workflowOwnerReason(workflowControllerRef.current.getSnapshot(), projectId) : null) ??
++      (workflowControllerRef.current ? workflowControllerRef.current.ownerReason(projectId) : null) ??
+       (metadataControllerRef.current ? metadataOwnerReason(metadataControllerRef.current.getSnapshot(), projectId) : null);
+   }, () => assetControllerRef.current?.getSnapshot() ?? null));
+   githubRemoteSetupControllerRef.current = githubRemoteSetup;
+@@ -697,7 +697,7 @@
+   const [githubPreflight] = useState(() => new GitHubPreflightController(githubConnection.getSnapshot, () => {
+     const projectId = workspaceRef.current.selectedId ?? '';
+     return savedCommandBusy(false, true) ?? diagnosticsOwnerReason(diagnostics.getSnapshot()) ?? configurationOwnerReason(configEdit.getSnapshot(), projectId) ??
+-      (workflowControllerRef.current ? workflowOwnerReason(workflowControllerRef.current.getSnapshot(), projectId) : null) ??
++      (workflowControllerRef.current ? workflowControllerRef.current.ownerReason(projectId) : null) ??
+       (metadataControllerRef.current ? metadataOwnerReason(metadataControllerRef.current.getSnapshot(), projectId) : null);
+   }));
+   githubPreflightControllerRef.current = githubPreflight;
+@@ -705,7 +705,7 @@
+   const [githubRelease] = useState(() => new GitHubReleaseController(githubConnection.getSnapshot, () => {
+     const projectId = workspaceRef.current.selectedId ?? '';
+     return savedCommandBusy(false, false, true) ?? diagnosticsOwnerReason(diagnostics.getSnapshot()) ?? configurationOwnerReason(configEdit.getSnapshot(), projectId) ??
+-      (workflowControllerRef.current ? workflowOwnerReason(workflowControllerRef.current.getSnapshot(), projectId) : null) ??
++      (workflowControllerRef.current ? workflowControllerRef.current.ownerReason(projectId) : null) ??
+       (metadataControllerRef.current ? metadataOwnerReason(metadataControllerRef.current.getSnapshot(), projectId) : null);
+   }));
+   githubReleaseControllerRef.current = githubRelease;
+@@ -753,7 +753,7 @@
+       const current = workspaceRef.current;
+       return current.selectedId && Object.hasOwn(current.projects, current.selectedId) ? current.projects[current.selectedId] ?? null : null;
+     },
+-    otherEditReason: (projectId) => savedCommandBusy() ?? diagnosticsOwnerReason(diagnostics.getSnapshot()) ?? configurationOwnerReason(configEdit.getSnapshot(), projectId) ?? workflowOwnerReason(workflowEdit.getSnapshot(), projectId),
++    otherEditReason: (projectId) => savedCommandBusy() ?? diagnosticsOwnerReason(diagnostics.getSnapshot()) ?? configurationOwnerReason(configEdit.getSnapshot(), projectId) ?? workflowEdit.ownerReason(projectId),
+     otherOperationReason: savedCommandBusy,
+     onRecoveryBoundary: () => {
+       // Recovery changes persisted saved-file facts, never the retained draft.
+@@ -785,7 +785,7 @@
+     // Excluding this controller avoids turning its own retained checkout into a
+     // conflicting operation. All other consumers include the version owner.
+     otherEditReason: (projectId) => savedCommandBusy(true) ?? diagnosticsOwnerReason(diagnostics.getSnapshot()) ??
+-      configurationOwnerReason(configEdit.getSnapshot(), projectId) ?? workflowOwnerReason(workflowEdit.getSnapshot(), projectId) ??
++      configurationOwnerReason(configEdit.getSnapshot(), projectId) ?? workflowEdit.ownerReason(projectId) ??
+       metadataOwnerReason(metadataText.getSnapshot(), projectId),
+     otherOperationReason: () => localHistoryBusy() ?? storeBusy() ?? savedCommandPrerequisiteReason(true),
+     // Only the native-reserved branch may retain an idle connected account.
+@@ -845,7 +845,7 @@
+     const pathOwner = projectPathOwnerReason(pathPickerRef.current); if (pathOwner) return pathOwner;
+     if (bootstrapPending.current || connectionPicking.current) return 'Finish the original service or project-selection request before browsing or reviewing saved checks.';
+     const projectId = workspaceRef.current.selectedId ?? '';
+-    const owned = (forHistoryRead ? null : historyBusy()) ?? (excludeInitialization?null:initialization.ownerReason(projectId)) ?? configurationOwnerReason(configEdit.getSnapshot(), projectId) ?? workflowOwnerReason(workflowEdit.getSnapshot(), projectId) ??
++    const owned = (forHistoryRead ? null : historyBusy()) ?? (excludeInitialization?null:initialization.ownerReason(projectId)) ?? configurationOwnerReason(configEdit.getSnapshot(), projectId) ?? workflowEdit.ownerReason(projectId) ??
+       metadataOwnerReason(metadataText.getSnapshot(), projectId) ?? (excludeToolDoctor ? null : diagnosticsOwnerReason(diagnostics.getSnapshot())) ??
+       (excludeVersion ? null : versionOwnerReason(versionEdit.getSnapshot(), projectId)) ??
+       (excludeImages ? null : metadataImagesOwnerReason(metadataImages.getSnapshot(), projectId));
+@@ -2008,7 +2008,7 @@
+     return () => window.removeEventListener('beforeunload', warn);
+   }, []);
+
+-  const navigate = (next: Page) => { if (next !== page) gitLocal.beforeContextIntent(); externalObserver.beforeWorkspaceAction(); initialization.setVisible(next==='dashboard'); configEdit.setRecoveryVisible(next === 'settings' || next === 'metadata'); metadataText.setVisible(next === 'metadata'); metadataImages.setVisible(next === 'metadata'); versionEdit.setVisible(next === 'dashboard'); retirePathPicker(); artifactInspection.setVisible(next === 'artifacts'); offlinePreflight.setVisible(next === 'releases'); localStore.setVisible(next === 'releases'); localStorePrepare.setVisible(next === 'releases'); localStoreExecute.setVisible(next === 'releases'); localStoreReconcile.setVisible(next === 'releases'); localHistory.setVisible(next === 'releases'); appleProvisioning.setVisible(next === 'dashboard'); androidBuild.setVisible(next === 'releases'); androidBuild.setToolSetupVisible(next === 'environment' && environment.getSnapshot().platform === 'android' && environment.getSnapshot().operation === 'build'); projectRecovery.setVisible(next === 'recovery'); iosArchive.setVisible(next === 'releases'); iosArchive.setRecoveryVisible(next === 'recovery'); diagnostics.setVisible(next === 'environment'); toolAcquisition.setVisible(next === 'environment' && environment.getSnapshot().platform === 'android' && environment.getSnapshot().operation === 'build'); if (next !== 'settings') { setCliAccessReveal(0); setIdentityReveal(0); } setReleaseCheckFocus(null); setPage(next); main.current?.focus({ preventScroll: true }); };
++  const navigate = (next: Page) => { if (next !== page) gitLocal.beforeContextIntent(); externalObserver.beforeWorkspaceAction(); initialization.setVisible(next==='dashboard'); workflowEdit.setVisible(next==='github'); configEdit.setRecoveryVisible(next === 'settings' || next === 'metadata'); metadataText.setVisible(next === 'metadata'); metadataImages.setVisible(next === 'metadata'); versionEdit.setVisible(next === 'dashboard'); retirePathPicker(); artifactInspection.setVisible(next === 'artifacts'); offlinePreflight.setVisible(next === 'releases'); localStore.setVisible(next === 'releases'); localStorePrepare.setVisible(next === 'releases'); localStoreExecute.setVisible(next === 'releases'); localStoreReconcile.setVisible(next === 'releases'); localHistory.setVisible(next === 'releases'); appleProvisioning.setVisible(next === 'dashboard'); androidBuild.setVisible(next === 'releases'); androidBuild.setToolSetupVisible(next === 'environment' && environment.getSnapshot().platform === 'android' && environment.getSnapshot().operation === 'build'); projectRecovery.setVisible(next === 'recovery'); iosArchive.setVisible(next === 'releases'); iosArchive.setRecoveryVisible(next === 'recovery'); diagnostics.setVisible(next === 'environment'); toolAcquisition.setVisible(next === 'environment' && environment.getSnapshot().platform === 'android' && environment.getSnapshot().operation === 'build'); if (next !== 'settings') { setCliAccessReveal(0); setIdentityReveal(0); } setReleaseCheckFocus(null); setPage(next); main.current?.focus({ preventScroll: true }); };
+   const reviewCredentialChecks = (kind: 'offline' | 'android-signing' | 'store-access') => {
+     if (savedCommandBusy() || diagnosticsOwnerReason(diagnostics.getSnapshot())) return;
+     // Navigation selects a review only. The existing controller still owns
+@@ -2036,6 +2036,7 @@
+     externalObserverRef.current?.beforeWorkspaceAction();
+     githubHistory.beforeWorkspaceAction();
+     initialization.snapshotIntent();
++    workflowEdit.selectionIntent();
+     configEdit.snapshotIntent(projectId);
+     metadataImages.snapshotIntent(projectId);
+     versionEdit.snapshotIntent(projectId);
+@@ -2067,6 +2068,7 @@
+     externalObserver.beforeWorkspaceAction();
+     githubHistory.beforeWorkspaceAction();
+     initialization.selectionIntent();
++    workflowEdit.selectionIntent();
+     configEdit.selectionIntent();
+     metadataImages.selectionIntent();
+     versionEdit.selectionIntent();
+@@ -2200,7 +2202,7 @@
+     catch (error) { finish({ error }); }
+   };
+
+-  const draftRetained = (projectId: string) => !!(identityBusy() && identityRef.current?.native.getState().projectId === projectId) || initialization.retainsDraft(projectId) || editRetainsDraft(configEdit.getSnapshot(), projectId) || workflowRetainsDraft(workflowEdit.getSnapshot(), projectId) || metadataRetainsDraft(metadataText.getSnapshot(), projectId) || versionRetainsDraft(versionEdit.getSnapshot(), projectId);
++  const draftRetained = (projectId: string) => !!(identityBusy() && identityRef.current?.native.getState().projectId === projectId) || initialization.retainsDraft(projectId) || editRetainsDraft(configEdit.getSnapshot(), projectId) || workflowEdit.retainsDraft(projectId) || metadataRetainsDraft(metadataText.getSnapshot(), projectId) || versionRetainsDraft(versionEdit.getSnapshot(), projectId);
+
+   const projectScriptsContext = (): ProjectScriptContext => {
+     const current = workspaceRef.current, service = pathService.current;
+@@ -2227,7 +2229,7 @@
+       readReason: (bootstrapPending.current ? 'Wait for the current application capabilities.' : savedCommandBusy() ??
+         methodReason(service.info, 'project.snapshot', service.api?.mode ?? 'unavailable')) ??
+         configurationOwnerReason(configEdit.getSnapshot(), selected?.project.id ?? '') ??
+-        workflowOwnerReason(workflowEdit.getSnapshot(), selected?.project.id ?? '') ??
++        workflowEdit.ownerReason(selected?.project.id ?? '') ??
+         metadataOwnerReason(metadataText.getSnapshot(), selected?.project.id ?? '') ??
+         (passivePending.current > 0 ? 'An original project read is still pending.' : null),
+       resume: { platform: environment.getSnapshot().platform, android: androidBuild.getSnapshot(), ios: iosArchive.getSnapshot(),
+@@ -2269,7 +2271,7 @@
+     validateReason={loading ? 'Engine capabilities are being loaded.' : validateReason}
+     reviewReason={loading ? 'Engine capabilities are being loaded.' : reviewReason}
+     suggestReason={loading ? 'Engine capabilities are being loaded.' : suggestReason}
+-    saveReason={loading ? 'Application capabilities are being loaded.' : savedCommandBusy() ?? diagnosticsOwnerReason(diagnosticsState) ?? (session ? workflowOwnerReason(workflowState, session.project.id) ?? metadataOwnerReason(metadataState, session.project.id) : null) ?? editStartReason(saveState, session)}
++    saveReason={loading ? 'Application capabilities are being loaded.' : savedCommandBusy() ?? diagnosticsOwnerReason(diagnosticsState) ?? (session ? workflowEdit.ownerReason(session.project.id) ?? metadataOwnerReason(metadataState, session.project.id) : null) ?? editStartReason(saveState, session)}
+     discardReason={versionEnrollmentBusy() ?? (session && draftRetained(session.project.id) ? 'Keep this draft until the original native file-edit session has settled. Closing a review is separate from discarding draft data.' : null)}
+     onChoose={() => void chooseProject()} onEdit={edit} onValidate={() => void validate()}
+     onReview={() => void review()} onSuggest={() => void suggest()}
+@@ -2500,7 +2502,7 @@
+           onShowOriginalControls={() => { main.current?.focus({ preventScroll: true }); main.current?.scrollTo({ top: 0 }); }}
+           session={session} info={info} preview={preview} configSaveState={saveState} chooseDisabled={chooseDisabled} chooseReason={chooseReason} refreshReason={loading ? 'Capabilities are loading.' : refreshReason}
+           setupReadinessReason={(loading ? 'Capabilities are loading.' : refreshReason) ?? configurationOwnerReason(saveState, session?.project.id ?? '') ??
+-            workflowOwnerReason(workflowState, session?.project.id ?? '') ?? metadataOwnerReason(metadataState, session?.project.id ?? '') ??
++            workflowEdit.ownerReason(session?.project.id ?? '') ?? metadataOwnerReason(metadataState, session?.project.id ?? '') ??
+             (passivePending.current > 0 ? 'An original project read is still pending.' : null)}
+           appleProvisioningPanel={<AppleBundleRegistration controller={appleProvisioning} state={appleProvisioningState}
+             cliPanel={<><AgentApplePreparationAccess controller={agentApplePreparation}/><AgentAppleProvisioningAccess controller={agentAppleProvisioning} /></>}
+diff --git a/desktop/src/bridge.ts b/desktop/src/bridge.ts
+--- a/desktop/src/bridge.ts
++++ b/desktop/src/bridge.ts
+@@ -26,6 +26,7 @@
+ import type { ArtifactInspectionStatus } from './artifactInspectionTypes.ts';
+ import { initializationRequestFits, parseProjectInitializationStatus, initializationError } from './projectInitializationProtocol.ts';
+ import { createInitializationAgentApi } from './serviceInitializationProtocol.ts';
++import { createWorkflowEditAgentApi } from './serviceWorkflowEditProtocol.ts';
+ import type { ProjectInitializationCommand } from './projectInitializationProtocol.ts';
+ import type { ProjectInitializationStatus } from './projectInitializationTypes.ts';
+ import { installationError, installationCheckError, installationPreparationError, parseInstallationReveal, parseInstallationCancel,
+@@ -121,7 +122,7 @@
+ import { createAppleProvisioningApi } from './appleProvisioningNative.ts';
+
+ export type NativeInvoke = <T>(command: string, args?: Record<string, unknown> | Uint8Array) => Promise<T>;
+-export type NativeEditListen = (event: 'mrk:agent-initialization' | 'mrk:agent-version-reserve-review' | 'mrk-agent-apple-preparation' | 'mrk:agent-version-edit' | 'mrk:agent-metadata-text' | 'mrk:agent-configuration' | 'apple-bundle-provisioning-state-changed' | 'tool-acquisition-state-changed' | 'project-identity-state-changed' | 'config-edit-state' | 'asset-session-state' | 'github-workflow-edit-status' | 'github-connection-status' | 'github-history-status' | 'github-preflight-status' | 'github-remote-setup-status' | 'github-setup-publication-status' | 'github-repository-create-status' | 'github-activity-status' | 'github-pull-request-status' | 'github-actions-retry-status' | 'github-play-cleanup-status' | 'github-release-status' | 'metadata-text-edit-status' | 'release-version-edit-status' | 'environment-diagnostics-state-changed' | 'local-release-history-state-changed' | 'local-store-preflight-state-changed' | 'local-store-prepare-state-changed' | 'local-store-execute-state-changed' | 'local-store-reconcile-state-changed' | 'offline-preflight-state-changed' | 'android-build-state-changed' | 'android-toolchain-catalog-state-changed' | 'android-tool-sources-state-changed' | 'android-tool-registration-state-changed' | 'android-tool-service-state-changed' | 'project-recovery-state-changed' | 'ios-archive-state-changed' | 'project-initialization-state-changed' | 'artifact-inspection-state-changed', onStatus: (status: unknown) => void) => Promise<() => void>;
++export type NativeEditListen = (event: 'mrk:agent-workflow-edit' | 'mrk:agent-initialization' | 'mrk:agent-version-reserve-review' | 'mrk-agent-apple-preparation' | 'mrk:agent-version-edit' | 'mrk:agent-metadata-text' | 'mrk:agent-configuration' | 'apple-bundle-provisioning-state-changed' | 'tool-acquisition-state-changed' | 'project-identity-state-changed' | 'config-edit-state' | 'asset-session-state' | 'github-workflow-edit-status' | 'github-connection-status' | 'github-history-status' | 'github-preflight-status' | 'github-remote-setup-status' | 'github-setup-publication-status' | 'github-repository-create-status' | 'github-activity-status' | 'github-pull-request-status' | 'github-actions-retry-status' | 'github-play-cleanup-status' | 'github-release-status' | 'metadata-text-edit-status' | 'release-version-edit-status' | 'environment-diagnostics-state-changed' | 'local-release-history-state-changed' | 'local-store-preflight-state-changed' | 'local-store-prepare-state-changed' | 'local-store-execute-state-changed' | 'local-store-reconcile-state-changed' | 'offline-preflight-state-changed' | 'android-build-state-changed' | 'android-toolchain-catalog-state-changed' | 'android-tool-sources-state-changed' | 'android-tool-registration-state-changed' | 'android-tool-service-state-changed' | 'project-recovery-state-changed' | 'ios-archive-state-changed' | 'project-initialization-state-changed' | 'artifact-inspection-state-changed', onStatus: (status: unknown) => void) => Promise<() => void>;
+
+ function connectionReply(value: unknown): GitHubConnectionStatus {
+   const status = parseGitHubConnectionStatus(value);
+@@ -735,6 +736,7 @@
+     agentVersionEdit: createVersionEditAgentApi(mode, invoke, listen),
+     agentConfiguration: createConfigurationApi(mode, invoke, listen),
+     agentInitialization: createInitializationAgentApi(mode, invoke, listen),
++    agentWorkflowEdit: createWorkflowEditAgentApi(mode, invoke, listen),
+     agentMetadataText: createMetadataServiceApi(mode, invoke, listen),
+     openConfigEdit: (projectId) => call<ConfigEditStatus>('open_config_edit', { projectId }),
+     openConfigRecovery: (projectId) => call<ConfigEditStatus>('open_config_edit', { projectId, intent: 'recover' }),
+diff --git a/desktop/src/components/GitHubWorkflowApply.tsx b/desktop/src/components/GitHubWorkflowApply.tsx
+--- a/desktop/src/components/GitHubWorkflowApply.tsx
++++ b/desktop/src/components/GitHubWorkflowApply.tsx
+@@ -85,6 +85,8 @@
+ }) {
+   const [confirmation, setConfirmation] = useState<WorkflowApplyBinding | null>(null);
+   const [recoveryConfirmation, setRecoveryConfirmation] = useState<WorkflowRecoveryApplyBinding | null>(null);
++  const agent = controller.agent.getSnapshot();
++  const linked = controller.agent.isLinked();
+   const attempt = state.attempt;
+   const owner = attempt?.projection ?? state.unknownEvidence ?? state.status?.active ?? state.status?.lastTerminal ?? null;
+   const projectId = owner?.projectId ?? attempt?.binding.projectId ?? null;
+@@ -94,11 +96,11 @@
+   const startReason = controller.startReason();
+   const recoveryStartReason = controller.recoveryStartReason();
+   const recoveryBinding = currentWorkflowRecoveryBinding(state);
+-  const mayRecover = canRecoverWorkflows(state, selected);
++  const mayRecover = !linked && canRecoverWorkflows(state, selected);
+   const recoveryView = owner?.recovery?.prepared?.view ?? owner?.recovery?.checkout?.view;
+   const showRecovery = detailed && selectedId === projectId && recoveryView?.state === 'recoverable';
+   const binding = currentWorkflowApplyBinding(state);
+-  const mayApply = canApplyWorkflows(state, selected, setup);
++  const mayApply = !linked && canApplyWorkflows(state, selected, setup);
+   const owned = Boolean(attempt && owner && attempt.sessionId === owner.sessionId && attempt.binding.windowGeneration === owner.ownerGeneration);
+   const terminal = owner?.phase === 'final' || owner?.phase === 'unknown';
+   const showReview = detailed && selectedId === projectId && owner?.prepared !== null && owner?.prepared !== undefined;
+@@ -106,11 +108,11 @@
+   const mayClose = state.mode === 'native' && attempt !== null && !attempt.handled && !attempt.closeRequested && !state.generationLost && !state.nativeBlocked &&
+     (!owner || owned && !terminal);
+   useEffect(() => {
+-    if (confirmation && (!detailed || selectedId !== projectId || !canApplyWorkflows(state, selected, setup, confirmation))) setConfirmation(null);
+-  }, [state, setup, selected, selectedId, projectId, detailed, confirmation]);
++    if (confirmation && (linked || !detailed || selectedId !== projectId || !canApplyWorkflows(state, selected, setup, confirmation))) setConfirmation(null);
++  }, [state, setup, selected, selectedId, projectId, detailed, confirmation, linked]);
+   useEffect(() => {
+-    if (recoveryConfirmation && (!detailed || selectedId !== projectId || !canRecoverWorkflows(state, selected, recoveryConfirmation))) setRecoveryConfirmation(null);
+-  }, [state, selected, selectedId, projectId, detailed, recoveryConfirmation]);
++    if (recoveryConfirmation && (linked || !detailed || selectedId !== projectId || !canRecoverWorkflows(state, selected, recoveryConfirmation))) setRecoveryConfirmation(null);
++  }, [state, selected, selectedId, projectId, detailed, recoveryConfirmation, linked]);
+   if (!detailed && !notice) return null;
+   return <section className="card native-workflow-panel" aria-label="Local GitHub workflow files">
+     <SectionHeading title={notice?.title ?? 'Local workflow files · separate native review'} description={project ? `Original local operation for ${project.project.name}. Configuration drafts remain separate and unsaved.` : 'Create absent, update canonical or preserve identical callers. Passive previews never supply Apply authority.'}>
+@@ -141,6 +143,19 @@
+       'Read-only inspection and preparation work without a valid draft or toolkit pin. A separate explicit confirmation is required for one rollback or private cleanup; incomplete legacy state is preserved and refused.'}</p>}
+     {showRecovery && !terminal && <p className="save-note">Changing project or native document retires this recovery review. Draft and toolkit edits are unrelated; no old Apply authority is reattached and no mutation is retried.</p>}
+     {showReview && !terminal && <p className="save-note">Selection, draft/baseline, toolkit pin, service/runtime or document changes retire this review before Apply. The native review lifetime is nonrenewable. Nothing is silently rebased, reprepared or retried.</p>}
++    {detailed && <details><summary>Advanced — CLI local workflow editing (macOS)</summary>
++      <p>The installed CLI uses this selected project's draft and toolkit pin through the same four-caller editor. READ permits Open/Prepare only. No configuration save, Git action or GitHub call is included; workflow recovery remains in the ordinary Desktop controls.</p>
++      {agent.status?.request && <p>Request <code>{agent.status.request.origin.requestId}</code> · {agent.status.request.phase}. Keep the same ID; never repeat Apply after an unknown result.</p>}
++      {agent.message && <p role={agent.unknown ? 'alert' : 'status'}>{agent.message}</p>}
++      <button type="button" disabled={agent.pending !== null || agent.revokePending} onClick={() => void controller.agent.check()}>Check CLI request and original native plan</button>
++      {linked && showReview && <>
++        <p>This permission covers the complete four-path native before/after review above. Allow alone does not apply files; the agent must submit that exact checked plan once.</p>
++        <label><input type="checkbox" checked={agent.acknowledged} disabled={controller.agent.allowReason() !== null} onChange={event => controller.agent.acknowledge(event.target.checked)} /> I reviewed all four paths and complete before/after text and authorize this one CLI Apply.</label>
++        <button type="button" disabled={!agent.acknowledged || controller.agent.allowReason() !== null} onClick={() => void controller.agent.allow()}>Allow this CLI Apply once</button>
++      </>}
++      {agent.status?.request && <button type="button" disabled={agent.revokePending || agent.status.request.phase === 'final'} onClick={() => void controller.agent.revoke()}>Withdraw / stop original CLI request</button>}
++      {linked && !attempt?.handled && owner?.phase === 'final' && <p>The native terminal is visible; the original callers and service history acknowledgement are still required.</p>}
++    </details>}
+     {recoveryConfirmation && owner?.recovery?.prepared && <WorkflowRecoveryConfirmation view={owner.recovery.prepared.view} binding={recoveryConfirmation}
+       allowed={detailed && selectedId === projectId && canRecoverWorkflows(state, selected, recoveryConfirmation)} onCancel={() => setRecoveryConfirmation(null)}
+       onConfirm={() => { controller.recover(recoveryConfirmation); setRecoveryConfirmation(null); }} />}
+diff --git a/desktop/src/githubWorkflowEdit.ts b/desktop/src/githubWorkflowEdit.ts
+--- a/desktop/src/githubWorkflowEdit.ts
++++ b/desktop/src/githubWorkflowEdit.ts
+@@ -84,7 +84,8 @@
+   | { type: 'recover-claim'; binding: WorkflowRecoveryApplyBinding }
+   | { type: 'close-request'; reason: 'user' | 'context_changed' | 'invoke_failed' }
+   | { type: 'close-claim'; sessionId: string }
+-  | { type: 'handled'; sessionId: string };
++  | { type: 'handled'; sessionId: string }
++  | { type: 'agent-unentered'; binding: WorkflowDraftBinding };
+
+ function unknown(owner: GitHubWorkflowEditProjection | null): boolean { return owner?.phase === 'unknown' || owner?.nativeFinality === 'unknown'; }
+ export function workflowAttemptSettled(attempt: WorkflowAttempt | null): boolean {
+@@ -220,6 +221,11 @@
+       if (!attempt || attempt.sessionId !== action.sessionId || !attempt.closeRequested || attempt.closeClaimed ||
+           workflowAttemptSettled(attempt) || unknown(attempt.projection) || state.generationLost) return state;
+       return { ...state, attempt: { ...attempt, closeClaimed: true } };
++    }
++    case 'agent-unentered': {
++      const a = state.attempt;
++      return a?.binding === action.binding && a.sessionId === null && a.projection === null && !a.applyClaimed
++        ? {...state,attempt:null} : state;
+     }
+     case 'handled': return state.attempt?.sessionId === action.sessionId ? { ...state, attempt: { ...state.attempt, handled: true } } : state;
+   }
+diff --git a/desktop/src/githubWorkflowEditController.ts b/desktop/src/githubWorkflowEditController.ts
+--- a/desktop/src/githubWorkflowEditController.ts
++++ b/desktop/src/githubWorkflowEditController.ts
+@@ -3,13 +3,17 @@
+ import {
+   canApplyWorkflows, canRecoverWorkflows, githubWorkflowEditReducer, initialGitHubWorkflowEdit,
+   workflowContextMatches, workflowPreparedMatches, workflowRecoveryStartReason, workflowStartReason,
++  workflowOwnerReason, workflowRetainsDraft,
+ } from './githubWorkflowEdit.ts';
+ import type { GitHubWorkflowEditState, WorkflowApplyBinding, WorkflowBinding, WorkflowDraftBinding, WorkflowEditAction, WorkflowRecoveryApplyBinding, WorkflowRecoveryBinding } from './githubWorkflowEdit.ts';
+ import { parseGitHubWorkflowEditStatus, workflowEditError } from './githubWorkflowEditProtocol.ts';
+ import type { GitHubWorkflowEditStatus } from './githubWorkflowEditTypes.ts';
+-import type { ProjectSession } from './drafts.ts';
++import type { ProjectSession, WorkspaceAction } from './drafts.ts';
+ import type { GitHubSetupState } from './githubSetupController.ts';
+ import type { DesktopApi } from './types.ts';
++import { ServiceWorkflowEditController } from './serviceWorkflowEditController.ts';
++import { sameWorkflowEditOrigin } from './serviceWorkflowEditProtocol.ts';
++import type { WorkflowEditOrigin } from './serviceWorkflowEditProtocol.ts';
+
+ interface WorkflowContext {
+   selectedProject: () => ProjectSession | null;
+@@ -35,7 +39,43 @@
+   private disposed = false;
+   private readonly context: WorkflowContext;
+
+-  constructor(context: WorkflowContext) { this.context = context; }
++  readonly agent: ServiceWorkflowEditController;
++  private agentBinding: WorkflowDraftBinding | null = null;
++  private agentOrigin: WorkflowEditOrigin | null = null;
++  private agentCommands = 0;
++
++  constructor(context: WorkflowContext) {
++    this.context = context;
++    this.agent = new ServiceWorkflowEditController({
++      native: () => this.state, project: context.selectedProject, setup: context.setup,
++      startReason: () => this.originalStartReason(), linked: q => this.agentLinked(q), callsPending: () => this.agentCommands !== 0,
++      checkNative: () => this.checkAgentNative(),
++      open: (q,p,current) => this.agentOpen(q,p,current), prepare: (q,current) => this.agentPrepare(q,current),
++      apply: (q,b,current,claimed) => this.agentApply(q,b,current,claimed), close: q => {
++        if (this.agentLinked(q)) { this.change({type:'close-request',reason:'user'}); this.process(); }
++      },
++    });
++    this.agent.subscribe(() => {
++      if (this.disposed) return;
++      this.state = {...this.state}; // Same App owner also retains pre-admission callers/draft.
++      for (const listener of this.listeners) listener();
++      this.process();
++    });
++  }
++  private agentLinked(q: WorkflowEditOrigin): boolean {
++    return !!this.agentOrigin && sameWorkflowEditOrigin(this.agentOrigin,q) && this.agentBinding !== null && this.state.attempt?.binding === this.agentBinding;
++  }
++  ownerReason(projectId: string): string | null { return this.agent.busyReason() ?? workflowOwnerReason(this.state,projectId); }
++  retainsDraft(projectId: string): boolean { return this.agent.retainsDraft(projectId) || workflowRetainsDraft(this.state,projectId); }
++  private async checkAgentNative(): Promise<boolean> {
++    const api = this.api, prior = this.reading;
++    if (prior) await prior;
++    // A previously coalesced status is not this explicit Check's comparison.
++    if (!api || this.api !== api || this.disposed || this.reading) return false;
++    await this.checkStatus();
++    return !this.disposed && this.api === api && this.state.initialized && this.state.listening &&
++      !this.state.readPending && !this.state.observationIssue && !this.state.integrityFailed && !this.state.generationLost;
++  }
+   getSnapshot = (): GitHubWorkflowEditState => this.state;
+   subscribe = (listener: () => void): (() => void) => {
+     this.listeners.add(listener);
+@@ -51,7 +91,7 @@
+     if (this.disposed || this.api) return;
+     this.api = api;
+     this.change({ type: 'connect', mode: api.mode });
+-    if (api.mode === 'native') await this.checkStatus();
++    if (api.mode === 'native') { await this.checkStatus(); await this.agent.connect(api); }
+   }
+
+   // One coalesced observation. Never a polling timer, retry clock, replacement
+@@ -92,11 +132,13 @@
+     if (this.state.integrityFailed) this.change({ type: 'close-request', reason: 'invoke_failed' });
+     this.process();
+   }
+-  startReason(): string | null {
++  startReason(): string | null { return this.agent.busyReason() ?? this.originalStartReason(); }
++  private originalStartReason(): string | null {
+     const project = this.context.selectedProject();
+     return workflowStartReason(this.state, project, this.context.setup(), project ? this.context.otherEditReason(project.project.id) : null);
+   }
+   recoveryStartReason(): string | null {
++    if (this.agent.busyReason()) return this.agent.busyReason();
+     const project = this.context.selectedProject();
+     return workflowRecoveryStartReason(this.state, project, project ? this.context.otherEditReason(project.project.id) : null);
+   }
+@@ -114,6 +156,7 @@
+     return true;
+   }
+   recover(confirmation: WorkflowRecoveryApplyBinding): boolean {
++    if (this.agent.isLinked()) return false;
+     if (this.disposed || !this.api || !this.state.attempt ||
+         !canRecoverWorkflows(this.state, this.context.selectedProject(), confirmation)) return false;
+     const binding = this.state.attempt.binding; const previous = this.state.attempt;
+@@ -145,6 +188,7 @@
+     return true;
+   }
+   apply(confirmation: WorkflowApplyBinding): boolean {
++    if (this.agent.isLinked()) return false;
+     if (this.disposed || !this.api || !this.state.attempt ||
+         !canApplyWorkflows(this.state, this.context.selectedProject(), this.context.setup(), confirmation)) return false;
+     const binding = this.state.attempt.binding; const previous = this.state.attempt;
+@@ -159,12 +203,21 @@
+   }
+   requestClose(): void {
+     if (this.disposed) return;
++    this.agent.invalidate(true);
+     this.change({ type: 'close-request', reason: 'user' });
+     this.process();
+   }
+   // App calls this synchronously for workspace dispatch and every setup setter
+   // or connection generation change, not from a delayed React effect.
+   syncContext = (): void => { if (!this.disposed) this.process(); };
++
++  // Invalidate only the new delegated review on explicit context intent,
++  // including ABA/no-op actions. Ordinary workflow/recovery behavior is unchanged.
++  beforeWorkspaceAction(action: WorkspaceAction): void {
++    if (['select','switch','new-draft','edit','remove-forbidden','undo-removal','reset','snapshot-start','suggest-start','adopt-suggestion','config-save-intent','config-save-final','initialization-intent','initialization-final'].includes(action.type)) this.selectionIntent();
++  }
++  selectionIntent(): void { if (!this.disposed) this.agent.invalidate(); }
++  setVisible(visible: boolean): void { if (!visible) this.selectionIntent(); }
+
+   private process(): void {
+     if (this.disposed || !this.api) return;
+@@ -173,6 +226,8 @@
+     try {
+       do {
+         this.processAgain = false;
++        this.agent.process();
++        if (this.agent.completedWithoutOriginal() && this.agentBinding) this.change({type:'agent-unentered',binding:this.agentBinding});
+         let attempt = this.state.attempt;
+         if (!attempt) continue;
+         const owner = attempt.projection;
+@@ -185,10 +240,12 @@
+           this.change({ type: 'observation-failed', protocol: true });
+           this.change({ type: 'close-request', reason: 'invoke_failed' });
+         }
+-        if (owner?.phase === 'final' && owner.nativeFinality === 'settled' && !attempt.handled) {
++        if (owner?.phase === 'final' && owner.nativeFinality === 'settled' && !attempt.handled &&
++            (attempt.binding !== this.agentBinding || this.agent.mayComplete())) {
+           // No configuration-save callback, draft reset or baseline adoption.
+           // The retained original projection itself is the read-only result.
+           this.change({ type: 'handled', sessionId: owner.sessionId });
++          if (attempt.binding === this.agentBinding) this.processAgain = true;
+         }
+         attempt = this.state.attempt;
+         if (!attempt || attempt.handled || !attempt.sessionId || !attempt.projection || this.state.generationLost ||
+@@ -197,10 +254,10 @@
+         if (attempt.closeRequested && !attempt.closeClaimed) {
+           const sessionId = attempt.sessionId; const binding = attempt.binding;
+           this.change({ type: 'close-claim', sessionId });
+-          if (this.state.attempt?.binding === binding && this.state.attempt.closeClaimed) void this.command('close', binding, () => this.api!.closeGitHubWorkflowEdit(sessionId));
++          if (this.state.attempt?.binding === binding && this.state.attempt.closeClaimed) void this.command('close', binding, () => this.api!.closeGitHubWorkflowEdit(sessionId)).catch(() => { /* The child retains this missing return. */ });
+           continue;
+         }
+-        if (attempt.projection.phase === 'editing' && !attempt.prepareClaimed &&
++        if (attempt.binding !== this.agentBinding && attempt.projection.phase === 'editing' && !attempt.prepareClaimed &&
+             !attempt.closeRequested && !attempt.applyClaimed && !attempt.invalidated) {
+           const sessionId = attempt.sessionId; const binding = attempt.binding;
+           if (binding.intent === 'recover') {
+@@ -231,22 +288,76 @@
+     } finally { this.processing = false; }
+   }
+
+-  private async command(kind: 'open' | 'prepare' | 'apply' | 'close', binding: WorkflowBinding, call: () => Promise<GitHubWorkflowEditStatus>): Promise<void> {
+-    try { this.receive(await call(), 'reply'); }
+-    catch (error) {
+-      if (this.disposed || this.state.attempt?.binding !== binding) return;
+-      if (this.state.attempt.projection?.phase === 'final' && this.state.attempt.projection.nativeFinality === 'settled') return;
++  private async agentOpen(q: WorkflowEditOrigin, project: ProjectSession, current: () => boolean): Promise<boolean> {
++    const api = this.api, service = api?.agentWorkflowEdit, setup = this.context.setup(), status = this.state.status;
++    if (!api || !service || this.disposed || !current() || this.context.selectedProject() !== project ||
++        this.originalStartReason() !== null || !project.draft || !status) return false;
++    const binding: WorkflowDraftBinding = freeze({projectId:project.project.id,
++      windowGeneration:status.windowGeneration,startStatusRevision:status.statusRevision,previousTerminalId:status.lastTerminal?.sessionId??null,
++      draftRevision:project.revision,baselineGeneration:project.baselineGeneration,baseline:structuredClone(project.baseline),draft:structuredClone(project.draft),
++      serviceGeneration:setup.serviceGeneration,selectionGeneration:setup.selectionGeneration,coordinateGeneration:setup.coordinateGeneration,
++      toolingRepository:setup.inputs.toolingRepository,toolingSha:setup.inputs.toolingSha});
++    // Bind before notifying: events cannot turn this into ordinary auto-Prepare.
++    this.agentBinding = binding; this.agentOrigin = q;
++    this.change({type:'begin',binding});
++    if (this.api !== api || !current() || this.state.attempt?.binding !== binding || this.state.attempt.closeRequested) return false;
++    return this.command('open',binding,() => service.open(q,{projectId:binding.projectId,
++      toolingRepository:binding.toolingRepository,toolingSha:binding.toolingSha,draftRevision:binding.draftRevision,baselineGeneration:binding.baselineGeneration}));
++  }
++  private async agentPrepare(q: WorkflowEditOrigin, current: () => boolean): Promise<boolean> {
++    const api = this.api, service = api?.agentWorkflowEdit, a = this.state.attempt, checkout = a?.projection?.checkout;
++    if (!api || !service || !a || !a.sessionId || !checkout || a.binding.intent === 'recover' || a.projection?.recovery || !this.agentLinked(q) || !current()) return false;
++    const binding = a.binding;
++    this.change({type:'prepare-claim',sessionId:a.sessionId});
++    if (this.api !== api || !current() || this.state.attempt === a || this.state.attempt?.binding !== binding ||
++        !this.state.attempt.prepareClaimed || this.state.attempt.closeRequested) return false;
++    return this.command('prepare',binding,() => service.prepare(q,{sessionId:a.sessionId!,revision:checkout.revision,draft:binding.draft,
++      toolingRepository:binding.toolingRepository,toolingSha:binding.toolingSha,draftRevision:binding.draftRevision,baselineGeneration:binding.baselineGeneration}));
++  }
++  private async agentApply(q: WorkflowEditOrigin, confirmation: WorkflowApplyBinding, current: () => boolean, claimed: () => void): Promise<boolean> {
++    const api = this.api, service = api?.agentWorkflowEdit, a = this.state.attempt;
++    if (!api || !service || !a || !this.agentLinked(q) || !current() ||
++        !canApplyWorkflows(this.state,this.context.selectedProject(),this.context.setup(),confirmation)) return false;
++    this.change({type:'apply-claim',binding:confirmation});
++    if (this.api !== api || !current() || this.state.attempt === a || this.state.attempt?.binding !== a.binding ||
++        !this.state.attempt.applyClaimed || this.state.attempt.closeRequested) return false;
++    claimed(); // Before any original invoke; later draft edits never rewrite its result.
++    if (this.disposed || this.api !== api || !current() || !this.agentLinked(q) || this.state.attempt?.closeRequested ||
++        this.state.generationLost || this.state.status?.windowGeneration !== a.binding.windowGeneration) return false;
++    return this.command('apply',a.binding,() => service.apply(q,confirmation.sessionId,confirmation.planToken));
++  }
++  private async command(kind: 'open' | 'prepare' | 'apply' | 'close', binding: WorkflowBinding, call: () => Promise<GitHubWorkflowEditStatus>): Promise<boolean> {
++    const delegated = binding === this.agentBinding;
++    if (delegated) this.agentCommands++;
++    try {
++      this.receive(await call(), 'reply');
++      if (delegated && this.state.integrityFailed) throw {code:'GitHubWorkflowStatusInvalid'};
++      return true;
++    } catch (error) {
++      if (delegated) {
++        this.agent.callerFailed();
++        if (!this.disposed && this.state.attempt?.binding === binding) {
++          this.change({type:'observation-failed',protocol:workflowEditError(error).code === 'GitHubWorkflowStatusInvalid'});
++          this.change({type:'close-request',reason:'invoke_failed'}); this.process();
++        }
++        throw error; // Original missing return is not repaired by terminal DATA.
++      }
++      if (this.disposed || this.state.attempt?.binding !== binding) return false;
++      if (this.state.attempt.projection?.phase === 'final' && this.state.attempt.projection.nativeFinality === 'settled') return false;
+       const protocol = workflowEditError(error).code === 'GitHubWorkflowStatusInvalid';
+       this.change({ type: 'observation-failed', protocol });
+       if (kind === 'open' || kind === 'prepare' || protocol) this.change({ type: 'close-request', reason: 'invoke_failed' });
+       this.process();
+-      // Lost/duplicate results observe this owner once, never repeat any write
+-      // command or open a replacement when admission is unknown.
++      // Ordinary observation behavior is unchanged; never repeat a write.
+       await this.checkStatus();
++      return false;
++    } finally {
++      if (delegated) { this.agentCommands--; this.agent.process(); this.process(); }
+     }
+   }
+   dispose(): void {
+     if (this.disposed) return;
++    this.agent.dispose();
+     this.disposed = true;
+     const attempt = this.state.attempt;
+     if (this.api?.mode === 'native' && attempt?.sessionId && attempt.projection && !attempt.closeClaimed && !this.state.generationLost &&
+diff --git a/desktop/src/types.ts b/desktop/src/types.ts
+--- a/desktop/src/types.ts
++++ b/desktop/src/types.ts
+@@ -428,6 +428,7 @@
+   readonly agentMetadataText?: import('./serviceMetadataTextProtocol.ts').MetadataServiceApi | null;
+   readonly agentConfiguration?: import('./serviceConfigurationProtocol.ts').ConfigurationApi | null;
+   readonly agentInitialization?: import('./serviceInitializationProtocol.ts').InitializationAgentApi | null;
++  readonly agentWorkflowEdit?: import('./serviceWorkflowEditProtocol.ts').WorkflowEditAgentApi | null;
+   readonly agentIdentityActions?: import('./agentIdentityActions.ts').AgentIdentityActionApi | null;
+   readonly agentLocalChecks?: import('./agentLocalChecks.ts').AgentLocalCheckApi | null;
+   readonly agentAndroidBuild?: import('./agentAndroidBuild.ts').AgentAndroidBuildApi | null;
+diff --git a/desktop/src-tauri/build.rs b/desktop/src-tauri/build.rs
+--- a/desktop/src-tauri/build.rs
++++ b/desktop/src-tauri/build.rs
+@@ -289,7 +289,7 @@
+     "agent_git_repository_access", "allow_agent_git_repository", "revoke_agent_git_repository",
+     "agent_git_remote_access", "allow_agent_git_remote", "revoke_agent_git_remote",
+     "agent_version_edit_status", "allow_agent_version_edit_apply", "revoke_agent_version_edit",
+-    "agent_configuration_status", "agent_initialization_status", "allow_agent_initialization", "revoke_agent_initialization", "allow_agent_configuration_apply", "revoke_agent_configuration",
++    "agent_configuration_status", "agent_initialization_status", "allow_agent_initialization", "revoke_agent_initialization", "agent_workflow_edit_status", "allow_agent_workflow_edit", "revoke_agent_workflow_edit", "allow_agent_configuration_apply", "revoke_agent_configuration",
+     "agent_metadata_images_prepare_status", "agent_metadata_images_inspect", "agent_metadata_images_prepare_cancel",
+     "agent_metadata_images_status", "allow_agent_metadata_images_apply", "revoke_agent_metadata_images",
+     "agent_metadata_text_status", "allow_agent_metadata_text_apply", "revoke_agent_metadata_text",
+diff --git a/desktop/src-tauri/capabilities/main.json b/desktop/src-tauri/capabilities/main.json
+--- a/desktop/src-tauri/capabilities/main.json
++++ b/desktop/src-tauri/capabilities/main.json
+@@ -8,7 +8,7 @@
+     "allow-agent-version-edit-status",
+     "allow-allow-agent-version-edit-apply",
+     "allow-revoke-agent-version-edit",
+-    "allow-agent-configuration-status", "allow-agent-initialization-status", "allow-allow-agent-initialization", "allow-revoke-agent-initialization", "allow-allow-agent-configuration-apply", "allow-revoke-agent-configuration",
++    "allow-agent-configuration-status", "allow-agent-initialization-status", "allow-allow-agent-initialization", "allow-revoke-agent-initialization", "allow-agent-workflow-edit-status", "allow-allow-agent-workflow-edit", "allow-revoke-agent-workflow-edit", "allow-allow-agent-configuration-apply", "allow-revoke-agent-configuration",
+     "allow-agent-metadata-images-prepare-status", "allow-agent-metadata-images-inspect", "allow-agent-metadata-images-prepare-cancel",
+     "allow-agent-metadata-images-status", "allow-allow-agent-metadata-images-apply", "allow-revoke-agent-metadata-images",
+     "allow-agent-metadata-text-status", "allow-allow-agent-metadata-text-apply", "allow-revoke-agent-metadata-text",
+diff --git a/desktop/src-tauri/src/application_service.rs b/desktop/src-tauri/src/application_service.rs
+--- a/desktop/src-tauri/src/application_service.rs
++++ b/desktop/src-tauri/src/application_service.rs
+@@ -101,6 +101,8 @@
+ mod git_index;
+ #[path="service_initialization_application.rs"]
+ mod agent_initialization;
++#[path="service_workflow_edit_application.rs"]
++mod agent_workflow_edit;
+ #[path="service_configuration_application.rs"]
+ mod agent_configuration;
+ #[path="service_metadata_images_application.rs"]
+@@ -549,9 +551,13 @@
+                 p::RequestBody::MetadataTextStatus(q) => return self.metadata_text_query(client,q,false),
+                 p::RequestBody::MetadataTextCancel(q) => return self.metadata_text_query(client,q,true),
+                 p::RequestBody::InitializationPrepare(v)=>return self.initialization_prepare(client,v.clone()),
++                p::RequestBody::WorkflowEditPrepare(v)=>return self.workflow_edit_prepare(client,v.clone()),
+                 p::RequestBody::InitializationApply(v)=>return self.initialization_apply(client,v.clone()),
++                p::RequestBody::WorkflowEditApply(v)=>return self.workflow_edit_apply(client,v.clone()),
+                 p::RequestBody::InitializationStatus(q)=>return self.initialization_query(client,q,false),
++                p::RequestBody::WorkflowEditStatus(q)=>return self.workflow_edit_query(client,q,false),
+                 p::RequestBody::InitializationCancel(q)=>return self.initialization_query(client,q,true),
++                p::RequestBody::WorkflowEditCancel(q)=>return self.workflow_edit_query(client,q,true),
+                 p::RequestBody::ConfigurationRead(v) => return self.configuration_read(client,v.clone()),
+                 p::RequestBody::ConfigurationPrepare(v) => return self.configuration_prepare(client,v.clone()),
+                 p::RequestBody::ConfigurationApply(v) => return self.configuration_apply(client,v.clone()),
+@@ -569,6 +575,7 @@
+             Ok(match request.request {
+                 p::RequestBody::UploadKeyScope(_) | p::RequestBody::UploadKeySubmit(_) | p::RequestBody::UploadKeyStatus(_) | p::RequestBody::UploadKeyCancel(_) |
+                 p::RequestBody::InitializationPrepare(_)|p::RequestBody::InitializationApply(_)|p::RequestBody::InitializationStatus(_)|p::RequestBody::InitializationCancel(_)|
++                p::RequestBody::WorkflowEditPrepare(_)|p::RequestBody::WorkflowEditApply(_)|p::RequestBody::WorkflowEditStatus(_)|p::RequestBody::WorkflowEditCancel(_)|
+                 p::RequestBody::MetadataImagesRead(_)|p::RequestBody::MetadataImagesPrepare(_)|p::RequestBody::MetadataImagesScope(_)|p::RequestBody::MetadataImagesSubmit(_)|p::RequestBody::MetadataImagesStatus(_)|p::RequestBody::MetadataImagesCancel(_)|
+                 p::RequestBody::MetadataTextRead(_) | p::RequestBody::MetadataTextPrepare(_) | p::RequestBody::MetadataTextApply(_) | p::RequestBody::MetadataTextStatus(_) | p::RequestBody::MetadataTextCancel(_) |
+                 p::RequestBody::ConfigurationRead(_) | p::RequestBody::ConfigurationPrepare(_) | p::RequestBody::ConfigurationApply(_) | p::RequestBody::ConfigurationStatus(_) | p::RequestBody::ConfigurationCancel(_) |
+diff --git a/desktop/src-tauri/src/asset_session.rs b/desktop/src-tauri/src/asset_session.rs
+--- a/desktop/src-tauri/src/asset_session.rs
++++ b/desktop/src-tauri/src/asset_session.rs
+@@ -1197,6 +1197,11 @@
+ pub(crate) mod agent_initialization;
+ #[cfg(any(target_os="linux",target_os="macos"))]
+ pub(crate) use agent_initialization::InitializationAgentGate;
++#[cfg(any(target_os="linux",target_os="macos"))]
++#[path="asset_session_service_workflow_edit.rs"]
++pub(crate) mod agent_workflow_edit;
++#[cfg(any(target_os="linux",target_os="macos"))]
++pub(crate) use agent_workflow_edit::WorkflowEditAgentGate;
+ #[cfg(any(target_os="linux",target_os="macos"))]
+ #[path="asset_session_service_metadata_images.rs"]
+ pub(crate) mod agent_metadata_images;
+@@ -4827,6 +4832,10 @@
+             if domain==crate::edit_protocol::EditDomain::ProjectInitialization{
+                 self.inner.bridge.edits.initialization_agent_origin(MAIN,None)?;
+             }
++            #[cfg(any(target_os="linux",target_os="macos"))]
++            if domain==crate::edit_protocol::EditDomain::GitHubWorkflows{
++                self.inner.bridge.edits.workflow_edit_agent_origin(MAIN,None)?;
++            }
+             let registered = self.registered_edit_root_locked_published(&mut state, domain, project_id, None, &mut publisher)?;
+             enqueue(&self.inner.bridge, registered, &publisher)
+         })();
+diff --git a/desktop/src-tauri/src/edit_commands.rs b/desktop/src-tauri/src/edit_commands.rs
+--- a/desktop/src-tauri/src/edit_commands.rs
++++ b/desktop/src-tauri/src/edit_commands.rs
+@@ -313,3 +313,16 @@
+     let args:crate::service_initialization_protocol::Allow=decode(body,crate::service_initialization_protocol::REQUEST_BYTES)?;
+     args.validate().map_err(|_|BridgeError::invalid())?;Ok(args)
+ }
++
++// MAIN compact Workflow Edit controls; original base native/CLI DTOs unchanged.
++pub(crate) fn agent_workflow_edit_status(body:&Value)->Result<Option<crate::service_workflow_edit_protocol::Query>,BridgeError>{
++    #[derive(Deserialize)] #[serde(deny_unknown_fields)] struct Status {origin:Option<crate::service_workflow_edit_protocol::Query>}
++    let args:Status=decode(body,crate::service_workflow_edit_protocol::REQUEST_BYTES)?;Ok(args.origin)
++}
++pub(crate) fn agent_workflow_edit_query(body:&Value)->Result<crate::service_workflow_edit_protocol::Query,BridgeError>{
++    decode(body,crate::service_workflow_edit_protocol::REQUEST_BYTES)
++}
++pub(crate) fn agent_workflow_edit_allow(body:&Value)->Result<crate::service_workflow_edit_protocol::Allow,BridgeError>{
++    let args:crate::service_workflow_edit_protocol::Allow=decode(body,crate::service_workflow_edit_protocol::REQUEST_BYTES)?;
++    args.validate().map_err(|_|BridgeError::invalid())?;Ok(args)
++}
+diff --git a/desktop/src-tauri/src/edit_owner.rs b/desktop/src-tauri/src/edit_owner.rs
+--- a/desktop/src-tauri/src/edit_owner.rs
++++ b/desktop/src-tauri/src/edit_owner.rs
+@@ -41,6 +41,11 @@
+ mod agent_initialization;
+ #[cfg(any(target_os="linux",target_os="macos"))]
+ pub(crate) use agent_initialization::{Link as InitializationAgentLink,Step as InitializationAgentStep};
++#[cfg(any(target_os = "linux", target_os = "macos"))]
++#[path = "edit_owner_service_workflow_edit.rs"]
++mod agent_workflow_edit;
++#[cfg(any(target_os="linux",target_os="macos"))]
++pub(crate) use agent_workflow_edit::{Link as WorkflowEditAgentLink,Step as WorkflowEditAgentStep,Open as WorkflowEditAgentOpen};
+ #[cfg(any(target_os = "linux", target_os = "macos"))]
+ #[path="edit_owner_service_configuration.rs"]
+ mod agent_configuration;
+@@ -686,7 +691,9 @@
+     #[cfg(any(target_os="linux",target_os="macos"))]
+     agent_version_prepare:Option<Arc<VersionPrepareLink>>,
+     #[cfg(any(target_os="linux",target_os="macos"))]
+-    agent_initialization:Option<Arc<InitializationAgentLink>> }
++    agent_initialization:Option<Arc<InitializationAgentLink>>,
++    #[cfg(any(target_os="linux",target_os="macos"))]
++    agent_workflow_edit:Option<Arc<WorkflowEditAgentLink>> }
+ pub(crate) type WorkflowOpenTicket = RegisteredOpenTicket;
+
+ // Only the ignored headless workflow fixture can construct this private value,
+@@ -1042,6 +1049,8 @@
+     agent_version_prepare: Option<Arc<VersionPrepareLink>>,
+     #[cfg(any(target_os="linux",target_os="macos"))]
+     agent_initialization: Option<Arc<InitializationAgentLink>>,
++    #[cfg(any(target_os="linux",target_os="macos"))]
++    agent_workflow_edit: Option<Arc<WorkflowEditAgentLink>>,
+     #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+     native_failure: Mutex<Option<(Reason, Instant)>>,
+     #[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+@@ -1540,7 +1549,7 @@
+             if let Some(binding) = self.android_registration.get() { binding.control.poisoned(); }
+         }
+         #[cfg(any(target_os = "linux", target_os = "macos"))]
+-        { identity_history::changed(self, registry); agent_identity::actions::changed(registry); agent_configuration::changed(registry); agent_metadata_text::changed(registry); agent_version_prepare::changed(registry); agent_initialization::changed(registry); }
++        { identity_history::changed(self, registry); agent_identity::actions::changed(registry); agent_configuration::changed(registry); agent_metadata_text::changed(registry); agent_version_prepare::changed(registry); agent_initialization::changed(registry); agent_workflow_edit::changed(registry); }
+         self.changes.send_replace(registry.revision);
+         self.changed.notify_waiters();
+     }
+@@ -1701,7 +1710,7 @@
+                 target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+             installed_macos_observation::retire(&a.session);
+             #[cfg(any(target_os = "linux", target_os = "macos"))]
+-            { agent_version_edit::unknown(&a.session); agent_version_prepare::unknown(&a.session); agent_initialization::unknown(&a.session); agent_metadata_images::unknown(&a.session); agent_metadata_images_prepare::unknown(&a.session); }
++            { agent_version_edit::unknown(&a.session); agent_version_prepare::unknown(&a.session); agent_initialization::unknown(&a.session); agent_workflow_edit::unknown(&a.session); agent_metadata_images::unknown(&a.session); agent_metadata_images_prepare::unknown(&a.session); }
+             a.unknown = true;
+             a.projection.phase = Phase::Unknown;
+             a.projection.native_finality = NativeFinality::Unknown;
+@@ -1750,7 +1759,7 @@
+         }
+         #[cfg(any(target_os = "linux", target_os = "macos"))]
+         if let Some((at,reason))=r.active.as_ref().filter(|a|a.session.id==id).and_then(|a|
+-            agent_configuration::cancellation_at(&a.session,now).or_else(||agent_metadata_text::cancellation_at(&a.session,now)).or_else(||agent_version_prepare::cancellation_at(&a.session,now)).or_else(||agent_initialization::cancellation_at(&a.session,now)).filter(|(at,_)|a.cleanup_start.is_none_or(|old|*at<old))){
++            agent_configuration::cancellation_at(&a.session,now).or_else(||agent_metadata_text::cancellation_at(&a.session,now)).or_else(||agent_version_prepare::cancellation_at(&a.session,now)).or_else(||agent_initialization::cancellation_at(&a.session,now)).or_else(||agent_workflow_edit::cancellation_at(&a.session,now)).filter(|(at,_)|a.cleanup_start.is_none_or(|old|*at<old))){
+             self.trigger_locked(publication,r,id,reason,at);
+         }
+         #[cfg(any(target_os = "linux", target_os = "macos"))]
+@@ -2209,6 +2218,8 @@
+             agent_version_prepare:None,
+             #[cfg(any(target_os="linux",target_os="macos"))]
+             agent_initialization:None,
++            #[cfg(any(target_os="linux",target_os="macos"))]
++            agent_workflow_edit:None,
+             #[cfg(any(target_os = "linux", target_os = "macos"))]
+             agent_identity: None })
+     }
+@@ -2365,6 +2376,11 @@
+             if ticket.as_ref().is_some_and(|t|t.agent_initialization.is_some()&&(domain!=EditDomain::ProjectInitialization||t.saved_text_recovery||t.configuration_recovery||!t.initialization.as_ref().is_some_and(|i|i.intent()==initialization_wire::Intent::Initialize))){return Err(invalid_owner())}
+             ticket.as_mut().and_then(|t|t.agent_initialization.take())
+         };
++        #[cfg(any(target_os="linux",target_os="macos"))]
++        let agent_workflow_edit={
++            if ticket.as_ref().is_some_and(|t|t.agent_workflow_edit.is_some() && (!crate::service_workflow_edit_protocol::platform_supported() || domain!=EditDomain::GitHubWorkflows || t.workflow_recovery || t.saved_text_recovery || t.configuration_recovery)){return Err(invalid_owner())}
++            ticket.as_mut().and_then(|t|t.agent_workflow_edit.take())
++        };
+         let image_prepare_profile = ticket.as_ref().is_some_and(|t| t.image_prepare_profile);
+         if image_prepare_profile && (domain != EditDomain::MetadataImages || !matches!(images.as_ref(), Some(ImageOpen::Import(_)))) { return Err(invalid_owner()); }
+         let (id, executor, workflow_recovery, saved_text_recovery, configuration_recovery, initialization, identity) = match (domain, ticket) {
+@@ -2434,6 +2450,10 @@
+         if let Some(link) = &agent_initialization {
+             link.bind_native_code(installed.as_ref().ok_or_else(invalid_owner)?)?;
+         }
++        #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
++        if let Some(link) = &agent_workflow_edit {
++            link.bind_native_code(installed.as_ref().ok_or_else(invalid_owner)?)?;
++        }
+         let session = Arc::new(Session { domain, registration, saved_text_recovery, configuration_recovery, image_prepare_profile, image_written: std::sync::atomic::AtomicUsize::new(0), id: id.clone(), commands, receiver: AsyncMutex::new(Some(receiver)), stop,
+             #[cfg(any(target_os = "linux", target_os = "macos"))]
+             agent_identity,
+@@ -2457,6 +2477,8 @@
+             agent_version_prepare,
+             #[cfg(any(target_os="linux",target_os="macos"))]
+             agent_initialization,
++            #[cfg(any(target_os="linux",target_os="macos"))]
++            agent_workflow_edit,
+             #[cfg(all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64")))]
+             native_failure: Mutex::new(None),
+             #[cfg(all(test, debug_assertions, feature = "development-runtime", not(feature = "desktop-shell"), target_os = "linux", target_arch = "x86_64", target_env = "gnu"))]
+@@ -2518,6 +2540,8 @@
+             agent_version_prepare::before_claim(&self.inner,&r,&session,&project_id,&mut publication)?;
+             #[cfg(any(target_os="linux",target_os="macos"))]
+             agent_initialization::before_claim(&self.inner,&r,&session,&project_id,&mut publication)?;
++            #[cfg(any(target_os="linux",target_os="macos"))]
++            agent_workflow_edit::before_claim(&self.inner,&r,&session,&project_id,&mut publication)?;
+             // Claim is permanent for this invocation BEFORE its projection or
+             // queue can fail. No postclaim error is a negative admission fact.
+             *claimed = true;
+@@ -2539,7 +2563,7 @@
+             #[cfg(any(target_os = "linux", target_os = "macos"))]
+             agent_identity::linked(&r);
+             #[cfg(any(target_os = "linux", target_os = "macos"))]
+-            if agent_configuration::linked(&r).is_err()||agent_metadata_text::linked(&r).is_err()||agent_version_prepare::linked(&r).is_err()||agent_initialization::linked(&r).is_err(){
++            if agent_configuration::linked(&r).is_err()||agent_metadata_text::linked(&r).is_err()||agent_version_prepare::linked(&r).is_err()||agent_initialization::linked(&r).is_err()||agent_workflow_edit::linked(&r).is_err(){
+                 // The permanent claim/installed original are never dropped by
+                 // a failed link. Retain Unknown and register original cleanup.
+                 session.resource_unknown.store(true,Ordering::SeqCst);
+@@ -2675,6 +2699,16 @@
+         agent_action:Option<&Arc<crate::agent_identity_requests::Entry>>,agent_config:Option<&Arc<crate::service_configuration_requests::Entry>>,
+         agent_metadata:Option<&Arc<crate::service_metadata_text_requests::Entry>>,agent_version:Option<&Arc<crate::service_version_edit_prepare_requests::Entry>>,
+         agent_images:Option<&Arc<crate::service_metadata_images_prepare_requests::Entry>>,agent_init:Option<&Arc<crate::service_initialization_requests::Entry>>)->Result<DomainStatus,BridgeError>{
++        self.prepare_domain_workflow_edit(supplied,window,domain,session_id,revision,counters,params,registration,submission,agent_action,agent_config,agent_metadata,agent_version,agent_images,agent_init,None)
++    }
++    fn prepare_domain_workflow_edit(&self,supplied:Option<&RegistrationPublisher>,window:&str,domain:EditDomain,session_id:&str,revision:&str,
++        counters:(u32,u32),params:Value,registration:Option<RegisteredEditRoot>,submission:Option<SavedTextSubmission>,
++        agent_action:Option<&Arc<crate::agent_identity_requests::Entry>>,agent_config:Option<&Arc<crate::service_configuration_requests::Entry>>,
++        agent_metadata:Option<&Arc<crate::service_metadata_text_requests::Entry>>,agent_version:Option<&Arc<crate::service_version_edit_prepare_requests::Entry>>,
++        agent_images:Option<&Arc<crate::service_metadata_images_prepare_requests::Entry>>,agent_init:Option<&Arc<crate::service_initialization_requests::Entry>>,agent_workflow:Option<&Arc<crate::service_workflow_edit_requests::Entry>>)->Result<DomainStatus,BridgeError>{
++        if agent_workflow.is_some()&&domain!=EditDomain::GitHubWorkflows{return Err(invalid_owner())}
++        #[cfg(any(target_os="linux",target_os="macos"))]
++        agent_workflow_edit::preclaim(&self.inner,session_id,agent_workflow,crate::service_workflow_edit_requests::Kind::Prepare)?;
+         if agent_init.is_some()&&domain!=EditDomain::ProjectInitialization{return Err(invalid_owner())}
+         #[cfg(any(target_os="linux",target_os="macos"))]
+         agent_initialization::preclaim(&self.inner,session_id,agent_init,crate::service_initialization_requests::Kind::Prepare)?;
+@@ -2778,6 +2812,8 @@
+             #[cfg(any(target_os="linux",target_os="macos"))]
+             if !agent_initialization::consume(a,agent_init,crate::service_initialization_requests::Kind::Prepare,&mut publication){return Err(invalid_owner());}
+             #[cfg(any(target_os="linux",target_os="macos"))]
++            if !agent_workflow_edit::consume(a,agent_workflow,crate::service_workflow_edit_requests::Kind::Prepare,&mut publication){return Err(invalid_owner());}
++            #[cfg(any(target_os="linux",target_os="macos"))]
+             agent_metadata_images_prepare::consume(a,agent_images,&mut publication)?;
+             a.prepare_counters = Some(counters);
+             a.claimed_seq = 1;
+@@ -2870,6 +2906,15 @@
+         registration:Option<WorkflowRegistration>,recovery_intent:bool,agent_action:Option<&Arc<crate::agent_identity_requests::Entry>>,
+         agent_config:Option<&Arc<crate::service_configuration_requests::Entry>>,agent_version:Option<&VersionEditClaim>,
+         agent_metadata:Option<&Arc<crate::service_metadata_text_requests::Entry>>,agent_images:Option<&MetadataImagesClaim>,agent_init:Option<&Arc<crate::service_initialization_requests::Entry>>)->Result<DomainStatus,BridgeError>{
++        self.apply_domain_workflow_edit(supplied,window,domain,session_id,plan_token,registration,recovery_intent,agent_action,agent_config,agent_version,agent_metadata,agent_images,agent_init,None)
++    }
++    fn apply_domain_workflow_edit(&self,supplied:Option<&RegistrationPublisher>,window:&str,domain:EditDomain,session_id:&str,plan_token:&str,
++        registration:Option<WorkflowRegistration>,recovery_intent:bool,agent_action:Option<&Arc<crate::agent_identity_requests::Entry>>,
++        agent_config:Option<&Arc<crate::service_configuration_requests::Entry>>,agent_version:Option<&VersionEditClaim>,
++        agent_metadata:Option<&Arc<crate::service_metadata_text_requests::Entry>>,agent_images:Option<&MetadataImagesClaim>,agent_init:Option<&Arc<crate::service_initialization_requests::Entry>>,agent_workflow:Option<&Arc<crate::service_workflow_edit_requests::Entry>>)->Result<DomainStatus,BridgeError>{
++        if agent_workflow.is_some()&&(domain!=EditDomain::GitHubWorkflows||recovery_intent){return Err(invalid_owner())}
++        #[cfg(any(target_os="linux",target_os="macos"))]
++        agent_workflow_edit::preclaim(&self.inner,session_id,agent_workflow,crate::service_workflow_edit_requests::Kind::Apply)?;
+         if agent_init.is_some()&&(domain!=EditDomain::ProjectInitialization||recovery_intent){return Err(invalid_owner())}
+         #[cfg(any(target_os="linux",target_os="macos"))]
+         agent_initialization::preclaim(&self.inner,session_id,agent_init,crate::service_initialization_requests::Kind::Apply)?;
+@@ -2945,6 +2990,8 @@
+             #[cfg(any(target_os="linux",target_os="macos"))]
+             if !agent_initialization::consume(a,agent_init,crate::service_initialization_requests::Kind::Apply,&mut publication){return Err(invalid_owner());}
+             #[cfg(any(target_os="linux",target_os="macos"))]
++            if !agent_workflow_edit::consume(a,agent_workflow,crate::service_workflow_edit_requests::Kind::Apply,&mut publication){return Err(invalid_owner());}
++            #[cfg(any(target_os="linux",target_os="macos"))]
+             if !agent_metadata_images_prepare::apply_allowed(a)||!agent_metadata_images::consume(a,agent_images,&mut publication){return Err(invalid_owner());}
+             a.projection.apply_submitted = true; // Consume BEFORE send/acquisition.
+             a.projection.phase = Phase::Applying;
+@@ -3186,7 +3233,7 @@
+         #[cfg(any(target_os = "linux", target_os = "macos"))]
+         if version_reserve::wait_command(&owner).await.is_err(){inner.trigger(&owner.id,Reason::CallerLost,Instant::now());failed=true;break;}
+         #[cfg(any(target_os = "linux", target_os = "macos"))]
+-        if agent_configuration::wait_command(&owner).await.is_err()||agent_metadata_text::wait_command(&owner).await.is_err()||agent_version_prepare::wait_command(&owner).await.is_err()||agent_initialization::wait_command(&owner).await.is_err(){inner.trigger(&owner.id,Reason::CallerLost,Instant::now());failed=true;break;}
++        if agent_configuration::wait_command(&owner).await.is_err()||agent_metadata_text::wait_command(&owner).await.is_err()||agent_version_prepare::wait_command(&owner).await.is_err()||agent_initialization::wait_command(&owner).await.is_err()||agent_workflow_edit::wait_command(&owner).await.is_err(){inner.trigger(&owner.id,Reason::CallerLost,Instant::now());failed=true;break;}
+         if sent >= 3 || bytes.len() > edit_request_limit(owner.domain, sent) { failed = true; break; }
+         sent += 1;
+         let Some(writer) = pipe.io.as_mut() else { failed = true; break; };
+@@ -3304,7 +3351,7 @@
+                         EditDomain::ProjectIdentity => identity_wire::RESPONSE_LIMIT,
+                     };
+                     #[cfg(any(target_os="linux",target_os="macos"))]
+-                    if (owner.agent_configuration.is_some()||owner.agent_metadata_text.is_some()||owner.agent_version_prepare.is_some()||owner.image_prepare_profile) && frame.len() >= response_limit {
++                    if (owner.agent_configuration.is_some()||owner.agent_metadata_text.is_some()||owner.agent_version_prepare.is_some()||owner.agent_workflow_edit.is_some()||owner.image_prepare_profile) && frame.len() >= response_limit {
+                         discard=true;failed=true;frame.clear();
+                         inner.trigger(&owner.id,Reason::OutputLimit,Instant::now());inner.unknown(&owner.id);
+                         continue;
+@@ -3446,7 +3493,7 @@
+     let mut invalid = a.terminal || frame.domain() != owner.domain || a.projection.domain != owner.domain;
+     #[cfg(any(target_os = "linux", target_os = "macos"))]
+     { invalid |= !reserved_current; if !invalid&&version_reserve::frame(owner,&frame,&mut publication).is_err(){invalid=true;}
+-      if !invalid&&((a.cleanup_start.is_none()&&(agent_configuration::frame(a,&frame,&mut publication).is_err()||agent_metadata_text::frame(a,&frame,&mut publication).is_err()||agent_initialization::frame(a,&frame,&mut publication).is_err()))||agent_version_prepare::frame(a,&frame,&mut publication).is_err()||agent_metadata_images::frame(a,&frame,&mut publication).is_err()||agent_metadata_images_prepare::frame(a,&frame,&mut publication).is_err()){invalid=true;} }
++      if !invalid&&((a.cleanup_start.is_none()&&(agent_configuration::frame(a,&frame,&mut publication).is_err()||agent_metadata_text::frame(a,&frame,&mut publication).is_err()||agent_initialization::frame(a,&frame,&mut publication).is_err()||agent_workflow_edit::frame(a,&frame,&mut publication).is_err()))||agent_version_prepare::frame(a,&frame,&mut publication).is_err()||agent_metadata_images::frame(a,&frame,&mut publication).is_err()||agent_metadata_images_prepare::frame(a,&frame,&mut publication).is_err()){invalid=true;} }
+     let mut terminal = false;
+     let mut uncertain = false;
+     if !invalid {
+@@ -3787,7 +3834,7 @@
+ }
+ fn reserved_poll_end(owner:&Session,end:Instant)->Instant {
+     #[cfg(any(target_os = "linux", target_os = "macos"))]
+-    if owner.reserved_version.is_some()||owner.agent_configuration.is_some()||owner.agent_version_edit.get().is_some()||owner.agent_metadata_images.get().is_some()||owner.agent_metadata_images_prepare.get().is_some()||owner.agent_metadata_text.is_some()||owner.agent_version_prepare.is_some()||owner.agent_initialization.is_some(){return end.min(Instant::now()+Duration::from_millis(100));}
++    if owner.reserved_version.is_some()||owner.agent_configuration.is_some()||owner.agent_version_edit.get().is_some()||owner.agent_metadata_images.get().is_some()||owner.agent_metadata_images_prepare.get().is_some()||owner.agent_metadata_text.is_some()||owner.agent_version_prepare.is_some()||owner.agent_initialization.is_some()||owner.agent_workflow_edit.is_some(){return end.min(Instant::now()+Duration::from_millis(100));}
+     end
+ }
+ fn clock_endpoint(inner: &Inner, owner: &Session) -> Option<Instant> {
+@@ -3818,6 +3865,8 @@
+             let end=match &owner.agent_version_prepare {Some(link) if !unknown=>end.map(|end|link.cleanup_poll_end(end,now)),_=>end};
+             #[cfg(any(target_os="linux",target_os="macos"))]
+             let end=match &owner.agent_initialization{Some(link) if !unknown=>end.map(|end|link.cleanup_poll_end(end,now)),_=>end};
++            #[cfg(any(target_os="linux",target_os="macos"))]
++            let end=match &owner.agent_workflow_edit{Some(link) if !unknown=>end.map(|end|link.cleanup_poll_end(end,now)),_=>end};
+             end
+         } else {
+             let end = phase_deadline(review, phase, applying).unwrap_or(review);
+@@ -4773,6 +4822,8 @@
+         #[cfg(any(target_os="linux",target_os="macos"))]
+         let initialization_chain_current=agent_initialization::retirement_publication(&mut a,&mut publication);
+         #[cfg(any(target_os="linux",target_os="macos"))]
++        let workflow_edit_chain_current=agent_workflow_edit::retirement_publication(&mut a,&mut publication);
++        #[cfg(any(target_os="linux",target_os="macos"))]
+         let images_chain_current=agent_metadata_images::retirement_publication(&mut a,&mut publication);
+         if a.projection.core_outcome.as_ref().is_some_and(|core| core.journal == Journal::RecoveryRequired) {
+             // IDs only, bounded by the native 64-project picker registry. No
+@@ -4853,6 +4904,8 @@
+           agent_metadata_text::retired(&r,&a.session,a.unknown,metadata_chain_current);
+           agent_version_prepare::retired(&r,&a.session,a.unknown,version_prepare_current);
+           agent_initialization::retired(&r,&a.session,a.unknown,initialization_chain_current);
++          #[cfg(any(target_os="linux",target_os="macos"))]
++          agent_workflow_edit::retired(&r,&a.session,a.unknown,workflow_edit_chain_current);
+           agent_metadata_images::retired(&r,&a.session,a.unknown,images_chain_current); agent_metadata_images_prepare::retired(&r,&a.session,a.unknown); }
+     }
+     guard.completed = true;
+diff --git a/desktop/src-tauri/src/edit_owner_service_configuration_memory.rs b/desktop/src-tauri/src/edit_owner_service_configuration_memory.rs
+--- a/desktop/src-tauri/src/edit_owner_service_configuration_memory.rs
++++ b/desktop/src-tauri/src/edit_owner_service_configuration_memory.rs
+@@ -781,3 +781,6 @@
+
+ #[path="edit_owner_service_initialization_memory.rs"]
+ pub(in crate::edit_owner) mod initialization;
++
++#[path = "edit_owner_service_workflow_edit_memory.rs"]
++pub(in crate::edit_owner) mod workflow_edit;
+diff --git a/desktop/src-tauri/src/installed_cli.rs b/desktop/src-tauri/src/installed_cli.rs
+--- a/desktop/src-tauri/src/installed_cli.rs
++++ b/desktop/src-tauri/src/installed_cli.rs
+@@ -11,6 +11,8 @@
+ mod configuration;
+ #[path="installed_cli_initialization.rs"]
+ mod initialization;
++#[path="installed_cli_workflow_edit.rs"]
++mod workflow_edit;
+ #[path="installed_cli_metadata_images_prepare.rs"]
+ mod metadata_images_prepare;
+ #[path="installed_cli_metadata_images.rs"]
+@@ -90,9 +92,13 @@
+   mrk metadata-text-status PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n\
+   mrk metadata-text-cancel PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n\
+   mrk initialization-prepare PROJECT_ID OBSERVATION_REVISION [--json]\n\
++  mrk workflow-edit-prepare PROJECT_ID OBSERVATION_REVISION [--json]\n\
+   mrk initialization-apply PROJECT_ID SERVICE_INSTANCE REQUEST_ID SESSION_ID OWNER_GENERATION REVISION PLAN_TOKEN --reviewed [--json]\n\
++  mrk workflow-edit-apply PROJECT_ID SERVICE_INSTANCE REQUEST_ID SESSION_ID OWNER_GENERATION REVISION PLAN_TOKEN --reviewed [--json]\n\
+   mrk initialization-status PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n\
++  mrk workflow-edit-status PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n\
+   mrk initialization-cancel PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n\
++  mrk workflow-edit-cancel PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n\
+   mrk configuration-read PROJECT_ID OBSERVATION_REVISION [--json]\n\
+   mrk configuration-prepare PROJECT_ID SERVICE_INSTANCE REQUEST_ID SESSION_ID OWNER_GENERATION REVISION --stdin [--json]\n\
+   mrk configuration-apply PROJECT_ID SERVICE_INSTANCE REQUEST_ID SESSION_ID OWNER_GENERATION REVISION PLAN_TOKEN --reviewed [--json]\n\
+@@ -191,6 +197,7 @@
+ Supported changes: source branches, enabled Android/iOS build selections, or metadata root/languages (32 total across both platforms; no asset creation/move/upload).\n\
+ configuration-read requires fresh format-valid saved settings. Use observe PROJECT_ID --json for existing saved state/setup guidance; fix missing/invalid settings or refresh stale/unavailable observations in Desktop. Omitted metadata is not a default.\n\
+ Release-project initialization uses the running Desktop's explicit valid draft and toolkit selection, not CLI paths/JSON or Git init. Full native preview and separate Apply consent are required; differing existing targets refuse, recovery stays in Desktop.\n\
++Local workflow editing via CLI is macOS-only. READ prepares the original four canonical callers from Desktop draft/toolkit; separate exact native-preview consent permits Apply. No arbitrary YAML, Git push, provider or CI action; recovery stays in Desktop.\n\
+ No arbitrary edits, credential arguments or unrestricted signing/Store commands are supported.\n\
+ Delegated key and Store steps require exact one-use Desktop approval; Store steps can upload/promote/submit.\n\
+ Apple key-recover verifies only the selected original durably saved key and may record a local verification association; no replacement key, restored-new reference, provider request or automatic next step.\n\
+@@ -339,6 +346,7 @@
+             "metadataImages":{"commands":["metadata-images-read","metadata-images-prepare","metadata-images-scope","metadata-images-submit","metadata-images-status","metadata-images-cancel"],"desktopPreparedImportOnly":false,"nativeOpenedCliProfileOnly":true,"read":true,"scalarIdsOnly":true,"oneUseSeparateApproval":true,"nativeAvailabilityChecked":false,"chooseFiles":false,"prepare":true,"recovery":false,"storeUpload":false,"headless":false},
+             "metadataText":{"commands":["metadata-text-read","metadata-text-prepare","metadata-text-apply","metadata-text-status","metadata-text-cancel"],"alreadyConfiguredLocaleOnly":true,"stdinBytes":crate::service_metadata_text_protocol::STDIN_BYTES,"prepareRequestBytes":crate::service_metadata_text_protocol::REQUEST_BYTES,"nativeAvailabilityChecked":false,"completeOrderedFields":true,"desktopNativePreviewRequired":true,"applyRequiresSeparateConsent":true,"noAutomaticReloadOrRecovery":true,"images":false,"localeCreation":false,"storePublication":false,"headless":false},
+             "initialization":{"commands":["initialization-prepare","initialization-apply","initialization-status","initialization-cancel"],"arguments":"see --help","requiresSelectedDesktopDraftAndToolkit":true,"readAuthorizesPrepareOnly":true,"applyRequiresSeparateNativePreviewConsent":true,"existingTargetOverwrite":false,"recovery":false,"headless":false,"nativeAvailabilityChecked":false},
++            "workflowEdit":{"commands":["workflow-edit-prepare","workflow-edit-apply","workflow-edit-status","workflow-edit-cancel"],"arguments":"see --help","platform":"macos","fixedCanonicalCallers":4,"requiresSelectedDesktopDraftAndToolkit":true,"readAuthorizesPrepareOnly":true,"applyRequiresSeparateNativePreviewConsent":true,"customizedYamlConflict":true,"arbitraryFiles":false,"gitPush":false,"providerOrCiActions":false,"recovery":false,"headless":false,"nativeAvailabilityChecked":false},
+             "configuration":{"groups":["source-branches","enabled-android-build-selection","enabled-ios-build-selection","metadata-root-locales"],
+                 "commands":["configuration-read","configuration-prepare","configuration-apply","configuration-status","configuration-cancel"],"arguments":"see --help","readAuthorizesPrepareOnly":true,"applyRequiresDesktopPreview":true,
+                 "requiresFreshFormatValidSavedConfiguration":true,"metadataLocalesTotal":32,"metadataAssetsChanged":false,"configurationRepair":false,
+@@ -412,7 +420,7 @@
+                 "sharesGitGrantAnd32Requests":true,"requiresDesktopConnection":true,"force":false,"automaticRetry":false,
+                 "nativeAvailabilityChecked":false,"credentialExport":false,"activityRecovery":"separate-explicit-desktop-read"},
+             "repository": {"scope":"captured-desktop-git-observation", "freshness":"historical-not-revalidated", "basis":"local-refs-no-fetch", "startsInspection":false, "includesPaths":false},
+-            "requestDiscovery": {"schemaVersion":2, "scope":"current-host-retained-requests", "maxRequests":crate::service_request_catalogue::LIMIT, "families":["local-check","android-build","ios-archive","git-index","git-commit","git-repository","git-remote","identity","version-reservation","android-upload-key","configuration","initialization","metadata-text","metadata-images","store","local-history","play-cleanup","apple-provisioning","version-edit","version-tag",crate::service_request_catalogue::AdditionalFamily::GitHubAction,"tool-setup"], "savedHistory":false, "includesReports":false, "grantsExecution":false},
++            "requestDiscovery": {"schemaVersion":2, "scope":"current-host-retained-requests", "maxRequests":crate::service_request_catalogue::LIMIT, "families":["local-check","android-build","ios-archive","git-index","git-commit","git-repository","git-remote","identity","version-reservation","android-upload-key","configuration","initialization","workflow-edit","metadata-text","metadata-images","store","local-history","play-cleanup","apple-provisioning","version-edit","version-tag",crate::service_request_catalogue::AdditionalFamily::GitHubAction,"tool-setup"], "savedHistory":false, "includesReports":false, "grantsExecution":false},
+             "identityRequests": {
+                 "scope": "desktop-reviewed-proposal",
+                 "defaultEnabled": false,
+@@ -440,7 +448,7 @@
+         if !cfg!(any(target_os = "linux", target_os = "macos")) {
+             text.push_str("The local Desktop service transport is not implemented on this platform.\n\n");
+         }
+-        for command in READ_COMMANDS.iter().chain(IDENTITY_REQUEST_COMMANDS.iter()).chain(IDENTITY_ACTION_COMMANDS.iter()).chain(LOCAL_CHECK_COMMANDS.iter()).chain(ANDROID_BUILD_COMMANDS.iter()).chain(IOS_ARCHIVE_COMMANDS.iter()).chain(GIT_INDEX_COMMANDS.iter()).chain(git_commit::COMMANDS.iter()).chain(git_repository::COMMANDS.iter()).chain(git_remote::COMMANDS.iter()).chain(configuration::COMMANDS.iter()).chain(initialization::COMMANDS.iter()).chain(metadata_text::COMMANDS.iter()).chain(metadata_images::COMMANDS.iter()).chain(metadata_images_prepare::COMMANDS.iter()).chain(local_history::COMMANDS.iter()) {
++        for command in READ_COMMANDS.iter().chain(IDENTITY_REQUEST_COMMANDS.iter()).chain(IDENTITY_ACTION_COMMANDS.iter()).chain(LOCAL_CHECK_COMMANDS.iter()).chain(ANDROID_BUILD_COMMANDS.iter()).chain(IOS_ARCHIVE_COMMANDS.iter()).chain(GIT_INDEX_COMMANDS.iter()).chain(git_commit::COMMANDS.iter()).chain(git_repository::COMMANDS.iter()).chain(git_remote::COMMANDS.iter()).chain(configuration::COMMANDS.iter()).chain(initialization::COMMANDS.iter()).chain(workflow_edit::COMMANDS.iter()).chain(metadata_text::COMMANDS.iter()).chain(metadata_images::COMMANDS.iter()).chain(metadata_images_prepare::COMMANDS.iter()).chain(local_history::COMMANDS.iter()) {
+             text.push_str("  mrk "); text.push_str(command.command);
+             for argument in command.arguments { text.push(' '); text.push_str(argument); }
+             text.push_str(" [--json]\n    "); text.push_str(command.description); text.push('\n');
+@@ -448,7 +456,7 @@
+         text.push_str("\nStore steps: store-prepare installs a real native Prepared but cannot Start. Candidate-upload preparation requires the original reviewed intent, current credential and native tools; a fresh separate Store Start permission authorizes the internal upload. Later Execute and current/recovery/readiness Reconcile preparation also retain the exact original intent and credentials, without HTTP; a fresh separate Start approves only the reviewed promotion/draft/submission or readback/checkpoint. Checkpoints do not prove earlier finality or permit retry. Current inventory requires separate Start consent (Android/paired may create and delete a temporary Play edit); it is not historical uniqueness or version-allocation authority. Existing store-submit uses separate Desktop one-use approval of one exact returned native review: access, candidate preparation, Execute or Reconcile. Execute can upload/promote/submit the reviewed mode; old access/prepare grants never authorize it. Reconcile can use a temporary Play edit or an explicitly reviewed local recovery/readiness checkpoint. No automatic retry or public release; keep Desktop open.\n  mrk store-prepare PROJECT_ID SERVICE_INSTANCE GRANT_ID REVIEW_ID --reviewed [--json]\n  mrk store-start PROJECT_ID SERVICE_INSTANCE REQUEST_ID GRANT_ID REVIEW_ID --reviewed [--json]\n  mrk store-submit PROJECT_ID SERVICE_INSTANCE GRANT_ID REVIEW_ID --reviewed [--json]\n  mrk store-status PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n  mrk store-cancel PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n");
+         text.push_str("\nVersion preparation opens the existing saved source in the current Desktop. Review and allow its exact Save separately; no automatic allocation.\n  mrk version-edit-prepare PROJECT_ID SERVICE_INSTANCE (--manual NAME BUILD | --reserved RESERVATION_ID) [--json]\n  mrk version-edit-submit PROJECT_ID SERVICE_INSTANCE GRANT_ID SESSION_ID PLAN_TOKEN --reviewed [--json]\n  mrk version-edit-status PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n  mrk version-edit-cancel PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n");
+         text.push_str("\nVersion reservation uses one already-reviewed native Desktop request; no source Apply or upload authority.\n");
+-        text.push_str("GitHub actions: github-submit/status/cancel use one exact Desktop permission and IDs only. Prepare ordinary five-file setup, preflight/release or FIRST Counter through the original owner; separately approve Publish, Dispatch or Create. Pending/Observe/Reconcile never resend. Counter enrollment uses separate Review and Connect permissions. After each github-submit, Check its retained Desktop permission to run it once. After the original Review/caller/history return, Revoke and Check that old permission before approving a fresh Connect. Connect saves only this computer’s mapping to that exact reviewed counter/account; it neither creates a counter nor reserves a version. No token/URL/file payloads; remote settings and local workflow editing remain Desktop-only. Uncertain requests must not be replayed.\n");
++        text.push_str("GitHub actions: github-submit/status/cancel use one exact Desktop permission and IDs only. Prepare ordinary five-file setup, preflight/release or FIRST Counter through the original owner; separately approve Publish, Dispatch or Create. Pending/Observe/Reconcile never resend. Counter enrollment uses separate Review and Connect permissions. After each github-submit, Check its retained Desktop permission to run it once. After the original Review/caller/history return, Revoke and Check that old permission before approving a fresh Connect. Connect saves only this computer’s mapping to that exact reviewed counter/account; it neither creates a counter nor reserves a version. No token/URL/file payloads. Remote settings stay Desktop-only; macOS local workflow editing uses the separate workflow-edit commands and exact Desktop preview. Uncertain requests must not be replayed.\n");
+         text.push_str("Hosted Play cleanup: explicit Desktop review/one-use permission; mutating, not publishing. A dispatch ACK never confirms cleanup.\n  mrk play-cleanup-submit PROJECT_ID SERVICE_INSTANCE CONSENT_ID --reviewed [--json]\n  mrk play-cleanup-status PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n  mrk play-cleanup-cancel PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n");
+         text.push_str("Future version tag: separate Desktop review/one-use permission; create-only hosted tag at the exact version commit, branch-triggered build unchanged. ACK is not tag confirmation.\n  mrk version-tag-submit PROJECT_ID SERVICE_INSTANCE CONSENT_ID --reviewed [--json]\n  mrk version-tag-status PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n  mrk version-tag-cancel PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n");
+         text.push_str("  mrk upload-key-scope PROJECT_ID [--json]\n  mrk upload-key-submit PROJECT_ID SERVICE_INSTANCE GRANT_ID --reviewed [--json]\n  mrk upload-key-status PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n  mrk upload-key-cancel PROJECT_ID SERVICE_INSTANCE REQUEST_ID [--json]\n");
+@@ -547,6 +555,7 @@
+         p::ResponseBody::UploadKeyAccess(_) | p::ResponseBody::UploadKeyRequest(_) => "Use upload-key-status with the same original request IDs; no automatic retry.\n".into(),
+         p::ResponseBody::ConfigurationRequest(s)=>configuration::human(s),
+         p::ResponseBody::InitializationRequest(s)=>initialization::human(s),
++        p::ResponseBody::WorkflowEditRequest(s)=>workflow_edit::human(s),
+         p::ResponseBody::AppleProvisioningRequest(_)|p::ResponseBody::AppleProvisioningPreparation(_)=>"Use apple-provisioning-status with the same original request IDs.\n".into(),
+         p::ResponseBody::MetadataImagesPreparation(s)=>metadata_images_prepare::human(s),
+         p::ResponseBody::MetadataImagesRequest(s)=>metadata_images::human(s),
+@@ -598,6 +607,7 @@
+     let json = args.iter().any(|a| a == "--json");
+     if configuration::recognizes(&args){return configuration::run(args);}
+     if initialization::recognizes(&args){return initialization::run(args);}
++    if workflow_edit::recognizes(&args){return workflow_edit::run(args);}
+     if metadata_images_prepare::recognizes(&args){return metadata_images_prepare::run(args);}
+     if metadata_images::recognizes(&args){return metadata_images::run(args);}
+     if metadata_text::recognizes(&args){return metadata_text::run(args);}
+diff --git a/desktop/src-tauri/src/installed_cli_ipc.rs b/desktop/src-tauri/src/installed_cli_ipc.rs
+--- a/desktop/src-tauri/src/installed_cli_ipc.rs
++++ b/desktop/src-tauri/src/installed_cli_ipc.rs
+@@ -306,6 +306,7 @@
+         p::ResponseBody::LocalHistoryRequest(view)=>service.android_tools_client_current(&client,&view.origin.project_id)?,
+         p::ResponseBody::LocalHistoryAccess(view)=>match &view.project_id{Some(id)=>service.android_tools_client_current(&client,id)?,None=>service.client_current(&client)?},
+         p::ResponseBody::InitializationRequest(view)=>service.android_tools_client_current(&client,&view.origin.project_id)?,
++        p::ResponseBody::WorkflowEditRequest(view)=>service.android_tools_client_current(&client,&view.origin.project_id)?,
+         p::ResponseBody::MetadataImagesPreparation(view)=>service.android_tools_client_current(&client,&view.origin.project_id)?,
+         p::ResponseBody::MetadataImagesRequest(view)=>service.android_tools_client_current(&client,&view.origin.project_id)?,
+         p::ResponseBody::MetadataImagesAccess(view)=>match &view.project_id{Some(id)=>service.android_tools_client_current(&client,id)?,None=>service.client_current(&client)?},
+diff --git a/desktop/src-tauri/src/installed_cli_main.rs b/desktop/src-tauri/src/installed_cli_main.rs
+--- a/desktop/src-tauri/src/installed_cli_main.rs
++++ b/desktop/src-tauri/src/installed_cli_main.rs
+@@ -15,7 +15,9 @@
+ mod service_version_edit_prepare_requests;
+ mod service_configuration_protocol;
+ mod service_initialization_protocol;
++mod service_workflow_edit_protocol;
+ mod service_initialization_requests;
++mod service_workflow_edit_requests;
+ mod bounded_json_seed;
+ mod service_metadata_images_protocol;
+ mod service_metadata_images_requests;
+diff --git a/desktop/src-tauri/src/installed_runtime_macos.rs b/desktop/src-tauri/src/installed_runtime_macos.rs
+--- a/desktop/src-tauri/src/installed_runtime_macos.rs
++++ b/desktop/src-tauri/src/installed_runtime_macos.rs
+@@ -589,7 +589,7 @@
+     "git_push_bootstrap.py"
+ }
+ struct Record { state: State, fd: Option<OwnedFd>, parent: Option<usize>, name: String, identity: Option<Identity>, android_flags: Option<u32> }
+-struct Book { upload_key_inspection:bool, initialization_agent_inspection:bool, records: Vec<Record>, started: bool, inspected: bool, prepared: bool, unknown: bool, closed: bool,
++struct Book { upload_key_inspection:bool, initialization_agent_inspection:bool,workflow_edit_agent_inspection:bool, records: Vec<Record>, started: bool, inspected: bool, prepared: bool, unknown: bool, closed: bool,
+     tool_ca_required: bool, tool_ca: Option<(usize,u64,String)>,
+     fetch_helper_required:bool,fetch_helper:Option<usize>,
+     push_helper_required:bool,push_helper:Option<usize>,
+@@ -634,7 +634,7 @@
+     Ok(Identity::of(s))
+ }
+ impl Book {
+-    fn new() -> Self { Self { upload_key_inspection:false, initialization_agent_inspection:false, records: Vec::new(), started: false, inspected: false, prepared: false, unknown: false, closed: false,
++    fn new() -> Self { Self { upload_key_inspection:false, initialization_agent_inspection:false,workflow_edit_agent_inspection:false, records: Vec::new(), started: false, inspected: false, prepared: false, unknown: false, closed: false,
+         history_nomination: None, history_provider: None, tool_ca_required:false, tool_ca:None,fetch_helper_required:false,fetch_helper:None,push_helper_required:false,push_helper:None,
+         store: None,
+         #[cfg(not(feature = "macos-android-registration-helper"))]
+@@ -1122,7 +1122,7 @@
+     fn inspect(&mut self, selection: &VerifiedRuntime, end: Instant, stop: &watch::Receiver<bool>) -> Result<()> {
+         if !self.inspection_ready(){return Err(AdmissionFailure::AlreadyUsed);}
+         self.records.try_reserve_exact(crate::macos_install_record::RUNTIME_RECORD_LIMIT).map_err(native_error)?;
+-        if (self.upload_key_inspection||self.initialization_agent_inspection)&&self.records.capacity()>crate::macos_install_record::RUNTIME_RECORD_LIMIT{return Err(AdmissionFailure::Bounds);}
++        if (self.upload_key_inspection||self.initialization_agent_inspection||self.workflow_edit_agent_inspection)&&self.records.capacity()>crate::macos_install_record::RUNTIME_RECORD_LIMIT{return Err(AdmissionFailure::Bounds);}
+         self.protected_app_once(end, stop)?;
+         if selection.cwd != runtime_root() { return Err(AdmissionFailure::Inventory); }
+         let root = self.chain(&selection.cwd, end, stop)?;
+@@ -1141,7 +1141,7 @@
+             || option_env!("MRK_BUNDLED_PROTOCOL_SHA256") != Some(PROTOCOL_SHA)
+             || manifest.files.is_empty() || manifest.files.len() > crate::macos_install_record::FILE_LIMIT
+             || digest(&serde_json::to_vec(&manifest.files).map_err(native_error)?) != manifest.inventory_sha256 { return Err(AdmissionFailure::Inventory); }
+-        if self.history_nomination.is_some()||self.upload_key_inspection||self.initialization_agent_inspection{history_runtime::history_manifest_reserve(&manifest.files)?;}
++        if self.history_nomination.is_some()||self.upload_key_inspection||self.initialization_agent_inspection||self.workflow_edit_agent_inspection{history_runtime::history_manifest_reserve(&manifest.files)?;}
+         let store_present = crate::macos_store_runtime::validate(manifest.files.iter()
+             .map(|file| (file.path.as_str(), file.size))).map_err(|_| AdmissionFailure::Inventory)?;
+         if self.store.is_some() && !store_present { return Err(AdmissionFailure::Inventory); }
+@@ -1155,7 +1155,7 @@
+                 || (file.path == "core.zip" && file.sha256 != manifest.core_sha256) { return Err(AdmissionFailure::Inventory); }
+             previous = file.path.clone(); let mut name = file.path.as_str();
+             while let Some((parent, _)) = name.rsplit_once('/') {
+-                if (self.upload_key_inspection||self.initialization_agent_inspection)&&!directories.contains(parent)&&directories.len()>=crate::macos_install_record::ENTRY_LIMIT{return Err(AdmissionFailure::Bounds);}
++                if (self.upload_key_inspection||self.initialization_agent_inspection||self.workflow_edit_agent_inspection)&&!directories.contains(parent)&&directories.len()>=crate::macos_install_record::ENTRY_LIMIT{return Err(AdmissionFailure::Bounds);}
+                 history_runtime::history_prefix_insert_allowed(self,directories.len(),directories.contains(parent))?;
+                 directories.insert(parent.to_owned()); name = parent;
+             }
+@@ -1430,6 +1430,9 @@
+ slots!(ConfigurationRuntimeSlots, ConfigurationInstalledRuntime, runtime::ConfigurationInstalledProfile);
+ slots!(GitHubWorkflowRuntimeSlots, GitHubWorkflowInstalledRuntime, runtime::GitHubWorkflowInstalledProfile);
+ slots!(ProjectInitializationRuntimeSlots, ProjectInitializationInstalledRuntime, runtime::ProjectInitializationInstalledProfile);
++#[path = "workflow_edit_runtime_macos.rs"]
++mod workflow_edit_agent;
++
+ #[path = "initialization_runtime_macos.rs"]
+ mod initialization_runtime;
+ slots!(ProjectIdentityRuntimeSlots, ProjectIdentityInstalledRuntime, runtime::ProjectIdentityInstalledProfile);
+diff --git a/desktop/src-tauri/src/lib.rs b/desktop/src-tauri/src/lib.rs
+--- a/desktop/src-tauri/src/lib.rs
++++ b/desktop/src-tauri/src/lib.rs
+@@ -131,7 +131,9 @@
+ mod service_version_edit_prepare_requests;
+ mod service_configuration_protocol;
+ mod service_initialization_protocol;
++mod service_workflow_edit_protocol;
+ mod service_initialization_requests;
++mod service_workflow_edit_requests;
+ mod bounded_json_seed;
+ mod service_metadata_images_protocol;
+ mod service_metadata_images_requests;
+diff --git a/desktop/src-tauri/src/service_configuration_requests.rs b/desktop/src-tauri/src/service_configuration_requests.rs
+--- a/desktop/src-tauri/src/service_configuration_requests.rs
++++ b/desktop/src-tauri/src/service_configuration_requests.rs
+@@ -499,12 +499,13 @@
+         }
+     }
+ }
+-// One Book/mutex/32-row budget for all three fixed editor families.
+-enum SharedRow { Initialization(Arc<crate::service_initialization_requests::Entry>), Configuration(Arc<Entry>), MetadataText(Arc<crate::service_metadata_text_requests::Entry>), MetadataImages(Arc<crate::service_metadata_images_requests::Entry>), MetadataImagesPrepare(Arc<crate::service_metadata_images_prepare_requests::Entry>) }
++// One Book/mutex/32-row budget for these fixed editor families.
++enum SharedRow { WorkflowEdit(Arc<crate::service_workflow_edit_requests::Entry>), Initialization(Arc<crate::service_initialization_requests::Entry>), Configuration(Arc<Entry>), MetadataText(Arc<crate::service_metadata_text_requests::Entry>), MetadataImages(Arc<crate::service_metadata_images_requests::Entry>), MetadataImagesPrepare(Arc<crate::service_metadata_images_prepare_requests::Entry>) }
+ impl SharedRow {
+-    fn origin(&self)->Option<&p::Query> {match self{Self::Initialization(e)=>Some(&e.input.origin),Self::Configuration(e)=>Some(&e.input.origin),Self::MetadataText(e)=>Some(&e.input().origin),Self::MetadataImages(e)=>e.origin(),Self::MetadataImagesPrepare(e)=>Some(&e.input.origin)}}
+-    fn occupied(&self)->Result<bool,Error>{match self{Self::Initialization(e)=>e.occupied(),Self::Configuration(e)=>{let _=e.status()?;e.occupied()},Self::MetadataText(e)=>{let _=e.status()?;e.occupied()},Self::MetadataImages(e)=>e.occupied(),Self::MetadataImagesPrepare(e)=>e.occupied()}}
+-    fn cancel(&self,at:Instant)->Result<(),Error>{match self{Self::Initialization(e)=>e.cancel(at),Self::Configuration(e)=>e.cancel(at),Self::MetadataText(e)=>e.cancel(at),Self::MetadataImages(e)=>e.revoke(at),Self::MetadataImagesPrepare(e)=>e.cancel(at)}}
++    fn origin(&self)->Option<&p::Query> {match self{Self::WorkflowEdit(e)=>Some(&e.input.origin),Self::Initialization(e)=>Some(&e.input.origin),Self::Configuration(e)=>Some(&e.input.origin),Self::MetadataText(e)=>Some(&e.input().origin),Self::MetadataImages(e)=>e.origin(),Self::MetadataImagesPrepare(e)=>Some(&e.input.origin)}}
++    fn occupied(&self)->Result<bool,Error>{match self{Self::WorkflowEdit(e)=>e.occupied(),Self::Initialization(e)=>e.occupied(),Self::Configuration(e)=>{let _=e.status()?;e.occupied()},Self::MetadataText(e)=>{let _=e.status()?;e.occupied()},Self::MetadataImages(e)=>e.occupied(),Self::MetadataImagesPrepare(e)=>e.occupied()}}
++    fn cancel(&self,at:Instant)->Result<(),Error>{match self{Self::WorkflowEdit(e)=>e.cancel(at),Self::Initialization(e)=>e.cancel(at),Self::Configuration(e)=>e.cancel(at),Self::MetadataText(e)=>e.cancel(at),Self::MetadataImages(e)=>e.revoke(at),Self::MetadataImagesPrepare(e)=>e.cancel(at)}}
++    fn workflow_edit(&self)->Option<&Arc<crate::service_workflow_edit_requests::Entry>>{match self{Self::WorkflowEdit(e)=>Some(e),_=>None}}
+     fn initialization(&self)->Option<&Arc<crate::service_initialization_requests::Entry>>{match self{Self::Initialization(e)=>Some(e),_=>None}}
+     fn image_preparation(&self)->Option<&Arc<crate::service_metadata_images_prepare_requests::Entry>>{match self{Self::MetadataImagesPrepare(e)=>Some(e),_=>None}}
+     fn images(&self)->Option<&Arc<crate::service_metadata_images_requests::Entry>>{match self{Self::MetadataImages(e)=>Some(e),_=>None}}
+@@ -714,7 +715,7 @@
+             .rows
+             .iter()
+             .filter_map(|r|r.origin().filter(|q|&q.project_id==project).map(|q|AdditionalRequest {
+-                family: match r {SharedRow::Initialization(_)=>AdditionalFamily::Initialization,SharedRow::Configuration(_)=>AdditionalFamily::Configuration,SharedRow::MetadataText(_)=>AdditionalFamily::MetadataText,SharedRow::MetadataImages(_)|SharedRow::MetadataImagesPrepare(_)=>AdditionalFamily::MetadataImages},
++                family: match r {SharedRow::WorkflowEdit(_)=>AdditionalFamily::WorkflowEdit,SharedRow::Initialization(_)=>AdditionalFamily::Initialization,SharedRow::Configuration(_)=>AdditionalFamily::Configuration,SharedRow::MetadataText(_)=>AdditionalFamily::MetadataText,SharedRow::MetadataImages(_)|SharedRow::MetadataImagesPrepare(_)=>AdditionalFamily::MetadataImages},
+                 request_id:q.request_id.clone(),
+             }))
+             .collect())
+@@ -734,3 +735,5 @@
+
+ #[path="service_initialization_book.rs"]
+ mod initialization;
++#[path="service_workflow_edit_book.rs"]
++mod workflow_edit;
+diff --git a/desktop/src-tauri/src/service_protocol.rs b/desktop/src-tauri/src/service_protocol.rs
+--- a/desktop/src-tauri/src/service_protocol.rs
++++ b/desktop/src-tauri/src/service_protocol.rs
+@@ -256,9 +256,13 @@
+     #[serde(rename="upload-key.status")] UploadKeyStatus(crate::service_upload_key_protocol::Query),
+     #[serde(rename="upload-key.cancel")] UploadKeyCancel(crate::service_upload_key_protocol::Query),
+     #[serde(rename="initialization.prepare")] InitializationPrepare(crate::service_initialization_protocol::Prepare),
++    #[serde(rename="workflow-edit.prepare")] WorkflowEditPrepare(crate::service_workflow_edit_protocol::Prepare),
+     #[serde(rename="initialization.apply")] InitializationApply(crate::service_initialization_protocol::Apply),
++    #[serde(rename="workflow-edit.apply")] WorkflowEditApply(crate::service_workflow_edit_protocol::Apply),
+     #[serde(rename="initialization.status")] InitializationStatus(crate::service_initialization_protocol::Query),
++    #[serde(rename="workflow-edit.status")] WorkflowEditStatus(crate::service_workflow_edit_protocol::Query),
+     #[serde(rename="initialization.cancel")] InitializationCancel(crate::service_initialization_protocol::Query),
++    #[serde(rename="workflow-edit.cancel")] WorkflowEditCancel(crate::service_workflow_edit_protocol::Query),
+     #[serde(rename="configuration.read")] ConfigurationRead(crate::service_configuration_protocol::Read),
+     #[serde(rename="configuration.prepare")] ConfigurationPrepare(crate::service_configuration_protocol::Prepare),
+     #[serde(rename="configuration.apply")] ConfigurationApply(crate::service_configuration_protocol::Apply),
+@@ -359,6 +363,7 @@
+     UploadKeyAccess(crate::service_upload_key_protocol::Access),
+     UploadKeyRequest(crate::service_upload_key_protocol::Status),
+     InitializationRequest(crate::service_initialization_protocol::Status),
++    WorkflowEditRequest(crate::service_workflow_edit_protocol::Status),
+     ConfigurationRequest(crate::service_configuration_protocol::Status),
+     VersionEditRequest(crate::service_version_edit_protocol::Status),
+     VersionEditPreparation(crate::service_version_edit_prepare_protocol::Status),
+@@ -456,7 +461,9 @@
+     if let RequestBody::ConfigurationPrepare(input)=&request.request{input.change.validate()?;}
+     if let RequestBody::ConfigurationApply(input)=&request.request{if !input.reviewed{return Err(Error::InvalidRequest);}}
+     if let RequestBody::InitializationPrepare(input)=&request.request{input.validate()?;}
++    if let RequestBody::WorkflowEditPrepare(input)=&request.request{input.validate()?;}
+     if let RequestBody::InitializationApply(input)=&request.request{if !input.reviewed{return Err(Error::InvalidRequest)}}
++    if let RequestBody::WorkflowEditApply(input)=&request.request{if !input.reviewed{return Err(Error::InvalidRequest)}}
+     if let RequestBody::MetadataImagesPrepare(input)=&request.request{input.validate()?;}
+     if let RequestBody::MetadataImagesSubmit(input)=&request.request{input.validate()?;}
+     if let RequestBody::IdentitySubmit(input) = &request.request { input.validate()?; }
+@@ -540,6 +547,7 @@
+             crate::service_metadata_text_protocol::bounded(response,row.limit())?;
+         },
+         ResponseBody::InitializationRequest(row)=>{row.validate()?;if row.origin.service_instance!=response.service_instance{return Err(Error::InvalidRequest)}crate::service_initialization_protocol::bounded(response,crate::service_initialization_protocol::STATUS_BYTES)?;}
++        ResponseBody::WorkflowEditRequest(row)=>{row.validate()?;if row.origin.service_instance!=response.service_instance{return Err(Error::InvalidRequest)}crate::service_workflow_edit_protocol::bounded(response,crate::service_workflow_edit_protocol::STATUS_BYTES)?;}
+         ResponseBody::MetadataImagesPreparation(row)=>{row.validate()?;if row.origin.service_instance!=response.service_instance{return Err(Error::InvalidRequest)}crate::service_metadata_images_prepare_protocol::bounded(response,crate::service_metadata_images_prepare_protocol::STATUS_BYTES)?;}
+         ResponseBody::MetadataImagesAccess(row)=>{
+             row.validate()?;if row.service_instance!=response.service_instance{return Err(Error::InvalidRequest)}
+diff --git a/desktop/src-tauri/src/service_request_catalogue.rs b/desktop/src-tauri/src/service_request_catalogue.rs
+--- a/desktop/src-tauri/src/service_request_catalogue.rs
++++ b/desktop/src-tauri/src/service_request_catalogue.rs
+@@ -181,6 +181,7 @@
+     MetadataText,
+     MetadataImages,
+     Initialization,
++    WorkflowEdit,
+     Store,
+     LocalHistory,
+     PlayCleanup,
+@@ -197,7 +198,7 @@
+             Self::Identity => 1,
+             Self::VersionReservation => 2,
+             Self::AndroidUploadKey => 3,
+-            Self::Configuration | Self::MetadataText | Self::MetadataImages | Self::Initialization => 4,
++            Self::Configuration | Self::MetadataText | Self::MetadataImages | Self::Initialization | Self::WorkflowEdit => 4,
+             Self::Store | Self::LocalHistory => 5,
+             Self::PlayCleanup | Self::VersionTag => 6,
+             Self::AppleProvisioning=>7,
+@@ -217,6 +218,7 @@
+             Self::AndroidUploadKey => "upload-key-status",
+             Self::Configuration => "configuration-status",
+             Self::Initialization => "initialization-status",
++            Self::WorkflowEdit => "workflow-edit-status",
+             Self::MetadataText => "metadata-text-status",
+             Self::MetadataImages => "metadata-images-status",
+             Self::Store => "store-status",
+diff --git a/desktop/src-tauri/src/shell.rs b/desktop/src-tauri/src/shell.rs
+--- a/desktop/src-tauri/src/shell.rs
++++ b/desktop/src-tauri/src/shell.rs
+@@ -1337,6 +1337,12 @@
+ async fn github_workflow_edit_open(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<WorkflowEditStatus, BridgeError> {
+     fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
+     let window = edit_window(&webview)?;
++    #[cfg(any(target_os="linux",target_os="macos"))]
++    if let tauri::ipc::InvokeBody::Raw(bytes)=request.body(){
++        let (q,input)=crate::asset_session::agent_workflow_edit::raw_request(bytes,crate::service_workflow_edit_requests::Kind::Open)?;
++        drop(request); // Original bounded RAW graph ends before the native step.
++        return state.document.agent_workflow_edit_command(window,q,input);
++    }
+     let args = edit_commands::workflow_open(request_body(&request)?)?;
+     #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"), feature = "macos-installed-observation", not(feature = "macos-installed-installer")))))]
+     if let Some(q) = &state.observation { q.workflow_open_request(args.project_id()); }
+@@ -1352,6 +1358,12 @@
+ async fn github_workflow_edit_prepare(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<WorkflowEditStatus, BridgeError> {
+     fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
+     let window = edit_window(&webview)?;
++    #[cfg(any(target_os="linux",target_os="macos"))]
++    if let tauri::ipc::InvokeBody::Raw(bytes)=request.body(){
++        let (q,input)=crate::asset_session::agent_workflow_edit::raw_request(bytes,crate::service_workflow_edit_requests::Kind::Prepare)?;
++        drop(request); // Original bounded RAW graph ends before the native step.
++        return state.document.agent_workflow_edit_command(window,q,input);
++    }
+     let args = edit_commands::workflow_prepare_request(request_body(&request)?)?;
+     #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"), feature = "macos-installed-observation", not(feature = "macos-installed-installer")))))]
+     if let (Some(q), edit_commands::WorkflowPrepare::Edit(args)) = (&state.observation, &args) { q.workflow_prepare_request(args); }
+@@ -1367,6 +1379,12 @@
+ async fn github_workflow_edit_apply(webview: Webview, request: tauri::ipc::Request<'_>, state: State<'_, ShellState>) -> Result<WorkflowEditStatus, BridgeError> {
+     fixture_command!(state, Forbidden, observed, BridgeError::new("sg1_fixture_refused", "This fixture does not admit that action."));
+     let window = edit_window(&webview)?;
++    #[cfg(any(target_os="linux",target_os="macos"))]
++    if let tauri::ipc::InvokeBody::Raw(bytes)=request.body(){
++        let (q,input)=crate::asset_session::agent_workflow_edit::raw_request(bytes,crate::service_workflow_edit_requests::Kind::Apply)?;
++        drop(request); // Original bounded RAW graph ends before the native step.
++        return state.document.agent_workflow_edit_command(window,q,input);
++    }
+     let args = edit_commands::workflow_apply(request_body(&request)?)?;
+     #[cfg(all(test, debug_assertions, feature = "desktop-shell", feature = "custom-protocol", not(feature = "development-runtime"), not(feature = "ubuntu-runtime-publisher"), any(all(target_os = "linux", target_arch = "x86_64", target_env = "gnu"), all(target_os = "macos", target_pointer_width = "64", any(target_arch = "aarch64", target_arch = "x86_64"), feature = "macos-installed-observation", not(feature = "macos-installed-installer")))))]
+     if let Some(q) = &state.observation { q.workflow_apply_request(args.session_id(), args.plan_token()); }
+@@ -1781,6 +1799,34 @@
+     {let q=edit_commands::agent_initialization_query(request_body(&request)?)?;serde_json::to_value(state.document.revoke_agent_initialization(window,q)?).map_err(|_|BridgeError::protocol())}
+     #[cfg(not(any(target_os="linux",target_os="macos")))]
+     {let _=(window,request,state);Err(BridgeError::unavailable("Initialization delegation is unavailable on this platform."))}
++}
++
++#[tauri::command]
++async fn agent_workflow_edit_status(webview:Webview,request:tauri::ipc::Request<'_>,state:State<'_,ShellState>)->Result<Value,BridgeError>{
++    fixture_command!(state, Forbidden, observed, BridgeError::unavailable("WorkflowEdit delegation has no fixture admission."));
++    let window=edit_window(&webview)?;
++    #[cfg(any(target_os="linux",target_os="macos"))]
++    {let q=edit_commands::agent_workflow_edit_status(request_body(&request)?)?;serde_json::to_value(state.document.agent_workflow_edit_status(q.as_ref())?).map_err(|_|BridgeError::protocol())}
++    #[cfg(not(any(target_os="linux",target_os="macos")))]
++    {let _=(window,request,state);Err(BridgeError::unavailable("WorkflowEdit delegation is unavailable on this platform."))}
++}
++#[tauri::command]
++async fn allow_agent_workflow_edit(webview:Webview,request:tauri::ipc::Request<'_>,state:State<'_,ShellState>)->Result<Value,BridgeError>{
++    fixture_command!(state, Forbidden, observed, BridgeError::unavailable("WorkflowEdit delegation has no fixture admission."));
++    let window=edit_window(&webview)?;
++    #[cfg(any(target_os="linux",target_os="macos"))]
++    {let q=edit_commands::agent_workflow_edit_allow(request_body(&request)?)?;serde_json::to_value(state.document.allow_agent_workflow_edit(window,q)?).map_err(|_|BridgeError::protocol())}
++    #[cfg(not(any(target_os="linux",target_os="macos")))]
++    {let _=(window,request,state);Err(BridgeError::unavailable("WorkflowEdit delegation is unavailable on this platform."))}
++}
++#[tauri::command]
++async fn revoke_agent_workflow_edit(webview:Webview,request:tauri::ipc::Request<'_>,state:State<'_,ShellState>)->Result<Value,BridgeError>{
++    fixture_command!(state, Forbidden, observed, BridgeError::unavailable("WorkflowEdit delegation has no fixture admission."));
++    let window=edit_window(&webview)?;
++    #[cfg(any(target_os="linux",target_os="macos"))]
++    {let q=edit_commands::agent_workflow_edit_query(request_body(&request)?)?;serde_json::to_value(state.document.revoke_agent_workflow_edit(window,q)?).map_err(|_|BridgeError::protocol())}
++    #[cfg(not(any(target_os="linux",target_os="macos")))]
++    {let _=(window,request,state);Err(BridgeError::unavailable("WorkflowEdit delegation is unavailable on this platform."))}
+ }
+
+ #[tauri::command]
+@@ -3994,7 +4040,7 @@
+ #[cfg(any(target_os="linux",target_os="macos"))]
+ struct ConfigurationAgentRelayGuard(crate::asset_session::DocumentBinding);
+ #[cfg(any(target_os="linux",target_os="macos"))]
+-impl Drop for ConfigurationAgentRelayGuard{fn drop(&mut self){self.0.agent_configuration_relay_lost();self.0.agent_initialization_relay_lost();self.0.agent_metadata_text_relay_lost();self.0.agent_metadata_images_relay_lost();}}
++impl Drop for ConfigurationAgentRelayGuard{fn drop(&mut self){self.0.agent_configuration_relay_lost();self.0.agent_initialization_relay_lost();self.0.agent_workflow_edit_relay_lost();self.0.agent_metadata_text_relay_lost();self.0.agent_metadata_images_relay_lost();}}
+
+ fn start_relay(app: tauri::AppHandle, edits: EditOwner, document: DocumentBinding, mut stop: watch::Receiver<bool>,
+     #[cfg(any(target_os="linux",target_os="macos"))] reserve:Arc<crate::asset_session::ReserveRelay>,
+@@ -4110,6 +4156,8 @@
+         #[cfg(any(target_os="linux",target_os="macos"))]
+         let mut initialization_agent_revision=None;
+         #[cfg(any(target_os="linux",target_os="macos"))]
++        let mut workflow_edit_agent_revision=None;
++        #[cfg(any(target_os="linux",target_os="macos"))]
+         let mut metadata_text_revision=None;
+         #[cfg(any(target_os="linux",target_os="macos"))]
+         let mut metadata_images_agent_snapshot=None;
+@@ -4193,6 +4241,13 @@
+                 let key=(status.service_instance.clone(),status.request.as_ref().map(|s|(s.origin.clone(),s.revision)));
+                 if initialization_agent_revision.as_ref()!=Some(&key){
+                     let _=app.emit_to(MAIN_WINDOW,crate::service_initialization_protocol::EVENT,&status);initialization_agent_revision=Some(key);
++                }
++            }
++            #[cfg(any(target_os="linux",target_os="macos"))]
++            if let Ok(Some(status))=document.agent_workflow_edit_relay(){
++                let key=(status.service_instance.clone(),status.request.as_ref().map(|s|(s.origin.clone(),s.revision)));
++                if workflow_edit_agent_revision.as_ref()!=Some(&key){
++                    let _=app.emit_to(MAIN_WINDOW,crate::service_workflow_edit_protocol::EVENT,&status);workflow_edit_agent_revision=Some(key);
+                 }
+             }
+             #[cfg(any(target_os="linux",target_os="macos"))]
+@@ -6194,6 +6249,7 @@
+             agent_version_edit_status, allow_agent_version_edit_apply, revoke_agent_version_edit,
+             agent_configuration_status, allow_agent_configuration_apply, revoke_agent_configuration,
+             agent_initialization_status, allow_agent_initialization, revoke_agent_initialization,
++            agent_workflow_edit_status, allow_agent_workflow_edit, revoke_agent_workflow_edit,
+             agent_metadata_images_prepare_status, agent_metadata_images_inspect, agent_metadata_images_prepare_cancel,
+             agent_metadata_images_status, allow_agent_metadata_images_apply, revoke_agent_metadata_images,
+             agent_metadata_text_status, allow_agent_metadata_text_apply, revoke_agent_metadata_text,
+diff --git a/desktop/src-tauri/tests/installed_shell_observation.rs b/desktop/src-tauri/tests/installed_shell_observation.rs
+--- a/desktop/src-tauri/tests/installed_shell_observation.rs
++++ b/desktop/src-tauri/tests/installed_shell_observation.rs
+@@ -44,7 +44,9 @@
+ #[path="../src/service_version_edit_prepare_requests.rs"] mod service_version_edit_prepare_requests;
+ #[path="../src/service_configuration_protocol.rs"] mod service_configuration_protocol;
+ #[path="../src/service_initialization_protocol.rs"] mod service_initialization_protocol;
++#[path="../src/service_workflow_edit_protocol.rs"] mod service_workflow_edit_protocol;
+ #[path="../src/service_initialization_requests.rs"] mod service_initialization_requests;
++#[path="../src/service_workflow_edit_requests.rs"] mod service_workflow_edit_requests;
+ #[path="../src/bounded_json_seed.rs"]
+ mod bounded_json_seed;
+ #[path="../src/service_metadata_images_protocol.rs"]

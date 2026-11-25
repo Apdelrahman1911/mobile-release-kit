@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import base64
 import ast
+import builtins
 import json
 import os
 import plistlib
@@ -41,6 +42,42 @@ from mobile_release.reporting import Status
 
 from .helpers import android_config, ios_config, write_project
 from .ios_entitlement_helpers import profile as fictional_profile
+
+
+class CredentialFingerprintTextTests(unittest.TestCase):
+    def test_openssl_libressl_and_keytool_fingerprints_share_exact_sha256(self) -> None:
+        pairs = ":".join(["AB"] * 32)
+        for line in (
+            f"sha256 Fingerprint={pairs}",
+            f"SHA256 Fingerprint={pairs}",
+            f"SHA-256 fingerprint={pairs.lower()}",
+            f"\t SHA256: {pairs}  \r",
+            f"SHA256: {'ab' * 32}",
+        ):
+            with self.subTest(line=line):
+                self.assertEqual(
+                    credential_module._fingerprint_from_text(
+                        f"Certificate details\n{line}\nSignature algorithm: SHA256withRSA\n"
+                    ),
+                    "ab" * 32,
+                )
+
+    def test_malformed_or_partial_fingerprint_never_becomes_approved_digest(self) -> None:
+        pairs = ":".join(["AB"] * 32)
+        for line in (
+            f"SHA1: {pairs}",
+            f"SHA256: {'ab' * 31}",
+            f"SHA256: {'ab' * 33}",
+            f"SHA256: {pairs}:AB",
+            f"SHA256: {pairs}:",
+            f"SHA256: :{pairs}",
+            f"SHA256: {pairs.replace(':', '::', 1)}",
+            f"SHA256: {pairs} trailing-data",
+            f"Unrelated text SHA256: {pairs}",
+            "Signature algorithm name: SHA256withRSA",
+        ):
+            with self.subTest(line=line):
+                self.assertIsNone(credential_module._fingerprint_from_text(line))
 
 
 class CredentialMetadataTests(unittest.TestCase):
@@ -596,11 +633,21 @@ class CredentialMetadataTests(unittest.TestCase):
             key = private_root / "AuthKey.p8"
             key.write_bytes(b"private-p8-content")
             key.chmod(0o600)
-            environment = store_lane_environment(
-                config,
-                values={"MOBILE_RELEASE_ASC_PRIVATE_KEY_P8_PATH": str(key)},
-                platforms=("ios",),
-            )
+            original_import = builtins.__import__
+
+            def import_dependency(name, globals=None, locals=None, fromlist=(), level=0):
+                if name.rsplit(".", 1)[-1] in {
+                    "_desktop_android_signing_material", "_desktop_ios_signing_material",
+                }:
+                    self.fail("ordinary Store credentials imported the Desktop signing owners")
+                return original_import(name, globals, locals, fromlist, level)
+
+            with patch.object(builtins, "__import__", import_dependency):
+                environment = store_lane_environment(
+                    config,
+                    values={"MOBILE_RELEASE_ASC_PRIVATE_KEY_P8_PATH": str(key)},
+                    platforms=("ios",),
+                )
             self.assertEqual(
                 base64.b64decode(environment["MOBILE_RELEASE_ASC_PRIVATE_KEY_P8_BASE64"]),
                 b"private-p8-content",
