@@ -208,7 +208,7 @@ class ConfigDiscoveryTests(unittest.TestCase):
                     else:
                         self.assertEqual(selected.release_version(), expected)
                     path.assert_called_once_with("version.properties")
-                    read.assert_called_once_with(source)
+                    read.assert_called_once_with(source, budget=None)
 
     def test_runtime_rejects_bool_schema_version_colon_fingerprint_and_length_overflow(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:
