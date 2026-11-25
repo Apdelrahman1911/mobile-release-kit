@@ -414,7 +414,14 @@ def _worker(handles, parent, group, root, name, task, deadline, write_json, *, h
     code = WORKER_ERROR
     try:
         handles.close_except(("w-runr", "w-statew"))
-        require(not handles.errors and os.getppid() == parent and os.getpgrp() == group, "worker original group setup")
+        parent_matches = os.getppid() == parent
+        group_matches = os.getpgrp() == group
+        if name in {"healthy", "crash", "deadline"} and (handles.errors or not parent_matches or not group_matches):
+            _focused_record(dict(case=name, role="worker", step="original-group-setup",
+                                 parentMatches=parent_matches, groupMatches=group_matches,
+                                 closeErrors=[(type(error).__name__, error.errno if isinstance(error, OSError) else None)
+                                              for error in handles.errors[:8]]))
+        require(not handles.errors and parent_matches and group_matches, "worker original group setup")
         send(handles.get("w-statew"), b"READY\n", deadline)
         message = bytearray()
         while b"\n" not in message:
