@@ -2585,31 +2585,33 @@ def workspace_cli_check(selection, work, evidence, steps, result):
         need(overview["runtimeCard"] == "bundled" and not overview["workspaceErrorMarkers"], "workspace-first-connection")
         need(overview["cliStatus"]["returncode"] == 3 and overview["cliStatus"]["guidance"], "workspace-default-denial")
         click_when_ready(pid, work, "Dashboard")
-        opened = click_when_ready(pid, work, "Open project folder", "AXButton")
-        need(opened.get("clicked") == "Open project folder", "workspace-open-project-picker")
+        opened = click_when_ready(pid, work, "Choose project folder", "AXButton")
+        need(opened.get("clicked") == "Choose project folder", "workspace-open-project-picker")
         script = work / "project-picker.js"
         script.write_text(PROJECT_PICKER_JXA)
         picked = subprocess.run(["/usr/bin/osascript", "-l", "JavaScript", str(script), str(pid), str(fixture.resolve())],
                                 capture_output=True, text=True, timeout=30)
         result["picker"] = picked.stdout.strip()
         need(picked.returncode == 0 and result["picker"] == "selected", "workspace-native-picker")
+        details = "Project details & saved observations"
+        need(click_when_ready(pid, work, details).get("clicked") == details, "workspace-project-details")
         deadline = time.monotonic() + 60
         while True:
             texts = ui_query(pid, work, "texts", timeout=10).get("texts") or []
             need(not any(marker in text for marker in WORKSPACE_ERROR_MARKERS for text in texts), "workspace-view-error")
-            if str(fixture.resolve()) in texts or "org.mrk.fixture" in texts:
+            if "org.mrk.fixture" in texts:
                 break
             need(time.monotonic() < deadline, "workspace-fixture-not-observed")
             time.sleep(2)
         result["fixtureWorkspaceObserved"] = True
-        for title in ("Project settings", "Advanced · CLI / AI access", "Check access",
+        for title in ("Open all project settings", "Advanced · CLI / AI access", "Check access",
                       "Allow selected project for 1 hour"):
             action = click_when_ready(pid, work, title)
             result.setdefault("accessNavigation", []).append(action)
             need(action.get("clicked") == title, "workspace-cli-access-control")
         cli = APP / "Contents/MacOS/mrk"
         statuses = result["statusReturns"] = []
-        for expected in (0, 3):
+        for expected in (0, 4):
             deadline = time.monotonic() + 25
             while True:
                 status = subprocess.run([str(cli), "status", "--json"], capture_output=True, text=True, timeout=20)
@@ -2618,18 +2620,26 @@ def workspace_cli_check(selection, work, evidence, steps, result):
                 need(time.monotonic() < deadline, "workspace-cli-status")
                 time.sleep(1)
             statuses.append(status.returncode)
+            payload = json.loads(status.stdout + status.stderr)
+            need(type(payload) is dict, "workspace-cli-json")
             if expected == 0:
-                need(isinstance(json.loads(status.stdout), dict), "workspace-cli-json")
+                need(payload.get("error") is None, "workspace-cli-grant-refused")
                 revoked = click_when_ready(pid, work, "Turn off access", "AXButton")
                 need(revoked.get("clicked") == "Turn off access", "workspace-cli-revoke-control")
             else:
-                need(CLI_STATUS_GUIDANCE in status.stdout + status.stderr, "workspace-cli-revoke-guidance")
+                need(payload.get("error") == "access_denied", "workspace-cli-explicit-revoked-denial")
+        deadline = time.monotonic() + 15
+        while True:
+            texts = ui_query(pid, work, "texts", timeout=10).get("texts") or []
+            if "Off at last check" in texts:
+                result["offUiObservedAfterDenial"] = True
+                break
+            need(time.monotonic() < deadline, "workspace-cli-off-ui-after-denial")
+            time.sleep(1)
         result["fixtureUnchanged"] = {p.relative_to(fixture): digest(p) for p in fixture.rglob("*") if p.is_file()} == originals
         need(result["fixtureUnchanged"], "workspace-cli-modified-fixture")
         need(set(recent_crashes()) == before_crashes, "workspace-crash")
     finally:
-        subprocess.run(["/usr/sbin/screencapture", "-x", str(evidence / "screen-workspace-cli.png")],
-                       capture_output=True, timeout=60)
         stop_app(payload_pids())
 
 
@@ -2741,6 +2751,12 @@ def run_workspace_xctest(mode, row, folder, installed, work, evidence, steps, re
         (evidence / "workspace-resources.json").write_text(json.dumps(resource_samples) + "\n")
     result["cliAccessFacts"] = re.findall(
         r"(?m)^MRK_RELEASE_CLI_ACCESS_STATE=([a-z-]{2,24})$", transcript)
+    result["snapshotState"] = re.findall(
+        r"(?m)^MRK_NORMAL_SNAPSHOT_STATE=v2;sample=post-wait;waiter=(completed|timed-out|other);"
+        r"error=([0-5]);partial=([0-5]);unread=([0-5]);loading=([0-5]);empty=([0-5]);"
+        r"unsupported=([0-5]);invalid=([0-5]);missing=([0-5]);runtime=([0-5]);protocol=([0-5]);"
+        r"engineDisabled=([0-5]);engineUnavailable=([0-5]);firstKnownReason=([a-z0-9-]{1,40});nonAtomic=1$",
+        transcript)[-4:]
     result["cliRevokeCuts"] = re.findall(r"(?m)^MRK_RELEASE_CLI_REVOKE_CUT=(click-returned|off-visible)$", transcript)
     result["xctestStages"] = re.findall(r"(?m)^MRK_NORMAL_PROJECT_STAGE=([a-z0-9-]{1,70});result=(started|passed|failed)",
                                           transcript)[-60:]
