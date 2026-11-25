@@ -158,6 +158,23 @@ class UI:
             need(frame.startswith((b"GIF87a", b"GIF89a")), "ui-recording-gif")
             (self.evidence / f"{name}.gif").write_bytes(frame)
 
+    def resize(self, width, height):
+        active = call("/usr/bin/pgrep", "-f", PAYLOAD_PATTERN).stdout.splitlines()
+        need(len(active) == 1, "exact-original-payload")
+        pid = int(active[0])
+
+        def window():
+            rows = [row for row in self.command("windows.list")["windows"] if row["process_id"] == pid]
+            need(len(rows) == 1 and rows[0]["bounds"] is not None, "exact-original-window")
+            return rows[0]
+
+        original = window()
+        self.command("windows.move_resize", id=original["id"], width=width, height=height, x=20, y=55)
+        observed = window()["bounds"]
+        need(abs(observed["width"] - width) <= 1 and abs(observed["height"] - height) <= 1,
+             "observed-window-size")
+        return observed
+
 
 def open_session(work, action):
     def new_connection():
@@ -276,12 +293,24 @@ def observe(work, action, media):
         need((project / VERSION_FILE).read_bytes() == expected
              and file_hash(project / CONFIG_FILE) == original[CONFIG_FILE], "reopened-saved-values")
 
+    def window_layouts():
+        screen = json.loads(client.fetch("/v2/capabilities"))["screen"]
+        if screen["width"] < 1200 or screen["height"] < 800:
+            raise Blocked("The synthetic console is too small for the two controlled sizes")
+        results["windowBounds"] = []
+        for width, height in ((1100, 700), (1180, 740)):
+            results["windowBounds"].append(ui.resize(width, height))
+            ui.page("Overview")
+            ui.page("Project settings")
+            ui.image(f"settings-{width}x{height}")
+
     try:
         if scenario("cold-runtime-and-cli-denial", lambda: ui.record_session("cold-runtime", startup)):
             selected = scenario("project-picker-and-saved-config", select_project)
             for page in PAGES:
                 label = "nav-" + re.sub(r"[^a-z]+", "-", page.lower()).strip("-")
                 scenario(label, lambda page=page: ui.page(page))
+            scenario("window-layouts", window_layouts)
             if selected:
                 scenario("cli-grant-and-revoke", permission_lifecycle)
                 scenario("version-cancel-save-quit-reopen", versions)
@@ -290,7 +319,7 @@ def observe(work, action, media):
                 scenarios["version-cancel-save-quit-reopen"] = dict(status="Blocked", reason="Fixture project selection failed")
         else:
             for name in ("project-picker-and-saved-config", "cli-grant-and-revoke", "workspace-navigation",
-                         "version-cancel-save-quit-reopen"):
+                         "version-cancel-save-quit-reopen", "window-layouts"):
                 scenarios[name] = dict(status="Blocked", reason="Original UI session or initialization did not pass")
     finally:
         save()

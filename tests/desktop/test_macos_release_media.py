@@ -73,3 +73,16 @@ class FrozenMediaTests(unittest.TestCase):
         for key in ("installedProducerSha256", "installedInventorySha256", "signingPolicySha256"):
             with self.subTest(key=key), self.assertRaisesRegex(ValueError, "release-matching-pair"):
                 pair(dict(removal, **{key: "0" * 64}))
+
+    def test_draft_must_be_private_and_each_asset_must_match_the_frozen_roster(self):
+        expected = {path.name: media.record(path) for path in self.root.iterdir()}
+        rows = [dict(id=index, name=name, state="uploaded", size=record["bytes"], digest="sha256:" + record["sha256"])
+                for index, (name, record) in enumerate(expected.items(), 1)]
+        draft = dict(draft=True, prerelease=True, published_at=None, tag_name="desktop-v0.2.13",
+                     target_commitish=self.manifest["sourceCommit"], assets=rows)
+        self.assertEqual(media.draft_assets(draft, self.manifest, expected), rows)
+        for changed in (dict(draft=False), dict(prerelease=False), dict(target_commitish="main"),
+                        dict(assets=rows + [dict(rows[0], name="old.dmg")]),
+                        dict(assets=[dict(rows[0], digest="sha256:" + "0" * 64), *rows[1:]])):
+            with self.subTest(changed=changed), self.assertRaisesRegex(ValueError, "release-(private-)?draft"):
+                media.draft_assets(dict(draft, **changed), self.manifest, expected)

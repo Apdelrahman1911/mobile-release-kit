@@ -15,6 +15,8 @@ import tomllib
 
 
 TARGET = "aarch64-apple-darwin"
+REPOSITORY = "Apdelrahman1911/mobile-release-kit"
+SIGNER_WORKFLOW = REPOSITORY + "/.github/workflows/desktop-macos-installed.yml"
 MANIFEST = "RELEASE-MANIFEST.json"
 CHECKSUMS = "SHA256SUMS"
 PROFILE = Path("desktop/packaging/macos-installer-signing.json")
@@ -188,7 +190,7 @@ def verify_frozen(media, source, tree, build_run, carrier_run):
 
 def release_selection(value):
     """Select the qualified predecessor and actual same-source Actions outputs."""
-    repository = "Apdelrahman1911/mobile-release-kit"
+    repository = REPOSITORY
     source, tree = value["sourceCommit"], value["sourceTree"]
     workflow = ".github/workflows/desktop-macos-installed.yml"
 
@@ -226,6 +228,75 @@ def release_selection(value):
                       packageVersion="0.2.12", release="macos26-arm64-desktop-18"),
         previousRemoval=dict(runId="45612131054", artifactId="15021938507",
                              imageSha256="c04b2eb96e431f44ced32bfdc276b6b813d1155b45928ebcc7f1bc9c2ddaae6e"))
+
+
+def draft_assets(draft, manifest, expected):
+    """Check the REST metadata before requesting any private draft download."""
+    tag = f"desktop-v{manifest['version']}"
+    need(draft["draft"] is True and draft["prerelease"] is True and draft["published_at"] is None
+         and draft["tag_name"] == tag and draft["target_commitish"] == manifest["sourceCommit"],
+         "release-private-draft-binding")
+    rows = draft["assets"]
+    need(type(rows) is list and len(rows) == len(expected)
+         and {row["name"] for row in rows} == set(expected), "release-draft-asset-roster")
+    for asset in rows:
+        record = expected[asset["name"]]
+        need(type(asset["id"]) is int and asset["id"] > 0 and asset["state"] == "uploaded"
+             and asset["size"] == record["bytes"] and asset["digest"] == "sha256:" + record["sha256"],
+             "release-draft-asset-digest")
+    need(len({asset["id"] for asset in rows}) == len(rows), "release-draft-asset-identities")
+    return rows
+
+
+def verify_draft_tag(tag, source):
+    ref = "refs/tags/" + tag
+    reply = subprocess.run(["/usr/bin/git", "ls-remote", "--exit-code", "--tags",
+                            f"https://github.com/{REPOSITORY}.git", ref, ref + "^{}"],
+                           stdout=subprocess.PIPE, stderr=subprocess.PIPE, timeout=45)
+    if reply.returncode == 2 and not reply.stdout:
+        return "uncreated"
+    need(reply.returncode == 0, "release-tag-lookup")
+    refs = {}
+    for row in reply.stdout.decode("ascii").splitlines():
+        digest, name = row.split("\t")
+        need(name in (ref, ref + "^{}") and name not in refs and re.fullmatch(r"[0-9a-f]{40}", digest),
+             "release-tag-result")
+        refs[name] = digest
+    need(ref in refs and refs.get(ref + "^{}", refs[ref]) == source, "release-tag-source")
+    return "exact-source"
+
+
+def verify_draft(media, manifest, release_id):
+    need(re.fullmatch(r"[1-9][0-9]{0,19}", release_id), "release-draft-id")
+    endpoint = f"repos/{REPOSITORY}/releases/{release_id}"
+    draft = json.loads(run("gh", "api", endpoint))
+    need(draft["id"] == int(release_id), "release-draft-id")
+    expected = {name: record(media / name) for name in (*image_names(manifest["version"]), MANIFEST, CHECKSUMS)}
+    assets = draft_assets(draft, manifest, expected)
+    tag_state = verify_draft_tag(draft["tag_name"], manifest["sourceCommit"])
+    with tempfile.TemporaryDirectory(prefix="mrk-release-draft-check-") as path:
+        downloaded = Path(path)
+        for asset in assets:
+            name = asset["name"]
+            file = downloaded / name
+            with file.open("xb") as stream:
+                subprocess.run(["gh", "api", f"repos/{REPOSITORY}/releases/assets/{asset['id']}",
+                                "-H", "Accept: application/octet-stream"],
+                               stdout=stream, stderr=subprocess.PIPE, timeout=600, check=True)
+            need(record(file) == expected[name], "release-draft-downloaded-bytes")
+            run("gh", "attestation", "verify", str(file), "--repo", REPOSITORY, "--source-ref", "refs/heads/main",
+                "--source-digest", manifest["sourceCommit"], "--deny-self-hosted-runners",
+                "--signer-workflow", SIGNER_WORKFLOW, timeout=180)
+        need(verify_frozen(downloaded, manifest["sourceCommit"], manifest["sourceTree"],
+                           manifest["buildRun"], manifest["carrierRun"]) == manifest,
+             "release-draft-downloaded-manifest")
+    after = json.loads(run("gh", "api", endpoint))
+    need(after["id"] == draft["id"] and after["body"] == draft["body"]
+         and draft_assets(after, manifest, expected) == assets
+         and verify_draft_tag(draft["tag_name"], manifest["sourceCommit"]) == tag_state,
+         "release-draft-changed-during-download")
+    print(dump({"releaseId": release_id, "tag": draft["tag_name"], "sourceCommit": manifest["sourceCommit"],
+                "tagState": tag_state, "sourceTree": manifest["sourceTree"], "assets": expected}).decode("ascii"), end="")
 
 
 def preflight():
@@ -319,6 +390,7 @@ def main():
     verify.add_argument("--build-run", required=True)
     verify.add_argument("--carrier-run", required=True)
     verify.add_argument("--selection", type=Path)
+    verify.add_argument("--draft-id")
     args = parser.parse_args()
     if args.command == "preflight":
         preflight()
@@ -329,6 +401,8 @@ def main():
         if args.selection is not None:
             with args.selection.open("xb") as stream:
                 stream.write(dump(release_selection(value)))
+        if args.draft_id is not None:
+            verify_draft(args.media, value, args.draft_id)
 
 
 if __name__ == "__main__":

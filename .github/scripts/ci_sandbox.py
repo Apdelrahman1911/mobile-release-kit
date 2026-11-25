@@ -3491,6 +3491,12 @@ class Session:
             self._fail("native authority preparation failed")
             errors = self._native_close_pins(state)
             self.cleanup_errors.extend(errors)
+            if state["control_seen"]:
+                case = state["control_seen"][-1]
+                observed = state["control_notes"].get(case, {})
+                note["last_native_control"] = {"case": case, "returned": case in state["control_notes"],
+                                               "returncode": observed.get("returncode"),
+                                               "waited": observed.get("waited")}
             note.update({"exceptions": _exception_notes(original), "cleanup_errors": len(errors)})
             if errors:
                 raise BaseExceptionGroup("native authority preparation/owned close failed",

@@ -11,6 +11,30 @@ original=/opt/hostedtoolcache/Ruby/3.3.12/x64
 
 parent="$(/usr/bin/mktemp -d /opt/mrk-ci-ruby.XXXXXXXX)"
 [[ "$parent" =~ ^/opt/mrk-ci-ruby\.[a-zA-Z0-9]{8}$ ]]
+# The tool-cache ACL can be inherited from /opt even when the copy tool
+# ignores ACLs. Clear inheritance on this newly created empty root only.
+"$1" -I -S -B - "$parent" <<'PY'
+import errno
+import os
+import stat
+import sys
+
+fd = os.open(sys.argv[1], os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW)
+try:
+    info = os.fstat(fd)
+    if (info.st_uid, info.st_gid, stat.S_IMODE(info.st_mode)) != (0, 0, 0o700) or os.listdir(fd):
+        raise RuntimeError("disposable Ruby copy root is not empty and private")
+    for name in ("system.posix_acl_access", "system.posix_acl_default"):
+        try:
+            os.removexattr(fd, name)
+        except OSError as error:
+            if error.errno != errno.ENODATA:
+                raise
+    if stat.S_IMODE(os.fstat(fd).st_mode) != 0o700:
+        raise RuntimeError("disposable Ruby copy root mode changed")
+finally:
+    os.close(fd)
+PY
 runtime="$parent/runtime"
 /usr/bin/install -d -m 0755 -o root -g root -- "$runtime"
 /usr/bin/rsync -rltp --safe-links --chown=0:0 --chmod=Du=rwx,Dgo=rx,Fu+rw,Fgo-w \

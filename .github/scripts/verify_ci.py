@@ -6061,6 +6061,10 @@ def finalize_report(report: dict, session, *, summary: Path | None, runner_temp:
             details = first_failure.get("details", {})
             diagnostic = {"gate": first_failure["id"], "error": first_failure.get("error"),
                           "stage": details.get("stage"), "failure": details.get("failure")}
+            native_controls = [row["last_native_control"] for row in report.get("admission", ())
+                               if row.get("ok") is False and "last_native_control" in row]
+            if native_controls:
+                diagnostic["lastNativeControls"] = native_controls
             print("MRK_CI_GATE_FAILURE=" + json.dumps(diagnostic, sort_keys=True, ensure_ascii=True), flush=True)
     except BaseException as exc:
         fail(exc)
