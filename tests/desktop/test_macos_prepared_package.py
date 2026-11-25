@@ -887,6 +887,7 @@ esac
                     timeout=10, env=dict(PATH=str(root)+os.pathsep+os.environ['PATH'], TEST_ROOT=str(root),
                     TEST_SCOPE=scope, TEST_MODULE=str(ROOT/'desktop/tools/macos_prepared_package.py'),
                     MRK_MACOS_WORK=str(work), MRK_PYTHON=str(driver), MRK_MACOS_TARGET=P.TARGETS[0],
+                    MRK_MACOS_PACKAGE_ROLE='installed-shell-observation', MRK_MACOS_NATIVE_SCOPE=scope,
                     GITHUB_OUTPUT=str(output), GITHUB_REPOSITORY=P.REPOSITORY, PRODUCER_SOURCE='1'*40,
                     PRODUCER_RUN='41', GH_TOKEN='inert'))
                 self.assertEqual(result.returncode, 0, result.stderr)

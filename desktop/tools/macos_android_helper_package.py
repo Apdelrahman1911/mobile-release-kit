@@ -10784,6 +10784,8 @@ def xcode_setup_event(environment, phase, *, target=ARM_TARGET):
         return (scope == "companion-only"
                 and environment.get("GITHUB_EVENT_NAME") == "workflow_dispatch"
                 and phase in ("sign-xcode-setup", "finalize-xcode-setup-package", XCODE_SETUP_VERIFY))
+    if environment.get("GITHUB_REF") == MAIN_RELEASE_REF:
+        return scope == "disabled" and main_release_build_context(environment, target) and phase in MAIN_RELEASE_PHASES
     return scope == "disabled" and (environment.get("GITHUB_EVENT_NAME") == "push"
                                     or candidate_python_signing_context(environment, phase, target))
 
@@ -10864,7 +10866,7 @@ def admit(environment, *, target=ARM_TARGET, phase=None):
     workflow = ("desktop-macos-android-support-signing.yml" if support_phase else
                 "desktop-macos-python-runtime-signing.yml" if (python_phase and not candidate_python) or tool_phase or store_phase else
                 "desktop-macos-aqua.yml" if ref == "refs/heads/verify/desktop-macos-aqua" else
-                "desktop-macos-installed.yml" if ref in ("refs/heads/verify/desktop-macos-installed", "refs/heads/verify/desktop-macos-preview", REMOVAL_REF, APP_SIGNATURE_REF, APP_ABSENCE_REF, RESTORE_CHAIN_REF, UPDATE_REF, CANDIDATE_REF, XCODE_SETUP_REF) else None)
+                "desktop-macos-installed.yml" if ref in ("refs/heads/verify/desktop-macos-installed", "refs/heads/verify/desktop-macos-preview", REMOVAL_REF, APP_SIGNATURE_REF, APP_ABSENCE_REF, RESTORE_CHAIN_REF, UPDATE_REF, CANDIDATE_REF, XCODE_SETUP_REF, MAIN_RELEASE_REF) else None)
     need(workflow is not None, "closed-workflow-route")
     sha = environment.get("GITHUB_SHA", "")
     required = {"GITHUB_ACTIONS": "true", "RUNNER_ENVIRONMENT": "github-hosted", "RUNNER_OS": "macOS", "RUNNER_ARCH": runner_arch,
@@ -10901,6 +10903,20 @@ XCODE_SETUP_REF = "refs/heads/verify/desktop-macos-xcode-setup"
 CANDIDATE_PHASES = APP_SIGNATURE_PHASES + ("notarize-payload", "sign-root-installer",
     "finalize-package", "package-install", "finalize-image", "sign-xcode-setup",
     "finalize-xcode-setup-package", XCODE_SETUP_VERIFY)
+MAIN_RELEASE_REF = "refs/heads/main"
+MAIN_RELEASE_PHASES = APP_SIGNATURE_PHASES + ("notarize-payload", "sign-root-installer", "finalize-package", "package-install")
+
+
+def main_release_build_context(environment, target):
+    return target == ARM_TARGET and all(environment.get(key) == value for key, value in {
+        "GITHUB_REF": MAIN_RELEASE_REF, "GITHUB_REF_PROTECTED": "true", "GITHUB_EVENT_NAME": "workflow_dispatch",
+        "GITHUB_WORKFLOW_REF": "Apdelrahman1911/mobile-release-kit/.github/workflows/desktop-macos-installed.yml@refs/heads/main",
+        "MRK_MACOS_NATIVE_SCOPE": "disabled", "MRK_MACOS_PACKAGE_ROLE": "ordinary-image",
+        "MRK_MACOS_RUNNER": "macos-26", "MRK_MACOS_TARGET": ARM_TARGET,
+        "MRK_MACOS_PREPARED_RESUME": None,
+    }.items())
+
+
 APP_SIGNATURE_SUMMARY = "summarize-app-signature"
 APP_SIGNATURE_STEPS = ("work", "source", "app_runtime", "github_tools", "app_tools", "app_selection",
                        "android_helper", "app_vault", "app_build", "app_compiler", "app_assemble")
@@ -11154,16 +11170,17 @@ def tool_data_context(environment, phase, target):
          and os.getuid() == os.geteuid() and os.getgid() == os.getegid(), "tool-data-platform")
     ref = environment.get("GITHUB_REF")
     build_selection = phase in TOOL_SELECTION_PHASES[:2]
-    if ref in (APP_SIGNATURE_REF, APP_ABSENCE_REF, RESTORE_CHAIN_REF, UPDATE_REF, CANDIDATE_REF):
+    if ref in (APP_SIGNATURE_REF, APP_ABSENCE_REF, RESTORE_CHAIN_REF, UPDATE_REF, CANDIDATE_REF, MAIN_RELEASE_REF):
         need(phase in APP_SIGNATURE_DATA, "app-signature-fixed-data-phase")
+    main_release = ref == MAIN_RELEASE_REF and main_release_build_context(environment, target)
     workflow = "desktop-macos-python-runtime-signing.yml" if build_selection else "desktop-macos-installed.yml"
-    need(ref == TOOL_REF if build_selection else ref in
+    need(ref == TOOL_REF if build_selection else main_release or ref in
          ("refs/heads/verify/desktop-macos-installed", "refs/heads/verify/desktop-macos-preview", REMOVAL_REF, APP_SIGNATURE_REF, APP_ABSENCE_REF, RESTORE_CHAIN_REF, UPDATE_REF, CANDIDATE_REF), "tool-data-ref")
     sha = environment.get("GITHUB_SHA")
     need(tool_hex(sha, 40) and Path(__file__).absolute() == CHECKOUT / "desktop/tools/macos_android_helper_package.py"
          and all(environment.get(k) == v for k, v in {
              "GITHUB_ACTIONS": "true", "RUNNER_ENVIRONMENT": "github-hosted", "RUNNER_OS": "macOS", "RUNNER_ARCH": architecture,
-             "GITHUB_EVENT_NAME": "push", "GITHUB_REPOSITORY": "Apdelrahman1911/mobile-release-kit",
+             "GITHUB_EVENT_NAME": "workflow_dispatch" if main_release else "push", "GITHUB_REPOSITORY": "Apdelrahman1911/mobile-release-kit",
              "GITHUB_WORKSPACE": str(CHECKOUT), "GITHUB_WORKFLOW_SHA": sha, "MRK_EXPECTED_SHA": sha,
              "MRK_MACOS_INSTALL_SOURCE_COMMIT": sha,
              "GITHUB_WORKFLOW_REF": "Apdelrahman1911/mobile-release-kit/.github/workflows/" + workflow + "@" + ref}.items()),

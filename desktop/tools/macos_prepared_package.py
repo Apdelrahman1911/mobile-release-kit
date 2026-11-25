@@ -20,6 +20,7 @@ SCOPE = 'prepared-signed-input-not-installed'
 WORKFLOW = '.github/workflows/desktop-macos-installed.yml'
 REPOSITORY = 'Apdelrahman1911/mobile-release-kit'
 BRANCH = 'verify/desktop-macos-candidate'
+MAIN_BRANCH = 'main'
 TARGETS = ('aarch64-apple-darwin', 'x86_64-apple-darwin')
 FILES = {'MobileReleaseKit.pkg': PACKAGE_LIMIT, 'MobileReleaseKit-original.pkg': PACKAGE_LIMIT,
          'android-helper-finalize-package.json': RECEIPT_LIMIT, 'package-finalization.status': 2}
@@ -148,8 +149,13 @@ def metadata_data(run, job, artifact, manifest):
     origin = manifest_data(manifest)['origin']
     native_scope = origin.get('nativeScope')
     need(type(run) is type(job) is type(artifact) is dict, 'prepared-service-shape')
+    branch = run.get('head_branch')
+    event = run.get('event')
     need(all(type(run.get(k)) is int and run[k] == int(origin[v]) for k, v in (('id', 'runId'), ('run_attempt', 'runAttempt')))
-         and run.get('head_sha') == origin['source'] and run.get('head_branch') == BRANCH and run.get('event') == 'push'
+         and run.get('head_sha') == origin['source']
+         and ((branch, event) == (BRANCH, 'push') or
+              (branch, event) == (MAIN_BRANCH, 'workflow_dispatch') and native_scope is None
+              and job.get('name') == ORDINARY_SPLIT_JOB and run.get('head_commit', {}).get('tree_id') == origin['tree'])
          and run.get('path') == WORKFLOW and type(run.get('workflow_id')) is int and run['workflow_id'] == 363563168
          and type(run.get('repository')) is dict
          and run['repository'].get('full_name') == REPOSITORY, 'prepared-service-run')
@@ -167,7 +173,7 @@ def metadata_data(run, job, artifact, manifest):
          and 22 <= artifact['size_in_bytes'] <= ARTIFACT_LIMIT and type(artifact.get('digest')) is str
          and artifact['digest'].startswith('sha256:') and hex_data(artifact['digest'][7:])
          and type(producer) is dict and type(producer.get('id')) is int and producer['id'] == int(origin['runId'])
-         and producer.get('head_sha') == origin['source'] and producer.get('head_branch') == BRANCH,
+         and producer.get('head_sha') == origin['source'] and producer.get('head_branch') == branch,
          'prepared-service-artifact')
     return {'artifactId': str(artifact['id']), 'artifactBytes': artifact['size_in_bytes'],
             'artifactSha256': artifact['digest'][7:], 'origin': dict(origin)}
@@ -1357,7 +1363,9 @@ def main():
         from desktop.tools import macos_android_helper_package as helper
         environment = dict(os.environ)
         work = admit_host(helper, environment, args)
-        need(environment['GITHUB_REF'] == 'refs/heads/' + BRANCH, 'prepared-fixed-candidate-route')
+        need(environment['GITHUB_REF'] == 'refs/heads/' + BRANCH
+             or environment['GITHUB_REF'] == 'refs/heads/' + MAIN_BRANCH and args.phase == 'export',
+             'prepared-fixed-candidate-route')
         stager = helper.load_data(root, 'stage_macos_installed.py', '_mrk_prepared_stager')
         need(stager.read(root / '.git/HEAD', 64) == (environment['GITHUB_SHA'] + '\n').encode('ascii'), 'prepared-current-source')
         qualification = helper.load_data(root, 'macos_aqua_qualification.py', '_mrk_prepared_owner_loader')
@@ -1492,6 +1500,8 @@ def main():
 
 
 def admit_host(helper, environment, args):
+    if args.phase == 'export' and environment.get('GITHUB_REF') == 'refs/heads/' + MAIN_BRANCH:
+        return helper.admit(environment, target=args.target, phase='package-install')
     if environment.get('GITHUB_EVENT_NAME') == 'push' or (
         environment.get('MRK_MACOS_PREPARED_RESUME') == 'true' and native_origin(environment)):
         need(args.phase in ('producer-attempt', 'observer-attempt', 'image-attempt', 'select', 'hydrate', 'package-install')

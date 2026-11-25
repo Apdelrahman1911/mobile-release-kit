@@ -71,7 +71,11 @@ runs:
             ;;
           *) exit 1 ;;
         esac
-        [[ "$GITHUB_EVENT_NAME" == push && ( "$GITHUB_REF" == refs/heads/verify/desktop-macos-installed || "$GITHUB_REF" == refs/heads/verify/desktop-macos-preview || "$GITHUB_REF" == refs/heads/verify/desktop-macos-removal-lifecycle || "$GITHUB_REF" == refs/heads/verify/desktop-macos-app-signature || "$GITHUB_REF" == refs/heads/verify/desktop-macos-app-absence-fixture || "$GITHUB_REF" == refs/heads/verify/desktop-macos-positive-update || "$GITHUB_REF" == refs/heads/verify/desktop-macos-candidate ) ]] || exit 1
+        if [[ "$GITHUB_REF" == refs/heads/main ]]; then
+          [[ "$GITHUB_EVENT_NAME" == workflow_dispatch && "$GITHUB_REF_PROTECTED" == true && "$MRK_MACOS_NATIVE_SCOPE" == disabled && "$MRK_MACOS_TARGET" == aarch64-apple-darwin && "$MRK_MACOS_RUNNER" == macos-26 ]] || exit 1
+        else
+          [[ "$GITHUB_EVENT_NAME" == push && ( "$GITHUB_REF" == refs/heads/verify/desktop-macos-installed || "$GITHUB_REF" == refs/heads/verify/desktop-macos-preview || "$GITHUB_REF" == refs/heads/verify/desktop-macos-removal-lifecycle || "$GITHUB_REF" == refs/heads/verify/desktop-macos-app-signature || "$GITHUB_REF" == refs/heads/verify/desktop-macos-app-absence-fixture || "$GITHUB_REF" == refs/heads/verify/desktop-macos-positive-update || "$GITHUB_REF" == refs/heads/verify/desktop-macos-candidate ) ]] || exit 1
+        fi
         if [[ "$GITHUB_REF" == refs/heads/verify/desktop-macos-app-absence-fixture || "$GITHUB_REF" == refs/heads/verify/desktop-macos-positive-update ]]; then
           [[ "$MRK_MACOS_SAME_PACKAGE_SCOPE" == disabled && "$MRK_MACOS_ANDROID_UI_SCOPE" == disabled && "$MRK_MACOS_IOS_UI_SCOPE" == disabled && "$MRK_MACOS_SAVED_FILE_UI_SCOPE" == ordinary-seven ]] || exit 1
         fi
@@ -256,7 +260,7 @@ runs:
             value.update(scope="whole-app-signature-only", fixedFixtureCases=0, aclPrimitiveCases=0,
                 selectedRegressionGroups=[], instrumented=False, applicationLaunched=False,
                 fullUIQualified=False, distributionQualified=False, actualAquaSaveGate="not-selected")
-        if os.environ["GITHUB_REF"] == "refs/heads/verify/desktop-macos-candidate":
+        if os.environ["GITHUB_REF"] in ("refs/heads/verify/desktop-macos-candidate", "refs/heads/main"):
             value.update(scope="current-macos-candidate", fixedFixtureCases=0, aclPrimitiveCases=0,
                 selectedRegressionGroups=[], instrumented=False, applicationLaunched=False,
                 fullUIQualified=False, distributionQualified=False, actualAquaSaveGate="not-selected")

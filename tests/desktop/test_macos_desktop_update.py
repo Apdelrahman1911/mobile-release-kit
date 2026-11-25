@@ -46,6 +46,26 @@ def inventory_fixture():
 
 
 class OrdinaryDesktopUpdateTests(unittest.TestCase):
+    def test_main_build_admits_only_protected_dispatch_with_ordinary_parts(self):
+        manifest, run, job, artifact = ordinary_fixture('image')
+        run.update(head_branch='main', event='workflow_dispatch')
+        artifact['workflow_run']['head_branch'] = 'main'
+        admitted = P.metadata_data(run, job, artifact, manifest)
+        self.assertEqual(admitted['origin'], manifest['origin'])
+        for changed in (dict(run, event='push'), dict(run, head_branch='other'),
+                        dict(run, head_commit=dict(run['head_commit'], tree_id='f' * 40))):
+            with self.assertRaisesRegex(ValueError, 'part-actual-run'):
+                P.metadata_data(changed, job, artifact, manifest)
+        mixed_artifact = copy.deepcopy(artifact)
+        mixed_artifact['workflow_run']['head_branch'] = P.BRANCH
+        with self.assertRaisesRegex(ValueError, 'part-actual-artifact'):
+            P.metadata_data(run, job, mixed_artifact, manifest)
+        native_manifest, native_run, native_job, native_artifact = native_fixture('prepare')
+        native_run.update(head_branch='main', event='workflow_dispatch')
+        native_artifact['workflow_run']['head_branch'] = 'main'
+        with self.assertRaisesRegex(ValueError, 'part-actual-run'):
+            P.metadata_data(native_run, native_job, native_artifact, native_manifest)
+
     @unittest.skipUnless(sys.platform == 'darwin', 'uses Darwin stat and xattr declarations')
     def test_startup_tag_timing_in_native_reader(self):
         root = Path(__file__).resolve().parents[2]

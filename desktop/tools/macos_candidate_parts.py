@@ -12,6 +12,7 @@ from types import MappingProxyType
 REPOSITORY = 'Apdelrahman1911/mobile-release-kit'
 WORKFLOW = '.github/workflows/desktop-macos-installed.yml'
 BRANCH = 'verify/desktop-macos-candidate'
+MAIN_BRANCH = 'main'
 TARGET = 'aarch64-apple-darwin'
 SCOPE = 'macos-candidate-intermediate-data-v1'
 MANIFEST_LIMIT = 8 * 1024 * 1024
@@ -266,10 +267,13 @@ def manifest_data(value):
 def service_metadata_data(run, job, artifact, part, origin):
     """Actual successful job and pinned transport; never trust a receipt alone."""
     origin, part = origin_data(origin), part_name(part)
+    branch = run.get('head_branch') if type(run) is dict else None
+    event = run.get('event') if type(run) is dict else None
     need(type(run) is dict and type(job) is dict and type(artifact) is dict
          and type(run.get('id')) is int and run['id'] == int(origin['runId'])
-         and run.get('head_sha') == origin['source'] and run.get('head_branch') == BRANCH
-         and run.get('event') == 'push' and run.get('path') == WORKFLOW
+         and run.get('head_sha') == origin['source'] and run.get('path') == WORKFLOW
+         and ((branch, event) == (BRANCH, 'push') or
+              (branch, event) == (MAIN_BRANCH, 'workflow_dispatch') and origin['nativeScope'] == 'disabled')
          and type(run.get('workflow_id')) is int and run['workflow_id'] == 363563168
          and type(run.get('run_attempt')) is int and run['run_attempt'] >= int(origin['runAttempt'])
          and run.get('head_commit', {}).get('id') == origin['source']
@@ -297,7 +301,7 @@ def service_metadata_data(run, job, artifact, part, origin):
          and type(artifact.get('digest')) is str and re.fullmatch('sha256:[0-9a-f]{64}', artifact['digest'])
          and artifact.get('workflow_run', {}).get('id') == run['id']
          and artifact['workflow_run'].get('head_sha') == origin['source']
-         and artifact['workflow_run'].get('head_branch') == BRANCH, 'part-actual-artifact')
+         and artifact['workflow_run'].get('head_branch') == branch, 'part-actual-artifact')
     return {'part': part, 'origin': origin, 'artifactId': str(artifact['id']),
             'artifactSha256': artifact['digest'][7:]}
 

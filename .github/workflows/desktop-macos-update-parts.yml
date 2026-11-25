@@ -1,15 +1,24 @@
 ---
 name: Focused ordinary Desktop update parts
 'on':
-  workflow_call: {}
+  workflow_call:
+    inputs:
+      main-release:
+        description: Explicit protected-main ordinary ARM64 release build
+        type: boolean
+        default: false
 permissions:
   contents: read
   actions: read
 jobs:
   desktop26-prepare:
     name: "${{ matrix.native_scope == 'disabled' && 'macOS part (Desktop26 / prepare)' || 'Invalid Desktop update scope' }}"
-    if: github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-macos-candidate'
-      && contains(github.event.head_commit.message, '[macos-desktop-update]')
+    if: >-
+      (!inputs.main-release && github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-macos-candidate' &&
+       contains(github.event.head_commit.message, '[macos-desktop-update]')) ||
+      (inputs.main-release && github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' &&
+       github.ref_protected && github.event.inputs.operation == 'main-release-build' &&
+       github.event.inputs.expected_sha == github.sha && github.event.inputs.target == 'aarch64-apple-darwin')
     runs-on: "${{ matrix.runner }}"
     timeout-minutes: 90
     strategy:
@@ -129,7 +138,11 @@ jobs:
             ;;
           *) exit 1 ;;
         esac
-        [[ "$GITHUB_EVENT_NAME" == push && ( "$GITHUB_REF" == refs/heads/verify/desktop-macos-installed || "$GITHUB_REF" == refs/heads/verify/desktop-macos-preview || "$GITHUB_REF" == refs/heads/verify/desktop-macos-removal-lifecycle || "$GITHUB_REF" == refs/heads/verify/desktop-macos-app-signature || "$GITHUB_REF" == refs/heads/verify/desktop-macos-app-absence-fixture || "$GITHUB_REF" == refs/heads/verify/desktop-macos-positive-update || "$GITHUB_REF" == refs/heads/verify/desktop-macos-candidate ) ]] || exit 1
+        if [[ "$GITHUB_REF" == refs/heads/main ]]; then
+          [[ "$GITHUB_EVENT_NAME" == workflow_dispatch && "$GITHUB_REF_PROTECTED" == true && "$MRK_MACOS_NATIVE_SCOPE" == disabled && "$MRK_MACOS_TARGET" == aarch64-apple-darwin && "$MRK_MACOS_RUNNER" == macos-26 ]] || exit 1
+        else
+          [[ "$GITHUB_EVENT_NAME" == push && ( "$GITHUB_REF" == refs/heads/verify/desktop-macos-installed || "$GITHUB_REF" == refs/heads/verify/desktop-macos-preview || "$GITHUB_REF" == refs/heads/verify/desktop-macos-removal-lifecycle || "$GITHUB_REF" == refs/heads/verify/desktop-macos-app-signature || "$GITHUB_REF" == refs/heads/verify/desktop-macos-app-absence-fixture || "$GITHUB_REF" == refs/heads/verify/desktop-macos-positive-update || "$GITHUB_REF" == refs/heads/verify/desktop-macos-candidate ) ]] || exit 1
+        fi
         if [[ "$GITHUB_REF" == refs/heads/verify/desktop-macos-app-absence-fixture || "$GITHUB_REF" == refs/heads/verify/desktop-macos-positive-update ]]; then
           [[ "$MRK_MACOS_SAME_PACKAGE_SCOPE" == disabled && "$MRK_MACOS_ANDROID_UI_SCOPE" == disabled && "$MRK_MACOS_IOS_UI_SCOPE" == disabled && "$MRK_MACOS_SAVED_FILE_UI_SCOPE" == ordinary-seven ]] || exit 1
         fi
@@ -235,7 +248,7 @@ jobs:
       timeout-minutes: 1
       uses: "./.github/actions/macos-candidate-recipes/check-actual-git-and-library-flags-before-the-expens"
     - name: Check the corrected macOS minimum and actual native host before signing
-      if: github.ref == 'refs/heads/verify/desktop-macos-candidate' && env.MRK_MACOS_NATIVE_SCOPE
+      if: (github.ref == 'refs/heads/verify/desktop-macos-candidate' || inputs.main-release) && env.MRK_MACOS_NATIVE_SCOPE
         == 'disabled'
       timeout-minutes: 10
       uses: "./.github/actions/macos-candidate-recipes/check-the-corrected-macos-minimum-and-actual-native-"
@@ -422,8 +435,12 @@ jobs:
         overwrite: false
   desktop26-resident:
     name: "${{ matrix.native_scope == 'disabled' && 'macOS part (Desktop26 / resident)' || 'Invalid Desktop update scope' }}"
-    if: github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-macos-candidate'
-      && contains(github.event.head_commit.message, '[macos-desktop-update]')
+    if: >-
+      (!inputs.main-release && github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-macos-candidate' &&
+       contains(github.event.head_commit.message, '[macos-desktop-update]')) ||
+      (inputs.main-release && github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' &&
+       github.ref_protected && github.event.inputs.operation == 'main-release-build' &&
+       github.event.inputs.expected_sha == github.sha && github.event.inputs.target == 'aarch64-apple-darwin')
     runs-on: "${{ matrix.runner }}"
     timeout-minutes: 90
     strategy:
@@ -548,8 +565,12 @@ jobs:
         overwrite: false
   desktop26-vault:
     name: "${{ matrix.native_scope == 'disabled' && 'macOS part (Desktop26 / vault)' || 'Invalid Desktop update scope' }}"
-    if: github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-macos-candidate'
-      && contains(github.event.head_commit.message, '[macos-desktop-update]')
+    if: >-
+      (!inputs.main-release && github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-macos-candidate' &&
+       contains(github.event.head_commit.message, '[macos-desktop-update]')) ||
+      (inputs.main-release && github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' &&
+       github.ref_protected && github.event.inputs.operation == 'main-release-build' &&
+       github.event.inputs.expected_sha == github.sha && github.event.inputs.target == 'aarch64-apple-darwin')
     runs-on: "${{ matrix.runner }}"
     timeout-minutes: 90
     strategy:
@@ -674,8 +695,12 @@ jobs:
         overwrite: false
   desktop26-frontend:
     name: "${{ matrix.native_scope == 'disabled' && 'macOS part (Desktop26 / frontend)' || 'Invalid Desktop update scope' }}"
-    if: github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-macos-candidate'
-      && contains(github.event.head_commit.message, '[macos-desktop-update]')
+    if: >-
+      (!inputs.main-release && github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-macos-candidate' &&
+       contains(github.event.head_commit.message, '[macos-desktop-update]')) ||
+      (inputs.main-release && github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' &&
+       github.ref_protected && github.event.inputs.operation == 'main-release-build' &&
+       github.event.inputs.expected_sha == github.sha && github.event.inputs.target == 'aarch64-apple-darwin')
     runs-on: "${{ matrix.runner }}"
     timeout-minutes: 90
     strategy:
@@ -794,8 +819,12 @@ jobs:
         overwrite: false
   desktop26-image:
     name: "${{ matrix.native_scope == 'disabled' && 'macOS part (Desktop26 / image)' || 'Invalid Desktop update scope' }}"
-    if: github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-macos-candidate'
-      && contains(github.event.head_commit.message, '[macos-desktop-update]')
+    if: >-
+      (!inputs.main-release && github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-macos-candidate' &&
+       contains(github.event.head_commit.message, '[macos-desktop-update]')) ||
+      (inputs.main-release && github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' &&
+       github.ref_protected && github.event.inputs.operation == 'main-release-build' &&
+       github.event.inputs.expected_sha == github.sha && github.event.inputs.target == 'aarch64-apple-darwin')
     runs-on: "${{ matrix.runner }}"
     timeout-minutes: 120
     strategy:
@@ -924,8 +953,12 @@ jobs:
         overwrite: false
   desktop26-remover:
     name: "${{ matrix.native_scope == 'disabled' && 'macOS part (Desktop26 / remover)' || 'Invalid Desktop update scope' }}"
-    if: github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-macos-candidate'
-      && contains(github.event.head_commit.message, '[macos-desktop-update]')
+    if: >-
+      (!inputs.main-release && github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-macos-candidate' &&
+       contains(github.event.head_commit.message, '[macos-desktop-update]')) ||
+      (inputs.main-release && github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' &&
+       github.ref_protected && github.event.inputs.operation == 'main-release-build' &&
+       github.event.inputs.expected_sha == github.sha && github.event.inputs.target == 'aarch64-apple-darwin')
     runs-on: "${{ matrix.runner }}"
     timeout-minutes: 90
     strategy:
@@ -1056,8 +1089,12 @@ jobs:
         overwrite: false
   desktop26-cli:
     name: "${{ matrix.native_scope == 'disabled' && 'macOS part (Desktop26 / cli)' || 'Invalid Desktop update scope' }}"
-    if: github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-macos-candidate'
-      && contains(github.event.head_commit.message, '[macos-desktop-update]')
+    if: >-
+      (!inputs.main-release && github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-macos-candidate' &&
+       contains(github.event.head_commit.message, '[macos-desktop-update]')) ||
+      (inputs.main-release && github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' &&
+       github.ref_protected && github.event.inputs.operation == 'main-release-build' &&
+       github.event.inputs.expected_sha == github.sha && github.event.inputs.target == 'aarch64-apple-darwin')
     runs-on: "${{ matrix.runner }}"
     timeout-minutes: 90
     strategy:
@@ -1189,8 +1226,12 @@ jobs:
         overwrite: false
   desktop26-sign-remover:
     name: "${{ matrix.native_scope == 'disabled' && 'macOS part (Desktop26 / sign-remover)' || 'Invalid Desktop update scope' }}"
-    if: github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-macos-candidate'
-      && contains(github.event.head_commit.message, '[macos-desktop-update]')
+    if: >-
+      (!inputs.main-release && github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-macos-candidate' &&
+       contains(github.event.head_commit.message, '[macos-desktop-update]')) ||
+      (inputs.main-release && github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' &&
+       github.ref_protected && github.event.inputs.operation == 'main-release-build' &&
+       github.event.inputs.expected_sha == github.sha && github.event.inputs.target == 'aarch64-apple-darwin')
     runs-on: "${{ matrix.runner }}"
     timeout-minutes: 90
     strategy:
@@ -1311,8 +1352,12 @@ jobs:
         overwrite: false
   desktop26-sign-cli:
     name: "${{ matrix.native_scope == 'disabled' && 'macOS part (Desktop26 / sign-cli)' || 'Invalid Desktop update scope' }}"
-    if: github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-macos-candidate'
-      && contains(github.event.head_commit.message, '[macos-desktop-update]')
+    if: >-
+      (!inputs.main-release && github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-macos-candidate' &&
+       contains(github.event.head_commit.message, '[macos-desktop-update]')) ||
+      (inputs.main-release && github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' &&
+       github.ref_protected && github.event.inputs.operation == 'main-release-build' &&
+       github.event.inputs.expected_sha == github.sha && github.event.inputs.target == 'aarch64-apple-darwin')
     runs-on: "${{ matrix.runner }}"
     timeout-minutes: 90
     strategy:
@@ -1434,8 +1479,12 @@ jobs:
         overwrite: false
   desktop26-assemble:
     name: "${{ matrix.native_scope == 'disabled' && 'macOS part (Desktop26 / assemble)' || 'Invalid Desktop update scope' }}"
-    if: github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-macos-candidate'
-      && contains(github.event.head_commit.message, '[macos-desktop-update]')
+    if: >-
+      (!inputs.main-release && github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-macos-candidate' &&
+       contains(github.event.head_commit.message, '[macos-desktop-update]')) ||
+      (inputs.main-release && github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' &&
+       github.ref_protected && github.event.inputs.operation == 'main-release-build' &&
+       github.event.inputs.expected_sha == github.sha && github.event.inputs.target == 'aarch64-apple-darwin')
     runs-on: "${{ matrix.runner }}"
     timeout-minutes: 90
     strategy:
@@ -1574,8 +1623,12 @@ jobs:
         overwrite: false
   desktop26-notarize-payload:
     name: "${{ matrix.native_scope == 'disabled' && 'macOS part (Desktop26 / notarize-payload)' || 'Invalid Desktop update scope' }}"
-    if: github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-macos-candidate'
-      && contains(github.event.head_commit.message, '[macos-desktop-update]')
+    if: >-
+      (!inputs.main-release && github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-macos-candidate' &&
+       contains(github.event.head_commit.message, '[macos-desktop-update]')) ||
+      (inputs.main-release && github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' &&
+       github.ref_protected && github.event.inputs.operation == 'main-release-build' &&
+       github.event.inputs.expected_sha == github.sha && github.event.inputs.target == 'aarch64-apple-darwin')
     runs-on: "${{ matrix.runner }}"
     timeout-minutes: 90
     strategy:
@@ -1715,8 +1768,12 @@ jobs:
         overwrite: false
   desktop26-installer:
     name: "${{ matrix.native_scope == 'disabled' && 'macOS part (Desktop26 / installer)' || 'Invalid Desktop update scope' }}"
-    if: github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-macos-candidate'
-      && contains(github.event.head_commit.message, '[macos-desktop-update]')
+    if: >-
+      (!inputs.main-release && github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-macos-candidate' &&
+       contains(github.event.head_commit.message, '[macos-desktop-update]')) ||
+      (inputs.main-release && github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' &&
+       github.ref_protected && github.event.inputs.operation == 'main-release-build' &&
+       github.event.inputs.expected_sha == github.sha && github.event.inputs.target == 'aarch64-apple-darwin')
     runs-on: "${{ matrix.runner }}"
     timeout-minutes: 90
     strategy:
@@ -1844,8 +1901,12 @@ jobs:
         overwrite: false
   desktop26-scripts-package:
     name: "${{ matrix.native_scope == 'disabled' && 'macOS part (Desktop26 / scripts-package)' || 'Invalid Desktop update scope' }}"
-    if: github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-macos-candidate'
-      && contains(github.event.head_commit.message, '[macos-desktop-update]')
+    if: >-
+      (!inputs.main-release && github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-macos-candidate' &&
+       contains(github.event.head_commit.message, '[macos-desktop-update]')) ||
+      (inputs.main-release && github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' &&
+       github.ref_protected && github.event.inputs.operation == 'main-release-build' &&
+       github.event.inputs.expected_sha == github.sha && github.event.inputs.target == 'aarch64-apple-darwin')
     runs-on: "${{ matrix.runner }}"
     timeout-minutes: 90
     strategy:
@@ -1977,8 +2038,12 @@ jobs:
         overwrite: false
   desktop26-final-package:
     name: "${{ matrix.native_scope == 'disabled' && 'Build signed candidate (Desktop26)' || 'Invalid Desktop update scope' }}"
-    if: github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-macos-candidate'
-      && contains(github.event.head_commit.message, '[macos-desktop-update]')
+    if: >-
+      (!inputs.main-release && github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-macos-candidate' &&
+       contains(github.event.head_commit.message, '[macos-desktop-update]')) ||
+      (inputs.main-release && github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' &&
+       github.ref_protected && github.event.inputs.operation == 'main-release-build' &&
+       github.event.inputs.expected_sha == github.sha && github.event.inputs.target == 'aarch64-apple-darwin')
     runs-on: "${{ matrix.runner }}"
     timeout-minutes: 90
     strategy:
@@ -2097,7 +2162,7 @@ jobs:
       uses: "./.github/actions/macos-candidate-recipes/sign-and-notarize-the-same-completed-observer-packag"
     - name: Publish only the prepared signed input checkpoint; not installed
       id: prepared_export
-      if: github.ref == 'refs/heads/verify/desktop-macos-candidate' && (env.MRK_MACOS_NATIVE_SCOPE
+      if: (github.ref == 'refs/heads/verify/desktop-macos-candidate' || inputs.main-release) && (env.MRK_MACOS_NATIVE_SCOPE
         == 'disabled' || env.MRK_MACOS_NATIVE_SCOPE == 'tool-setup' || env.MRK_MACOS_NATIVE_SCOPE
         == 'git-native')
       timeout-minutes: 5
@@ -2119,7 +2184,7 @@ jobs:
         "$MRK_PYTHON" -I -S -B desktop/tools/macos_prepared_package.py export --target "$MRK_MACOS_TARGET"
     - name: Upload the immutable prepared input; first retention attempt
       id: prepared_upload_first
-      if: github.ref == 'refs/heads/verify/desktop-macos-candidate' && steps.prepared_export.outcome
+      if: (github.ref == 'refs/heads/verify/desktop-macos-candidate' || inputs.main-release) && steps.prepared_export.outcome
         == 'success'
       continue-on-error: true
       timeout-minutes: 5
@@ -2136,7 +2201,7 @@ jobs:
         overwrite: false
     - name: Retry the same immutable prepared input once after returned upload failure
       id: prepared_upload_retry
-      if: "${{ !cancelled() && github.ref == 'refs/heads/verify/desktop-macos-candidate'
+      if: "${{ !cancelled() && (github.ref == 'refs/heads/verify/desktop-macos-candidate' || inputs.main-release)
         && steps.prepared_export.outcome == 'success' && steps.prepared_upload_first.outcome
         == 'failure' }}"
       continue-on-error: true
@@ -2154,7 +2219,7 @@ jobs:
         overwrite: false
     - name: Retain prepared signed input for failed-job-only installation retries
       id: prepared_upload
-      if: "${{ !cancelled() && github.ref == 'refs/heads/verify/desktop-macos-candidate'
+      if: "${{ !cancelled() && (github.ref == 'refs/heads/verify/desktop-macos-candidate' || inputs.main-release)
         && steps.prepared_export.outcome == 'success' }}"
       timeout-minutes: 1
       shell: bash
@@ -2173,7 +2238,7 @@ jobs:
         esac
     - name: Retire only the completed candidate's disposable compiler outputs
       id: candidate_compiler_retire
-      if: always() && github.ref == 'refs/heads/verify/desktop-macos-candidate' &&
+      if: always() && (github.ref == 'refs/heads/verify/desktop-macos-candidate' || inputs.main-release) &&
         steps.prepared_upload.outcome == 'success'
       timeout-minutes: 3
       uses: "./.github/actions/macos-candidate-recipes/candidate_compiler_retire"

@@ -71,14 +71,27 @@ class LocalIOSStoreDataTests(unittest.TestCase):
             lambda d:d['storePrecondition'].update(appIdentity='com.foreign.app'),
             lambda d:d['preparedBy']['assignment'].update(kind='google-service-account'),
             lambda d:d['preparedBy']['assignment'].update(expectedRevision=True)])
-    def test_ios_recover_hybrids_and_self_authorized_receipts_are_refused(self):
+    def test_ios_recover_rejects_intent_hybrids(self):
         for field,value in [('origin','github-actions'),('documentType','store-operation-intent'),
             ('stage','external-testing'),('authorizedBy',self.authority)]:
             with self.subTest(field=field),self.assertRaises(L.LocalIntentError):self.read(dict(self.intent,**{field:value}))
-        changed=copy.deepcopy(self.authority);changed['purpose']='recover'
+
+    def test_ios_recover_accepts_bound_data_only_for_candidate_reconciliation(self):
+        recover = dict(self.authority, purpose='recover')
+        self.assertEqual(L.validate_local_execution_authority(encoded(recover),
+            intent_data=self.args['intent_data'], purpose='recover', platform='ios'), recover)
         with self.assertRaises(L.LocalIntentError):
-            L.validate_local_execution_authority(encoded(changed),intent_data=self.args['intent_data'],purpose='recover',platform='ios')
-        with self.assertRaises(R.LocalReceiptError):self.receipt_read(dict(self.receipt,executedBy=changed),authority_data=encoded(changed),purpose='recover')
+            L.validate_local_execution_authority(encoded(recover),
+                intent_data=self.args['intent_data'], purpose='execute', platform='ios')
+        self_authorized = dict(recover, authorizationId=self.intent['preparedBy']['authorizationId'])
+        with self.assertRaises(L.LocalIntentError):
+            L.validate_local_execution_authority(encoded(self_authorized),
+                intent_data=self.args['intent_data'], purpose='recover', platform='ios')
+        with self.assertRaises(R.LocalReceiptError):
+            self.receipt_read(dict(self.receipt, executedBy=recover),
+                authority_data=encoded(recover), purpose='recover')
+
+    def test_ios_receipt_cannot_supply_its_own_authority_or_intent(self):
         changed=copy.deepcopy(self.authority);changed['authorizationId']='66666666-6666-4666-8666-666666666666'
         with self.assertRaises(R.LocalReceiptError):self.receipt_read(dict(self.receipt,executedBy=changed))
         altered=copy.deepcopy(self.intent);altered['artifacts'][-1]['sha256']='f'*64

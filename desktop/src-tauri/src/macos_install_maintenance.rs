@@ -16,7 +16,7 @@ pub const INPUT_LIMIT: usize = 16 * 1024;
 pub const PREDECESSOR_LIMIT: usize = 8;
 // The signed list can name more starting releases than one installed history
 // can retain. Keep the existing limit on generations and their disk budget.
-const ACCEPTED_PREDECESSOR_LIMIT: usize = 11;
+const ACCEPTED_PREDECESSOR_LIMIT: usize = 12;
 const PROFILE: &str = "fixed-macos26-arm64-maintenance-v2";
 fn profile(target: MaintenanceTargetData) -> &'static str {
     match target { MaintenanceTargetData::Arm64 => PROFILE,

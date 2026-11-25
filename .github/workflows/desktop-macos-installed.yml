@@ -15,6 +15,8 @@ on:
           - candidate-tests
           - local-carrier
           - local-desktop-carrier
+          - main-release-preflight
+          - main-release-build
           - candidate-python-source
           - candidate-python-sign
           - xcode-setup-companion
@@ -23,7 +25,7 @@ on:
           - command-startup-data
           - unsigned-arm64-compile
       expected_sha:
-        description: Exact reviewed source for the unsigned ARM64 compile-only route
+        description: Exact reviewed SHA for the ARM64 compile or protected-main release
         type: string
         required: false
       prepared_source:
@@ -3633,7 +3635,13 @@ jobs:
   # Independent current-source parts; rerun failed jobs keeps completed originals.
   candidate-parts-data:
     name: "Check Mac part retry and transport DATA"
-    if: "github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-macos-candidate'"
+    if: >-
+      github.repository == 'Apdelrahman1911/mobile-release-kit' &&
+      ((github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-macos-candidate') ||
+       (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' &&
+        github.ref_protected && inputs.expected_sha == github.sha &&
+        inputs.target == 'aarch64-apple-darwin' &&
+        (inputs.operation == 'main-release-preflight' || inputs.operation == 'main-release-build')))
     runs-on: macos-26
     timeout-minutes: 8
     steps:
@@ -3668,8 +3676,17 @@ jobs:
   candidate-desktop-update:
     name: Desktop update
     needs: [candidate-parts-data]
-    if: github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-macos-candidate' && contains(github.event.head_commit.message, '[macos-desktop-update]') && contains(github.event.head_commit.message, '[macos-builds-only]')
+    if: >-
+      github.repository == 'Apdelrahman1911/mobile-release-kit' &&
+      ((github.event_name == 'push' && github.ref == 'refs/heads/verify/desktop-macos-candidate' &&
+        contains(github.event.head_commit.message, '[macos-desktop-update]') &&
+        contains(github.event.head_commit.message, '[macos-builds-only]')) ||
+       (github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main' &&
+        github.ref_protected && inputs.operation == 'main-release-build' &&
+        inputs.expected_sha == github.sha && inputs.target == 'aarch64-apple-darwin'))
     uses: ./.github/workflows/desktop-macos-update-parts.yml
+    with:
+      main-release: ${{ github.ref == 'refs/heads/main' }}
     secrets: inherit
 
   candidate-tool26-prepare:

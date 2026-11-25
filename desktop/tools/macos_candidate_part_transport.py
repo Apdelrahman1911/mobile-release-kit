@@ -447,10 +447,15 @@ def host():
     env = os.environ
     need(sys.platform == 'darwin' and os.getuid() == os.geteuid() != 0 and os.getgid() == os.getegid()
          and os.uname().machine == 'arm64', 'part-host')
+    ref = env.get('GITHUB_REF')
+    main = ref == 'refs/heads/' + P.MAIN_BRANCH
+    need(ref == 'refs/heads/' + P.BRANCH or (main and env.get('GITHUB_REF_PROTECTED') == 'true'
+         and env.get('MRK_MACOS_NATIVE_SCOPE') == 'disabled' and env.get('MRK_MACOS_RUNNER') == 'macos-26'),
+         'part-host-branch')
     required = dict(GITHUB_ACTIONS='true', RUNNER_ENVIRONMENT='github-hosted', RUNNER_OS='macOS', RUNNER_ARCH='ARM64',
-        GITHUB_EVENT_NAME='push', GITHUB_REPOSITORY=P.REPOSITORY, GITHUB_REF='refs/heads/' + P.BRANCH,
+        GITHUB_EVENT_NAME='workflow_dispatch' if main else 'push', GITHUB_REPOSITORY=P.REPOSITORY, GITHUB_REF=ref,
         GITHUB_WORKSPACE='/Users/runner/work/mobile-release-kit/mobile-release-kit',
-        GITHUB_WORKFLOW_REF=P.REPOSITORY + '/' + P.WORKFLOW + '@refs/heads/' + P.BRANCH)
+        GITHUB_WORKFLOW_REF=P.REPOSITORY + '/' + P.WORKFLOW + '@' + ref)
     need(all(env.get(k) == v for k, v in required.items()) and env.get('GITHUB_SHA') == env.get('GITHUB_WORKFLOW_SHA'),
          'part-host-source-route')
     work, workspace = Path(env['MRK_MACOS_WORK']), Path(env['GITHUB_WORKSPACE'])
