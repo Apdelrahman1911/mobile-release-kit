@@ -102,7 +102,7 @@ runs:
                 inventory = document(read(work_parent, 'source-inventory.json', 2 * 1024 * 1024))
                 need(set(inventory) == {'source', 'tree', 'files'} and inventory['source'] == source
                      and type(inventory['tree']) is str and re.fullmatch(r'[0-9a-f]{40}', inventory['tree']) is not None
-                     and type(inventory['files']) is list and 0 < len(inventory['files']) < 4096)
+                     and type(inventory['files']) is list and 1 <= len(inventory['files']) <= 4128)
                 rows = [row for row in inventory['files'] if type(row) is dict and row.get('path') == SCRIPT_PATH]
                 need(len(rows) == 1 and set(rows[0]) == {'path', 'gitMode', 'blob', 'size', 'sha256'})
                 row = rows[0]

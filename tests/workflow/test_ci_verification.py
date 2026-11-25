@@ -206,8 +206,10 @@ def fixture_paths(controller):
 def coordinator_shell(platform: str, *, scope: str | None = None) -> str:
     if platform not in {"linux", "macos"}:
         raise ValueError("unsupported CI platform")
+    launcher = ""
     if platform == "linux" and scope is None:
         java = '--java-home "$JAVA_HOME_21_X64" '
+        launcher = "/bin/bash .github/scripts/stage_ci_linux_ruby.sh \\\n  "
     elif platform == "macos" and scope in {None, "native-python"}:
         java = '--scope native-python '
     elif platform == "macos" and scope == "native-support":
@@ -219,7 +221,7 @@ ruby_executable="$(command -v ruby)"
 [[ "$MRK_PYTHON" == /* && "$ruby_executable" == /* ]]
 [[ "$MRK_PYTHON_312" == /* && "$MRK_PYTHON_313" == /* && "$MRK_PYTHON_314" == /* ]]
 sudo -n env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin PYTHONSAFEPATH=1 \\
-  "$MRK_PYTHON" -I -B .github/scripts/verify_ci.py \\
+  LAUNCHER"$MRK_PYTHON" -I -B .github/scripts/verify_ci.py \\
   --platform PLATFORM --source "$GITHUB_WORKSPACE" \\
   --python "$MRK_PYTHON" --ruby "$ruby_executable" \\
   --python-312 "$MRK_PYTHON_312" --python-313 "$MRK_PYTHON_313" --python-314 "$MRK_PYTHON_314" \\
@@ -227,7 +229,7 @@ sudo -n env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin PYTHONSAFEPATH=1 \\
   --commit "$GITHUB_SHA" --run-id "$GITHUB_RUN_ID" \\
   --run-attempt "$GITHUB_RUN_ATTEMPT" --image "$ImageOS/$ImageVersion" \\
   JAVA--summary "$GITHUB_STEP_SUMMARY"
-'''.replace("PLATFORM", platform).replace("JAVA", java)
+'''.replace("PLATFORM", platform).replace("JAVA", java).replace("LAUNCHER", launcher)
 
 
 class CIWorkflowIsolationTests(unittest.TestCase):
@@ -563,6 +565,7 @@ sudo() {
                 "--run-attempt", env["GITHUB_RUN_ATTEMPT"], "--image", "fixture-image/20260909.1",
             ]
             if platform == "linux":
+                expected[5:5] = ["/bin/bash", ".github/scripts/stage_ci_linux_ruby.sh"]
                 expected += ["--java-home", env["JAVA_HOME_21_X64"]]
             else:
                 expected += ["--scope", scope]
@@ -885,13 +888,15 @@ class CIControllerContractTests(unittest.TestCase):
         self.assertEqual(controller._native_entry_failure_locations("".join(rejected), entry), [])
         self.assertEqual(controller._native_entry_failure_locations(frame(relative, 1), Path(relative)), [])
 
-        for phase in ("source", "wheel"):
+        for gate, partition in (("native-profile-source", "all"), ("native-profile-wheel", "all"),
+                                ("python-full", "poison-command-preguard-127"),
+                                ("python-wheel", "poison-command-guarded-import")):
             for changes in ({}, {"waited": False, "stderr_eof": False, "domain_finality": False,
                     "timed_out": True, "cancelled": True, "cleanup_errors": ("stream close OSError",)}):
-                with self.subTest(phase=phase, lost_finality=bool(changes)):
+                with self.subTest(gate=gate, lost_finality=bool(changes)):
                     original = SimpleNamespace(**{**fields, **changes})
                     before = dict(vars(original))
-                    step = controller.Step("native-profile-" + phase, parser="native")
+                    step = controller.Step(gate, parser="native", native_partition=partition)
                     reported = controller.failure_details(original, step, paths)
                     self.assertEqual(reported["native_entry_locations"], expected)
                     for key, value in controller.capture_observations(original).items():
@@ -1039,7 +1044,12 @@ class CIControllerContractTests(unittest.TestCase):
                             self.assertNotIn("native_test_locations", controller.failure_details(
                                 omitted, step, paths, checks=checks, _source_files=source_files))
                             projection.assert_not_called()
-        for names in (list(source_files), source_files + (source_files[0],), source_files * 129,
+        new_roster = source_files + tuple(f"tests/unit/test_inventory_fixture_{index}.py"
+                                         for index in range(1024 - len(source_files)))
+        tracked_entry = paths.source / source_files[2]
+        self.assertEqual(controller._native_test_failure_locations(frame(tracked_entry, 810), paths, "source", new_roster),
+                         [{"file": source_files[2], "line": 810}])
+        for names in (list(source_files), source_files + (source_files[0],), new_roster + ("tests/over_limit.py",),
                       ("src/mobile_release/../private.py",), ("tests/foreign-name.py",), (False,)):
             with self.subTest(invalid_scope=repr(names)[:100]), \
                     self.assertRaisesRegex(controller.VerificationError, "NATIVE_DIAGNOSTIC_SCOPE"):
@@ -2573,7 +2583,7 @@ class CIControllerContractTests(unittest.TestCase):
             "AndroidLocalUploadInputTest#test_registered_request_is_forwarded_from_same_invocation_without_credentials",
             "AndroidLocalUploadInputTest#test_registered_nomination_digest_and_origin_are_one_use_exactly_bound",
         } <= set(healthy))
-        self.assertEqual(len(controller.ruby_expected_ids(ROOT, "ruby-local-store-execution-runtime")), 4)
+        self.assertEqual(len(controller.ruby_expected_ids(ROOT, "ruby-local-store-execution-runtime")), 21)
         before = ("source-copy", "source-environment", "source-dependencies", "bundler", "bundle-install",
                   "editable-install", "source-freeze", "source-pip-check", "bundle-check")
         ruby = ("ruby-support", "ruby-metadata-image-catalog", "ruby-local-store-intent",
@@ -5968,7 +5978,7 @@ class CIProductEvidenceContractTests(unittest.TestCase):
                             patch.object(checks, "_remaining", return_value=10.0), \
                             patch.object(checks, "_python_full_profile", return_value={"fixture": "admitted"}), \
                             patch.object(checks, "inspect_installed_wheel", return_value=None) as installed, \
-                            patch.object(checks, "sys", SimpleNamespace(platform="linux", stderr=io.StringIO())), \
+                            patch.object(checks, "sys", SimpleNamespace(platform="linux", stderr=io.StringIO(), path=[])), \
                             patch.object(checks, "os", SimpleNamespace(environ={"MOBILE_RELEASE_REQUIRE_RUBY_CONTRACTS": "1"})):
                         if outcome in {"success", "allowed-skip"}:
                             detail = checks.run_python_tests(ROOT, selection, 1000.0, observations, work_root=Path("/fixture/checks"))

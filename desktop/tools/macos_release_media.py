@@ -300,6 +300,8 @@ def verify_draft(media, manifest, release_id):
 
 
 def preflight():
+    tracked = run("/usr/bin/git", "ls-tree", "-r", "-z", "--full-tree", "HEAD").split(b"\0")
+    need(tracked[-1] == b"" and 1 <= len(tracked) - 1 <= 4128, "release-preflight-source-inventory")
     inputs = Path("desktop/macos-installed-inputs")
     build = json_data(inputs / "build-release.json")
     version = build["packageVersion"]

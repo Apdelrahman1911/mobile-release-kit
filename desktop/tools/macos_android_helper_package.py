@@ -11076,7 +11076,7 @@ def app_signature_summary(target, environment, stager, work):
     inventory = stager.maintenance_json(inventory_body, 2 * 1024 * 1024)
     need(set(inventory) == {"source", "tree", "files"} and inventory["source"] == environment["GITHUB_SHA"]
          and inventory["tree"] == binding["tree"] and type(inventory["files"]) is list
-         and 0 < len(inventory["files"]) < 4096, "app-signature-source-inventory")
+         and 1 <= len(inventory["files"]) <= 4128, "app-signature-source-inventory")
     names = set()
     for row in inventory["files"]:
         need(type(row) is dict and set(row) == {"path", "gitMode", "blob", "size", "sha256"}

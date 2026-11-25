@@ -131,7 +131,7 @@ runs:
             if (type(inventory) is not dict or set(inventory) != {"source", "tree", "files"}
                     or inventory["source"] != source or type(inventory["tree"]) is not str
                     or re.fullmatch(r"[0-9a-f]{40}", inventory["tree"]) is None
-                    or type(inventory["files"]) is not list or not 0 < len(inventory["files"]) <= 4096):
+                    or type(inventory["files"]) is not list or not 1 <= len(inventory["files"]) <= 4128):
                 raise ValueError("ACL complete inventory shape refused")
             rows = {}
             for row in inventory["files"]:

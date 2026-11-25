@@ -1032,7 +1032,7 @@ def decode(body, budget, *, inventory=False, ui_admission=False):
             need(len(item) <= 128)
             pending.extend((part, depth + 1) for pair in item.items() for part in pair)
         elif type(item) is list:
-            need(len(item) <= (4095 if inventory else 128))
+            need(len(item) <= (4128 if inventory else 128))
             pending.extend((part, depth + 1) for part in item)
     need(type(value) is dict)
     clock(budget)

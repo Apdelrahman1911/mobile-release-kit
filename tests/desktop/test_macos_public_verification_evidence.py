@@ -1722,13 +1722,13 @@ class PublicVerificationEvidenceData(unittest.TestCase):
 
     def test_real_source_inventory_row_ceiling_has_sufficient_graph_budget(self):
         rows = [{"path": "public/source-%d.py" % index, "gitMode": "100644", "blob": "2" * 40,
-                 "size": 1, "sha256": "3" * 64} for index in range(4095)]
+                 "size": 1, "sha256": "3" * 64} for index in range(4128)]
         value = {"source": CONTEXT["source"], "tree": "4" * 40, "files": rows}
         body = json.dumps(value).encode()
         observed = DATA.project_inventory(DATA.decode(body, budget(), inventory=True), body, CONTEXT)
-        self.assertEqual(observed["fileCount"], 4095)
+        self.assertEqual(observed["fileCount"], 4128)
         self.assertNotIn("files", observed)
-        value["files"].append(dict(rows[0]))
+        value["files"].append(dict(rows[0], path="public/overflow.py"))
         with self.assertRaises(DATA.Refused):
             DATA.decode(json.dumps(value).encode(), budget(), inventory=True)
 
