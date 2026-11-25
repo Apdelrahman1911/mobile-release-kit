@@ -59,6 +59,49 @@ def evaluate(route, port, deadline):
     print(module.AIA_PREFIX.decode("ascii") + json.dumps(record, separators=(",", ":")))
 
 
+def issuer_extension(authority, fixture, expected_uri):
+    """Read only the synthetic leaf's AIA property using Security.framework."""
+    import ctypes as C
+    import plistlib
+
+    def contains(value):
+        if isinstance(value, dict):
+            return any(contains(item) for item in value.values())
+        if isinstance(value, list):
+            return any(contains(item) for item in value)
+        return type(value) is str and value == expected_uri
+
+    owner = authority._Trust(fixture["leaf"], fixture["root"])
+    ptr = C.c_void_p
+    try:
+        copy_values = owner.security.SecCertificateCopyValues
+        copy_values.restype, copy_values.argtypes = ptr, [ptr, ptr, C.POINTER(ptr)]
+        oid_aia = ptr.in_dll(owner.security, "kSecOIDAuthorityInfoAccess").value
+        error = ptr()
+        values = copy_values(owner._certificate(fixture["leaf"]), owner._array([oid_aia]), C.byref(error))
+        if error.value:
+            owner._own(error.value)
+        if not values:
+            return {"propertyAvailable": False, "uriMatches": False}
+        owner._own(values)
+        serialize = owner.foundation.CFPropertyListCreateData
+        serialize.restype, serialize.argtypes = ptr, [ptr, ptr, C.c_long, C.c_ulong, C.POINTER(ptr)]
+        error = ptr()
+        data = serialize(None, values, 200, 0, C.byref(error))  # Binary plist, read-only public properties.
+        if error.value:
+            owner._own(error.value)
+        if not data:
+            return {"propertyAvailable": False, "uriMatches": False}
+        raw = owner._own(data)
+        size, address = owner.data_length(raw), owner.data_bytes(raw)
+        if not address or not 0 < size < 16384:
+            return {"propertyAvailable": False, "uriMatches": False}
+        document = plistlib.loads(C.string_at(address, size))
+        return {"propertyAvailable": bool(document), "uriMatches": contains(document)}
+    finally:
+        owner.close()
+
+
 def observe(route, deny_direct_network):
     start = time.monotonic()
     deadline = start + 70.0
@@ -71,6 +114,11 @@ def observe(route, deny_direct_network):
             os.chdir(work)
             authority.prepare_aia(responder.port, deadline)
             fixtures = authority._fixtures(work, responder.port, deadline)
+            decoder = [
+                {"case": row["case"], **issuer_extension(
+                    authority, row, f"http://{HOSTS[route]}:{responder.port}" + row["route"])}
+                for row in fixtures
+            ]
             responder.start({row["route"]: row["issuer"] for row in fixtures})
             control = fixtures[-1]
             opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
@@ -97,6 +145,7 @@ def observe(route, deny_direct_network):
             responder.close()
         note = {"route": route, "directNetworkDenied": deny_direct_network, "controllerReachedResponder": True,
                 "childReturn": child.returncode, "elapsedSeconds": round(time.monotonic() - start, 3),
+                "nativeIssuerProperty": decoder,
                 "evaluationStartUnixNs": evaluation_start, "evaluationEndUnixNs": evaluation_end}
         if child.returncode or child.stderr or not 0 < len(child.stdout) <= 8192:
             return {**note, "result": "unavailable", "stderrBytes": len(child.stderr)}
